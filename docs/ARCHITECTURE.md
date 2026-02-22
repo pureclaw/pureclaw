@@ -344,8 +344,6 @@ ZeroClaw's trait table maps to PureClaw as follows:
 | `Observer` | `class Observer o` — `record`, `flush` |
 | `SecurityPolicy` | Pure function — no typeclass needed |
 
-### Where Haskell's typeclasses go further
-
 **Typeclass laws.** Haskell typeclasses can carry documented laws that implementations
 must satisfy, testable via QuickCheck. For example, the `MemoryBackend` class can declare:
 
@@ -357,9 +355,6 @@ class MemoryBackend m where
   recall :: m -> MemoryId -> IO (Maybe MemoryEntry)
   search :: m -> Text -> SearchConfig -> IO [SearchResult]
 ```
-
-ZeroClaw's Rust traits have no equivalent mechanism — correctness of implementations
-is documented but not machine-checked.
 
 **Static dispatch by default.** In Rust, swapping implementations at runtime requires
 `Box<dyn Trait>` (heap allocation, vtable dispatch). In Haskell, the typeclass is
