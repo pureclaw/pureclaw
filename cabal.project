@@ -1,0 +1,12 @@
+packages: .
+
+-- No floating bounds in CI builds
+-- Run: cabal freeze --enable-tests to regenerate
+index-state: hackage.haskell.org 2026-02-22T00:00:00Z
+
+-- Strict build: warnings are errors in CI
+package pureclaw
+  ghc-options: -Werror
+
+-- Security: reproducible builds only
+write-ghc-environment-files: never
