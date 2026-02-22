@@ -24,8 +24,8 @@ jobs:
         with:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
-            extra-substituters = https://cache.iog.io s3://mb-nix-cache?region=us-east-1
-            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= equitek-ci:vXVUXig6ISy/jPmxB9VPRwpju17OfraujXiUwAXW6co=
+            extra-substituters = https://cache.iog.io s3://pureclaw-nix-cache
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= pureclaw-ci:tiDJ1F73/W/XyhU5o280QMWljJRc57++M+6TDKSCjQI=
 
       - name: Build
         run: nix build --print-build-logs
@@ -43,4 +43,4 @@ jobs:
         run: |
           # Sign and push the build result and its closure
           nix store sign --recursive --key-file <(echo "$NIX_CACHE_SIGNING_KEY") ./result
-          nix copy --to "s3://mb-nix-cache?region=us-east-1" ./result
+          nix copy --to "s3://pureclaw-nix-cache" ./result
