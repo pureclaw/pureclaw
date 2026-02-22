@@ -30,9 +30,30 @@ Early development. Security foundations first, features second.
 
 ## Building
 
+### With Nix (recommended — fully reproducible)
+
+```bash
+# Enter dev shell with GHC + HLS + cabal + ormolu
+nix develop
+
+# Build the executable
+nix build
+
+# Run directly
+nix run
+
+# With direnv (auto-enters dev shell on cd)
+direnv allow
+```
+
+Binary caches are configured in `flake.nix` — first build fetches from IOG's cache
+rather than compiling from scratch.
+
+### With Cabal (requires GHC toolchain)
+
 ```bash
 cabal build
 cabal test
 ```
 
-Requires GHC 9.6+ and a Haskell toolchain (`ghcup` recommended).
+Requires GHC 9.10+ (`ghcup` recommended).
