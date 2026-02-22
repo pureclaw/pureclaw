@@ -325,6 +325,68 @@ No `mtl`, no `effectful`, no `polysemy`. The monad stack is `ReaderT AppEnv IO` 
 
 ---
 
+## Relationship to ZeroClaw's Trait Architecture
+
+ZeroClaw's central design insight — every subsystem is a swappable interface — translates
+directly and naturally to Haskell typeclasses. Rust traits and Haskell typeclasses solve
+the same problem: define a contract that multiple concrete types can satisfy.
+
+ZeroClaw's trait table maps to PureClaw as follows:
+
+| ZeroClaw Trait | PureClaw Typeclass / Handle |
+|---|---|
+| `Provider` | `class Provider p` — `complete`, `streamComplete` |
+| `Channel` | `class Channel c` — `receive`, `send` |
+| `Memory` | `class MemoryBackend m` — `search`, `save`, `recall` |
+| `Tool` | `class Tool t` — `toolName`, `toolSchema`, `runTool` |
+| `Tunnel` | `class Tunnel t` — `start`, `stop`, `endpoint` |
+| `RuntimeAdapter` | `class RuntimeAdapter r` — `executeIn`, `sandboxEnv` |
+| `Observer` | `class Observer o` — `record`, `flush` |
+| `SecurityPolicy` | Pure function — no typeclass needed |
+
+### Where Haskell's typeclasses go further
+
+**Typeclass laws.** Haskell typeclasses can carry documented laws that implementations
+must satisfy, testable via QuickCheck. For example, the `MemoryBackend` class can declare:
+
+```haskell
+-- Law: save then recall returns the saved entry
+-- prop> \entry -> do { mid <- save b entry; recall b mid } == Just entry
+class MemoryBackend m where
+  save   :: m -> MemorySource -> IO MemoryId
+  recall :: m -> MemoryId -> IO (Maybe MemoryEntry)
+  search :: m -> Text -> SearchConfig -> IO [SearchResult]
+```
+
+ZeroClaw's Rust traits have no equivalent mechanism — correctness of implementations
+is documented but not machine-checked.
+
+**Static dispatch by default.** In Rust, swapping implementations at runtime requires
+`Box<dyn Trait>` (heap allocation, vtable dispatch). In Haskell, the typeclass is
+resolved at compile time via instance selection — zero runtime overhead in the common
+case. When runtime dispatch is genuinely needed (e.g. selecting a provider from config),
+we use an explicit existential:
+
+```haskell
+data SomeProvider where
+  MkProvider :: Provider p => p -> SomeProvider
+```
+
+This makes the tradeoff explicit at the use site rather than implicit throughout.
+
+**Deriving and default methods.** Haskell's `deriving` and typeclass default methods
+reduce boilerplate substantially. A new provider implementation needs only the
+non-defaultable methods; everything else composes for free.
+
+### What doesn't change
+
+The _conceptual_ architecture is identical: PureClaw's `Provider`, `Channel`, and
+`MemoryBackend` typeclasses represent the same abstraction boundaries as ZeroClaw's
+traits. Someone familiar with ZeroClaw's architecture will find PureClaw's module
+layout immediately recognizable.
+
+---
+
 ## What PureClaw Is Not
 
 - **Not a Haskell port of ZeroClaw.** ZeroClaw's architecture has security problems baked in. We are not translating those decisions into Haskell.
