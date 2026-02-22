@@ -21,75 +21,86 @@ PureClaw's answer: make the insecure path a type error.
 
 None of these are conventions. They are enforced at compile time.
 
-### IO monad as a capability ledger
+### Simple IO, not an effect system
 
-In an unconstrained system, any function can do anything: spawn a process, read a file, open a socket. You audit security by reading the entire call graph.
+PureClaw uses `ReaderT AppEnv IO` — the standard Handle pattern used in production Haskell. No `effectful`, no `polysemy`, no `mtl` type class proliferation.
 
-In PureClaw, every function's type signature declares its capabilities:
+The Handle pattern gives us:
+- Dependency injection (swap real/mock implementations in tests)
+- Scoped capabilities (components only receive the handles they need)
+- Easy to read, easy to onboard, no GHC extension soup
 
-```haskell
--- This function can ONLY read files. Cannot shell out, cannot network.
-readWorkspaceFile :: (FileSystem :> es) => SafePath -> Eff es ByteString
-
--- This function has NO side effects at all. Trivially auditable.
-evaluatePolicy :: SecurityPolicy -> RawCommand -> Either PolicyError AuthorizedCommand
-```
-
-Effect constraints are not documentation — they are compiler-enforced contracts. If `evaluatePolicy` ever tried to do IO, it would fail to compile.
+Capability control lives in the type signatures of the handles themselves — not in the effect system. A function that only receives a `FileHandle` and `LogHandle` cannot shell out, not because the type system forbids `IO`, but because it has no `ShellHandle` to call. The same principle, far less machinery.
 
 ### Pure policy evaluation
 
-Security policy is pure Haskell. It takes a command and returns either a proof of authorization or an error. No IO. No side channels. Exhaustively testable with QuickCheck.
+Security policy is pure Haskell. It takes a command and returns either proof of authorization or an error. No `IO`. Exhaustively testable with QuickCheck, no mocking required.
 
 ```haskell
--- Pure — can be tested with 10,000 QuickCheck cases in milliseconds
-evaluatePolicy :: SecurityPolicy -> RawCommand -> Either PolicyError AuthorizedCommand
+-- Pure — testable with 10,000 QuickCheck cases in milliseconds
+evaluatePolicy :: SecurityPolicy -> FilePath -> [Text] -> Either PolicyError AuthorizedCommand
 ```
 
 ---
 
-## Effect System
-
-PureClaw uses `effectful` for algebraic effects. Choice rationale:
-
-| Library | Status | Performance | Ergonomics |
-|---|---|---|---|
-| `effectful` | ✅ Production-ready | Fast (state-based) | Clean, minimal boilerplate |
-| `polysemy` | Caution | Slow compile times | Heavy TH |
-| MTL | Fine | Good | Type class proliferation at scale |
-
-### Effect hierarchy
-
-```
-AgentEff              -- full agent stack
-├── FileSystem        -- read/write SafePath files
-├── Shell             -- execute AuthorizedCommand
-├── Network           -- outbound HTTP (allowlisted)
-├── Memory            -- recall/store to memory backend
-├── ChannelIO         -- send/receive channel messages
-├── SchedulerIO       -- interact with cron scheduler
-├── Logger            -- structured logging
-├── Error AgentError  -- typed errors
-└── IOE               -- base IO (minimally used)
-```
-
-Each capability is a distinct effect. Tools declare exactly which effects they need:
+## Application Monad
 
 ```haskell
--- Shell tool: needs Shell + FileSystem (for working directory)
-runShellTool :: (Shell :> es, FileSystem :> es, Logger :> es)
-             => ToolInput -> Eff es ToolOutput
+type App a = ReaderT AppEnv IO a
 
--- Memory tool: needs only Memory
-runMemoryTool :: (Memory :> es)
-              => ToolInput -> Eff es ToolOutput
-
--- HTTP tool: needs only Network
-runHttpTool :: (Network :> es, Logger :> es)
-            => ToolInput -> Eff es ToolOutput
+data AppEnv = AppEnv
+  { envConfig    :: RuntimeConfig
+  , envHandles   :: Handles
+  , envLogger    :: LogHandle
+  }
 ```
 
-The agent loop grants only the effects configured in the security policy. A tool asking for `Shell` when the policy denies shell execution fails to be dispatched — not because of a runtime check, but because the effect isn't in scope.
+For subsystems that need only a subset of the environment, pass only what they need:
+
+```haskell
+-- Shell tool only needs ShellHandle + LogHandle, not the whole env
+runShellTool :: ShellHandle -> LogHandle -> ToolInput -> IO ToolOutput
+```
+
+This is the Handle pattern: pass explicit handles, not a global environment. Functions are honest about their dependencies via their argument types.
+
+---
+
+## Handles
+
+Each capability is a record of `IO` actions. Swapping implementations (real vs test) is just passing a different record.
+
+```haskell
+data FileHandle = FileHandle
+  { readFile  :: SafePath -> IO ByteString
+  , writeFile :: SafePath -> ByteString -> IO ()
+  , listDir   :: SafePath -> IO [SafePath]
+  }
+
+data ShellHandle = ShellHandle
+  { execute :: AuthorizedCommand -> IO ProcessResult
+  }
+
+data NetworkHandle = NetworkHandle
+  { httpGet  :: AllowedUrl -> IO Response
+  , httpPost :: AllowedUrl -> ByteString -> IO Response
+  }
+
+data MemoryHandle = MemoryHandle
+  { search :: Text -> SearchConfig -> IO [SearchResult]
+  , save   :: MemorySource -> IO (Maybe MemoryId)
+  , recall :: MemoryId -> IO (Maybe MemoryEntry)
+  }
+
+data LogHandle = LogHandle
+  { logInfo  :: Text -> IO ()
+  , logWarn  :: Text -> IO ()
+  , logError :: Text -> IO ()
+  , logDebug :: Text -> IO ()
+  }
+```
+
+A tool that only receives `FileHandle` and `LogHandle` cannot shell out — not by compiler magic, but because it has no `ShellHandle`. The constraint is in the function signature.
 
 ---
 
@@ -99,23 +110,23 @@ The agent loop grants only the effects configured in the security policy. A tool
 
 ```haskell
 -- All secret types: unexported internals, redacted Show
-newtype ApiKey       = ApiKey       ByteString
-newtype BearerToken  = BearerToken  ByteString
-newtype PairingCode  = PairingCode  Text
-newtype SecretKey    = SecretKey    ByteString
+newtype ApiKey      = ApiKey      ByteString
+newtype BearerToken = BearerToken ByteString
+newtype PairingCode = PairingCode Text
+newtype SecretKey   = SecretKey   ByteString
 
--- Redacted Show for all secrets — deriving or manual
 instance Show ApiKey      where show _ = "ApiKey <redacted>"
 instance Show BearerToken where show _ = "BearerToken <redacted>"
 instance Show PairingCode where show _ = "PairingCode <redacted>"
+instance Show SecretKey   where show _ = "SecretKey <redacted>"
 
--- No ToJSON/ToTOML instances for secrets — they cannot be serialized
+-- No ToJSON / ToTOML instances — secrets cannot be serialized
 ```
 
 ### Config vs RuntimeConfig
 
 ```haskell
--- Serializable: safe to write to disk, contains no secrets
+-- Serializable: safe to write to disk
 data Config = Config
   { cfgProvider    :: ProviderId
   , cfgModel       :: ModelId
@@ -126,13 +137,14 @@ data Config = Config
   , cfgAllowedUsers:: AllowList UserId
   } deriving (Show, Eq, Generic, ToTOML, FromTOML)
 
--- Not serializable: secrets are runtime-only
+-- Not serializable: secrets loaded from env / keychain only
 data RuntimeConfig = RuntimeConfig
   { rtConfig    :: Config
-  , rtApiKey    :: ApiKey    -- from env var or keychain only
-  , rtSecretKey :: SecretKey -- for encryption, from keystore
+  , rtApiKey    :: ApiKey    -- no ToTOML instance
+  , rtSecretKey :: SecretKey -- no ToTOML instance
   }
--- No ToTOML/ToJSON instance — compile error if you try to serialize
+-- Attempting to derive ToTOML on RuntimeConfig is a compile error
+-- (ApiKey has no ToTOML instance)
 ```
 
 ### Path safety
@@ -144,44 +156,46 @@ newtype SafePath = SafePath FilePath
 newtype WorkspaceRoot = WorkspaceRoot FilePath
 
 data PathError
-  = PathEscapesWorkspace FilePath FilePath -- (requested, resolved)
-  | PathIsBlocked        FilePath Text
+  = PathEscapesWorkspace { requested :: FilePath, resolved :: FilePath }
+  | PathIsBlocked        { path :: FilePath, reason :: Text }
   deriving (Show, Eq)
 
--- The ONLY way to get a SafePath
+-- The ONLY way to obtain a SafePath
 mkSafePath :: WorkspaceRoot -> FilePath -> IO (Either PathError SafePath)
+mkSafePath (WorkspaceRoot root) p = do
+  canonical <- canonicalizePath (root </> p)
+  if root `isPrefixOf` canonical
+    then pure $ Right (SafePath canonical)
+    else pure $ Left (PathEscapesWorkspace p canonical)
 ```
 
 ### Command authorization
 
 ```haskell
--- Constructor unexported — only obtainable via authorize
+-- Constructor unexported — only obtainable via evaluatePolicy
 newtype AuthorizedCommand = AuthorizedCommand (FilePath, [Text])
 
 -- Pure — no IO, fully testable
-authorize :: SecurityPolicy -> FilePath -> [Text] -> Either PolicyError AuthorizedCommand
+evaluatePolicy :: SecurityPolicy -> FilePath -> [Text] -> Either PolicyError AuthorizedCommand
 
--- Only accepts authorized commands — no other path to subprocess execution
-execute :: (Shell :> es) => AuthorizedCommand -> Eff es ProcessResult
+-- ShellHandle.execute only accepts AuthorizedCommand
+-- There is no other path to subprocess execution
 ```
 
 ### Allow-lists
 
 ```haskell
 data AllowList a
-  = AllowAll           -- explicit opt-in; logged as warning on startup
+  = AllowAll
   | AllowList (Set a)
   deriving (Show, Eq, Generic)
 
--- TOML: allowed_users = ["*"] -> AllowAll (with warning)
---       allowed_users = ["alice", "bob"] -> AllowList {"alice", "bob"}
-
 isAllowed :: Ord a => AllowList a -> a -> Bool
-isAllowed AllowAll     _ = True
+isAllowed AllowAll      _ = True
 isAllowed (AllowList s) x = x `Set.member` s
 ```
 
-### Public errors
+### Public errors (channel-safe)
 
 ```haskell
 -- What users see — no internal detail
@@ -191,12 +205,11 @@ data PublicError
   | NotAuthorizedError
   deriving (Show, Eq)
 
--- Channel send accepts only PublicError
-sendError :: (ChannelIO :> es) => PublicError -> Eff es ()
-
--- Internal errors are always translated before reaching a channel
 class ToPublicError e where
   toPublicError :: e -> PublicError
+
+-- Channel send only accepts PublicError, never internal errors
+sendError :: ChannelHandle -> PublicError -> IO ()
 ```
 
 ---
@@ -206,142 +219,76 @@ class ToPublicError e where
 ```
 pureclaw/
 ├── src/
-│   ├── PureClaw/
-│   │   ├── Core/
-│   │   │   ├── Types.hs          -- shared types (no effects)
-│   │   │   ├── Config.hs         -- Config / RuntimeConfig
-│   │   │   └── Errors.hs         -- error hierarchy
-│   │   ├── Security/
-│   │   │   ├── Path.hs           -- SafePath, mkSafePath
-│   │   │   ├── Command.hs        -- AuthorizedCommand, authorize
-│   │   │   ├── Policy.hs         -- SecurityPolicy, evaluatePolicy (PURE)
-│   │   │   ├── Secrets.hs        -- ApiKey, BearerToken etc. (redacted Show)
-│   │   │   ├── Crypto.hs         -- encryption/decryption via crypton
-│   │   │   └── Pairing.hs        -- OTP pairing, per-client lockout
-│   │   ├── Effects/
-│   │   │   ├── FileSystem.hs     -- FileSystem effect + SafePath handler
-│   │   │   ├── Shell.hs          -- Shell effect + AuthorizedCommand handler
-│   │   │   ├── Network.hs        -- Network effect + allowlist handler
-│   │   │   ├── Memory.hs         -- Memory effect + backends
-│   │   │   ├── ChannelIO.hs      -- ChannelIO effect
-│   │   │   └── Logger.hs         -- structured logging effect
-│   │   ├── Tools/
-│   │   │   ├── Registry.hs       -- tool dispatch, capability gating
-│   │   │   ├── Shell.hs          -- shell tool (Shell :> es)
-│   │   │   ├── FileRead.hs       -- file_read tool (FileSystem :> es)
-│   │   │   ├── FileWrite.hs      -- file_write tool (FileSystem :> es)
-│   │   │   ├── Memory.hs         -- memory tool (Memory :> es)
-│   │   │   ├── HttpRequest.hs    -- http_request tool (Network :> es)
-│   │   │   ├── Cron.hs           -- cron tool (SchedulerIO :> es)
-│   │   │   └── Git.hs            -- git tool (Shell :> es)
-│   │   ├── Agent/
-│   │   │   ├── Loop.hs           -- main agent loop
-│   │   │   ├── Context.hs        -- conversation context management
-│   │   │   ├── Memory.hs         -- memory recall integration
-│   │   │   └── Identity.hs       -- SOUL.md / identity config loading
-│   │   ├── Providers/
-│   │   │   ├── Class.hs          -- Provider typeclass
-│   │   │   ├── Anthropic.hs
-│   │   │   ├── OpenAI.hs
-│   │   │   ├── OpenRouter.hs
-│   │   │   └── Ollama.hs
-│   │   ├── Channels/
-│   │   │   ├── Class.hs          -- Channel typeclass
-│   │   │   ├── Telegram.hs
-│   │   │   ├── Signal.hs
-│   │   │   ├── Discord.hs
-│   │   │   └── CLI.hs
-│   │   ├── Memory/
-│   │   │   ├── Class.hs          -- Memory backend typeclass
-│   │   │   ├── SQLite.hs         -- hybrid vector+FTS5 backend
-│   │   │   ├── Markdown.hs       -- file-based backend
-│   │   │   └── None.hs           -- no-op backend
-│   │   ├── Gateway/
-│   │   │   ├── Server.hs         -- Warp HTTP server
-│   │   │   ├── Routes.hs         -- /health /pair /webhook
-│   │   │   └── Auth.hs           -- pairing + bearer token validation
-│   │   ├── Scheduler/
-│   │   │   ├── Cron.hs           -- cron job management
-│   │   │   └── Heartbeat.hs      -- heartbeat loop
-│   │   └── CLI/
-│   │       ├── Main.hs           -- CLI entry point
-│   │       └── Commands.hs       -- subcommand parsers
+│   └── PureClaw/
+│       ├── Core/
+│       │   ├── Types.hs          -- shared types, no IO
+│       │   ├── Config.hs         -- Config / RuntimeConfig
+│       │   └── Errors.hs         -- error hierarchy
+│       ├── Security/
+│       │   ├── Path.hs           -- SafePath, mkSafePath
+│       │   ├── Command.hs        -- AuthorizedCommand, evaluatePolicy (PURE)
+│       │   ├── Policy.hs         -- SecurityPolicy type and combinators
+│       │   ├── Secrets.hs        -- ApiKey etc., redacted Show, no serialization
+│       │   ├── Crypto.hs         -- AES-256-GCM via crypton
+│       │   └── Pairing.hs        -- OTP generation, per-client lockout
+│       ├── Handles/
+│       │   ├── File.hs           -- FileHandle + real implementation
+│       │   ├── Shell.hs          -- ShellHandle + real implementation
+│       │   ├── Network.hs        -- NetworkHandle + real implementation
+│       │   ├── Memory.hs         -- MemoryHandle (interface)
+│       │   ├── Channel.hs        -- ChannelHandle (interface)
+│       │   └── Log.hs            -- LogHandle + implementations
+│       ├── Tools/
+│       │   ├── Registry.hs       -- tool dispatch table
+│       │   ├── Shell.hs          -- shell tool (takes ShellHandle)
+│       │   ├── FileRead.hs       -- file_read tool (takes FileHandle)
+│       │   ├── FileWrite.hs      -- file_write tool (takes FileHandle)
+│       │   ├── Memory.hs         -- memory tool (takes MemoryHandle)
+│       │   ├── HttpRequest.hs    -- http_request tool (takes NetworkHandle)
+│       │   └── Git.hs            -- git tool (takes ShellHandle)
+│       ├── Agent/
+│       │   ├── Loop.hs           -- main agent loop
+│       │   ├── Context.hs        -- conversation context
+│       │   ├── Memory.hs         -- memory recall integration
+│       │   └── Identity.hs       -- SOUL.md / identity loading
+│       ├── Providers/
+│       │   ├── Class.hs          -- Provider typeclass
+│       │   ├── Anthropic.hs
+│       │   ├── OpenAI.hs
+│       │   ├── OpenRouter.hs
+│       │   └── Ollama.hs
+│       ├── Channels/
+│       │   ├── Class.hs          -- Channel typeclass
+│       │   ├── CLI.hs
+│       │   ├── Telegram.hs
+│       │   └── Signal.hs
+│       ├── Memory/
+│       │   ├── SQLite.hs         -- hybrid vector+FTS5 (MemoryHandle impl)
+│       │   ├── Markdown.hs       -- file-based (MemoryHandle impl)
+│       │   └── None.hs           -- no-op (MemoryHandle impl)
+│       ├── Gateway/
+│       │   ├── Server.hs         -- Warp, connection limits, timeouts
+│       │   ├── Routes.hs         -- /health /pair /webhook
+│       │   └── Auth.hs           -- pairing + bearer token validation
+│       ├── Scheduler/
+│       │   ├── Cron.hs
+│       │   └── Heartbeat.hs
+│       └── CLI/
+│           └── Commands.hs
 ├── test/
 │   ├── Security/
-│   │   ├── PolicySpec.hs         -- QuickCheck policy evaluation
+│   │   ├── PolicySpec.hs         -- QuickCheck: pure policy eval
 │   │   ├── PathSpec.hs           -- SafePath edge cases
-│   │   └── CryptoSpec.hs         -- crypto correctness
-│   └── ...
+│   │   └── CryptoSpec.hs
+│   ├── Agent/
+│   │   └── LoopSpec.hs           -- mock handles, no real IO needed
+│   └── Gateway/
+│       └── RoutesSpec.hs         -- hspec-wai
 ├── pureclaw.cabal
 ├── cabal.project
-├── cabal.project.freeze           -- pinned deps, committed
+├── cabal.project.freeze
 └── docs/
-    ├── ARCHITECTURE.md            -- this file
-    └── SECURITY_PRACTICES.md
 ```
-
----
-
-## Key Architectural Decisions
-
-### 1. Typeclasses for providers and channels
-
-Providers and channels are typeclasses, not trait objects with dynamic dispatch. This keeps the code monomorphic in common configurations while still allowing runtime selection via existential wrappers where needed.
-
-```haskell
-class Provider p where
-  complete :: p -> CompletionRequest -> IO CompletionResponse
-  streamComplete :: p -> CompletionRequest -> IO (Stream CompletionChunk)
-
-class Channel c where
-  receive :: c -> IO (Maybe InboundMessage)
-  send    :: c -> OutboundMessage -> IO ()
-```
-
-### 2. Tool dispatch via existentials
-
-Tools have heterogeneous effect requirements. The registry wraps them as existentials, dispatched by the agent loop with appropriate effect interpretation:
-
-```haskell
-data SomeTool where
-  MkTool :: (ToolEffects effs) => Tool effs -> SomeTool
-
--- Agent loop interprets the right effect stack per tool
-dispatchTool :: ToolName -> ToolInput -> AgentM ToolOutput
-```
-
-### 3. Memory system: hybrid search in SQLite
-
-No external dependencies (no Pinecone, no Elasticsearch). SQLite with FTS5 for keyword search and `sqlite-vec` extension for vector search, with a weighted merge function in Haskell.
-
-```haskell
-data SearchResult = SearchResult
-  { srContent    :: Text
-  , srVector     :: Maybe Float  -- score from vector search
-  , srKeyword    :: Maybe Float  -- score from FTS5/BM25
-  , srHybrid     :: Float        -- weighted merge
-  }
-
-hybridSearch :: MemoryBackend -> Text -> SearchConfig -> IO [SearchResult]
-```
-
-### 4. Structured concurrency with `async` + STM
-
-All concurrent operations use `async` with explicit `cancel` and `withAsync` for cleanup. Shared mutable state uses STM only — no `IORef` in concurrent code.
-
-```haskell
--- Daemon runs all subsystems concurrently, cancels all on any failure
-runDaemon :: RuntimeConfig -> IO ()
-runDaemon cfg = withAsync (runGateway cfg) $ \gatewayA ->
-               withAsync (runScheduler cfg) $ \schedulerA ->
-               withAsync (runChannels cfg) $ \channelsA ->
-               waitAnyCancel [gatewayA, schedulerA, channelsA] >>= \_ ->
-               pure ()
-```
-
-### 5. Heartbeat as a first-class process
-
-Heartbeat is a distinct async process, not a cron job. It has access to session state and can trigger self-management (context overflow detection, memory flush).
 
 ---
 
@@ -350,14 +297,13 @@ Heartbeat is a distinct async process, not a cron job. It has access to session 
 ### Core
 | Package | Purpose |
 |---|---|
-| `effectful` | Algebraic effects |
-| `aeson` | JSON parsing |
-| `tomland` | TOML config parsing |
+| `aeson` | JSON |
+| `tomland` | TOML config |
 | `optparse-applicative` | CLI |
-| `warp` + `wai` | HTTP server |
+| `warp` + `wai` | HTTP server (connection limits + timeouts built-in) |
 | `http-client` + `http-client-tls` | HTTP client |
-| `websockets` | WebSocket channels |
-| `sqlite-simple` | SQLite memory backend |
+| `websockets` | Channel WebSockets |
+| `sqlite-simple` | Memory backend |
 | `async` | Structured concurrency |
 | `stm` | Shared state |
 | `typed-process` | Safe subprocess execution |
@@ -365,34 +311,26 @@ Heartbeat is a distinct async process, not a cron job. It has access to session 
 ### Security
 | Package | Purpose |
 |---|---|
-| `crypton` | AES-256-GCM, random bytes, HMAC |
+| `crypton` | AES-256-GCM, `getRandomBytes`, HMAC |
 | `memory` | `constEq` constant-time comparison |
-| `bcrypt` | Password hashing (if needed) |
-
-### Data
-| Package | Purpose |
-|---|---|
-| `text` | Text handling |
-| `bytestring` | Binary data |
-| `containers` | Map, Set, Seq |
-| `time` | Time handling |
-| `vector` | Dense arrays for embeddings |
 
 ### Testing
 | Package | Purpose |
 |---|---|
-| `hspec` | Spec-style tests |
-| `QuickCheck` | Property-based testing |
-| `hspec-wai` | HTTP endpoint testing |
+| `hspec` | Tests |
+| `QuickCheck` | Property tests (pure policy eval) |
+| `hspec-wai` | HTTP endpoint tests |
+
+No `mtl`, no `effectful`, no `polysemy`. The monad stack is `ReaderT AppEnv IO` and that's it.
 
 ---
 
 ## What PureClaw Is Not
 
-- **Not a Haskell port of ZeroClaw.** ZeroClaw's architecture has security problems baked into its design. We are not translating those decisions into Haskell.
-- **Not a thin wrapper over shell scripts.** The shell tool exists for user convenience; it is not the foundation of the system.
-- **Not feature-complete on day one.** We build the security core first: `SafePath`, `AuthorizedCommand`, `SecurityPolicy`, `ApiKey` newtypes, `effectful` effect stack. Features are added on top of a correct foundation, not before it.
+- **Not a Haskell port of ZeroClaw.** ZeroClaw's architecture has security problems baked in. We are not translating those decisions into Haskell.
+- **Not clever Haskell.** No type-level programming, no GHC extension soup, no effect systems. Standard GHC2021 + `OverloadedStrings` + `LambdaCase`. A competent Haskell programmer should be able to read any module cold.
+- **Not feature-complete on day one.** Security foundations first: `SafePath`, `AuthorizedCommand`, `SecurityPolicy`, secret newtypes. Features are added on top of a correct foundation, not before it.
 
 ## What PureClaw Is
 
-A minimal, correct, auditable AI agent runtime where the type checker is the primary security control.
+A minimal, correct, auditable AI agent runtime where the type checker is the primary security control — and where any Haskell programmer can read the code and understand it.

@@ -13,7 +13,9 @@ description:
   * File access requires SafePath — workspace escape is a type error
   * Secrets have redacted Show instances — credential leaks are structurally prevented
   * Security policy is pure Haskell — fully testable without IO
-  * Effect constraints declare capabilities — each function's type is an audit trail
+  * Handle pattern for capabilities — dependencies are explicit, not global
+  .
+  No effect systems. ReaderT AppEnv IO and the Handle pattern throughout.
 
 license:            MIT
 license-file:       LICENSE
@@ -33,54 +35,63 @@ common warnings
 library
   import:           warnings
   exposed-modules:
+    -- Core types (no IO, no handles)
     PureClaw.Core.Types
     PureClaw.Core.Config
     PureClaw.Core.Errors
+    -- Security (pure where possible)
     PureClaw.Security.Path
     PureClaw.Security.Command
     PureClaw.Security.Policy
     PureClaw.Security.Secrets
     PureClaw.Security.Crypto
     PureClaw.Security.Pairing
-    PureClaw.Effects.FileSystem
-    PureClaw.Effects.Shell
-    PureClaw.Effects.Network
-    PureClaw.Effects.Memory
-    PureClaw.Effects.ChannelIO
-    PureClaw.Effects.Logger
+    -- Handles (capability interfaces + real implementations)
+    PureClaw.Handles.File
+    PureClaw.Handles.Shell
+    PureClaw.Handles.Network
+    PureClaw.Handles.Memory
+    PureClaw.Handles.Channel
+    PureClaw.Handles.Log
+    -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
     PureClaw.Tools.Shell
     PureClaw.Tools.FileRead
     PureClaw.Tools.FileWrite
-    PureClaw.Tools.MemoryTool
+    PureClaw.Tools.Memory
     PureClaw.Tools.HttpRequest
     PureClaw.Tools.Git
+    -- Agent
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
     PureClaw.Agent.Memory
     PureClaw.Agent.Identity
+    -- Providers
     PureClaw.Providers.Class
     PureClaw.Providers.Anthropic
     PureClaw.Providers.OpenAI
     PureClaw.Providers.OpenRouter
     PureClaw.Providers.Ollama
+    -- Channels
     PureClaw.Channels.Class
     PureClaw.Channels.CLI
     PureClaw.Channels.Telegram
-    PureClaw.Memory.Class
+    PureClaw.Channels.Signal
+    -- Memory backends
     PureClaw.Memory.SQLite
     PureClaw.Memory.Markdown
     PureClaw.Memory.None
+    -- Gateway
     PureClaw.Gateway.Server
     PureClaw.Gateway.Routes
     PureClaw.Gateway.Auth
+    -- Scheduler
     PureClaw.Scheduler.Cron
     PureClaw.Scheduler.Heartbeat
+    -- CLI
+    PureClaw.CLI.Commands
   build-depends:
     base              >= 4.17 && < 5,
-    -- Effects
-    effectful         >= 2.3  && < 3,
-    effectful-core    >= 2.3  && < 3,
     -- Data
     text              >= 2.0  && < 3,
     bytestring        >= 0.11 && < 1,
@@ -109,6 +120,9 @@ library
     -- Security / Crypto
     crypton           >= 0.34 && < 1,
     memory            >= 0.18 && < 1,
+    -- Monad
+    transformers      >= 0.6  && < 1,
+    mtl               >= 2.3  && < 3,
     -- CLI
     optparse-applicative >= 0.18 && < 1,
     -- Logging
@@ -116,9 +130,6 @@ library
     -- Utils
     filepath          >= 1.4  && < 2,
     directory         >= 1.3  && < 2,
-    transformers      >= 0.6  && < 1,
-    mtl               >= 2.3  && < 3,
-    unliftio          >= 0.2  && < 1,
   hs-source-dirs:   src
   default-language: GHC2021
   default-extensions:
@@ -128,11 +139,7 @@ library
     ScopedTypeVariables
     DerivingStrategies
     DeriveGeneric
-    DeriveAnyClass
     GeneralizedNewtypeDeriving
-    TypeApplications
-    DataKinds
-    TypeFamilies
 
 executable pureclaw
   import:           warnings
