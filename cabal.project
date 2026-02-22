@@ -2,7 +2,7 @@ packages: .
 
 -- No floating bounds in CI builds
 -- Run: cabal freeze --enable-tests to regenerate
-index-state: hackage.haskell.org 2026-02-22T00:00:00Z
+index-state: hackage.haskell.org 2026-02-21T23:43:43Z
 
 -- Strict build: warnings are errors in CI
 package pureclaw
