@@ -6,10 +6,10 @@ on:
   pull_request:
     branches: [main]
 
-# Allow only one Pages deployment at a time
+# Cancel outdated runs when a new push arrives on the same PR
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
