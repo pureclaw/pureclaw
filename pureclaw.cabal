@@ -183,6 +183,8 @@ test-suite pureclaw-test
     Channels.TelegramSpec
     Channels.SignalSpec
     Agent.IdentitySpec
+    Scheduler.CronSpec
+    Scheduler.HeartbeatSpec
   hs-source-dirs:   test
   build-depends:
     base,
@@ -198,6 +200,7 @@ test-suite pureclaw-test
     stm,
     temporary,
     text,
+    time,
     wai,
     warp,
     hspec,
