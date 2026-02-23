@@ -17,7 +17,7 @@ description:
   .
   No effect systems. ReaderT AppEnv IO and the Handle pattern throughout.
 
-license:            MIT
+license:            BSD3
 license-file:       LICENSE
 author:             PureClaw Contributors
 maintainer:         doug@equitek.ai
@@ -91,45 +91,32 @@ library
     -- CLI
     PureClaw.CLI.Commands
   build-depends:
-    base              >= 4.17 && < 5,
-    -- Data
-    text              >= 2.0  && < 3,
-    bytestring        >= 0.11 && < 1,
-    containers        >= 0.6  && < 1,
-    vector            >= 0.13 && < 1,
-    time              >= 1.12 && < 2,
-    -- JSON / Config
-    aeson             >= 2.1  && < 3,
-    tomland           >= 1.3  && < 2,
-    -- HTTP
-    warp              >= 3.3  && < 4,
-    wai               >= 3.2  && < 4,
-    wai-extra         >= 3.1  && < 4,
-    http-client       >= 0.7  && < 1,
-    http-client-tls   >= 0.3  && < 1,
-    http-types        >= 0.12 && < 1,
-    -- WebSockets
-    websockets        >= 0.12 && < 1,
-    -- Database
-    sqlite-simple     >= 0.4  && < 1,
-    -- Concurrency
-    async             >= 2.2  && < 3,
-    stm               >= 2.5  && < 3,
-    -- Process
-    typed-process     >= 0.2  && < 1,
-    -- Security / Crypto
-    crypton           >= 0.34 && < 1,
-    memory            >= 0.18 && < 1,
-    -- Monad
-    transformers      >= 0.6  && < 1,
-    mtl               >= 2.3  && < 3,
-    -- CLI
-    optparse-applicative >= 0.18 && < 1,
-    -- Logging
-    fast-logger       >= 3.1  && < 4,
-    -- Utils
-    filepath          >= 1.4  && < 2,
-    directory         >= 1.3  && < 2,
+    base              >= 4.20,
+    aeson,
+    async,
+    bytestring,
+    containers,
+    crypton,
+    directory,
+    filepath,
+    http-client,
+    http-client-tls,
+    http-types,
+    memory,
+    mtl,
+    optparse-applicative,
+    sqlite-simple,
+    stm,
+    text,
+    time,
+    tomland,
+    transformers,
+    typed-process,
+    vector,
+    wai,
+    wai-extra,
+    warp,
+    websockets,
   hs-source-dirs:   src
   default-language: GHC2021
   default-extensions:
@@ -148,7 +135,6 @@ executable pureclaw
   build-depends:
     base,
     pureclaw,
-    optparse-applicative >= 0.18 && < 1,
   default-language: GHC2021
 
 test-suite pureclaw-test
@@ -159,8 +145,7 @@ test-suite pureclaw-test
   build-depends:
     base,
     pureclaw,
-    hspec             >= 2.10 && < 3,
-    QuickCheck        >= 2.14 && < 3,
-    hspec-wai         >= 0.11 && < 1,
+    hspec,
+    QuickCheck,
   default-language: GHC2021
   ghc-options:      -threaded -rtsopts -with-rtsopts=-N
