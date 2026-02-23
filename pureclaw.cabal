@@ -17,7 +17,7 @@ description:
   .
   No effect systems. ReaderT AppEnv IO and the Handle pattern throughout.
 
-license:            BSD3
+license:            BSD-3-Clause
 license-file:       LICENSE
 author:             PureClaw Contributors
 maintainer:         doug@equitek.ai
