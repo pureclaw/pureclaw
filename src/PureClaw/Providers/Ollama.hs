@@ -1,1 +1,1 @@
-module PureClaw.Providers.Ollama where
+module PureClaw.Providers.Ollama () where

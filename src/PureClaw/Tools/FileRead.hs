@@ -1,1 +1,1 @@
-module PureClaw.Tools.FileRead where
+module PureClaw.Tools.FileRead () where

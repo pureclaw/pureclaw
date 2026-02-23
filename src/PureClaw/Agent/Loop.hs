@@ -1,1 +1,1 @@
-module PureClaw.Agent.Loop where
+module PureClaw.Agent.Loop () where

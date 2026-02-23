@@ -1,1 +1,1 @@
-module PureClaw.Security.Policy where
+module PureClaw.Security.Policy () where

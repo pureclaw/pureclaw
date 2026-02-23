@@ -1,1 +1,1 @@
-module PureClaw.Handles.File where
+module PureClaw.Handles.File () where

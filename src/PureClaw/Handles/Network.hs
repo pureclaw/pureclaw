@@ -1,1 +1,1 @@
-module PureClaw.Handles.Network where
+module PureClaw.Handles.Network () where

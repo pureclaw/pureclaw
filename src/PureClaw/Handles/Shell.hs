@@ -1,1 +1,1 @@
-module PureClaw.Handles.Shell where
+module PureClaw.Handles.Shell () where

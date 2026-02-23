@@ -1,1 +1,1 @@
-module PureClaw.Agent.Context where
+module PureClaw.Agent.Context () where

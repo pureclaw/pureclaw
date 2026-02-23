@@ -1,1 +1,1 @@
-module PureClaw.Memory.Class where
+module PureClaw.Memory.Class () where

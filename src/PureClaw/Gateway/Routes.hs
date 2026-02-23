@@ -1,1 +1,1 @@
-module PureClaw.Gateway.Routes where
+module PureClaw.Gateway.Routes () where

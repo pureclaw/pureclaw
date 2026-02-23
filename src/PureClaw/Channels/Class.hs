@@ -1,1 +1,1 @@
-module PureClaw.Channels.Class where
+module PureClaw.Channels.Class () where

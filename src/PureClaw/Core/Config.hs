@@ -1,1 +1,1 @@
-module PureClaw.Core.Config where
+module PureClaw.Core.Config () where

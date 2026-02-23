@@ -1,1 +1,1 @@
-module PureClaw.Channels.Signal where
+module PureClaw.Channels.Signal () where

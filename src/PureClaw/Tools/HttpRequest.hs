@@ -1,1 +1,1 @@
-module PureClaw.Tools.HttpRequest where
+module PureClaw.Tools.HttpRequest () where

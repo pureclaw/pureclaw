@@ -1,1 +1,1 @@
-module PureClaw.Security.Crypto where
+module PureClaw.Security.Crypto () where

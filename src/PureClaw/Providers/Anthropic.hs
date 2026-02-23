@@ -1,1 +1,1 @@
-module PureClaw.Providers.Anthropic where
+module PureClaw.Providers.Anthropic () where

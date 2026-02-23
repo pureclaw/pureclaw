@@ -1,1 +1,1 @@
-module PureClaw.Gateway.Auth where
+module PureClaw.Gateway.Auth () where

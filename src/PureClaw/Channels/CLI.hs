@@ -1,1 +1,1 @@
-module PureClaw.Channels.CLI where
+module PureClaw.Channels.CLI () where

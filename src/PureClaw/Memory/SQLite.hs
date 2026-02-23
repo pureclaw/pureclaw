@@ -1,1 +1,1 @@
-module PureClaw.Memory.SQLite where
+module PureClaw.Memory.SQLite () where

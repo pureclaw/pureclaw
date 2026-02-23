@@ -1,1 +1,1 @@
-module PureClaw.Memory.None where
+module PureClaw.Memory.None () where

@@ -1,1 +1,1 @@
-module PureClaw.Agent.Memory where
+module PureClaw.Agent.Memory () where

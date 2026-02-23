@@ -1,1 +1,1 @@
-module PureClaw.Tools.MemoryTool where
+module PureClaw.Tools.Memory () where

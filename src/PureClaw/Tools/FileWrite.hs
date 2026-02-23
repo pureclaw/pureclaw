@@ -1,1 +1,1 @@
-module PureClaw.Tools.FileWrite where
+module PureClaw.Tools.FileWrite () where

@@ -1,1 +1,1 @@
-module PureClaw.Gateway.Server where
+module PureClaw.Gateway.Server () where

@@ -1,1 +1,1 @@
-module PureClaw.Handles.Log where
+module PureClaw.Handles.Log () where

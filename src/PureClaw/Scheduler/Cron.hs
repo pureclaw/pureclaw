@@ -1,1 +1,1 @@
-module PureClaw.Scheduler.Cron where
+module PureClaw.Scheduler.Cron () where

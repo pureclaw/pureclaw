@@ -1,1 +1,1 @@
-module PureClaw.Core.Errors where
+module PureClaw.Core.Errors () where

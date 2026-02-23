@@ -1,1 +1,1 @@
-module PureClaw.Memory.Markdown where
+module PureClaw.Memory.Markdown () where

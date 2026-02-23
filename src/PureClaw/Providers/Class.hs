@@ -1,1 +1,1 @@
-module PureClaw.Providers.Class where
+module PureClaw.Providers.Class () where

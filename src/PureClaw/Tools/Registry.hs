@@ -1,1 +1,1 @@
-module PureClaw.Tools.Registry where
+module PureClaw.Tools.Registry () where

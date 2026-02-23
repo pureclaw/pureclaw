@@ -1,1 +1,1 @@
-module PureClaw.Security.Path where
+module PureClaw.Security.Path () where

@@ -1,1 +1,1 @@
-module PureClaw.Channels.Telegram where
+module PureClaw.Channels.Telegram () where

@@ -1,1 +1,1 @@
-module PureClaw.Handles.Memory where
+module PureClaw.Handles.Memory () where

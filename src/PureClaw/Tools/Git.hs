@@ -1,1 +1,1 @@
-module PureClaw.Tools.Git where
+module PureClaw.Tools.Git () where

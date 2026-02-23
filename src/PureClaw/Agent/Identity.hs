@@ -1,1 +1,1 @@
-module PureClaw.Agent.Identity where
+module PureClaw.Agent.Identity () where

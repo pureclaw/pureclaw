@@ -1,1 +1,1 @@
-module PureClaw.Scheduler.Heartbeat where
+module PureClaw.Scheduler.Heartbeat () where

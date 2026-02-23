@@ -1,1 +1,1 @@
-module PureClaw.Providers.OpenRouter where
+module PureClaw.Providers.OpenRouter () where

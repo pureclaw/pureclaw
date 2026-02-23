@@ -1,1 +1,1 @@
-module PureClaw.Core.Types where
+module PureClaw.Core.Types () where

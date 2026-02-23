@@ -1,1 +1,1 @@
-module PureClaw.Tools.Shell where
+module PureClaw.Tools.Shell () where

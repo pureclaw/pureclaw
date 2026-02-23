@@ -1,1 +1,1 @@
-module PureClaw.Security.Secrets where
+module PureClaw.Security.Secrets () where

@@ -1,1 +1,1 @@
-module PureClaw.Security.Pairing where
+module PureClaw.Security.Pairing () where

@@ -1,1 +1,1 @@
-module PureClaw.Providers.OpenAI where
+module PureClaw.Providers.OpenAI () where
