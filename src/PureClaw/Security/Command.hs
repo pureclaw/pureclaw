@@ -24,7 +24,7 @@ import PureClaw.Security.Policy
 -- Note for downstream: 'ShellHandle.execute' is responsible for stripping
 -- the subprocess environment (@setEnv (Just [])@) — environment isolation
 -- is an execution-time concern, not a policy concern.
-newtype AuthorizedCommand = AuthorizedCommand (FilePath, [Text])
+newtype AuthorizedCommand = AuthorizedCommand { unAuthorizedCommand :: (FilePath, [Text]) }
 
 -- | Errors from command authorization.
 data CommandError
@@ -48,8 +48,8 @@ authorize policy cmd args
 
 -- | Get the program path from an authorized command.
 getCommandProgram :: AuthorizedCommand -> FilePath
-getCommandProgram (AuthorizedCommand (prog, _)) = prog
+getCommandProgram = fst . unAuthorizedCommand
 
 -- | Get the arguments from an authorized command.
 getCommandArgs :: AuthorizedCommand -> [Text]
-getCommandArgs (AuthorizedCommand (_, args)) = args
+getCommandArgs = snd . unAuthorizedCommand

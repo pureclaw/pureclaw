@@ -21,11 +21,11 @@ import PureClaw.Core.Types
 -- | A filesystem path that has been validated to be within the workspace
 -- and not on the blocked list. Constructor is intentionally NOT exported —
 -- the only way to obtain a 'SafePath' is through 'mkSafePath'.
-newtype SafePath = SafePath FilePath
+newtype SafePath = SafePath { getSafePath :: FilePath }
   deriving stock (Eq, Ord)
 
 instance Show SafePath where
-  show (SafePath p) = "SafePath " ++ show p
+  show sp = "SafePath " ++ show (getSafePath sp)
 
 -- | Errors that can occur during path validation.
 data PathError
@@ -92,6 +92,3 @@ isBlockedPath relative =
   let firstComponent = Prelude.takeWhile (\c -> c /= '/' && c /= '\\') relative
   in Set.member firstComponent blockedPaths
 
--- | Read-only accessor for the underlying file path.
-getSafePath :: SafePath -> FilePath
-getSafePath (SafePath p) = p
