@@ -47,19 +47,12 @@ jobs:
       - name: Build
         run: nix build --print-build-logs
 
-      # - name: Run tests
-      #   run: nix build .#checks.x86_64-linux.pureclaw-test --print-build-logs
-
-      - name: Configure Nix signing key
-        if: github.event_name == 'push'
-        run: |
-          echo "${{ secrets.NIX_CACHE_SIGNING_KEY }}" > /tmp/nix-cache-priv-key.pem
-
       - name: Push to S3 Nix cache
-        if: github.event_name == 'push'
+        #if: github.event_name == 'push'
         run: |
-          S3_CACHE='s3://mb-nix-cache'
+          S3_CACHE='s3://pureclaw-nix-cache'
           KEY=/tmp/nix-cache-priv-key.pem
+          echo "${{ secrets.NIX_CACHE_SIGNING_KEY }}" > $KEY
 
           if [ ! -f "$KEY" ]; then
             echo "Signing key not found, skipping cache push."
@@ -102,5 +95,8 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.NIX_CACHE_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_CACHE_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Run tests
+        run: nix develop --command cabal test
 
 
