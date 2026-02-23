@@ -50,7 +50,7 @@ jobs:
       - name: Push to S3 Nix cache
         #if: github.event_name == 'push'
         run: |
-          S3_CACHE='s3://mb-nix-cache'
+          S3_CACHE='s3://pureclaw-nix-cache'
           KEY=/tmp/nix-cache-priv-key.pem
           echo "${{ secrets.NIX_CACHE_SIGNING_KEY }}" > $KEY
 
