@@ -166,6 +166,13 @@ test-suite pureclaw-test
     Tools.FileReadSpec
     Tools.GitSpec
     Tools.MemorySpec
+    Memory.MarkdownSpec
+    Memory.SQLiteSpec
+    Memory.NoneSpec
+    Agent.MemorySpec
+    Providers.OpenAISpec
+    Providers.OllamaSpec
+    Providers.OpenRouterSpec
   hs-source-dirs:   test
   build-depends:
     base,
