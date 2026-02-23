@@ -2,9 +2,9 @@
 set -euo pipefail
 
 echo "==> Running hlint..."
-hlint src/ test/ app/
+nix develop --command hlint src/ test/ app/
 
 echo "==> Running cabal test..."
-cabal test
+nix develop --command cabal test
 
 echo "==> All pre-push checks passed."
