@@ -1,1 +1,94 @@
-module PureClaw.Security.Path () where
+module PureClaw.Security.Path
+  ( -- * Safe path type (constructor intentionally NOT exported)
+    SafePath
+    -- * Path errors
+  , PathError (..)
+    -- * Construction (the ONLY way to obtain a SafePath)
+  , mkSafePath
+    -- * Read-only accessor
+  , getSafePath
+  ) where
+
+import Data.List
+import Data.Set (Set)
+import Data.Set qualified as Set
+import Data.Text (Text)
+import System.Directory
+import System.FilePath
+
+import PureClaw.Core.Types
+
+-- | A filesystem path that has been validated to be within the workspace
+-- and not on the blocked list. Constructor is intentionally NOT exported —
+-- the only way to obtain a 'SafePath' is through 'mkSafePath'.
+newtype SafePath = SafePath { getSafePath :: FilePath }
+  deriving stock (Eq, Ord)
+
+instance Show SafePath where
+  show sp = "SafePath " ++ show (getSafePath sp)
+
+-- | Errors that can occur during path validation.
+data PathError
+  = PathEscapesWorkspace FilePath FilePath  -- ^ requested, resolved
+  | PathIsBlocked FilePath Text             -- ^ requested, reason
+  | PathDoesNotExist FilePath               -- ^ the requested path does not exist
+  deriving stock (Show, Eq)
+
+-- | Paths that must never be readable or writable, regardless of workspace.
+-- Checked against the first component of the relative path within the workspace.
+blockedPaths :: Set String
+blockedPaths = Set.fromList
+  [ ".env"
+  , ".env.local"
+  , ".env.production"
+  , ".ssh"
+  , ".gnupg"
+  , ".netrc"
+  ]
+
+-- | The ONLY way to obtain a 'SafePath'. Canonicalizes the path (following
+-- symlinks), verifies it stays within the workspace, checks the blocked list,
+-- and verifies the path exists.
+--
+-- Checks run in order, each as an early return:
+--  1. Reject @..@ traversal (prevents workspace escape)
+--  2. Reject absolute paths outside workspace
+--  3. Reject blocked paths (@.env@, @.ssh@, etc.)
+--  4. Reject non-existent paths
+--  5. Reject symlinks that resolve outside workspace
+mkSafePath :: WorkspaceRoot -> FilePath -> IO (Either PathError SafePath)
+mkSafePath (WorkspaceRoot root) requested = do
+  canonRoot <- canonicalizePath root
+  let raw = if isAbsolute requested then requested else canonRoot </> requested
+      relative = makeRelative canonRoot raw
+  -- Pure checks first (no IO, no filesystem access)
+  let pureCheck
+        | hasParentTraversal requested = Just (PathEscapesWorkspace requested raw)
+        | isAbsolute requested && not (canonRoot `isPrefixOf` raw) = Just (PathEscapesWorkspace requested raw)
+        | isBlockedPath relative = Just (PathIsBlocked requested "blocked path")
+        | otherwise = Nothing
+  case pureCheck of
+    Just err -> pure (Left err)
+    Nothing -> do
+      exists <- doesPathExist raw
+      if not exists
+        then pure $ Left (PathDoesNotExist requested)
+        else do
+          -- Canonicalize resolves symlinks — a symlink inside the workspace
+          -- could point outside it, so we re-check containment.
+          canonical <- canonicalizePath raw
+          pure $ if canonRoot `isPrefixOf` canonical
+            then Right (SafePath canonical)
+            else Left (PathEscapesWorkspace requested canonical)
+
+-- | Check if a path contains ".." components that could traverse upward.
+hasParentTraversal :: FilePath -> Bool
+hasParentTraversal path = ".." `elem` splitDirectories path
+
+-- | Check if a relative path matches any blocked path.
+-- Matches on the first path component (e.g. ".env" matches ".env" and ".env/foo").
+isBlockedPath :: FilePath -> Bool
+isBlockedPath relative =
+  let firstComponent = Prelude.takeWhile (\c -> c /= '/' && c /= '\\') relative
+  in Set.member firstComponent blockedPaths
+

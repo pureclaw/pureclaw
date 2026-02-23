@@ -141,11 +141,26 @@ test-suite pureclaw-test
   import:           warnings
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
+  other-modules:
+    Core.TypesSpec
+    Security.SecretsSpec
+    Core.ErrorsSpec
+    Security.PolicySpec
+    Security.PathSpec
+    Security.CommandSpec
+    Core.ConfigSpec
   hs-source-dirs:   test
   build-depends:
     base,
     pureclaw,
+    bytestring,
+    containers,
+    directory,
+    filepath,
+    text,
     hspec,
     QuickCheck,
   default-language: GHC2021
+  default-extensions:
+    OverloadedStrings
   ghc-options:      -threaded -rtsopts -with-rtsopts=-N
