@@ -176,17 +176,24 @@ test-suite pureclaw-test
     Providers.OpenRouterSpec
     Security.CryptoSpec
     Security.PairingSpec
+    Gateway.AuthSpec
+    Gateway.RoutesSpec
+    Gateway.ServerSpec
   hs-source-dirs:   test
   build-depends:
     base,
     pureclaw,
     aeson,
+    base16-bytestring,
     bytestring,
     containers,
     directory,
     filepath,
+    http-types,
     optparse-applicative,
     text,
+    wai,
+    warp,
     hspec,
     QuickCheck,
   default-language: GHC2021

@@ -35,6 +35,9 @@ import qualified Providers.OllamaSpec
 import qualified Providers.OpenRouterSpec
 import qualified Security.CryptoSpec
 import qualified Security.PairingSpec
+import qualified Gateway.AuthSpec
+import qualified Gateway.RoutesSpec
+import qualified Gateway.ServerSpec
 
 main :: IO ()
 main = hspec $ do
@@ -71,3 +74,6 @@ main = hspec $ do
   describe "Providers.OpenRouter" Providers.OpenRouterSpec.spec
   describe "Security.Crypto" Security.CryptoSpec.spec
   describe "Security.Pairing" Security.PairingSpec.spec
+  describe "Gateway.Auth" Gateway.AuthSpec.spec
+  describe "Gateway.Routes" Gateway.RoutesSpec.spec
+  describe "Gateway.Server" Gateway.ServerSpec.spec
