@@ -19,6 +19,8 @@ module PureClaw.Providers.Class
   , Usage (..)
     -- * Provider typeclass
   , Provider (..)
+    -- * Existential wrapper
+  , SomeProvider (..)
   ) where
 
 import Data.Aeson (Value)
@@ -131,3 +133,10 @@ data CompletionResponse = CompletionResponse
 -- implements this typeclass.
 class Provider p where
   complete :: p -> CompletionRequest -> IO CompletionResponse
+
+-- | Existential wrapper for runtime provider selection (e.g. from config).
+data SomeProvider where
+  MkProvider :: Provider p => p -> SomeProvider
+
+instance Provider SomeProvider where
+  complete (MkProvider p) = complete p
