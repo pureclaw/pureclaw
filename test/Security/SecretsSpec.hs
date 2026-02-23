@@ -2,7 +2,6 @@ module Security.SecretsSpec (spec) where
 
 import Test.Hspec
 import Data.ByteString (ByteString)
-
 import PureClaw.Security.Secrets
 
 spec :: Spec

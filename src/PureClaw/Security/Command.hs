@@ -12,10 +12,10 @@ module PureClaw.Security.Command
 
 import Data.Text (Text)
 import Data.Text qualified as T
-import System.FilePath (takeFileName)
+import System.FilePath
 
-import PureClaw.Core.Types (AutonomyLevel (..), CommandName (..))
-import PureClaw.Security.Policy (SecurityPolicy (..), isCommandAllowed)
+import PureClaw.Core.Types
+import PureClaw.Security.Policy
 
 -- | A command that has been authorized by the security policy.
 -- Constructor is intentionally NOT exported — the only way to obtain an
@@ -39,7 +39,7 @@ data CommandError
 -- 2. Command basename is in the policy's allowed command set
 authorize :: SecurityPolicy -> FilePath -> [Text] -> Either CommandError AuthorizedCommand
 authorize policy cmd args
-  | policyAutonomy policy == Deny =
+  | _sp_autonomy policy == Deny =
       Left CommandInAutonomyDeny
   | not (isCommandAllowed policy (CommandName (T.pack (takeFileName cmd)))) =
       Left (CommandNotAllowed (T.pack (takeFileName cmd)))

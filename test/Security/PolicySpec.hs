@@ -15,7 +15,7 @@ spec = do
         isCommandAllowed defaultPolicy (CommandName (T.pack cmdText)) `shouldBe` False
 
     it "has Deny autonomy" $
-      policyAutonomy defaultPolicy `shouldBe` Deny
+      _sp_autonomy defaultPolicy `shouldBe` Deny
 
   describe "allowCommand" $ do
     it "adds a command to the allowed set" $ do
@@ -45,14 +45,14 @@ spec = do
   describe "withAutonomy" $ do
     it "sets the autonomy level" $ do
       let policy = withAutonomy Full defaultPolicy
-      policyAutonomy policy `shouldBe` Full
+      _sp_autonomy policy `shouldBe` Full
 
     it "can override previous autonomy" $ do
       let policy = withAutonomy Supervised $ withAutonomy Full defaultPolicy
-      policyAutonomy policy `shouldBe` Supervised
+      _sp_autonomy policy `shouldBe` Supervised
 
   describe "AllowAll commands" $ do
     it "allows everything when policy uses AllowAll" $ do
-      let policy = defaultPolicy { policyAllowedCommands = AllowAll }
+      let policy = defaultPolicy { _sp_allowedCommands = AllowAll }
       property $ \(cmdText :: String) ->
         isCommandAllowed policy (CommandName (T.pack cmdText)) `shouldBe` True

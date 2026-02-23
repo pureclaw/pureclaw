@@ -190,6 +190,7 @@ Development patterns and standards are documented in `.claude/guides/`:
 - GHC `-Wall -Werror`, `-Wincomplete-record-updates`, `-Wmissing-export-lists`
 - hlint clean
 - All quality gates must pass before PR creation
+- **Follow the [Haskell Coding Standards](.claude/guides/coding-standards.md)** — especially the import style rules (no explicit import lists except canonical cases like `import Data.Set (Set)`)
 
 ## Key Decisions
 

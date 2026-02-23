@@ -2,14 +2,9 @@ module Security.PathSpec (spec) where
 
 import Test.Hspec
 import System.Directory
-  ( createDirectoryIfMissing
-  , removeDirectoryRecursive
-  , getTemporaryDirectory
-  , canonicalizePath
-  )
-import System.FilePath ((</>))
+import System.FilePath
 
-import PureClaw.Core.Types (WorkspaceRoot (..))
+import PureClaw.Core.Types
 import PureClaw.Security.Path
 
 spec :: Spec

@@ -11,13 +11,13 @@ spec :: Spec
 spec = do
   describe "Config" $ do
     let cfg = Config
-          { cfgProvider     = ProviderId "anthropic"
-          , cfgModel        = ModelId "claude-3-opus"
-          , cfgGatewayPort  = Port 8080
-          , cfgWorkspace    = "/home/user/workspace"
-          , cfgAutonomy     = Supervised
-          , cfgAllowedCmds  = AllowList (Set.fromList [CommandName "git"])
-          , cfgAllowedUsers = AllowAll
+          { _cfg_provider     = ProviderId "anthropic"
+          , _cfg_model        = ModelId "claude-3-opus"
+          , _cfg_gatewayPort  = Port 8080
+          , _cfg_workspace    = "/home/user/workspace"
+          , _cfg_autonomy     = Supervised
+          , _cfg_allowedCmds  = AllowList (Set.fromList [CommandName "git"])
+          , _cfg_allowedUsers = AllowAll
           }
 
     it "has a safe Show instance (no secrets)" $ do
@@ -31,13 +31,13 @@ spec = do
 
   describe "RuntimeConfig" $ do
     let cfg = Config
-          { cfgProvider     = ProviderId "anthropic"
-          , cfgModel        = ModelId "claude-3-opus"
-          , cfgGatewayPort  = Port 8080
-          , cfgWorkspace    = "/home/user/workspace"
-          , cfgAutonomy     = Supervised
-          , cfgAllowedCmds  = AllowList (Set.fromList [CommandName "git"])
-          , cfgAllowedUsers = AllowAll
+          { _cfg_provider     = ProviderId "anthropic"
+          , _cfg_model        = ModelId "claude-3-opus"
+          , _cfg_gatewayPort  = Port 8080
+          , _cfg_workspace    = "/home/user/workspace"
+          , _cfg_autonomy     = Supervised
+          , _cfg_allowedCmds  = AllowList (Set.fromList [CommandName "git"])
+          , _cfg_allowedUsers = AllowAll
           }
         apiKey = mkApiKey "sk-secret-key-12345"
         secretKey = mkSecretKey "encryption-key-67890"

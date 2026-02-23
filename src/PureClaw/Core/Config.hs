@@ -11,26 +11,18 @@ module PureClaw.Core.Config
   ) where
 
 import PureClaw.Core.Types
-  ( AllowList
-  , AutonomyLevel
-  , CommandName
-  , ModelId
-  , Port
-  , ProviderId
-  , UserId
-  )
-import PureClaw.Security.Secrets (ApiKey, SecretKey)
+import PureClaw.Security.Secrets
 
 -- | Serializable configuration — safe to write to disk.
 -- Contains no secrets. All fields are safe to show, compare, and serialize.
 data Config = Config
-  { cfgProvider     :: ProviderId
-  , cfgModel        :: ModelId
-  , cfgGatewayPort  :: Port
-  , cfgWorkspace    :: FilePath
-  , cfgAutonomy     :: AutonomyLevel
-  , cfgAllowedCmds  :: AllowList CommandName
-  , cfgAllowedUsers :: AllowList UserId
+  { _cfg_provider     :: ProviderId
+  , _cfg_model        :: ModelId
+  , _cfg_gatewayPort  :: Port
+  , _cfg_workspace    :: FilePath
+  , _cfg_autonomy     :: AutonomyLevel
+  , _cfg_allowedCmds  :: AllowList CommandName
+  , _cfg_allowedUsers :: AllowList UserId
   }
   deriving stock (Show, Eq)
 
@@ -42,15 +34,15 @@ data Config = Config
 -- derive them would be a compile error because 'ApiKey' and 'SecretKey'
 -- have no serialization instances.
 data RuntimeConfig = RuntimeConfig
-  { _rtConfig    :: Config
-  , _rtApiKey    :: ApiKey
-  , _rtSecretKey :: SecretKey
+  { _rc_config    :: Config
+  , _rc_apiKey    :: ApiKey
+  , _rc_secretKey :: SecretKey
   }
 
 instance Show RuntimeConfig where
-  show rc = "RuntimeConfig { config = " ++ show (_rtConfig rc)
-         ++ ", apiKey = " ++ show (_rtApiKey rc)
-         ++ ", secretKey = " ++ show (_rtSecretKey rc)
+  show rc = "RuntimeConfig { config = " ++ show (_rc_config rc)
+         ++ ", apiKey = " ++ show (_rc_apiKey rc)
+         ++ ", secretKey = " ++ show (_rc_secretKey rc)
          ++ " }"
 
 -- | Construct a 'RuntimeConfig' from a 'Config' and secrets.
@@ -59,12 +51,12 @@ mkRuntimeConfig = RuntimeConfig
 
 -- | Access the serializable config portion.
 rtConfig :: RuntimeConfig -> Config
-rtConfig = _rtConfig
+rtConfig = _rc_config
 
 -- | Access the API key.
 rtApiKey :: RuntimeConfig -> ApiKey
-rtApiKey = _rtApiKey
+rtApiKey = _rc_apiKey
 
 -- | Access the secret key.
 rtSecretKey :: RuntimeConfig -> SecretKey
-rtSecretKey = _rtSecretKey
+rtSecretKey = _rc_secretKey

@@ -9,14 +9,14 @@ module PureClaw.Security.Path
   , getSafePath
   ) where
 
-import Data.List (isPrefixOf)
+import Data.List
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import System.Directory (canonicalizePath, doesPathExist)
-import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories)
+import System.Directory
+import System.FilePath
 
-import PureClaw.Core.Types (WorkspaceRoot (..))
+import PureClaw.Core.Types
 
 -- | A filesystem path that has been validated to be within the workspace
 -- and not on the blocked list. Constructor is intentionally NOT exported —
