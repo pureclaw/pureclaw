@@ -6,16 +6,25 @@ on:
   pull_request:
     branches: [main]
 
+# Allow only one Pages deployment at a time
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build & Test (${{ matrix.system }})
     runs-on: ${{ matrix.runner }}
+    permissions:
+      statuses: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - system: x86_64-linux
             runner: ubuntu-latest
+    outputs:
+      coverage-summary: ${{ steps.coverage-summary.outputs.summary }}
 
     steps:
       - uses: actions/checkout@v4
@@ -136,7 +145,7 @@ jobs:
           echo "$MODULE_REPORT"
           echo "$MODULE_REPORT" > coverage-per-module.txt
 
-          # Find the HTML report directory
+          # Find the HTML report directory and prepare for Pages
           HTML_DIR=$(find dist-newstyle -path "*/hpc/vanilla/html" -type d 2>/dev/null | head -1)
           if [ -n "$HTML_DIR" ]; then
             mkdir -p coverage-html
@@ -144,19 +153,42 @@ jobs:
           fi
           '
 
-      - name: Post coverage summary
+      - name: Extract coverage summary
+        id: coverage-summary
         if: always()
         run: |
+          if [ ! -f coverage-report.txt ]; then
+            echo "summary=No coverage data" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract the key percentage for the status description
+          EXPR=$(grep 'expressions used' coverage-report.txt | head -1 || true)
+          BOOL=$(grep 'boolean coverage' coverage-report.txt | head -1 || true)
+          TOPDECL=$(grep 'top-level declarations' coverage-report.txt | head -1 || true)
+
+          # Build a compact summary for the commit status (max ~140 chars)
+          EXPR_PCT=$(echo "$EXPR" | grep -o '[0-9]*%' | head -1 || true)
+          BOOL_PCT=$(echo "$BOOL" | grep -o '[0-9]*%' | head -1 || true)
+          TOPDECL_PCT=$(echo "$TOPDECL" | grep -o '[0-9]*%' | head -1 || true)
+
+          SUMMARY="${EXPR_PCT:-?%} expressions, ${BOOL_PCT:-?%} booleans, ${TOPDECL_PCT:-?%} top-level decls"
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+
+      - name: Post coverage to job summary
+        if: always()
+        run: |
+          PAGES_URL="https://pureclaw.github.io/pureclaw/"
+
           if [ ! -f coverage-report.txt ]; then
             echo "No coverage report found." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Parse the summary line for expressions
-          EXPR_LINE=$(grep 'expressions used' coverage-report.txt || true)
-
           {
             echo "## Code Coverage (HPC)"
+            echo ""
+            echo "**[View full HTML report on GitHub Pages]($PAGES_URL)**"
             echo ""
             echo '```'
             cat coverage-report.txt
@@ -172,11 +204,39 @@ jobs:
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload coverage HTML report
+      - name: Upload Pages artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: coverage-report
           path: coverage-html/
-          if-no-files-found: warn
-          retention-days: 30
+
+      - name: Post coverage commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PAGES_URL="https://pureclaw.github.io/pureclaw/"
+          SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          SUMMARY="${{ steps.coverage-summary.outputs.summary }}"
+
+          gh api "repos/${{ github.repository }}/statuses/$SHA" \
+            -f state=success \
+            -f context="coverage" \
+            -f description="$SUMMARY" \
+            -f target_url="$PAGES_URL"
+
+  deploy-coverage:
+    name: Deploy coverage to GitHub Pages
+    needs: build
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
