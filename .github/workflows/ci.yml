@@ -24,8 +24,7 @@ jobs:
         with:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
-            extra-substituters = https://cache.iog.io s3://pureclaw-nix-cache
-            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= pureclaw-ci:tiDJ1F73/W/XyhU5o280QMWljJRc57++M+6TDKSCjQI=
+            accept-flake-config = true
 
       - name: Build
         run: nix build --print-build-logs
