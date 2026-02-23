@@ -6,10 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel outdated runs when a new push arrives on the same PR
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build & Test (${{ matrix.system }})
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      statuses: write
     strategy:
       fail-fast: false
       matrix:
@@ -96,7 +104,227 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.NIX_CACHE_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_CACHE_AWS_SECRET_ACCESS_KEY }}
 
-      - name: Run tests
-        run: nix develop --command cabal test
+      - name: Run tests with coverage
+        run: nix develop --command cabal test --enable-coverage
 
+      - name: Generate coverage report
+        if: always()
+        run: |
+          nix develop --command bash -c '
+          TIX=$(find dist-newstyle -name "pureclaw-test.tix" 2>/dev/null | head -1)
+          if [ -z "$TIX" ]; then
+            echo "No .tix file found — coverage report skipped."
+            exit 0
+          fi
 
+          # Collect all mix directories
+          MIXDIRS=$(find dist-newstyle -path "*/hpc/vanilla/mix" -type d 2>/dev/null)
+          HPCDIR_ARGS=""
+          for d in $MIXDIRS; do
+            HPCDIR_ARGS="$HPCDIR_ARGS --hpcdir=$d"
+          done
+
+          # Generate text report (library modules only, exclude test harness)
+          echo "=== HPC Coverage Report ==="
+          REPORT=$(hpc report "$TIX" $HPCDIR_ARGS \
+            --exclude=Main \
+            --exclude=Paths_pureclaw \
+            2>&1)
+          echo "$REPORT"
+          echo "$REPORT" > coverage-report.txt
+
+          # Per-module breakdown
+          echo ""
+          echo "=== Per-Module Coverage ==="
+          MODULE_REPORT=$(hpc report "$TIX" $HPCDIR_ARGS \
+            --exclude=Main \
+            --exclude=Paths_pureclaw \
+            --per-module \
+            2>&1)
+          echo "$MODULE_REPORT"
+          echo "$MODULE_REPORT" > coverage-per-module.txt
+
+          # Stage the HTML report for this PR
+          HTML_DIR=$(find dist-newstyle -path "*/hpc/vanilla/html" -type d 2>/dev/null | head -1)
+          if [ -n "$HTML_DIR" ]; then
+            mkdir -p new-coverage
+            cp -r "$HTML_DIR"/* new-coverage/
+          fi
+          '
+
+      - name: Extract coverage summary
+        id: coverage-summary
+        if: always()
+        run: |
+          if [ ! -f coverage-report.txt ]; then
+            echo "summary=No coverage data" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract the key percentage for the status description
+          EXPR=$(grep 'expressions used' coverage-report.txt | head -1 || true)
+          BOOL=$(grep 'boolean coverage' coverage-report.txt | head -1 || true)
+          TOPDECL=$(grep 'top-level declarations' coverage-report.txt | head -1 || true)
+
+          # Build a compact summary for the commit status (max ~140 chars)
+          EXPR_PCT=$(echo "$EXPR" | grep -o '[0-9]*%' | head -1 || true)
+          BOOL_PCT=$(echo "$BOOL" | grep -o '[0-9]*%' | head -1 || true)
+          TOPDECL_PCT=$(echo "$TOPDECL" | grep -o '[0-9]*%' | head -1 || true)
+
+          SUMMARY="${EXPR_PCT:-?%} expressions, ${BOOL_PCT:-?%} booleans, ${TOPDECL_PCT:-?%} top-level decls"
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+
+      - name: Determine report path
+        id: report-path
+        if: always()
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "dir=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post coverage to job summary
+        if: always()
+        run: |
+          REPORT_DIR="${{ steps.report-path.outputs.dir }}"
+          PAGES_URL="https://pureclaw.github.io/pureclaw/coverage/${REPORT_DIR}/hpc_index.html"
+
+          if [ ! -f coverage-report.txt ]; then
+            echo "No coverage report found." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "## Code Coverage (HPC)"
+            echo ""
+            echo "**[View full HTML report on GitHub Pages]($PAGES_URL)**"
+            echo ""
+            echo '```'
+            cat coverage-report.txt
+            echo '```'
+            echo ""
+            echo "<details>"
+            echo "<summary>Per-module breakdown</summary>"
+            echo ""
+            echo '```'
+            cat coverage-per-module.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fetch existing coverage reports
+        if: always()
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages-current
+        continue-on-error: true
+
+      - name: Assemble Pages content
+        if: always()
+        run: |
+          REPORT_DIR="${{ steps.report-path.outputs.dir }}"
+          PAGES_BASE="https://pureclaw.github.io/pureclaw"
+
+          mkdir -p deploy/coverage
+
+          # Carry forward existing reports from gh-pages
+          if [ -d gh-pages-current/coverage ]; then
+            cp -r gh-pages-current/coverage/* deploy/coverage/ 2>/dev/null || true
+          fi
+
+          # Add (or overwrite) this PR's report
+          if [ -d new-coverage ]; then
+            rm -rf "deploy/coverage/${REPORT_DIR}"
+            mkdir -p "deploy/coverage/${REPORT_DIR}"
+            cp -r new-coverage/* "deploy/coverage/${REPORT_DIR}/"
+
+            # Save the summary alongside the HTML for the index page
+            if [ -f coverage-report.txt ]; then
+              cp coverage-report.txt "deploy/coverage/${REPORT_DIR}/summary.txt"
+            fi
+          fi
+
+          # Generate the coverage index page
+          cat > deploy/coverage/index.html << 'HEADER'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>PureClaw — Coverage Reports</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #24292f; }
+              h1 { border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
+              table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+              th, td { text-align: left; padding: 8px 12px; border: 1px solid #d0d7de; }
+              th { background: #f6f8fa; }
+              a { color: #0969da; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .timestamp { color: #656d76; font-size: 0.9em; }
+            </style>
+          </head>
+          <body>
+            <h1>PureClaw — Coverage Reports</h1>
+            <table>
+              <tr><th>Report</th><th>Expressions</th><th>Top-level Decls</th><th>Updated</th></tr>
+          HEADER
+
+          # List all report directories, newest first
+          for dir in $(ls -dt deploy/coverage/pr-* deploy/coverage/main 2>/dev/null); do
+            NAME=$(basename "$dir")
+            LINK="${PAGES_BASE}/coverage/${NAME}/hpc_index.html"
+
+            # Extract stats from summary.txt if available
+            EXPR_PCT="-"
+            TOPDECL_PCT="-"
+            if [ -f "$dir/summary.txt" ]; then
+              EXPR_PCT=$(grep 'expressions used' "$dir/summary.txt" | grep -o '[0-9]*%' | head -1 || echo "-")
+              TOPDECL_PCT=$(grep 'top-level declarations' "$dir/summary.txt" | grep -o '[0-9]*%' | head -1 || echo "-")
+            fi
+
+            # Use directory modification time as timestamp
+            TIMESTAMP=$(date -r "$dir" "+%Y-%m-%d %H:%M" 2>/dev/null || stat -c '%y' "$dir" 2>/dev/null | cut -d. -f1 || echo "-")
+
+            # Format the display name
+            if [ "$NAME" = "main" ]; then
+              DISPLAY="main"
+            else
+              PR_NUM="${NAME#pr-}"
+              DISPLAY="PR #${PR_NUM}"
+            fi
+
+            echo "  <tr><td><a href=\"$LINK\">$DISPLAY</a></td><td>$EXPR_PCT</td><td>$TOPDECL_PCT</td><td class=\"timestamp\">$TIMESTAMP</td></tr>" >> deploy/coverage/index.html
+          done
+
+          cat >> deploy/coverage/index.html << 'FOOTER'
+            </table>
+          </body>
+          </html>
+          FOOTER
+
+      - name: Deploy to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          force_orphan: true
+          commit_message: "Update coverage: ${{ steps.report-path.outputs.dir }}"
+
+      - name: Post coverage commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPORT_DIR="${{ steps.report-path.outputs.dir }}"
+          PAGES_URL="https://pureclaw.github.io/pureclaw/coverage/${REPORT_DIR}/hpc_index.html"
+          SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          SUMMARY="${{ steps.coverage-summary.outputs.summary }}"
+
+          gh api "repos/${{ github.repository }}/statuses/$SHA" \
+            -f state=success \
+            -f context="coverage" \
+            -f description="$SUMMARY" \
+            -f target_url="$PAGES_URL"
