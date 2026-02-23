@@ -4,6 +4,9 @@ module PureClaw.CLI.Commands
     -- * Options (exported for testing)
   , ChatOptions (..)
   , chatOptionsParser
+    -- * Enums (exported for testing)
+  , ProviderType (..)
+  , MemoryBackend (..)
   ) where
 
 import Data.Maybe
@@ -43,14 +46,29 @@ import PureClaw.Tools.Memory
 import PureClaw.Tools.Registry
 import PureClaw.Tools.Shell
 
+-- | Supported LLM providers.
+data ProviderType
+  = Anthropic
+  | OpenAI
+  | OpenRouter
+  | Ollama
+  deriving stock (Show, Eq, Ord, Bounded, Enum)
+
+-- | Supported memory backends.
+data MemoryBackend
+  = NoMemory
+  | SQLiteMemory
+  | MarkdownMemory
+  deriving stock (Show, Eq, Ord, Bounded, Enum)
+
 -- | CLI chat options.
 data ChatOptions = ChatOptions
   { _co_model         :: String
   , _co_apiKey        :: Maybe String
   , _co_system        :: Maybe String
-  , _co_provider      :: String
+  , _co_provider      :: ProviderType
   , _co_allowCommands :: [String]
-  , _co_memory        :: String
+  , _co_memory        :: MemoryBackend
   , _co_soul          :: Maybe String
   }
   deriving stock (Show, Eq)
@@ -74,11 +92,11 @@ chatOptionsParser = ChatOptions
      <> short 's'
      <> help "System prompt (overrides SOUL.md)"
       ))
-  <*> strOption
+  <*> option parseProviderType
       ( long "provider"
      <> short 'p'
-     <> value "anthropic"
-     <> showDefault
+     <> value Anthropic
+     <> showDefaultWith providerToText
      <> help "LLM provider: anthropic, openai, openrouter, ollama"
       )
   <*> many (strOption
@@ -86,16 +104,46 @@ chatOptionsParser = ChatOptions
      <> short 'a'
      <> help "Allow a shell command (repeatable, e.g. --allow git --allow ls)"
       ))
-  <*> strOption
+  <*> option parseMemoryBackend
       ( long "memory"
-     <> value "none"
-     <> showDefault
+     <> value NoMemory
+     <> showDefaultWith memoryToText
      <> help "Memory backend: none, sqlite, markdown"
       )
   <*> optional (strOption
       ( long "soul"
      <> help "Path to SOUL.md identity file (default: ./SOUL.md if it exists)"
       ))
+
+-- | Parse a provider type from a CLI string.
+parseProviderType :: ReadM ProviderType
+parseProviderType = eitherReader $ \s -> case s of
+  "anthropic"  -> Right Anthropic
+  "openai"     -> Right OpenAI
+  "openrouter" -> Right OpenRouter
+  "ollama"     -> Right Ollama
+  _            -> Left $ "Unknown provider: " <> s <> ". Choose: anthropic, openai, openrouter, ollama"
+
+-- | Display a provider type as a CLI string.
+providerToText :: ProviderType -> String
+providerToText Anthropic  = "anthropic"
+providerToText OpenAI     = "openai"
+providerToText OpenRouter = "openrouter"
+providerToText Ollama     = "ollama"
+
+-- | Parse a memory backend from a CLI string.
+parseMemoryBackend :: ReadM MemoryBackend
+parseMemoryBackend = eitherReader $ \s -> case s of
+  "none"     -> Right NoMemory
+  "sqlite"   -> Right SQLiteMemory
+  "markdown" -> Right MarkdownMemory
+  _          -> Left $ "Unknown memory backend: " <> s <> ". Choose: none, sqlite, markdown"
+
+-- | Display a memory backend as a CLI string.
+memoryToText :: MemoryBackend -> String
+memoryToText NoMemory       = "none"
+memoryToText SQLiteMemory   = "sqlite"
+memoryToText MarkdownMemory = "markdown"
 
 -- | Full CLI parser with help and version.
 cliParserInfo :: ParserInfo ChatOptions
@@ -148,9 +196,9 @@ runChat opts = do
   let registry = buildRegistry policy sh workspace fh mh nh
 
   hSetBuffering stdout LineBuffering
-  _lh_logInfo logger $ "Provider: " <> T.pack (_co_provider opts)
+  _lh_logInfo logger $ "Provider: " <> T.pack (providerToText (_co_provider opts))
   _lh_logInfo logger $ "Model: " <> T.pack (_co_model opts)
-  _lh_logInfo logger $ "Memory: " <> T.pack (_co_memory opts)
+  _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText (_co_memory opts))
   case _co_allowCommands opts of
     [] -> _lh_logInfo logger "Commands: none (deny all)"
     cmds -> _lh_logInfo logger $ "Commands: " <> T.intercalate ", " (map T.pack cmds)
@@ -177,27 +225,24 @@ buildPolicy :: [String] -> SecurityPolicy
 buildPolicy [] = defaultPolicy
 buildPolicy cmds =
   let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
-      policy = defaultPolicy
-        { _sp_allowedCommands = AllowList cmdNames
-        , _sp_autonomy = Full
-        }
-  in policy
+  in defaultPolicy
+    { _sp_allowedCommands = AllowList cmdNames
+    , _sp_autonomy = Full
+    }
 
--- | Resolve the LLM provider from the --provider flag.
-resolveProvider :: String -> Maybe String -> HTTP.Manager -> IO SomeProvider
-resolveProvider "anthropic" keyOpt manager = do
+-- | Resolve the LLM provider from the provider type.
+resolveProvider :: ProviderType -> Maybe String -> HTTP.Manager -> IO SomeProvider
+resolveProvider Anthropic keyOpt manager = do
   apiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY"
   pure (MkProvider (mkAnthropicProvider manager apiKey))
-resolveProvider "openai" keyOpt manager = do
+resolveProvider OpenAI keyOpt manager = do
   apiKey <- resolveApiKey keyOpt "OPENAI_API_KEY"
   pure (MkProvider (mkOpenAIProvider manager apiKey))
-resolveProvider "openrouter" keyOpt manager = do
+resolveProvider OpenRouter keyOpt manager = do
   apiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY"
   pure (MkProvider (mkOpenRouterProvider manager apiKey))
-resolveProvider "ollama" _ manager =
+resolveProvider Ollama _ manager =
   pure (MkProvider (mkOllamaProvider manager))
-resolveProvider name _ _ =
-  die $ "Unknown provider: " <> name <> ". Choose: anthropic, openai, openrouter, ollama"
 
 -- | Resolve an API key from a CLI flag or an environment variable.
 resolveApiKey :: Maybe String -> String -> IO ApiKey
@@ -208,9 +253,8 @@ resolveApiKey Nothing envVar = do
     Just key -> pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
     Nothing  -> die $ "No API key provided. Use --api-key or set " <> envVar
 
--- | Resolve the memory backend from the --memory flag.
-resolveMemory :: String -> IO MemoryHandle
-resolveMemory "none"     = pure mkNoOpMemoryHandle
-resolveMemory "sqlite"   = mkSQLiteMemoryHandle ".pureclaw/memory.db"
-resolveMemory "markdown" = mkMarkdownMemoryHandle ".pureclaw/memory"
-resolveMemory name       = die $ "Unknown memory backend: " <> name <> ". Choose: none, sqlite, markdown"
+-- | Resolve the memory backend.
+resolveMemory :: MemoryBackend -> IO MemoryHandle
+resolveMemory NoMemory       = pure mkNoOpMemoryHandle
+resolveMemory SQLiteMemory   = mkSQLiteMemoryHandle ".pureclaw/memory.db"
+resolveMemory MarkdownMemory = mkMarkdownMemoryHandle ".pureclaw/memory"

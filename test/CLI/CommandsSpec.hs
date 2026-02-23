@@ -51,18 +51,26 @@ spec = do
 
     it "parses --provider flag" $ do
       case parseArgs ["--provider", "openai"] of
-        Just opts -> _co_provider opts `shouldBe` "openai"
+        Just opts -> _co_provider opts `shouldBe` OpenAI
         Nothing -> expectationFailure "parse failed"
 
-    it "provider defaults to anthropic" $ do
+    it "provider defaults to Anthropic" $ do
       case parseArgs [] of
-        Just opts -> _co_provider opts `shouldBe` "anthropic"
+        Just opts -> _co_provider opts `shouldBe` Anthropic
         Nothing -> expectationFailure "parse failed"
 
     it "parses -p short flag for provider" $ do
       case parseArgs ["-p", "ollama"] of
-        Just opts -> _co_provider opts `shouldBe` "ollama"
+        Just opts -> _co_provider opts `shouldBe` Ollama
         Nothing -> expectationFailure "parse failed"
+
+    it "parses openrouter provider" $ do
+      case parseArgs ["-p", "openrouter"] of
+        Just opts -> _co_provider opts `shouldBe` OpenRouter
+        Nothing -> expectationFailure "parse failed"
+
+    it "rejects invalid provider" $
+      parseArgs ["-p", "invalid"] `shouldBe` Nothing
 
     it "parses --allow flags" $ do
       case parseArgs ["--allow", "git", "--allow", "ls"] of
@@ -81,13 +89,21 @@ spec = do
 
     it "parses --memory flag" $ do
       case parseArgs ["--memory", "sqlite"] of
-        Just opts -> _co_memory opts `shouldBe` "sqlite"
+        Just opts -> _co_memory opts `shouldBe` SQLiteMemory
         Nothing -> expectationFailure "parse failed"
 
-    it "memory defaults to none" $ do
-      case parseArgs [] of
-        Just opts -> _co_memory opts `shouldBe` "none"
+    it "parses markdown memory" $ do
+      case parseArgs ["--memory", "markdown"] of
+        Just opts -> _co_memory opts `shouldBe` MarkdownMemory
         Nothing -> expectationFailure "parse failed"
+
+    it "memory defaults to NoMemory" $ do
+      case parseArgs [] of
+        Just opts -> _co_memory opts `shouldBe` NoMemory
+        Nothing -> expectationFailure "parse failed"
+
+    it "rejects invalid memory backend" $
+      parseArgs ["--memory", "invalid"] `shouldBe` Nothing
 
     it "parses --soul flag" $ do
       case parseArgs ["--soul", "my-soul.md"] of
@@ -102,11 +118,29 @@ spec = do
     it "parses all flags together" $ do
       case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief"] of
         Just opts -> do
-          _co_provider opts `shouldBe` "openai"
+          _co_provider opts `shouldBe` OpenAI
           _co_model opts `shouldBe` "gpt-4"
           _co_apiKey opts `shouldBe` Just "sk-x"
           _co_allowCommands opts `shouldBe` ["git"]
-          _co_memory opts `shouldBe` "sqlite"
+          _co_memory opts `shouldBe` SQLiteMemory
           _co_soul opts `shouldBe` Just "SOUL.md"
           _co_system opts `shouldBe` Just "Be brief"
         Nothing -> expectationFailure "parse failed"
+
+  describe "ProviderType" $ do
+    it "has Show and Eq instances" $ do
+      show Anthropic `shouldBe` "Anthropic"
+      Anthropic `shouldNotBe` OpenAI
+
+    it "has all four variants" $ do
+      let allVariants = [Anthropic, OpenAI, OpenRouter, Ollama]
+      length allVariants `shouldBe` 4
+
+  describe "MemoryBackend" $ do
+    it "has Show and Eq instances" $ do
+      show NoMemory `shouldBe` "NoMemory"
+      NoMemory `shouldNotBe` SQLiteMemory
+
+    it "has all three variants" $ do
+      let allVariants = [NoMemory, SQLiteMemory, MarkdownMemory]
+      length allVariants `shouldBe` 3
