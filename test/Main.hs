@@ -26,6 +26,13 @@ import qualified Tools.ShellSpec
 import qualified Tools.FileReadSpec
 import qualified Tools.GitSpec
 import qualified Tools.MemorySpec
+import qualified Memory.NoneSpec
+import qualified Memory.MarkdownSpec
+import qualified Memory.SQLiteSpec
+import qualified Agent.MemorySpec
+import qualified Providers.OpenAISpec
+import qualified Providers.OllamaSpec
+import qualified Providers.OpenRouterSpec
 
 main :: IO ()
 main = hspec $ do
@@ -53,3 +60,10 @@ main = hspec $ do
   describe "Tools.FileRead" Tools.FileReadSpec.spec
   describe "Tools.Git" Tools.GitSpec.spec
   describe "Tools.Memory" Tools.MemorySpec.spec
+  describe "Memory.None" Memory.NoneSpec.spec
+  describe "Memory.Markdown" Memory.MarkdownSpec.spec
+  describe "Memory.SQLite" Memory.SQLiteSpec.spec
+  describe "Agent.Memory" Agent.MemorySpec.spec
+  describe "Providers.OpenAI" Providers.OpenAISpec.spec
+  describe "Providers.Ollama" Providers.OllamaSpec.spec
+  describe "Providers.OpenRouter" Providers.OpenRouterSpec.spec
