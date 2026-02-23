@@ -52,8 +52,8 @@ rather than compiling from scratch.
 ### With Cabal (requires GHC toolchain)
 
 ```bash
-cabal build
-cabal test
+nix develop --command cabal build
+nix develop --command cabal test
 ```
 
 Requires GHC 9.10+ (`ghcup` recommended).
