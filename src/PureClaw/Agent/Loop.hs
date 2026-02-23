@@ -1,1 +1,87 @@
-module PureClaw.Agent.Loop () where
+module PureClaw.Agent.Loop
+  ( -- * Agent loop
+    runAgentLoop
+  ) where
+
+import Control.Exception
+import Control.Monad
+import Data.Text (Text)
+import Data.Text qualified as T
+
+import PureClaw.Agent.Context
+import PureClaw.Core.Errors
+import PureClaw.Core.Types
+import PureClaw.Handles.Channel
+import PureClaw.Handles.Log
+import PureClaw.Providers.Class
+import PureClaw.Tools.Registry
+
+-- | Run the main agent loop. Reads messages from the channel, sends
+-- them to the provider (with tool definitions), handles tool call/result
+-- cycles, and writes responses back.
+--
+-- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
+-- Provider errors are logged and a 'PublicError' is sent to the channel.
+runAgentLoop :: Provider p => p -> ModelId -> ChannelHandle -> LogHandle -> Maybe Text -> ToolRegistry -> IO ()
+runAgentLoop provider model channel logger systemPrompt registry = do
+  _lh_logInfo logger "Agent loop started"
+  go (emptyContext systemPrompt)
+  where
+    tools = registryDefinitions registry
+
+    go ctx = do
+      receiveResult <- try @IOException (_ch_receive channel)
+      case receiveResult of
+        Left _ -> _lh_logInfo logger "Session ended"
+        Right msg
+          | T.null (T.strip (_im_content msg)) -> go ctx
+          | otherwise -> do
+              let userMsg = textMessage User (_im_content msg)
+                  ctx' = addMessage userMsg ctx
+              _lh_logDebug logger $
+                "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
+              handleCompletion ctx'
+
+    handleCompletion ctx = do
+      let req = CompletionRequest
+            { _cr_model        = model
+            , _cr_messages     = contextMessages ctx
+            , _cr_systemPrompt = contextSystemPrompt ctx
+            , _cr_maxTokens    = Just 4096
+            , _cr_tools        = tools
+            , _cr_toolChoice   = Nothing
+            }
+      providerResult <- try @SomeException (complete provider req)
+      case providerResult of
+        Left e -> do
+          _lh_logError logger $ "Provider error: " <> T.pack (show e)
+          _ch_sendError channel (TemporaryError "Something went wrong. Please try again.")
+          go ctx
+        Right response -> do
+          let calls = toolUseCalls response
+              text = responseText response
+              ctx' = addMessage (Message Assistant (_crsp_content response)) ctx
+          -- Send any text to the channel
+          unless (T.null (T.strip text)) $
+            _ch_send channel (OutgoingMessage text)
+          -- If there are tool calls, execute them and continue
+          if null calls
+            then go ctx'
+            else do
+              results <- mapM executeCall calls
+              let resultMsg = toolResultMessage results
+                  ctx'' = addMessage resultMsg ctx'
+              _lh_logDebug logger $
+                "Executed " <> T.pack (show (length results)) <> " tool calls, continuing"
+              handleCompletion ctx''
+
+    executeCall (callId, name, input) = do
+      _lh_logInfo logger $ "Tool call: " <> name
+      result <- executeTool registry name input
+      case result of
+        Nothing -> do
+          _lh_logWarn logger $ "Unknown tool: " <> name
+          pure (callId, "Unknown tool: " <> name, True)
+        Just (output, isErr) -> do
+          when isErr $ _lh_logWarn logger $ "Tool error in " <> name <> ": " <> output
+          pure (callId, output, isErr)
