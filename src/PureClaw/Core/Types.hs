@@ -22,35 +22,35 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 
 -- | Provider identifier (e.g. "anthropic", "openai")
-newtype ProviderId = ProviderId Text
+newtype ProviderId = ProviderId { unProviderId :: Text }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | Model identifier (e.g. "claude-3-opus")
-newtype ModelId = ModelId Text
+newtype ModelId = ModelId { unModelId :: Text }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | Network port number
-newtype Port = Port Int
+newtype Port = Port { unPort :: Int }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | User identifier for allow-list matching
-newtype UserId = UserId Text
+newtype UserId = UserId { unUserId :: Text }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | Command name for policy evaluation (e.g. "git", "ls")
-newtype CommandName = CommandName Text
+newtype CommandName = CommandName { unCommandName :: Text }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | Tool call identifier from provider responses
-newtype ToolCallId = ToolCallId Text
+newtype ToolCallId = ToolCallId { unToolCallId :: Text }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | Memory entry identifier
-newtype MemoryId = MemoryId Text
+newtype MemoryId = MemoryId { unMemoryId :: Text }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | Workspace root directory — anchors all SafePath resolution
-newtype WorkspaceRoot = WorkspaceRoot FilePath
+newtype WorkspaceRoot = WorkspaceRoot { unWorkspaceRoot :: FilePath }
   deriving stock (Show, Eq, Ord, Generic)
 
 -- | Agent autonomy level
