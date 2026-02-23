@@ -2,6 +2,7 @@ module Providers.OpenRouterSpec (spec) where
 
 import Data.Aeson
 import Data.ByteString.Lazy qualified as BL
+import Data.Either (isLeft)
 import Test.Hspec
 
 import PureClaw.Core.Types
@@ -40,6 +41,3 @@ spec = do
     it "returns error on invalid JSON" $ do
       decodeResponse "not json" `shouldSatisfy` isLeft
 
-isLeft :: Either a b -> Bool
-isLeft (Left _) = True
-isLeft _ = False

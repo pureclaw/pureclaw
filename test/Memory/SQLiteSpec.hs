@@ -1,6 +1,7 @@
 module Memory.SQLiteSpec (spec) where
 
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import System.Directory
 import System.FilePath
 import Test.Hspec
@@ -69,10 +70,6 @@ spec = do
       result <- withSQLiteMemory dbPath $ \mh ->
         _mh_save mh (MemorySource "test" Map.empty)
       result `shouldSatisfy` isJust
-
-isJust :: Maybe a -> Bool
-isJust (Just _) = True
-isJust Nothing  = False
 
 mkTempDb :: String -> IO FilePath
 mkTempDb name = do

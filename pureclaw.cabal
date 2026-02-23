@@ -94,6 +94,7 @@ library
     base              >= 4.20,
     aeson,
     async,
+    base16-bytestring,
     bytestring,
     containers,
     crypton,
@@ -173,6 +174,8 @@ test-suite pureclaw-test
     Providers.OpenAISpec
     Providers.OllamaSpec
     Providers.OpenRouterSpec
+    Security.CryptoSpec
+    Security.PairingSpec
   hs-source-dirs:   test
   build-depends:
     base,

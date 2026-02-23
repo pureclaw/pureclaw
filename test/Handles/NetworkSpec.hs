@@ -1,5 +1,6 @@
 module Handles.NetworkSpec (spec) where
 
+import Data.Either (isRight)
 import Data.Set qualified as Set
 import Test.Hspec
 
@@ -61,7 +62,3 @@ spec = do
           resp <- _nh_httpPost mkNoOpNetworkHandle url "body"
           _hr_statusCode resp `shouldBe` 200
         Left _ -> expectationFailure "mkAllowedUrl failed"
-
-isRight :: Either a b -> Bool
-isRight (Right _) = True
-isRight _ = False
