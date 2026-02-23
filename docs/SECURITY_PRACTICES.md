@@ -33,6 +33,8 @@ encryptSecret key iv plaintext =
 
 **Why it matters:** ZeroClaw shipped with a repeating-key XOR cipher for API key storage (issue #1). Broken since the 1800s. It was found on day 1.
 
+**See also:** [CrowdStrike research](https://www.crowdstrike.com/en-us/blog/crowdstrike-researchers-identify-hidden-vulnerabilities-ai-coded-software/) found that AI-generated code routinely introduces weak cryptographic patterns — broken algorithms, inadequate key lengths, and removed access controls.
+
 ### 1.2 Use cryptographic randomness for all security tokens
 
 **Never do this:**
@@ -117,6 +119,8 @@ instance Show PairingCode where
 Every struct containing a secret type will automatically redact it in all log output, error messages, and exception traces. You'd have to explicitly unwrap to leak.
 
 **Why it matters:** ZeroClaw leaked API keys in provider error messages (#6) and LLM error responses to WhatsApp users (#59) because request/response structs had full `Debug` implementations.
+
+**See also:** [Devin AI was found to be "completely defenseless against prompt injection"](https://embracethered.com/blog/posts/2025/devin-can-leak-your-secrets/) — manipulable into leaking access tokens, exposing ports, and exfiltrating secrets via browser and shell. [LangChain CVE-2025-68664](https://github.com/advisories/GHSA-c67j-w6g6-q2cm) (CVSS 9.3) allowed extraction of environment secrets via serialization injection.
 
 ### 2.2 Separate config from runtime secrets
 
@@ -227,6 +231,8 @@ The `shell :: String -> ProcessConfig` constructor from `typed-process` exists b
 
 **Why it matters:** ZeroClaw's shell tool passed full strings to `sh -c`, and its allowlist only checked the first whitespace-delimited word. `ls; cat ~/.zeroclaw/config.toml` bypassed it (#3). Screenshot filenames were interpolated into shell strings (#601). Git arguments were insufficiently sanitized (#516).
 
+**See also:** [GitHub Copilot CVE-2025-53773](https://embracethered.com/blog/posts/2025/github-copilot-remote-code-execution-via-prompt-injection/) — prompt injection in source files could enable auto-approved shell execution and was wormable across repos. [OpenAI Codex CLI CVE-2025-61260](https://research.checkpoint.com/2025/openai-codex-cli-command-injection-vulnerability/) — a malicious repo's `.env` and `config.toml` could execute arbitrary commands at startup with no approval prompt.
+
 ### 3.2 SQL must use parameterized queries
 
 Never construct SQL strings. Use `postgresql-simple` placeholders or `beam` query DSL.
@@ -334,6 +340,8 @@ File read and write tools take `SafePath`, period. There is no alternative.
 
 **Why it matters:** ZeroClaw had `is_resolved_path_allowed()` in the codebase — it just wasn't called at the file tool call sites (#9). Skill installation created symlinks without path validation (#13). The scanner traversed outside the workspace and read `.env` files (#1435). In PureClaw, forgetting to validate is a type error.
 
+**See also:** [GitHub Copilot Chat CVE-2025-62449](https://nvd.nist.gov/vuln/detail/CVE-2025-62449) (CVSS 6.8) — path traversal allowed read/write to arbitrary files outside the workspace. [Auto-GPT CVE-2023-37274](https://github.com/Significant-Gravitas/AutoGPT/security/advisories/GHSA-5h38-mgp9-rj5f) — unsanitized `basename` argument allowed overwriting files outside the sandbox.
+
 ### 4.2 Symlinks must be resolved before validation
 
 `mkSafePath` calls `canonicalizePath` which follows all symlinks. The workspace check is against the resolved path, not the nominal path. There is no path in PureClaw where a symlink escape is possible.
@@ -379,6 +387,8 @@ The cron scheduler, shell tool, and all other execution paths call `authorize` f
 
 **Why it matters:** ZeroClaw's cron scheduler executed commands without running them through `SecurityPolicy` (#32). iMessage spawned `sqlite3` directly, bypassing policy entirely (#52).
 
+**See also:** [Cursor CVE-2025-59944](https://www.lakera.ai/blog/cursor-vulnerability-cve-2025-59944) (CVSS 8.0) — case-sensitivity mismatch on macOS/Windows allowed bypassing file protections to overwrite MCP config for RCE. [Auto-GPT CVE-2023-37273](https://github.com/Significant-Gravitas/AutoGPT/security/advisories/GHSA-x5gj-2chr-4ch6) (CVSS 9.8) — Docker compose mount without write protection allowed host escape via prompt injection.
+
 ### 5.2 Allow-lists are typed, not stringly-typed
 
 ```haskell
@@ -423,6 +433,8 @@ providerErrorToPublic _                  = TemporaryError "Something went wrong"
 ```
 
 **Why it matters:** ZeroClaw forwarded raw LLM provider error messages to WhatsApp users and HTTP clients, leaking internal URLs, model names, and partial request bodies (#59, #356).
+
+**See also:** [ChatGPT data exfiltration via Markdown injection](https://embracethered.com/blog/posts/2023/chatgpt-webpilot-data-exfil-via-markdown-injection/) — plugins could be exploited via prompt injection to encode conversation data into image URLs sent to attacker-controlled servers.
 
 ### 6.2 Tool call output must not leak to channel users
 
@@ -489,6 +501,8 @@ attemptPair st ip code = atomically $ do
 
 **Why it matters:** ZeroClaw's pairing code was brute-forceable (#2). Per-client lockout was also missing initially (#603).
 
+**See also:** [Claude Code VS Code extension CVE-2025-52882](https://securitylabs.datadoghq.com/articles/claude-mcp-cve-2025-52882/) (CVSS 8.8) — WebSocket MCP server on localhost had no client authentication; a malicious website could brute-force the port and execute commands.
+
 ### 7.3 Pairing tokens are hashed at rest, not stored plaintext
 
 ```haskell
@@ -527,6 +541,8 @@ saveToMemory _       (AgentGenerated _) = pure Nothing  -- discarded
 
 **Why it matters:** ZeroClaw's `auto_save = true` stored model hallucinations as facts, which were then recalled and presented to users as ground truth (#861).
 
+**See also:** [ChatGPT "SpAIware" memory poisoning](https://embracethered.com/blog/posts/2024/chatgpt-macos-app-persistent-data-exfiltration/) — indirect prompt injection could plant instructions in ChatGPT's long-term memory, creating persistent spyware that survived across sessions. [Rules File Backdoor](https://www.pillar.security/blog/new-vulnerability-in-github-copilot-and-cursor-how-hackers-can-weaponize-code-agents) — `.github/copilot-instructions.md` and `.cursorrules` files could poison AI context using invisible Unicode characters, persisting across teams.
+
 ---
 
 ## 9. Resource Limits
@@ -547,6 +563,8 @@ gatewayWarpSettings cfg = Warp.defaultSettings
 ```
 
 **Why it matters:** ZeroClaw's raw TCP HTTP server allocated 64KB per connection with no limit — trivially memory-exhaustible (#12).
+
+**See also:** [Claude Code CVE-2025-55284](https://embracethered.com/blog/posts/2025/claude-code-exfiltration-via-dns-requests/) — overly broad "safe" command allowlist (including `ping`, `dig`, `nslookup`) enabled unbounded DNS exfiltration without user confirmation.
 
 ### 9.2 All regular expressions must be linear-time
 
@@ -581,6 +599,8 @@ FROM debian@sha256:abc123...
 ```
 
 **Why it matters:** ZeroClaw's sandbox Dockerfile used a floating base image tag — a supply chain attack vector (#513).
+
+**See also:** [Slopsquatting research](https://www.bleepingcomputer.com/news/security/ai-hallucinated-code-dependencies-become-new-supply-chain-risk/) — ~20% of AI-recommended packages don't exist; attackers register hallucinated names on PyPI/npm and wait for AI agents to install them. 121,539 downloads of phantom packages were observed over 6 months.
 
 ### 10.3 Docker containers never run as root
 
