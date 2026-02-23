@@ -15,6 +15,12 @@ import qualified Handles.ShellSpec
 import qualified Handles.NetworkSpec
 import qualified Handles.MemorySpec
 import qualified Handles.ChannelSpec
+import qualified Providers.ClassSpec
+import qualified Agent.ContextSpec
+import qualified Providers.AnthropicSpec
+import qualified Agent.LoopSpec
+import qualified Channels.CLISpec
+import qualified CLI.CommandsSpec
 
 main :: IO ()
 main = hspec $ do
@@ -31,3 +37,9 @@ main = hspec $ do
   describe "Handles.Network" Handles.NetworkSpec.spec
   describe "Handles.Memory" Handles.MemorySpec.spec
   describe "Handles.Channel" Handles.ChannelSpec.spec
+  describe "Providers.Class" Providers.ClassSpec.spec
+  describe "Agent.Context" Agent.ContextSpec.spec
+  describe "Providers.Anthropic" Providers.AnthropicSpec.spec
+  describe "Agent.Loop" Agent.LoopSpec.spec
+  describe "Channels.CLI" Channels.CLISpec.spec
+  describe "CLI.Commands" CLI.CommandsSpec.spec
