@@ -1,59 +1,236 @@
-# PureClaw
+<p align="center">
+  <strong>PureClaw</strong><br>
+  <em>Haskell-native AI agent runtime with security-by-construction</em>
+</p>
 
-A Haskell-native AI agent runtime with security-by-construction.
+<p align="center">
+  <a href="https://github.com/pureclaw/pureclaw/actions/workflows/ci.yml"><img src="https://github.com/pureclaw/pureclaw/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pureclaw.github.io/pureclaw/coverage/"><img src="https://img.shields.io/badge/coverage-report-blue" alt="Coverage"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-green" alt="License"></a>
+</p>
 
-## The Problem
+---
 
-Every severe security vulnerability in existing AI agent runtimes shares a root cause: the insecure path was as easy to write as the secure path. Security depended on developers remembering to call the right function.
+PureClaw is a complete AI agent runtime where **the insecure path is a compile error**. Shell execution requires `AuthorizedCommand`. File access requires `SafePath`. Secrets have redacted `Show`. If your code compiles, an entire class of security vulnerabilities is structurally impossible.
 
-## The Solution
+No effect systems. No framework magic. Just `ReaderT AppEnv IO`, the Handle pattern, and Haskell's type system doing the heavy lifting.
 
-PureClaw uses Haskell's type system to make the insecure path a **compile error**:
+## Quick Start
 
-- Shell execution requires `AuthorizedCommand` — no way to bypass policy
-- File access requires `SafePath` — workspace escape is impossible to express
-- Secrets have redacted `Show` — credential leaks are structurally prevented  
-- Security policy is pure Haskell — fully testable, no IO, no side channels
-- Effect constraints document capabilities — every function's type is an audit trail
+### Prerequisites
+
+- **Nix** (recommended) &mdash; [install Nix](https://nixos.org/download) for fully reproducible builds
+- **Or** GHC 9.10+ and Cabal &mdash; via [GHCup](https://www.haskell.org/ghcup/)
+- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), or [OpenRouter](https://openrouter.ai/)
+
+### Install and Run
+
+```bash
+# Clone the repository
+git clone https://github.com/pureclaw/pureclaw.git
+cd pureclaw
+
+# Option 1: Nix (recommended — reproducible, no system deps needed)
+nix develop            # enter dev shell with GHC + cabal + hlint
+nix build              # build the executable
+nix run                # run directly
+
+# Option 2: Cabal (requires GHC toolchain)
+cabal build
+cabal run pureclaw
+```
+
+Binary caches are configured in `flake.nix` — the first Nix build fetches pre-built dependencies rather than compiling from scratch.
+
+### Start a Chat
+
+```bash
+# Anthropic (default)
+export ANTHROPIC_API_KEY="sk-ant-..."
+pureclaw
+
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+pureclaw --provider openai --model gpt-4o
+
+# Ollama (local, no API key needed)
+pureclaw --provider ollama --model llama3
+
+# With tool access and persistent memory
+pureclaw --allow git --allow ls --memory sqlite
+```
+
+## Why PureClaw?
+
+Every major security vulnerability in existing AI agent runtimes shares a root cause: **the insecure path was as easy to write as the secure path**. Security depended on developers remembering to call the right function, add the right check, redact the right field.
+
+PureClaw eliminates these failure modes at the type level:
+
+| Security Property | How It's Enforced | What Fails at Compile Time |
+|---|---|---|
+| Command authorization | `AuthorizedCommand` proof type | Executing a shell command without policy approval |
+| Filesystem confinement | `SafePath` validated path | Accessing files outside the workspace |
+| Secret protection | Redacted `Show` on all secret types | Logging or serializing API keys, tokens, pairing codes |
+| Policy evaluation | Pure functions, no IO | Security checks that depend on external state |
+| Error isolation | `PublicError` channel type | Leaking internal error details to users |
+| Capability scoping | Handle pattern | Accessing capabilities not explicitly provided |
+
+See [`docs/SECURITY_PRACTICES.md`](docs/SECURITY_PRACTICES.md) for the full security model, including the real-world production failures each rule prevents.
+
+## Features
+
+### Providers
+
+Connect to any major LLM provider with a single flag:
+
+| Provider | Flag | API Key Env Var |
+|---|---|---|
+| Anthropic | `--provider anthropic` (default) | `ANTHROPIC_API_KEY` |
+| OpenAI | `--provider openai` | `OPENAI_API_KEY` |
+| OpenRouter | `--provider openrouter` | `OPENROUTER_API_KEY` |
+| Ollama | `--provider ollama` | None (local) |
+
+### Tools
+
+The agent has access to 7 built-in tools, all enforced by the security policy:
+
+| Tool | Description |
+|---|---|
+| `shell` | Execute shell commands (only commands in the allow-list) |
+| `file_read` | Read files within the workspace (SafePath enforced) |
+| `file_write` | Write files within the workspace (SafePath enforced) |
+| `git` | Git operations: status, diff, log, add, commit, branch, checkout |
+| `http_request` | HTTP requests to allowed URLs |
+| `memory_store` | Save facts to long-term memory |
+| `memory_recall` | Search memory for relevant context |
+
+### Memory Backends
+
+| Backend | Flag | Storage | Best For |
+|---|---|---|---|
+| None | `--memory none` (default) | &mdash; | Stateless sessions |
+| SQLite | `--memory sqlite` | `.pureclaw/memory.db` | Hybrid vector + FTS5 search |
+| Markdown | `--memory markdown` | `.pureclaw/memory/` | Human-readable, git-friendly |
+
+### Channels
+
+| Channel | Description |
+|---|---|
+| CLI | Interactive terminal (default) |
+| Telegram | Telegram Bot API integration |
+| Signal | Signal messenger via signal-cli |
+
+### Agent Identity (SOUL.md)
+
+Define your agent's personality and constraints with a `SOUL.md` file:
+
+```bash
+# Use the default SOUL.md in the current directory
+pureclaw
+
+# Or specify a custom identity file
+pureclaw --soul ./my-agent.md
+
+# Override with an inline system prompt
+pureclaw --system "You are a senior Haskell developer. Be concise."
+```
+
+## CLI Reference
+
+```
+pureclaw [OPTIONS]
+
+Options:
+  -m, --model STRING       Model to use (default: claude-sonnet-4-20250514)
+  -p, --provider PROVIDER  LLM provider: anthropic, openai, openrouter, ollama
+      --api-key STRING     API key (default: from env var for chosen provider)
+  -s, --system STRING      System prompt (overrides SOUL.md)
+  -a, --allow CMD          Allow a shell command (repeatable)
+      --memory BACKEND     Memory backend: none, sqlite, markdown
+      --soul PATH          Path to SOUL.md identity file
+  -h, --help               Show help text
+```
 
 ## Architecture
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+```
+pureclaw/
+├── src/PureClaw/
+│   ├── Core/            Types, Config, Errors
+│   ├── Security/        Path, Command, Policy, Secrets, Crypto, Pairing
+│   ├── Handles/         File, Shell, Network, Memory, Channel, Log
+│   ├── Tools/           Registry, Shell, FileRead, FileWrite, Git, Memory, Http
+│   ├── Agent/           Loop, Context, Memory, Identity
+│   ├── Providers/       Anthropic, OpenAI, OpenRouter, Ollama
+│   ├── Channels/        CLI, Telegram, Signal
+│   ├── Memory/          SQLite, Markdown, None
+│   ├── Gateway/         Server, Routes, Auth
+│   ├── Scheduler/       Cron, Heartbeat
+│   └── CLI/             Commands
+├── test/                43 test modules
+└── docs/
+    ├── ARCHITECTURE.md
+    └── SECURITY_PRACTICES.md
+```
 
-## Security Practices
+**Key design decisions:**
 
-See [`docs/SECURITY_PRACTICES.md`](docs/SECURITY_PRACTICES.md) — a detailed guide derived from real security failures in production agent runtimes.
+- **No effect systems** &mdash; `ReaderT AppEnv IO` and the Handle pattern throughout. No `mtl` typeclass proliferation, no `effectful`, no `polysemy`.
+- **Pure policy evaluation** &mdash; `SecurityPolicy` has no IO. Fully testable with QuickCheck.
+- **Capability-based handles** &mdash; Each function declares exactly which capabilities it needs. `FileHandle` for file access, `ShellHandle` for execution, `NetworkHandle` for HTTP.
+- **Static dispatch** &mdash; Typeclass resolution at compile time. `SomeProvider` and `SomeChannel` existentials only at the CLI wiring boundary.
 
-## Status
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
-Early development. Security foundations first, features second.
+## Development
 
-## Building
-
-### With Nix (recommended — fully reproducible)
+### Running Tests
 
 ```bash
-# Enter dev shell with GHC + HLS + cabal + ormolu
-nix develop
+# Run the full test suite
+nix develop --command cabal test
 
-# Build the executable
-nix build
+# Run with HPC coverage report
+nix develop --command cabal test --enable-coverage
 
-# Run directly
-nix run
+# Run hlint
+nix develop --command hlint src/ test/
+```
 
-# With direnv (auto-enters dev shell on cd)
+### Project Standards
+
+- **GHC flags:** `-Wall -Werror` with strict warnings (incomplete patterns, name shadowing, unused imports)
+- **TDD:** Tests first, implementation second
+- **Coverage:** 100% threshold enforcement via `.coverage-thresholds.json`
+- **Linting:** hlint clean required before merge
+- **CI:** GitHub Actions with Nix builds, HPC coverage reports deployed to [GitHub Pages](https://pureclaw.github.io/pureclaw/coverage/)
+
+### With direnv
+
+```bash
+# Auto-enter the Nix dev shell on cd
+echo "use flake" > .envrc
 direnv allow
 ```
 
-Binary caches are configured in `flake.nix` — first build fetches from IOG's cache
-rather than compiling from scratch.
+## Gateway
 
-### With Cabal (requires GHC toolchain)
+PureClaw includes an HTTP gateway for programmatic access with built-in security:
 
-```bash
-nix develop --command cabal build
-nix develop --command cabal test
-```
+- **Cryptographic pairing** &mdash; device enrollment via one-time pairing codes
+- **Bearer token auth** &mdash; hex-encoded tokens with constant-time comparison
+- **Localhost-only binding** by default (configurable)
+- **Connection limits** &mdash; 30s timeout, 100 concurrent connections
 
-Requires GHC 9.10+ (`ghcup` recommended).
+## Contributing
+
+Contributions are welcome. Please ensure:
+
+1. All tests pass: `cabal test`
+2. hlint is clean: `hlint src/ test/`
+3. New code follows existing patterns (Handle pattern, proof-carrying types)
+4. Security-sensitive changes include tests demonstrating the invariant holds
+
+## License
+
+BSD-3-Clause &mdash; see [LICENSE](LICENSE) for details.
