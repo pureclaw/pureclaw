@@ -148,6 +148,8 @@ jobs:
           if [ -n "$HTML_DIR" ]; then
             mkdir -p coverage-html
             cp -r "$HTML_DIR"/* coverage-html/
+            # HPC uses hpc_index.html as the entry point; GitHub Pages expects index.html
+            echo "<meta http-equiv=\"refresh\" content=\"0; url=hpc_index.html\">" > coverage-html/index.html
           fi
           '
 
