@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Running hlint..."
+hlint src/ test/ app/
+
+echo "==> Running cabal test..."
+cabal test
+
+echo "==> All pre-push checks passed."

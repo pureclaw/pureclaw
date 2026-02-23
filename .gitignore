@@ -18,3 +18,10 @@ result-*
 *.swp
 *~
 .vscode/
+
+# Secrets
+.env
+
+# OS
+.DS_Store
+*.log

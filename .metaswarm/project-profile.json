@@ -1,0 +1,30 @@
+{
+  "metaswarm_version": "0.7.0",
+  "installed_at": "2026-02-22T00:00:00Z",
+  "updated_at": "2026-02-22T00:00:00Z",
+  "detection": {
+    "language": "haskell",
+    "framework": null,
+    "test_runner": "hspec",
+    "linter": "hlint",
+    "formatter": null,
+    "package_manager": "cabal",
+    "type_checker": "ghc",
+    "ci": "github-actions",
+    "git_hooks": "custom (.githooks/pre-push)"
+  },
+  "choices": {
+    "coverage_threshold": 100,
+    "external_tools": false,
+    "visual_review": false,
+    "git_hooks": true,
+    "beads": true
+  },
+  "commands": {
+    "test": "cabal test",
+    "coverage": "cabal test --enable-coverage",
+    "lint": "hlint src/ test/ app/",
+    "typecheck": null,
+    "format_check": null
+  }
+}
