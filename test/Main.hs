@@ -42,6 +42,8 @@ import qualified Channels.ClassSpec
 import qualified Channels.TelegramSpec
 import qualified Channels.SignalSpec
 import qualified Agent.IdentitySpec
+import qualified Scheduler.CronSpec
+import qualified Scheduler.HeartbeatSpec
 
 main :: IO ()
 main = hspec $ do
@@ -85,3 +87,5 @@ main = hspec $ do
   describe "Channels.Telegram" Channels.TelegramSpec.spec
   describe "Channels.Signal" Channels.SignalSpec.spec
   describe "Agent.Identity" Agent.IdentitySpec.spec
+  describe "Scheduler.Cron" Scheduler.CronSpec.spec
+  describe "Scheduler.Heartbeat" Scheduler.HeartbeatSpec.spec
