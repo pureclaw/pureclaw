@@ -113,5 +113,29 @@ spec = do
       _trb_content block `shouldBe` "output"
       _trb_isError block `shouldBe` False
 
+  describe "SomeProvider" $ do
+    it "wraps a provider and delegates complete" $ do
+      let mockProvider = MockProvider
+          wrapped = MkProvider mockProvider
+      resp <- complete wrapped CompletionRequest
+        { _cr_model        = ModelId "test"
+        , _cr_messages     = []
+        , _cr_systemPrompt = Nothing
+        , _cr_maxTokens    = Nothing
+        , _cr_tools        = []
+        , _cr_toolChoice   = Nothing
+        }
+      responseText resp `shouldBe` "mock response"
+
+-- A trivial provider for testing SomeProvider dispatch.
+data MockProvider = MockProvider
+
+instance Provider MockProvider where
+  complete _ _ = pure CompletionResponse
+    { _crsp_content = [TextBlock "mock response"]
+    , _crsp_model   = ModelId "mock"
+    , _crsp_usage   = Nothing
+    }
+
 emptyObj :: Value
 emptyObj = object []
