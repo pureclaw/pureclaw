@@ -179,6 +179,10 @@ test-suite pureclaw-test
     Gateway.AuthSpec
     Gateway.RoutesSpec
     Gateway.ServerSpec
+    Channels.ClassSpec
+    Channels.TelegramSpec
+    Channels.SignalSpec
+    Agent.IdentitySpec
   hs-source-dirs:   test
   build-depends:
     base,
@@ -191,6 +195,8 @@ test-suite pureclaw-test
     filepath,
     http-types,
     optparse-applicative,
+    stm,
+    temporary,
     text,
     wai,
     warp,
