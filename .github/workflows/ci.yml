@@ -6,16 +6,12 @@ on:
   pull_request:
     branches: [main]
 
-# Allow only one Pages deployment at a time
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 jobs:
   build:
     name: Build & Test (${{ matrix.system }})
     runs-on: ${{ matrix.runner }}
     permissions:
+      contents: write
       statuses: write
     strategy:
       fail-fast: false
@@ -23,8 +19,6 @@ jobs:
         include:
           - system: x86_64-linux
             runner: ubuntu-latest
-    outputs:
-      coverage-summary: ${{ steps.coverage-summary.outputs.summary }}
 
     steps:
       - uses: actions/checkout@v4
@@ -204,11 +198,15 @@ jobs:
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Pages artifact
+      - name: Deploy coverage to GitHub Pages
         if: always()
-        uses: actions/upload-pages-artifact@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: coverage-html/
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./coverage-html
+          destination_dir: .
+          force_orphan: true
+          commit_message: "Update coverage report"
 
       - name: Post coverage commit status
         if: always()
@@ -224,19 +222,3 @@ jobs:
             -f context="coverage" \
             -f description="$SUMMARY" \
             -f target_url="$PAGES_URL"
-
-  deploy-coverage:
-    name: Deploy coverage to GitHub Pages
-    needs: build
-    if: always() && needs.build.result != 'cancelled'
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4
