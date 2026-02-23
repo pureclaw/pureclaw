@@ -47,7 +47,7 @@
       # IOG binary cache — covers haskell.nix + most Haskell packages
       "https://cache.iog.io"
       # Project binary cache — CI pushes here after successful builds
-      "s3://pureclaw-nix-cache"
+      "https://pureclaw-nix-cache.s3.amazonaws.com"
     ];
     extra-trusted-public-keys = [
       "hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ="
