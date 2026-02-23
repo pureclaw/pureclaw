@@ -1,6 +1,7 @@
 module Security.PairingSpec (spec) where
 
 import Data.Char (isDigit)
+import Data.Either (isRight)
 import Data.Text qualified as T
 import Test.Hspec
 
@@ -116,10 +117,6 @@ spec = do
       show LockedOut `shouldBe` "LockedOut"
       show CodeExpired `shouldBe` "CodeExpired"
       InvalidCode `shouldNotBe` LockedOut
-
-isRight :: Either a b -> Bool
-isRight (Right _) = True
-isRight _ = False
 
 isLeftWith :: Eq a => a -> Either a b -> Bool
 isLeftWith expected (Left actual) = expected == actual

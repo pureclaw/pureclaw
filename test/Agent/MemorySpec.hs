@@ -1,6 +1,7 @@
 module Agent.MemorySpec (spec) where
 
 import Data.IORef
+import Data.Maybe (isJust)
 import Test.Hspec
 
 import PureClaw.Agent.Memory
@@ -48,7 +49,3 @@ spec = do
       autoSave mh mkNoOpLogHandle longMsg
       saved <- readIORef savedRef
       saved `shouldBe` 1
-
-isJust :: Maybe a -> Bool
-isJust (Just _) = True
-isJust Nothing  = False
