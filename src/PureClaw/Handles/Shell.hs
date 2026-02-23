@@ -30,7 +30,7 @@ data ProcessResult = ProcessResult
 --
 -- The real implementation strips the subprocess environment to prevent
 -- secret leakage via inherited environment variables.
-data ShellHandle = ShellHandle
+newtype ShellHandle = ShellHandle
   { _sh_execute :: AuthorizedCommand -> IO ProcessResult
   }
 

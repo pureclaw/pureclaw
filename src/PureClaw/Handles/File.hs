@@ -33,7 +33,7 @@ data FileHandle = FileHandle
 mkFileHandle :: WorkspaceRoot -> FileHandle
 mkFileHandle root = FileHandle
   { _fh_readFile  = BS.readFile . getSafePath
-  , _fh_writeFile = \sp bs -> BS.writeFile (getSafePath sp) bs
+  , _fh_writeFile = BS.writeFile . getSafePath
   , _fh_listDir   = \sp -> do
       let dir = getSafePath sp
       entries <- listDirectory dir

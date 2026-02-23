@@ -67,7 +67,7 @@ testPolicy =
   $ allowCommand (CommandName "echo")
   $ allowCommand (CommandName "false")
   $ allowCommand (CommandName "env")
-  $ defaultPolicy
+    defaultPolicy
 
 authorizeEcho :: Either CommandError AuthorizedCommand
 authorizeEcho = authorize testPolicy "/bin/echo" ["hello"]

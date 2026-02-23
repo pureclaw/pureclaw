@@ -21,7 +21,7 @@ data IncomingMessage = IncomingMessage
   deriving stock (Show, Eq)
 
 -- | A message to send to a channel user.
-data OutgoingMessage = OutgoingMessage
+newtype OutgoingMessage = OutgoingMessage
   { _om_content :: Text
   }
   deriving stock (Show, Eq)
