@@ -11,9 +11,7 @@
 
 ---
 
-PureClaw is a complete AI agent runtime where **the insecure path is a compile error**. Shell execution requires `AuthorizedCommand`. File access requires `SafePath`. Secrets have redacted `Show`. If your code compiles, an entire class of security vulnerabilities is structurally impossible.
-
-No effect systems. No framework magic. Just `ReaderT AppEnv IO`, the Handle pattern, and Haskell's type system doing the heavy lifting.
+PureClaw is a complete AI agent runtime where **the insecure path is a compile error**. Shell execution requires `AuthorizedCommand`. File access requires `SafePath`. Secrets have redacted `Show`. If your code compiles, an entire class of security vulnerabilities is structurally impossible.  Haskell's type system does the heavy lifting.
 
 ## Quick Start
 
@@ -175,7 +173,7 @@ pureclaw/
 
 **Key design decisions:**
 
-- **No effect systems** &mdash; `ReaderT AppEnv IO` and the Handle pattern throughout. No `mtl` typeclass proliferation, no `effectful`, no `polysemy`.
+- **No effect systems** &mdash; `ReaderT AppEnv IO` and the Handle pattern throughout.
 - **Pure policy evaluation** &mdash; `SecurityPolicy` has no IO. Fully testable with QuickCheck.
 - **Capability-based handles** &mdash; Each function declares exactly which capabilities it needs. `FileHandle` for file access, `ShellHandle` for execution, `NetworkHandle` for HTTP.
 - **Static dispatch** &mdash; Typeclass resolution at compile time. `SomeProvider` and `SomeChannel` existentials only at the CLI wiring boundary.
