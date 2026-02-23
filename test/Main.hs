@@ -21,6 +21,11 @@ import qualified Providers.AnthropicSpec
 import qualified Agent.LoopSpec
 import qualified Channels.CLISpec
 import qualified CLI.CommandsSpec
+import qualified Tools.RegistrySpec
+import qualified Tools.ShellSpec
+import qualified Tools.FileReadSpec
+import qualified Tools.GitSpec
+import qualified Tools.MemorySpec
 
 main :: IO ()
 main = hspec $ do
@@ -43,3 +48,8 @@ main = hspec $ do
   describe "Agent.Loop" Agent.LoopSpec.spec
   describe "Channels.CLI" Channels.CLISpec.spec
   describe "CLI.Commands" CLI.CommandsSpec.spec
+  describe "Tools.Registry" Tools.RegistrySpec.spec
+  describe "Tools.Shell" Tools.ShellSpec.spec
+  describe "Tools.FileRead" Tools.FileReadSpec.spec
+  describe "Tools.Git" Tools.GitSpec.spec
+  describe "Tools.Memory" Tools.MemorySpec.spec

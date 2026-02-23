@@ -161,6 +161,11 @@ test-suite pureclaw-test
     Agent.LoopSpec
     Channels.CLISpec
     CLI.CommandsSpec
+    Tools.RegistrySpec
+    Tools.ShellSpec
+    Tools.FileReadSpec
+    Tools.GitSpec
+    Tools.MemorySpec
   hs-source-dirs:   test
   build-depends:
     base,

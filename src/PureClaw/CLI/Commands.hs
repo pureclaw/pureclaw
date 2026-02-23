@@ -17,9 +17,19 @@ import System.IO
 import PureClaw.Agent.Loop
 import PureClaw.Channels.CLI
 import PureClaw.Core.Types
+import PureClaw.Handles.File
 import PureClaw.Handles.Log
+import PureClaw.Handles.Memory
+import PureClaw.Handles.Shell
 import PureClaw.Providers.Anthropic
+import PureClaw.Security.Policy
 import PureClaw.Security.Secrets
+import PureClaw.Tools.FileRead
+import PureClaw.Tools.FileWrite
+import PureClaw.Tools.Git
+import PureClaw.Tools.Memory
+import PureClaw.Tools.Registry
+import PureClaw.Tools.Shell
 
 -- | CLI chat options.
 data ChatOptions = ChatOptions
@@ -68,16 +78,34 @@ runChat :: ChatOptions -> IO ()
 runChat opts = do
   apiKey <- resolveApiKey (_co_apiKey opts)
   manager <- HTTP.newTlsManager
-  let provider = mkAnthropicProvider manager apiKey
-      model    = ModelId (T.pack (_co_model opts))
+  let provider  = mkAnthropicProvider manager apiKey
+      model     = ModelId (T.pack (_co_model opts))
       sysPrompt = T.pack <$> _co_system opts
-      logger   = mkStderrLogHandle
-      channel  = mkCLIChannelHandle
+      logger    = mkStderrLogHandle
+      channel   = mkCLIChannelHandle
+      workspace = WorkspaceRoot "."
+      policy    = defaultPolicy
+      sh        = mkShellHandle logger
+      fh        = mkFileHandle workspace
+      mh        = mkNoOpMemoryHandle
+      registry  = buildRegistry policy sh workspace fh mh
   hSetBuffering stdout LineBuffering
   putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
   putStrLn "Type your message and press Enter. Ctrl-D to exit."
   putStrLn ""
-  runAgentLoop provider model channel logger sysPrompt
+  runAgentLoop provider model channel logger sysPrompt registry
+
+-- | Build the tool registry with all available tools.
+buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> ToolRegistry
+buildRegistry policy sh workspace fh mh =
+  let reg = uncurry registerTool
+  in reg (shellTool policy sh)
+   $ reg (fileReadTool workspace fh)
+   $ reg (fileWriteTool workspace fh)
+   $ reg (gitTool policy sh)
+   $ reg (memoryStoreTool mh)
+   $ reg (memoryRecallTool mh)
+     emptyRegistry
 
 -- | Resolve the API key from a CLI flag or the ANTHROPIC_API_KEY env var.
 resolveApiKey :: Maybe String -> IO ApiKey

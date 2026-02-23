@@ -22,16 +22,16 @@ spec = do
 
   describe "addMessage" $ do
     it "appends a message" $ do
-      let ctx = addMessage (Message User "hello") (emptyContext Nothing)
+      let ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
           msgs = contextMessages ctx
       length msgs `shouldBe` 1
       case msgs of
-        [m] -> _msg_content m `shouldBe` "hello"
+        [m] -> _msg_content m `shouldBe` [TextBlock "hello"]
         _   -> expectationFailure "expected exactly one message"
 
     it "preserves chronological order" $ do
-      let ctx = addMessage (Message Assistant "hi back")
-              $ addMessage (Message User "hello")
+      let ctx = addMessage (textMessage Assistant "hi back")
+              $ addMessage (textMessage User "hello")
               $ emptyContext Nothing
           msgs = contextMessages ctx
       length msgs `shouldBe` 2
@@ -42,14 +42,15 @@ spec = do
         _ -> expectationFailure "expected exactly two messages"
 
     it "preserves system prompt across additions" $ do
-      let ctx = addMessage (Message User "test")
+      let ctx = addMessage (textMessage User "test")
               $ emptyContext (Just "system")
       contextSystemPrompt ctx `shouldBe` Just "system"
 
   describe "contextMessages" $ do
     it "returns messages oldest first" $ do
-      let ctx = addMessage (Message User "third")
-              $ addMessage (Message User "second")
-              $ addMessage (Message User "first")
+      let ctx = addMessage (textMessage User "third")
+              $ addMessage (textMessage User "second")
+              $ addMessage (textMessage User "first")
               $ emptyContext Nothing
-      map _msg_content (contextMessages ctx) `shouldBe` ["first", "second", "third"]
+          contents = [ t | m <- contextMessages ctx, TextBlock t <- _msg_content m ]
+      contents `shouldBe` ["first", "second", "third"]

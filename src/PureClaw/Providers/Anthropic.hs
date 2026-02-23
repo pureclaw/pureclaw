@@ -78,19 +78,55 @@ anthropicComplete provider req = do
       Right response -> pure response
 
 -- | Encode a completion request as JSON for the Anthropic API.
--- System prompts go in the top-level @system@ field, not in the
--- messages array (Anthropic API requirement).
 encodeRequest :: CompletionRequest -> BL.ByteString
 encodeRequest req = encode $ object $
   [ "model"      .= unModelId (_cr_model req)
   , "max_tokens" .= fromMaybe 4096 (_cr_maxTokens req)
   , "messages"   .= map encodeMsg (_cr_messages req)
-  ] ++ maybe [] (\s -> ["system" .= s]) (_cr_systemPrompt req)
+  ]
+  ++ maybe [] (\s -> ["system" .= s]) (_cr_systemPrompt req)
+  ++ if null (_cr_tools req)
+     then maybe [] (\tc -> ["tool_choice" .= encodeToolChoice tc]) (_cr_toolChoice req)
+     else ("tools" .= map encodeTool (_cr_tools req))
+        : maybe [] (\tc -> ["tool_choice" .= encodeToolChoice tc]) (_cr_toolChoice req)
 
 encodeMsg :: Message -> Value
 encodeMsg msg = object
   [ "role"    .= roleToText (_msg_role msg)
-  , "content" .= _msg_content msg
+  , "content" .= map encodeContentBlock (_msg_content msg)
+  ]
+
+encodeContentBlock :: ContentBlock -> Value
+encodeContentBlock (TextBlock t) = object
+  [ "type" .= ("text" :: Text)
+  , "text" .= t
+  ]
+encodeContentBlock (ToolUseBlock callId name input) = object
+  [ "type"  .= ("tool_use" :: Text)
+  , "id"    .= unToolCallId callId
+  , "name"  .= name
+  , "input" .= input
+  ]
+encodeContentBlock (ToolResultBlock callId content isErr) = object $
+  [ "type"        .= ("tool_result" :: Text)
+  , "tool_use_id" .= unToolCallId callId
+  , "content"     .= content
+  ]
+  ++ ["is_error" .= True | isErr]
+
+encodeTool :: ToolDefinition -> Value
+encodeTool td = object
+  [ "name"         .= _td_name td
+  , "description"  .= _td_description td
+  , "input_schema" .= _td_inputSchema td
+  ]
+
+encodeToolChoice :: ToolChoice -> Value
+encodeToolChoice AutoTool = object ["type" .= ("auto" :: Text)]
+encodeToolChoice AnyTool = object ["type" .= ("any" :: Text)]
+encodeToolChoice (SpecificTool name) = object
+  [ "type" .= ("tool" :: Text)
+  , "name" .= name
   ]
 
 -- | Decode an Anthropic API response into a 'CompletionResponse'.
@@ -100,20 +136,25 @@ decodeResponse bs = eitherDecode bs >>= parseEither parseResp
     parseResp :: Value -> Parser CompletionResponse
     parseResp = withObject "AnthropicResponse" $ \o -> do
       contentArr <- o .: "content"
-      texts <- mapM parseContentBlock contentArr
+      blocks <- mapM parseBlock contentArr
       modelText <- o .: "model"
       usageObj <- o .: "usage"
       inToks <- usageObj .: "input_tokens"
       outToks <- usageObj .: "output_tokens"
       pure CompletionResponse
-        { _crsp_content = T.concat texts
+        { _crsp_content = blocks
         , _crsp_model   = ModelId modelText
         , _crsp_usage   = Just (Usage inToks outToks)
         }
 
-    parseContentBlock :: Value -> Parser Text
-    parseContentBlock = withObject "ContentBlock" $ \b -> do
+    parseBlock :: Value -> Parser ContentBlock
+    parseBlock = withObject "ContentBlock" $ \b -> do
       bType <- b .: "type"
-      if (bType :: Text) == "text"
-        then b .: "text"
-        else pure ""
+      case (bType :: Text) of
+        "text" -> TextBlock <$> b .: "text"
+        "tool_use" -> do
+          callId <- b .: "id"
+          name <- b .: "name"
+          input <- b .: "input"
+          pure (ToolUseBlock (ToolCallId callId) name input)
+        other -> fail $ "Unknown content block type: " <> T.unpack other
