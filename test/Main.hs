@@ -33,6 +33,8 @@ import qualified Agent.MemorySpec
 import qualified Providers.OpenAISpec
 import qualified Providers.OllamaSpec
 import qualified Providers.OpenRouterSpec
+import qualified Security.CryptoSpec
+import qualified Security.PairingSpec
 
 main :: IO ()
 main = hspec $ do
@@ -67,3 +69,5 @@ main = hspec $ do
   describe "Providers.OpenAI" Providers.OpenAISpec.spec
   describe "Providers.Ollama" Providers.OllamaSpec.spec
   describe "Providers.OpenRouter" Providers.OpenRouterSpec.spec
+  describe "Security.Crypto" Security.CryptoSpec.spec
+  describe "Security.Pairing" Security.PairingSpec.spec
