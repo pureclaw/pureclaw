@@ -96,7 +96,87 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.NIX_CACHE_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_CACHE_AWS_SECRET_ACCESS_KEY }}
 
-      - name: Run tests
-        run: nix develop --command cabal test
+      - name: Run tests with coverage
+        run: nix develop --command cabal test --enable-coverage
 
+      - name: Generate coverage report
+        if: always()
+        run: |
+          nix develop --command bash -c '
+          TIX=$(find dist-newstyle -name "pureclaw-test.tix" 2>/dev/null | head -1)
+          if [ -z "$TIX" ]; then
+            echo "No .tix file found — coverage report skipped."
+            exit 0
+          fi
 
+          # Collect all mix directories
+          MIXDIRS=$(find dist-newstyle -path "*/hpc/vanilla/mix" -type d 2>/dev/null)
+          HPCDIR_ARGS=""
+          for d in $MIXDIRS; do
+            HPCDIR_ARGS="$HPCDIR_ARGS --hpcdir=$d"
+          done
+
+          # Generate text report (library modules only, exclude test harness)
+          echo "=== HPC Coverage Report ==="
+          REPORT=$(hpc report "$TIX" $HPCDIR_ARGS \
+            --exclude=Main \
+            --exclude=Paths_pureclaw \
+            2>&1)
+          echo "$REPORT"
+          echo "$REPORT" > coverage-report.txt
+
+          # Per-module breakdown
+          echo ""
+          echo "=== Per-Module Coverage ==="
+          MODULE_REPORT=$(hpc report "$TIX" $HPCDIR_ARGS \
+            --exclude=Main \
+            --exclude=Paths_pureclaw \
+            --per-module \
+            2>&1)
+          echo "$MODULE_REPORT"
+          echo "$MODULE_REPORT" > coverage-per-module.txt
+
+          # Find the HTML report directory
+          HTML_DIR=$(find dist-newstyle -path "*/hpc/vanilla/html" -type d 2>/dev/null | head -1)
+          if [ -n "$HTML_DIR" ]; then
+            mkdir -p coverage-html
+            cp -r "$HTML_DIR"/* coverage-html/
+          fi
+          '
+
+      - name: Post coverage summary
+        if: always()
+        run: |
+          if [ ! -f coverage-report.txt ]; then
+            echo "No coverage report found." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Parse the summary line for expressions
+          EXPR_LINE=$(grep 'expressions used' coverage-report.txt || true)
+
+          {
+            echo "## Code Coverage (HPC)"
+            echo ""
+            echo '```'
+            cat coverage-report.txt
+            echo '```'
+            echo ""
+            echo "<details>"
+            echo "<summary>Per-module breakdown</summary>"
+            echo ""
+            echo '```'
+            cat coverage-per-module.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-html/
+          if-no-files-found: warn
+          retention-days: 30
