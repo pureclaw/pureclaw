@@ -149,6 +149,12 @@ test-suite pureclaw-test
     Security.PathSpec
     Security.CommandSpec
     Core.ConfigSpec
+    Handles.LogSpec
+    Handles.FileSpec
+    Handles.ShellSpec
+    Handles.NetworkSpec
+    Handles.MemorySpec
+    Handles.ChannelSpec
   hs-source-dirs:   test
   build-depends:
     base,
