@@ -146,10 +146,8 @@ jobs:
           # Find the HTML report directory and prepare for Pages
           HTML_DIR=$(find dist-newstyle -path "*/hpc/vanilla/html" -type d 2>/dev/null | head -1)
           if [ -n "$HTML_DIR" ]; then
-            mkdir -p coverage-html
-            cp -r "$HTML_DIR"/* coverage-html/
-            # HPC uses hpc_index.html as the entry point; GitHub Pages expects index.html
-            echo "<meta http-equiv=\"refresh\" content=\"0; url=hpc_index.html\">" > coverage-html/index.html
+            mkdir -p pages-root/coverage
+            cp -r "$HTML_DIR"/* pages-root/coverage/
           fi
           '
 
@@ -178,7 +176,7 @@ jobs:
       - name: Post coverage to job summary
         if: always()
         run: |
-          PAGES_URL="https://pureclaw.github.io/pureclaw/"
+          PAGES_URL="https://pureclaw.github.io/pureclaw/coverage/hpc_index.html"
 
           if [ ! -f coverage-report.txt ]; then
             echo "No coverage report found." >> "$GITHUB_STEP_SUMMARY"
@@ -208,14 +206,14 @@ jobs:
         if: always()
         uses: actions/upload-pages-artifact@v3
         with:
-          path: coverage-html/
+          path: pages-root/
 
       - name: Post coverage commit status
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PAGES_URL="https://pureclaw.github.io/pureclaw/"
+          PAGES_URL="https://pureclaw.github.io/pureclaw/coverage/hpc_index.html"
           SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           SUMMARY="${{ steps.coverage-summary.outputs.summary }}"
 
