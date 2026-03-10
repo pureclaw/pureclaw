@@ -121,7 +121,7 @@ mkProcessHandle logger = do
 
     , _ph_list = do
         st <- readIORef stateRef
-        mapM (toProcessInfo) (Map.toList (_pst_processes st))
+        mapM toProcessInfo (Map.toList (_pst_processes st))
 
     , _ph_poll = \(ProcessId pid) -> do
         st <- readIORef stateRef

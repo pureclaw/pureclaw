@@ -20,7 +20,7 @@ spec = do
     it "sends a message through the channel" $ do
       sentRef <- newIORef (Nothing :: Maybe OutgoingMessage)
       let ch = mkNoOpChannelHandle
-            { _ch_send = \msg -> writeIORef sentRef (Just msg)
+            { _ch_send = writeIORef sentRef . Just
             }
           (_, handler) = messageTool ch
           input = object ["content" .= ("Hello from cron!" :: String)]
@@ -62,7 +62,7 @@ spec = do
     it "sends multi-line messages" $ do
       sentRef <- newIORef (Nothing :: Maybe OutgoingMessage)
       let ch = mkNoOpChannelHandle
-            { _ch_send = \msg -> writeIORef sentRef (Just msg)
+            { _ch_send = writeIORef sentRef . Just
             }
           (_, handler) = messageTool ch
           input = object ["content" .= ("Line 1\nLine 2\nLine 3" :: String)]
