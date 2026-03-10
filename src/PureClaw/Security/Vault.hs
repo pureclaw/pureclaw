@@ -253,9 +253,7 @@ vaultStatus st = do
   let locked = case current of
                  Nothing -> True
                  Just _  -> False
-      count  = case current of
-                 Nothing -> 0
-                 Just m  -> Map.size m
+      count  = maybe 0 Map.size current
       keyTy  = inferKeyType (_vc_recipient (_vst_config st))
   pure VaultStatus
     { _vs_locked      = locked
