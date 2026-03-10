@@ -5,12 +5,15 @@ module PureClaw.CLI.Config
     -- * Loading
   , loadFileConfig
   , loadConfig
+    -- * Directory helpers
+  , getPureclawDir
   ) where
 
 import Control.Exception
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
 import System.Directory (getHomeDirectory)
+import System.FilePath ((</>))
 import Toml (TomlCodec, (.=))
 import Toml qualified
 
@@ -23,7 +26,7 @@ data FileConfig = FileConfig
   , _fc_system         :: Maybe Text
   , _fc_memory         :: Maybe Text
   , _fc_allow          :: Maybe [Text]
-  , _fc_vault_path      :: Maybe Text  -- ^ vault file path (default: .pureclaw/vault.age)
+  , _fc_vault_path      :: Maybe Text  -- ^ vault file path (default: ~/.pureclaw/vault.age)
   , _fc_vault_recipient :: Maybe Text  -- ^ age recipient string (required to enable vault)
   , _fc_vault_identity  :: Maybe Text  -- ^ age identity path or plugin string
   , _fc_vault_unlock    :: Maybe Text  -- ^ "startup", "on_demand", or "per_access"
@@ -58,19 +61,26 @@ loadFileConfig path = do
       Left  _ -> emptyFileConfig
       Right c -> c
 
+-- | The PureClaw home directory: @~\/.pureclaw@.
+-- This is where config, memory, and vault files are stored by default.
+getPureclawDir :: IO FilePath
+getPureclawDir = do
+  home <- getHomeDirectory
+  pure (home </> ".pureclaw")
+
 -- | Load config from the default locations, trying each in order:
 --
--- 1. @.pureclaw\/config.toml@ (project-local)
--- 2. @~\/.config\/pureclaw\/config.toml@ (user-global XDG)
+-- 1. @~\/.pureclaw\/config.toml@ (user home)
+-- 2. @~\/.config\/pureclaw\/config.toml@ (XDG fallback)
 --
 -- Returns the first config found, or 'emptyFileConfig' if none exists.
 loadConfig :: IO FileConfig
 loadConfig = do
-  projectCfg <- loadFileConfig ".pureclaw/config.toml"
-  if projectCfg /= emptyFileConfig
-    then pure projectCfg
-    else do
-      home <- try @IOError getHomeDirectory
-      case home of
-        Left  _    -> pure emptyFileConfig
-        Right h    -> loadFileConfig (h ++ "/.config/pureclaw/config.toml")
+  home <- try @IOError getHomeDirectory
+  case home of
+    Left  _ -> pure emptyFileConfig
+    Right h -> do
+      homeCfg <- loadFileConfig (h </> ".pureclaw" </> "config.toml")
+      if homeCfg /= emptyFileConfig
+        then pure homeCfg
+        else loadFileConfig (h </> ".config" </> "pureclaw" </> "config.toml")
