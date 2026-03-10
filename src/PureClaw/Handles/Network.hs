@@ -18,6 +18,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Text (Text)
 import Data.Text qualified as T
 import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Types.Header qualified as Header
 import Network.HTTP.Types.Status qualified as Status
 
 import PureClaw.Core.Types
@@ -72,6 +73,7 @@ data HttpResponse = HttpResponse
 data NetworkHandle = NetworkHandle
   { _nh_httpGet  :: AllowedUrl -> IO HttpResponse
   , _nh_httpPost :: AllowedUrl -> ByteString -> IO HttpResponse
+  , _nh_httpGetWithHeaders :: AllowedUrl -> [Header.Header] -> IO HttpResponse
   }
 
 -- | Real network handle using @http-client@.
@@ -95,6 +97,14 @@ mkNetworkHandle manager = NetworkHandle
         { _hr_statusCode = Status.statusCode (HTTP.responseStatus resp)
         , _hr_body       = BL.toStrict (HTTP.responseBody resp)
         }
+  , _nh_httpGetWithHeaders = \url headers -> do
+      req <- HTTP.parseRequest (T.unpack (getAllowedUrl url))
+      let req' = req { HTTP.requestHeaders = headers }
+      resp <- HTTP.httpLbs req' manager
+      pure HttpResponse
+        { _hr_statusCode = Status.statusCode (HTTP.responseStatus resp)
+        , _hr_body       = BL.toStrict (HTTP.responseBody resp)
+        }
   }
 
 -- | No-op network handle. Returns 200 with empty body.
@@ -102,4 +112,5 @@ mkNoOpNetworkHandle :: NetworkHandle
 mkNoOpNetworkHandle = NetworkHandle
   { _nh_httpGet  = \_ -> pure HttpResponse { _hr_statusCode = 200, _hr_body = "" }
   , _nh_httpPost = \_ _ -> pure HttpResponse { _hr_statusCode = 200, _hr_body = "" }
+  , _nh_httpGetWithHeaders = \_ _ -> pure HttpResponse { _hr_statusCode = 200, _hr_body = "" }
   }

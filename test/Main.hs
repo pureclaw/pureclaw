@@ -26,6 +26,11 @@ import qualified Tools.ShellSpec
 import qualified Tools.FileReadSpec
 import qualified Tools.GitSpec
 import qualified Tools.MemorySpec
+import qualified Tools.EditSpec
+import qualified Tools.ProcessSpec
+import qualified Handles.ProcessSpec
+import qualified Tools.WebSearchSpec
+import qualified Tools.MessageSpec
 import qualified Memory.NoneSpec
 import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
@@ -71,6 +76,11 @@ main = hspec $ do
   describe "Tools.FileRead" Tools.FileReadSpec.spec
   describe "Tools.Git" Tools.GitSpec.spec
   describe "Tools.Memory" Tools.MemorySpec.spec
+  describe "Tools.Edit" Tools.EditSpec.spec
+  describe "Tools.Process" Tools.ProcessSpec.spec
+  describe "Handles.Process" Handles.ProcessSpec.spec
+  describe "Tools.WebSearch" Tools.WebSearchSpec.spec
+  describe "Tools.Message" Tools.MessageSpec.spec
   describe "Memory.None" Memory.NoneSpec.spec
   describe "Memory.Markdown" Memory.MarkdownSpec.spec
   describe "Memory.SQLite" Memory.SQLiteSpec.spec

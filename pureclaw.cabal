@@ -52,6 +52,7 @@ library
     PureClaw.Handles.Network
     PureClaw.Handles.Memory
     PureClaw.Handles.Channel
+    PureClaw.Handles.Process
     PureClaw.Handles.Log
     -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
@@ -61,6 +62,10 @@ library
     PureClaw.Tools.Memory
     PureClaw.Tools.HttpRequest
     PureClaw.Tools.Git
+    PureClaw.Tools.Edit
+    PureClaw.Tools.Process
+    PureClaw.Tools.WebSearch
+    PureClaw.Tools.Message
     -- Agent
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
@@ -167,6 +172,11 @@ test-suite pureclaw-test
     Tools.FileReadSpec
     Tools.GitSpec
     Tools.MemorySpec
+    Tools.EditSpec
+    Tools.ProcessSpec
+    Handles.ProcessSpec
+    Tools.WebSearchSpec
+    Tools.MessageSpec
     Memory.MarkdownSpec
     Memory.SQLiteSpec
     Memory.NoneSpec
