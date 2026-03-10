@@ -9,6 +9,7 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Security.Vault
 import PureClaw.Tools.Registry
 
 -- | All runtime dependencies for the agent loop, gathered into a single record.
@@ -28,4 +29,6 @@ data AgentEnv = AgentEnv
     -- ^ Optional system prompt prepended to every conversation.
   , _env_registry     :: ToolRegistry
     -- ^ All registered tools available for the agent to call.
+  , _env_vault        :: Maybe VaultHandle
+    -- ^ Optional secrets vault. 'Nothing' if no vault is configured.
   }

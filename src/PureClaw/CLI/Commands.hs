@@ -227,6 +227,7 @@ runChat opts = do
         , _env_logger       = logger
         , _env_systemPrompt = sysPrompt
         , _env_registry     = registry
+        , _env_vault        = Nothing
         }
   runAgentLoop env
 

@@ -1,8 +1,11 @@
 module Agent.SlashCommandsSpec (spec) where
 
+import Control.Exception
+import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Test.Hspec
 
 import PureClaw.Agent.Context
@@ -12,6 +15,8 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Security.Vault
+import PureClaw.Security.Vault.Age
 import PureClaw.Tools.Registry
 
 -- | Mock provider for testing.
@@ -22,6 +27,56 @@ instance Provider MockProvider where
     { _crsp_content = [TextBlock summary]
     , _crsp_model   = ModelId "mock"
     , _crsp_usage   = Nothing
+    }
+
+-- | Build a mock VaultHandle backed by IORef state.
+-- Starts unlocked with no secrets.
+mkMockVaultHandle :: IO VaultHandle
+mkMockVaultHandle = do
+  lockedRef  <- newIORef False
+  secretsRef <- newIORef ([] :: [(Text, ByteString)])
+  initedRef  <- newIORef False
+  pure VaultHandle
+    { _vh_init = do
+        inited <- readIORef initedRef
+        if inited
+          then pure (Left VaultAlreadyExists)
+          else writeIORef initedRef True >> pure (Right ())
+
+    , _vh_put = \name val -> do
+        modifyIORef secretsRef (\ss -> (name, val) : filter ((/= name) . fst) ss)
+        pure (Right ())
+
+    , _vh_get = \name -> do
+        secrets <- readIORef secretsRef
+        case lookup name secrets of
+          Nothing  -> pure (Left (VaultCorrupted "no such key"))
+          Just val -> pure (Right val)
+
+    , _vh_delete = \name -> do
+        secrets <- readIORef secretsRef
+        case lookup name secrets of
+          Nothing -> pure (Left (VaultCorrupted "no such key"))
+          Just _  -> do
+            modifyIORef secretsRef (filter ((/= name) . fst))
+            pure (Right ())
+
+    , _vh_list = do
+        secrets <- readIORef secretsRef
+        pure (Right (map fst secrets))
+
+    , _vh_lock = writeIORef lockedRef True
+
+    , _vh_unlock = writeIORef lockedRef False >> pure (Right ())
+
+    , _vh_status = do
+        locked  <- readIORef lockedRef
+        secrets <- readIORef secretsRef
+        pure VaultStatus
+          { _vs_locked      = locked
+          , _vs_secretCount = length secrets
+          , _vs_keyType     = "X25519"
+          }
     }
 
 spec :: Spec
@@ -38,6 +93,33 @@ spec = do
 
     it "parses /compact" $ do
       parseSlashCommand "/compact" `shouldBe` Just CmdCompact
+
+    it "parses /vault init" $ do
+      parseSlashCommand "/vault init" `shouldBe` Just (CmdVault VaultInit)
+
+    it "parses /vault list" $ do
+      parseSlashCommand "/vault list" `shouldBe` Just (CmdVault VaultList)
+
+    it "parses /vault lock" $ do
+      parseSlashCommand "/vault lock" `shouldBe` Just (CmdVault VaultLock)
+
+    it "parses /vault unlock" $ do
+      parseSlashCommand "/vault unlock" `shouldBe` Just (CmdVault VaultUnlock)
+
+    it "parses /vault status" $ do
+      parseSlashCommand "/vault status" `shouldBe` Just (CmdVault VaultStatus')
+
+    it "parses /vault add <name>" $ do
+      parseSlashCommand "/vault add mykey" `shouldBe` Just (CmdVault (VaultAdd "mykey"))
+
+    it "parses /vault delete <name>" $ do
+      parseSlashCommand "/vault delete mykey" `shouldBe` Just (CmdVault (VaultDelete "mykey"))
+
+    it "parses unknown /vault subcommand" $ do
+      parseSlashCommand "/vault foo" `shouldBe` Just (CmdVault (VaultUnknown "foo"))
+
+    it "parses bare /vault as unknown" $ do
+      parseSlashCommand "/vault" `shouldBe` Just (CmdVault (VaultUnknown ""))
 
     it "is case-insensitive" $ do
       parseSlashCommand "/NEW" `shouldBe` Just CmdNew
@@ -64,6 +146,7 @@ spec = do
           , _env_logger       = mkNoOpLogHandle
           , _env_systemPrompt = Nothing
           , _env_registry     = emptyRegistry
+          , _env_vault        = Nothing
           }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -137,8 +220,249 @@ spec = do
         Just t -> T.unpack t `shouldContain` "Compacted"
         Nothing -> expectationFailure "Expected compact message"
 
+  describe "vault commands — no vault configured" $ do
+    let mkEnvNoVault sentRef = AgentEnv
+          { _env_provider     = MkProvider (MockProvider "summary")
+          , _env_model        = ModelId "test"
+          , _env_channel      = mkNoOpChannelHandle
+              { _ch_send = writeIORef sentRef . Just . _om_content }
+          , _env_logger       = mkNoOpLogHandle
+          , _env_systemPrompt = Nothing
+          , _env_registry     = emptyRegistry
+          , _env_vault        = Nothing
+          }
+
+    it "/vault list with no vault → helpful message" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let env = mkEnvNoVault sentRef
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultList) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "No vault configured"
+        Nothing -> expectationFailure "Expected message"
+
+    it "/vault lock with no vault → helpful message" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let env = mkEnvNoVault sentRef
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultLock) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "No vault configured"
+        Nothing -> expectationFailure "Expected message"
+
+  describe "vault commands — with mock vault" $ do
+    let mkEnvWithVault sentRef vault = AgentEnv
+          { _env_provider     = MkProvider (MockProvider "summary")
+          , _env_model        = ModelId "test"
+          , _env_channel      = mkNoOpChannelHandle
+              { _ch_send = writeIORef sentRef . Just . _om_content }
+          , _env_logger       = mkNoOpLogHandle
+          , _env_systemPrompt = Nothing
+          , _env_registry     = emptyRegistry
+          , _env_vault        = Just vault
+          }
+
+    it "/vault init succeeds on fresh vault" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultInit) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "initialized"
+        Nothing -> expectationFailure "Expected message"
+
+    it "/vault init on already-initialized vault reports error" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      _ <- _vh_init vault  -- initialize once
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultInit) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "already exists"
+        Nothing -> expectationFailure "Expected message"
+
+    it "/vault list with empty vault" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultList) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "empty"
+        Nothing -> expectationFailure "Expected message"
+
+    it "/vault list with secrets shows formatted list" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      _ <- _vh_put vault "alpha" "v1"
+      _ <- _vh_put vault "beta" "v2"
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultList) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "alpha"
+          T.unpack t `shouldContain` "beta"
+        Nothing -> expectationFailure "Expected message"
+
+    it "/vault lock delegates to handle and sends confirmation" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultLock) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "locked"
+        Nothing -> expectationFailure "Expected message"
+      -- Verify vault is actually locked
+      status <- _vh_status vault
+      _vs_locked status `shouldBe` True
+
+    it "/vault unlock delegates to handle" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      -- Lock first
+      _vh_lock vault
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultUnlock) ctx
+      status <- _vh_status vault
+      _vs_locked status `shouldBe` False
+
+    it "/vault status formats the status block" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      _ <- _vh_put vault "key1" "val"
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultStatus') ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "State"
+          T.unpack t `shouldContain` "Secrets"
+          T.unpack t `shouldContain` "Key"
+        Nothing -> expectationFailure "Expected message"
+
+    it "/vault delete with confirmation deletes secret" $ do
+      msgsRef  <- newIORef ["y"]
+      sentRef  <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      _ <- _vh_put vault "todelete" "val"
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = writeIORef sentRef . Just . _om_content
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = Just vault
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldNotContain` "Cancelled"
+        Nothing -> expectationFailure "Expected message"
+      -- Secret should be gone
+      result <- _vh_get vault "todelete"
+      result `shouldBe` Left (VaultCorrupted "no such key")
+
+    it "/vault delete with cancellation does not delete" $ do
+      msgsRef  <- newIORef ["n"]
+      sentRef  <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      _ <- _vh_put vault "keep" (TE.encodeUtf8 "val")
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = writeIORef sentRef . Just . _om_content
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = Just vault
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "Cancelled"
+        Nothing -> expectationFailure "Expected message"
+      -- Secret should still be there
+      result <- _vh_get vault "keep"
+      result `shouldBe` Right (TE.encodeUtf8 "val")
+
+    it "/vault add on non-CLI channel sends error message" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send       = writeIORef sentRef . Just . _om_content
+                  -- readSecret throws (like non-CLI channels)
+                , _ch_readSecret = ioError (userError "readSecret not supported")
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = Just vault
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "Error reading secret"
+        Nothing -> expectationFailure "Expected error message"
+
+    it "/vault unknown subcommand shows help text" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      let env = mkEnvWithVault sentRef vault
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault (VaultUnknown "foo")) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "Unknown vault command"
+          T.unpack t `shouldContain` "init"
+          T.unpack t `shouldContain` "list"
+        Nothing -> expectationFailure "Expected help text"
+
   describe "SlashCommand" $ do
     it "has Show and Eq instances" $ do
       show CmdNew `shouldContain` "CmdNew"
       CmdNew `shouldBe` CmdNew
       CmdNew `shouldNotBe` CmdReset
+
+    it "vault subcommands have Show and Eq instances" $ do
+      show (CmdVault VaultList) `shouldContain` "VaultList"
+      CmdVault VaultList `shouldBe` CmdVault VaultList
+      CmdVault VaultList `shouldNotBe` CmdVault VaultLock

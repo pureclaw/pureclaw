@@ -83,6 +83,7 @@ mkTestEnv p ch = AgentEnv
   , _env_logger       = mkNoOpLogHandle
   , _env_systemPrompt = Nothing
   , _env_registry     = emptyRegistry
+  , _env_vault        = Nothing
   }
 
 spec :: Spec
