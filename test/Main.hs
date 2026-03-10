@@ -31,10 +31,13 @@ import qualified Tools.ProcessSpec
 import qualified Handles.ProcessSpec
 import qualified Tools.WebSearchSpec
 import qualified Tools.MessageSpec
+import qualified Tools.CronSpec
 import qualified Memory.NoneSpec
 import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
 import qualified Agent.MemorySpec
+import qualified Agent.CompactionSpec
+import qualified Agent.SlashCommandsSpec
 import qualified Providers.OpenAISpec
 import qualified Providers.OllamaSpec
 import qualified Providers.OpenRouterSpec
@@ -81,10 +84,13 @@ main = hspec $ do
   describe "Handles.Process" Handles.ProcessSpec.spec
   describe "Tools.WebSearch" Tools.WebSearchSpec.spec
   describe "Tools.Message" Tools.MessageSpec.spec
+  describe "Tools.Cron" Tools.CronSpec.spec
   describe "Memory.None" Memory.NoneSpec.spec
   describe "Memory.Markdown" Memory.MarkdownSpec.spec
   describe "Memory.SQLite" Memory.SQLiteSpec.spec
   describe "Agent.Memory" Agent.MemorySpec.spec
+  describe "Agent.Compaction" Agent.CompactionSpec.spec
+  describe "Agent.SlashCommands" Agent.SlashCommandsSpec.spec
   describe "Providers.OpenAI" Providers.OpenAISpec.spec
   describe "Providers.Ollama" Providers.OllamaSpec.spec
   describe "Providers.OpenRouter" Providers.OpenRouterSpec.spec

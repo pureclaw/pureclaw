@@ -66,11 +66,14 @@ library
     PureClaw.Tools.Process
     PureClaw.Tools.WebSearch
     PureClaw.Tools.Message
+    PureClaw.Tools.Cron
     -- Agent
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
     PureClaw.Agent.Memory
+    PureClaw.Agent.Compaction
     PureClaw.Agent.Identity
+    PureClaw.Agent.SlashCommands
     -- Providers
     PureClaw.Providers.Class
     PureClaw.Providers.Anthropic
@@ -177,10 +180,13 @@ test-suite pureclaw-test
     Handles.ProcessSpec
     Tools.WebSearchSpec
     Tools.MessageSpec
+    Tools.CronSpec
     Memory.MarkdownSpec
     Memory.SQLiteSpec
     Memory.NoneSpec
     Agent.MemorySpec
+    Agent.CompactionSpec
+    Agent.SlashCommandsSpec
     Providers.OpenAISpec
     Providers.OllamaSpec
     Providers.OpenRouterSpec

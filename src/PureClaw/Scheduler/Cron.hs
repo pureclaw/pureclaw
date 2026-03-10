@@ -12,6 +12,7 @@ module PureClaw.Scheduler.Cron
   , addJob
   , removeJob
   , tickScheduler
+  , schedulerJobNames
   ) where
 
 import Data.Map.Strict (Map)
@@ -148,6 +149,11 @@ addJob job sched = sched { _cs_jobs = Map.insert (_cj_name job) job (_cs_jobs sc
 -- | Remove a job by name.
 removeJob :: Text -> CronScheduler -> CronScheduler
 removeJob name sched = sched { _cs_jobs = Map.delete name (_cs_jobs sched) }
+
+-- | Get all job names and their cron expressions.
+schedulerJobNames :: CronScheduler -> [(Text, CronExpr)]
+schedulerJobNames sched =
+  [(name, _cj_expr job) | (name, job) <- Map.toList (_cs_jobs sched)]
 
 -- | Run all jobs whose cron expression matches the given time.
 -- Returns the names of jobs that were executed.
