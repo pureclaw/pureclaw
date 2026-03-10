@@ -6,10 +6,13 @@ import Data.Text qualified as T
 import Test.Hspec
 
 import PureClaw.Agent.Context
+import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
+import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Tools.Registry
 
 -- | Mock provider for testing.
 newtype MockProvider = MockProvider Text
@@ -53,11 +56,14 @@ spec = do
       parseSlashCommand "" `shouldBe` Nothing
 
   describe "executeSlashCommand" $ do
-    let mkEnv sentRef = SlashEnv
-          { _se_provider = MockProvider "summary"
-          , _se_model    = ModelId "test"
-          , _se_channel  = mkNoOpChannelHandle
+    let mkEnv sentRef = AgentEnv
+          { _env_provider     = MkProvider (MockProvider "summary")
+          , _env_model        = ModelId "test"
+          , _env_channel      = mkNoOpChannelHandle
               { _ch_send = writeIORef sentRef . Just . _om_content }
+          , _env_logger       = mkNoOpLogHandle
+          , _env_systemPrompt = Nothing
+          , _env_registry     = emptyRegistry
           }
 
     it "/new clears messages but keeps system prompt" $ do

@@ -7,6 +7,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Test.Hspec
 
+import PureClaw.Agent.Env
 import PureClaw.Agent.Loop
 import PureClaw.Core.Errors
 import PureClaw.Core.Types
@@ -73,24 +74,35 @@ instance Provider ToolCallProvider where
       hasResult (ToolResultBlock {}) = True
       hasResult _ = False
 
+-- | Build a test AgentEnv from a provider and channel.
+mkTestEnv :: Provider p => p -> ChannelHandle -> AgentEnv
+mkTestEnv p ch = AgentEnv
+  { _env_provider     = MkProvider p
+  , _env_model        = ModelId "mock"
+  , _env_channel      = ch
+  , _env_logger       = mkNoOpLogHandle
+  , _env_systemPrompt = Nothing
+  , _env_registry     = emptyRegistry
+  }
+
 spec :: Spec
 spec = do
   describe "runAgentLoop" $ do
     it "processes a message and sends response" $ do
       (channel, sentRef) <- mkMockChannel ["hello"]
-      runAgentLoop (MockProvider "Hi there!") (ModelId "mock") channel mkNoOpLogHandle Nothing emptyRegistry
+      runAgentLoop (mkTestEnv (MockProvider "Hi there!") channel)
       sent <- readIORef sentRef
       sent `shouldBe` ["Hi there!"]
 
     it "processes multiple messages" $ do
       (channel, sentRef) <- mkMockChannel ["first", "second"]
-      runAgentLoop (MockProvider "reply") (ModelId "mock") channel mkNoOpLogHandle Nothing emptyRegistry
+      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
       sent <- readIORef sentRef
       length sent `shouldBe` 2
 
     it "skips empty messages" $ do
       (channel, sentRef) <- mkMockChannel ["", "  ", "hello"]
-      runAgentLoop (MockProvider "reply") (ModelId "mock") channel mkNoOpLogHandle Nothing emptyRegistry
+      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
       sent <- readIORef sentRef
       length sent `shouldBe` 1
 
@@ -98,7 +110,8 @@ spec = do
       (channel, sentRef) <- mkMockChannel ["hello"]
       errRef <- newIORef ([] :: [PublicError])
       let channel' = channel { _ch_sendError = \e -> modifyIORef errRef (e :) }
-      runAgentLoop FailingProvider (ModelId "mock") channel' mkNoOpLogHandle Nothing emptyRegistry
+          env = (mkTestEnv FailingProvider channel) { _env_channel = channel' }
+      runAgentLoop env
       sent <- readIORef sentRef
       sent `shouldBe` []
       errs <- readIORef errRef
@@ -106,7 +119,7 @@ spec = do
 
     it "handles slash commands without calling provider" $ do
       (channel, sentRef) <- mkMockChannel ["/status", "hello"]
-      runAgentLoop (MockProvider "reply") (ModelId "mock") channel mkNoOpLogHandle Nothing emptyRegistry
+      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
       sent <- readIORef sentRef
       -- First message is /status output, second is provider reply
       length sent `shouldBe` 2
@@ -119,7 +132,7 @@ spec = do
 
     it "/new clears context (provider sees fresh context)" $ do
       (channel, sentRef) <- mkMockChannel ["first message", "/new", "after reset"]
-      runAgentLoop (MockProvider "reply") (ModelId "mock") channel mkNoOpLogHandle Nothing emptyRegistry
+      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
       sent <- readIORef sentRef
       -- Should have: reply to "first message", /new confirmation, reply to "after reset"
       length sent `shouldBe` 3
@@ -128,7 +141,8 @@ spec = do
       chunksRef <- newIORef ([] :: [StreamChunk])
       (channel, _sentRef) <- mkMockChannel ["hello"]
       let channel' = channel { _ch_sendChunk = \c -> modifyIORef chunksRef (<> [c]) }
-      runAgentLoop (StreamingProvider ["He", "llo!"]) (ModelId "mock") channel' mkNoOpLogHandle Nothing emptyRegistry
+          env = (mkTestEnv (StreamingProvider ["He", "llo!"]) channel) { _env_channel = channel' }
+      runAgentLoop env
       chunks <- readIORef chunksRef
       -- Should get text chunks plus ChunkDone
       length chunks `shouldSatisfy` (>= 2)
@@ -139,7 +153,8 @@ spec = do
       let testHandler = ToolHandler $ \_ -> pure ("tool output", False)
           testDef = ToolDefinition "test_tool" "A test tool" (object [])
           registry = registerTool testDef testHandler emptyRegistry
-      runAgentLoop ToolCallProvider (ModelId "mock") channel mkNoOpLogHandle Nothing registry
+          env = (mkTestEnv ToolCallProvider channel) { _env_registry = registry }
+      runAgentLoop env
       sent <- readIORef sentRef
       -- Should get "Let me check." from first response, then "Done!" after tool execution
       sent `shouldBe` ["Let me check.", "Done!"]

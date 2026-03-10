@@ -22,6 +22,7 @@ import System.IO
 
 import PureClaw.CLI.Config
 
+import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Channels.CLI
@@ -219,7 +220,15 @@ runChat opts = do
   putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
   putStrLn "Type your message and press Enter. Ctrl-D to exit."
   putStrLn ""
-  runAgentLoop provider model channel logger sysPrompt registry
+  let env = AgentEnv
+        { _env_provider     = provider
+        , _env_model        = model
+        , _env_channel      = channel
+        , _env_logger       = logger
+        , _env_systemPrompt = sysPrompt
+        , _env_registry     = registry
+        }
+  runAgentLoop env
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType

@@ -10,9 +10,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 import PureClaw.Agent.Context
+import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
 import PureClaw.Core.Errors
-import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
@@ -27,17 +27,17 @@ import PureClaw.Tools.Registry
 --
 -- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
 -- Provider errors are logged and a 'PublicError' is sent to the channel.
-runAgentLoop :: Provider p => p -> ModelId -> ChannelHandle -> LogHandle -> Maybe Text -> ToolRegistry -> IO ()
-runAgentLoop provider model channel logger systemPrompt registry = do
+runAgentLoop :: AgentEnv -> IO ()
+runAgentLoop env = do
   _lh_logInfo logger "Agent loop started"
-  go (emptyContext systemPrompt)
+  go (emptyContext (_env_systemPrompt env))
   where
-    tools = registryDefinitions registry
-    slashEnv = SlashEnv
-      { _se_provider = provider
-      , _se_model    = model
-      , _se_channel  = channel
-      }
+    provider = _env_provider env
+    model    = _env_model env
+    channel  = _env_channel env
+    logger   = _env_logger env
+    registry = _env_registry env
+    tools    = registryDefinitions registry
 
     go ctx = do
       receiveResult <- try @IOException (_ch_receive channel)
@@ -49,7 +49,7 @@ runAgentLoop provider model channel logger systemPrompt registry = do
               case parseSlashCommand (_im_content msg) of
                 Just cmd -> do
                   _lh_logInfo logger $ "Slash command: " <> T.strip (_im_content msg)
-                  ctx' <- executeSlashCommand slashEnv cmd ctx
+                  ctx' <- executeSlashCommand env cmd ctx
                   go ctx'
                 Nothing -> do
                   let userMsg = textMessage User (_im_content msg)

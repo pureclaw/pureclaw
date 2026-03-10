@@ -69,6 +69,7 @@ library
     PureClaw.Tools.Cron
     PureClaw.Tools.Image
     -- Agent
+    PureClaw.Agent.Env
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
     PureClaw.Agent.Memory

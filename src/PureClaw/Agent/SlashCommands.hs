@@ -3,7 +3,6 @@ module PureClaw.Agent.SlashCommands
     SlashCommand (..)
   , parseSlashCommand
     -- * Slash command execution
-  , SlashEnv (..)
   , executeSlashCommand
   ) where
 
@@ -12,9 +11,8 @@ import Data.Text qualified as T
 
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
-import PureClaw.Core.Types
+import PureClaw.Agent.Env
 import PureClaw.Handles.Channel
-import PureClaw.Providers.Class
 
 -- | Recognized slash commands.
 data SlashCommand
@@ -36,27 +34,19 @@ parseSlashCommand input =
     "/compact" -> Just CmdCompact
     _          -> Nothing
 
--- | Environment needed to execute slash commands.
-data SlashEnv p = SlashEnv
-  { _se_provider :: p
-  , _se_model    :: ModelId
-  , _se_channel  :: ChannelHandle
-  }
-
 -- | Execute a slash command against a context.
 -- Returns the updated context.
 executeSlashCommand
-  :: Provider p
-  => SlashEnv p
+  :: AgentEnv
   -> SlashCommand
   -> Context
   -> IO Context
 executeSlashCommand env CmdNew ctx = do
-  _ch_send (_se_channel env) (OutgoingMessage "Session cleared. Starting fresh.")
+  _ch_send (_env_channel env) (OutgoingMessage "Session cleared. Starting fresh.")
   pure (clearMessages ctx)
 
 executeSlashCommand env CmdReset _ctx = do
-  _ch_send (_se_channel env) (OutgoingMessage "Full reset. Context and usage cleared.")
+  _ch_send (_env_channel env) (OutgoingMessage "Full reset. Context and usage cleared.")
   pure (emptyContext (contextSystemPrompt _ctx))
 
 executeSlashCommand env CmdStatus ctx = do
@@ -71,13 +61,13 @@ executeSlashCommand env CmdStatus ctx = do
         , "  Total input tokens: " <> T.pack (show inToks)
         , "  Total output tokens: " <> T.pack (show outToks)
         ]
-  _ch_send (_se_channel env) (OutgoingMessage status)
+  _ch_send (_env_channel env) (OutgoingMessage status)
   pure ctx
 
 executeSlashCommand env CmdCompact ctx = do
   (ctx', result) <- compactContext
-    (_se_provider env)
-    (_se_model env)
+    (_env_provider env)
+    (_env_model env)
     0  -- force compaction regardless of threshold
     defaultKeepRecent
     ctx
@@ -86,5 +76,5 @@ executeSlashCommand env CmdCompact ctx = do
         Compacted o n  -> "Compacted: " <> T.pack (show o)
                        <> " messages → " <> T.pack (show n)
         CompactionError e -> "Compaction failed: " <> e
-  _ch_send (_se_channel env) (OutgoingMessage msg)
+  _ch_send (_env_channel env) (OutgoingMessage msg)
   pure ctx'

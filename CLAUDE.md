@@ -175,15 +175,18 @@ and cross-model adversarial review. See `templates/external-tools-setup.md` for 
 
 When `TeamCreate` and `SendMessage` tools are available, the orchestrator uses Team Mode for parallel agent dispatch. Otherwise it falls back to Task Mode (the existing workflow, unchanged). See `.claude/guides/agent-coordination.md` for details.
 
-## Haskell Skill
+## Haskell Skills
 
-A comprehensive Haskell development skill is installed as a git submodule at:
+Two Haskell skills are installed as a git submodule at `.claude/skills/haskell/`:
 
-```
-.claude/skills/haskell/haskell/SKILL.md
-```
+| Skill | Path | When to use |
+|---|---|---|
+| **haskell-coder** | `.claude/skills/haskell/haskell-coder/SKILL.md` | Writing or modifying Haskell code — type-driven design, GHC extensions, Cabal/Nix, libraries, testing, performance |
+| **haskell-reviewer** | `.claude/skills/haskell/haskell-reviewer/SKILL.md` | Reviewing Haskell code — correctness, idiomatic style, partial functions, performance pitfalls, best practices |
 
-Reference documents (type system, patterns, libraries, GHC extensions, performance, Nix, Cabal) live in `.claude/skills/haskell/haskell/references/`. **Consult this skill for any Haskell architecture decisions, library choices, GHC extension usage, and coding patterns.**
+Reference documents (type system, patterns, libraries, GHC extensions, performance, Nix, Cabal) live in `.claude/skills/haskell/haskell-coder/references/`.
+
+**All coding agents must load `haskell-coder` before writing Haskell. All review agents must load `haskell-reviewer` before reviewing Haskell.**
 
 ## Guides
 
