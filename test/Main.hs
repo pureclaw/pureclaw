@@ -45,6 +45,8 @@ import qualified Providers.OllamaSpec
 import qualified Providers.OpenRouterSpec
 import qualified Security.CryptoSpec
 import qualified Security.PairingSpec
+import qualified Security.VaultAgeSpec
+import qualified Security.VaultSpec
 import qualified Gateway.AuthSpec
 import qualified Gateway.RoutesSpec
 import qualified Gateway.ServerSpec
@@ -101,6 +103,8 @@ main = hspec $ do
   describe "Providers.OpenRouter" Providers.OpenRouterSpec.spec
   describe "Security.Crypto" Security.CryptoSpec.spec
   describe "Security.Pairing" Security.PairingSpec.spec
+  describe "Security.VaultAge" Security.VaultAgeSpec.spec
+  describe "Security.Vault" Security.VaultSpec.spec
   describe "Gateway.Auth" Gateway.AuthSpec.spec
   describe "Gateway.Routes" Gateway.RoutesSpec.spec
   describe "Gateway.Server" Gateway.ServerSpec.spec

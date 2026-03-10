@@ -46,6 +46,8 @@ library
     PureClaw.Security.Secrets
     PureClaw.Security.Crypto
     PureClaw.Security.Pairing
+    PureClaw.Security.Vault
+    PureClaw.Security.Vault.Age
     -- Handles (capability interfaces + real implementations)
     PureClaw.Handles.File
     PureClaw.Handles.Shell
@@ -124,6 +126,7 @@ library
     time,
     tomland,
     transformers,
+    unix,
     typed-process,
     vector,
     wai,
@@ -198,6 +201,8 @@ test-suite pureclaw-test
     Providers.OpenRouterSpec
     Security.CryptoSpec
     Security.PairingSpec
+    Security.VaultAgeSpec
+    Security.VaultSpec
     Gateway.AuthSpec
     Gateway.RoutesSpec
     Gateway.ServerSpec
