@@ -162,7 +162,7 @@ spec = do
     it "unrecognized slash command does not add to context" $ do
       (channel, _sentRef) <- mkMockChannel ["/nosuchcommand", "/also-unknown"]
       callRef <- newIORef (0 :: Int)
-      let env = (mkTestEnv (CountingProvider "reply" callRef) channel)
+      let env = mkTestEnv (CountingProvider "reply" callRef) channel
       runAgentLoop env
       calls <- readIORef callRef
       -- Provider never called — both messages were slash commands
