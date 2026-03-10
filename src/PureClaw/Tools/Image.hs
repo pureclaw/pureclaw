@@ -12,6 +12,7 @@ import Data.Aeson.Types
 import Data.ByteString qualified as BS
 import Data.ByteString.Base64 qualified as B64
 import Data.Text (Text)
+import Data.Char qualified
 import Data.Text qualified as T
 import System.FilePath
 
@@ -79,8 +80,8 @@ detectMediaType ".gif"  = Just "image/gif"
 detectMediaType ".webp" = Just "image/webp"
 detectMediaType _       = Nothing
 
--- | Lowercase a character (ASCII only, avoids Data.Char import overhead).
+-- | Lowercase a character (ASCII only).
 toLowerChar :: Char -> Char
 toLowerChar c
-  | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+  | Data.Char.isAsciiUpper c = toEnum (fromEnum c + 32)
   | otherwise = c

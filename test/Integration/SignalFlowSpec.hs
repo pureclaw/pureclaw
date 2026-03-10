@@ -24,8 +24,8 @@ newtype EchoProvider = EchoProvider Text
 instance Provider EchoProvider where
   complete (EchoProvider prefix) req =
     let userText = T.intercalate " " [t | msg <- _cr_messages req
-                                         , TextBlock t <- _msg_content msg
-                                         , _msg_role msg == User]
+                                         , _msg_role msg == User
+                                         , TextBlock t <- _msg_content msg]
     in pure CompletionResponse
       { _crsp_content = [TextBlock (prefix <> userText)]
       , _crsp_model   = ModelId "mock"

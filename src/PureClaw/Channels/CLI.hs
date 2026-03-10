@@ -29,7 +29,7 @@ mkCLIChannelHandle = ChannelHandle
       TIO.putStrLn ""
   , _ch_sendError = \err ->
       TIO.hPutStrLn stderr $ "Error: " <> T.pack (show err)
-  , _ch_sendChunk = \chunk -> case chunk of
+  , _ch_sendChunk = \case
       ChunkText t -> do
         TIO.putStr t
         hFlush stdout

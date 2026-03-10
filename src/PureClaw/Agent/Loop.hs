@@ -70,7 +70,7 @@ runAgentLoop provider model channel logger systemPrompt registry = do
       responseRef <- newIORef (Nothing :: Maybe CompletionResponse)
       streamedRef <- newIORef False
       providerResult <- try @SomeException $
-        completeStream provider req $ \evt -> case evt of
+        completeStream provider req $ \case
           StreamText t -> do
             _ch_sendChunk channel (ChunkText t)
             writeIORef streamedRef True
