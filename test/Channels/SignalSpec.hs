@@ -1,6 +1,7 @@
 module Channels.SignalSpec (spec) where
 
 import Control.Concurrent.STM
+import Control.Exception
 import Data.Aeson
 import Data.Either (isLeft)
 import Data.Text (Text)
@@ -98,6 +99,12 @@ spec = do
       sc <- mkTestSignalChannel
       let h = toHandle sc
       _ch_sendError h (TemporaryError "oops") `shouldReturn` ()
+
+    it "readSecret throws IOError (vault requires CLI)" $ do
+      sc <- mkTestSignalChannel
+      let h = toHandle sc
+      result <- try @IOError (_ch_readSecret h)
+      result `shouldSatisfy` isLeft
 
 -- Helpers
 

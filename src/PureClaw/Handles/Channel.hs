@@ -41,18 +41,20 @@ data StreamChunk
 -- traces or model names cannot be sent to channel users. This is enforced
 -- at the type level.
 data ChannelHandle = ChannelHandle
-  { _ch_receive   :: IO IncomingMessage
-  , _ch_send      :: OutgoingMessage -> IO ()
-  , _ch_sendError :: PublicError -> IO ()
-  , _ch_sendChunk :: StreamChunk -> IO ()
+  { _ch_receive    :: IO IncomingMessage
+  , _ch_send       :: OutgoingMessage -> IO ()
+  , _ch_sendError  :: PublicError -> IO ()
+  , _ch_sendChunk  :: StreamChunk -> IO ()
+  , _ch_readSecret :: IO Text    -- ^ Read a line without echo (CLI only)
   }
 
 -- | No-op channel handle. Receive returns an empty message, send and
--- sendError are silent.
+-- sendError are silent. readSecret returns empty text.
 mkNoOpChannelHandle :: ChannelHandle
 mkNoOpChannelHandle = ChannelHandle
-  { _ch_receive   = pure (IncomingMessage (UserId "") "")
-  , _ch_send      = \_ -> pure ()
-  , _ch_sendError = \_ -> pure ()
-  , _ch_sendChunk = \_ -> pure ()
+  { _ch_receive    = pure (IncomingMessage (UserId "") "")
+  , _ch_send       = \_ -> pure ()
+  , _ch_sendError  = \_ -> pure ()
+  , _ch_sendChunk  = \_ -> pure ()
+  , _ch_readSecret = pure ""
   }

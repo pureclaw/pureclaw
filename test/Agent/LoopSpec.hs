@@ -179,6 +179,7 @@ mkMockChannel messages = do
         , _ch_send = \msg ->
             modifyIORef sentRef (<> [_om_content msg])
         , _ch_sendError = \_ -> pure ()
-        , _ch_sendChunk = \_ -> pure ()
+        , _ch_sendChunk  = \_ -> pure ()
+        , _ch_readSecret = pure ""
         }
   pure (channel, sentRef)

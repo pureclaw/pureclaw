@@ -25,6 +25,10 @@ spec = do
       _ch_sendError mkNoOpChannelHandle RateLimitError
       _ch_sendError mkNoOpChannelHandle NotAllowedError
 
+    it "readSecret returns empty text" $ do
+      secret <- _ch_readSecret mkNoOpChannelHandle
+      secret `shouldBe` ""
+
   describe "IncomingMessage" $ do
     it "has Show and Eq instances" $ do
       let msg = IncomingMessage (UserId "user1") "hello"

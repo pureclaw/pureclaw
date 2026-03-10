@@ -1,6 +1,7 @@
 module Channels.TelegramSpec (spec) where
 
 import Control.Concurrent.STM
+import Control.Exception
 import Data.Aeson
 import Data.ByteString (ByteString)
 import Data.Either (isLeft)
@@ -128,6 +129,12 @@ spec = do
         Nothing -> expectationFailure "expected POST call"
         Just (_, body) ->
           T.unpack (TE.decodeUtf8 body) `shouldContain` "text="
+
+    it "readSecret throws IOError (vault requires CLI)" $ do
+      tc <- mkTestTelegramChannel
+      let h = toHandle tc
+      result <- try @IOError (_ch_readSecret h)
+      result `shouldSatisfy` isLeft
 
 -- Helpers
 

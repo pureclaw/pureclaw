@@ -3,6 +3,7 @@ module PureClaw.Channels.CLI
     mkCLIChannelHandle
   ) where
 
+import Control.Exception (bracket_)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.IO
@@ -34,4 +35,8 @@ mkCLIChannelHandle = ChannelHandle
         TIO.putStr t
         hFlush stdout
       ChunkDone -> TIO.putStrLn ""
+  , _ch_readSecret = bracket_
+      (hSetEcho stdin False)
+      (hSetEcho stdin True)
+      TIO.getLine
   }

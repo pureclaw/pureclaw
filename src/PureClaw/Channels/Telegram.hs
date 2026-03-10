@@ -61,10 +61,11 @@ mkTelegramChannel config nh lh = do
 
 instance Channel TelegramChannel where
   toHandle tc = ChannelHandle
-    { _ch_receive   = receiveUpdate tc
-    , _ch_send      = sendMessage tc
-    , _ch_sendError = sendTelegramError tc
-    , _ch_sendChunk = \_ -> pure ()  -- Telegram doesn't support streaming
+    { _ch_receive    = receiveUpdate tc
+    , _ch_send       = sendMessage tc
+    , _ch_sendError  = sendTelegramError tc
+    , _ch_sendChunk  = \_ -> pure ()  -- Telegram doesn't support streaming
+    , _ch_readSecret = ioError (userError "Vault management requires the CLI interface")
     }
 
 -- | Block until a Telegram update arrives in the queue.

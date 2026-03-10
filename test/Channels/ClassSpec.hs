@@ -11,10 +11,11 @@ newtype TestChannel = TestChannel IncomingMessage
 
 instance Channel TestChannel where
   toHandle (TestChannel msg) = ChannelHandle
-    { _ch_receive   = pure msg
-    , _ch_send      = \_ -> pure ()
-    , _ch_sendError = \_ -> pure ()
-    , _ch_sendChunk = \_ -> pure ()
+    { _ch_receive    = pure msg
+    , _ch_send       = \_ -> pure ()
+    , _ch_sendError  = \_ -> pure ()
+    , _ch_sendChunk  = \_ -> pure ()
+    , _ch_readSecret = pure ""
     }
 
 spec :: Spec
