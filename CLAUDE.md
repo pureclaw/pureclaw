@@ -175,6 +175,16 @@ and cross-model adversarial review. See `templates/external-tools-setup.md` for 
 
 When `TeamCreate` and `SendMessage` tools are available, the orchestrator uses Team Mode for parallel agent dispatch. Otherwise it falls back to Task Mode (the existing workflow, unchanged). See `.claude/guides/agent-coordination.md` for details.
 
+## Haskell Skill
+
+A comprehensive Haskell development skill is installed as a git submodule at:
+
+```
+.claude/skills/haskell/haskell/SKILL.md
+```
+
+Reference documents (type system, patterns, libraries, GHC extensions, performance, Nix, Cabal) live in `.claude/skills/haskell/haskell/references/`. **Consult this skill for any Haskell architecture decisions, library choices, GHC extension usage, and coding patterns.**
+
 ## Guides
 
 Development patterns and standards are documented in `.claude/guides/`:
@@ -194,8 +204,8 @@ Development patterns and standards are documented in `.claude/guides/`:
 
 ## Key Decisions
 
-<!-- Document important architectural decisions here so agents have context.
-     These get loaded during knowledge priming (/prime). -->
+- **AgentEnv**: All `runAgentLoop` parameters are collected into a single `AgentEnv` record. Pass `AgentEnv` to the agent loop and to slash command handlers (replaces the old `SlashEnv`). Decompose fields at call sites as needed.
+- **Handle pattern**: Every capability is a record of IO actions. No global state. Handles are passed explicitly.
 
 ## Notes
 

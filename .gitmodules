@@ -1,0 +1,3 @@
+[submodule ".claude/skills/haskell"]
+	path = .claude/skills/haskell
+	url = https://github.com/mightybyte/haskell-skill
