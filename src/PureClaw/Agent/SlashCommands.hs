@@ -122,7 +122,7 @@ executeSlashCommand env (CmdVault sub) ctx =
   case _env_vault env of
     Nothing -> do
       _ch_send (_env_channel env)
-        (OutgoingMessage "No vault configured. Add vault settings to .pureclaw/config.toml.")
+        (OutgoingMessage "No vault configured. Add vault settings to ~/.pureclaw/config.toml.")
       pure ctx
     Just vault ->
       executeVaultCommand env vault sub ctx

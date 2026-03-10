@@ -26,6 +26,18 @@ instance Provider MockProvider where
     , _crsp_usage   = Nothing
     }
 
+-- | A mock provider that records how many times it was called.
+data CountingProvider = CountingProvider Text (IORef Int)
+
+instance Provider CountingProvider where
+  complete (CountingProvider response callRef) _ = do
+    modifyIORef callRef (+1)
+    pure CompletionResponse
+      { _crsp_content = [TextBlock response]
+      , _crsp_model   = ModelId "mock"
+      , _crsp_usage   = Nothing
+      }
+
 -- | A mock provider that always fails.
 data FailingProvider = FailingProvider
 
@@ -130,6 +142,31 @@ spec = do
           T.unpack statusMsg `shouldContain` "Messages"
           replyMsg `shouldBe` "reply"
         _ -> expectationFailure "expected two messages"
+
+    -- Invariant: slash-prefixed messages NEVER reach the provider
+    it "unknown slash command never calls provider" $ do
+      callRef <- newIORef (0 :: Int)
+      (channel, sentRef) <- mkMockChannel ["/unknown-command", "hello"]
+      let env = mkTestEnv (CountingProvider "reply" callRef) channel
+      runAgentLoop env
+      calls <- readIORef callRef
+      sent <- readIORef sentRef
+      -- Provider called exactly once (for "hello"), not for the slash command
+      calls `shouldBe` 1
+      -- Unknown slash command gets an error response, "hello" gets a reply
+      length sent `shouldBe` 2
+      case sent of
+        (first:_) -> T.unpack first `shouldContain` "Unknown command"
+        []        -> expectationFailure "expected messages"
+
+    it "unrecognized slash command does not add to context" $ do
+      (channel, _sentRef) <- mkMockChannel ["/nosuchcommand", "/also-unknown"]
+      callRef <- newIORef (0 :: Int)
+      let env = mkTestEnv (CountingProvider "reply" callRef) channel
+      runAgentLoop env
+      calls <- readIORef callRef
+      -- Provider never called — both messages were slash commands
+      calls `shouldBe` 0
 
     it "/new clears context (provider sees fresh context)" $ do
       (channel, sentRef) <- mkMockChannel ["first message", "/new", "after reset"]

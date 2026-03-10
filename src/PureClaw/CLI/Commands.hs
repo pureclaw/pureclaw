@@ -120,7 +120,7 @@ chatOptionsParser = ChatOptions
   <*> optional (strOption
       ( long "config"
      <> short 'c'
-     <> help "Path to config file (default: .pureclaw/config.toml or ~/.config/pureclaw/config.toml)"
+     <> help "Path to config file (default: ~/.pureclaw/config.toml or ~/.config/pureclaw/config.toml)"
       ))
   <*> switch
       ( long "no-vault"
@@ -328,8 +328,12 @@ tryVaultLookup (Just vh) key = do
 -- | Resolve the memory backend.
 resolveMemory :: MemoryBackend -> IO MemoryHandle
 resolveMemory NoMemory       = pure mkNoOpMemoryHandle
-resolveMemory SQLiteMemory   = mkSQLiteMemoryHandle ".pureclaw/memory.db"
-resolveMemory MarkdownMemory = mkMarkdownMemoryHandle ".pureclaw/memory"
+resolveMemory SQLiteMemory   = do
+  dir <- getPureclawDir
+  mkSQLiteMemoryHandle (dir ++ "/memory.db")
+resolveMemory MarkdownMemory = do
+  dir <- getPureclawDir
+  mkMarkdownMemoryHandle (dir ++ "/memory")
 
 -- | Open the vault if configured. Returns 'Nothing' if:
 -- - @--no-vault@ flag is set, or
@@ -349,7 +353,8 @@ resolveVault fileCfg False logger =
           _lh_logInfo logger $ "Vault disabled (age not available): " <> T.pack (show err)
           pure Nothing
         Right enc -> do
-          let path   = maybe ".pureclaw/vault.age" T.unpack (_fc_vault_path fileCfg)
+          dir <- getPureclawDir
+          let path   = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
               mode   = parseUnlockMode (_fc_vault_unlock fileCfg)
               cfg    = VaultConfig
                 { _vc_path      = path

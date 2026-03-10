@@ -1,7 +1,8 @@
 module CLI.ConfigSpec (spec) where
 
-import System.IO.Temp (withSystemTempDirectory)
+import System.Directory (getHomeDirectory)
 import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Data.Text.IO qualified as TIO
 import Test.Hspec
 
@@ -139,6 +140,12 @@ spec = do
         TIO.writeFile path "this is not = valid toml !!!\n"
         cfg <- loadFileConfig path
         cfg `shouldBe` emptyFileConfig
+
+  describe "getPureclawDir" $ do
+    it "returns a path ending in .pureclaw under the home directory" $ do
+      dir <- getPureclawDir
+      home <- getHomeDirectory
+      dir `shouldBe` (home </> ".pureclaw")
 
   describe "emptyFileConfig" $ do
     it "has all Nothing fields" $ do
