@@ -44,19 +44,29 @@ runAgentLoop env = do
       case receiveResult of
         Left _ -> _lh_logInfo logger "Session ended"
         Right msg
-          | T.null (T.strip (_im_content msg)) -> go ctx
-          | otherwise ->
-              case parseSlashCommand (_im_content msg) of
+          | T.null stripped -> go ctx
+          -- INVARIANT: any message beginning with '/' is handled locally and
+          -- NEVER forwarded to the provider. Unknown slash commands get an
+          -- error response rather than silently routing to the LLM.
+          | "/" `T.isPrefixOf` stripped ->
+              case parseSlashCommand stripped of
                 Just cmd -> do
-                  _lh_logInfo logger $ "Slash command: " <> T.strip (_im_content msg)
+                  _lh_logInfo logger $ "Slash command: " <> stripped
                   ctx' <- executeSlashCommand env cmd ctx
                   go ctx'
                 Nothing -> do
-                  let userMsg = textMessage User (_im_content msg)
-                      ctx' = addMessage userMsg ctx
-                  _lh_logDebug logger $
-                    "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-                  handleCompletion ctx'
+                  _lh_logWarn logger $ "Unrecognized slash command: " <> stripped
+                  _ch_send channel
+                    (OutgoingMessage ("Unknown command: " <> stripped
+                      <> "\nType /status for session info, /help for available commands."))
+                  go ctx
+          | otherwise -> do
+              let userMsg = textMessage User stripped
+                  ctx' = addMessage userMsg ctx
+              _lh_logDebug logger $
+                "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
+              handleCompletion ctx'
+          where stripped = T.strip (_im_content msg)
 
     handleCompletion ctx = do
       let req = CompletionRequest
