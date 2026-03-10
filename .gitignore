@@ -25,3 +25,6 @@ result-*
 # OS
 .DS_Store
 *.log
+
+.pureclaw
+config.toml

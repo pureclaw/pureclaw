@@ -10,6 +10,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
 import Database.SQLite.Simple
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath (takeDirectory)
 
 import PureClaw.Core.Types
 import PureClaw.Handles.Memory
@@ -18,6 +20,7 @@ import PureClaw.Handles.Memory
 -- given path and creates the schema if needed.
 mkSQLiteMemoryHandle :: FilePath -> IO MemoryHandle
 mkSQLiteMemoryHandle dbPath = do
+  createDirectoryIfMissing True (takeDirectory dbPath)
   conn <- open dbPath
   initSchema conn
   counterRef <- newIORef (0 :: Int)
