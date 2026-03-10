@@ -115,8 +115,23 @@ spec = do
         Just opts -> _co_soul opts `shouldBe` Nothing
         Nothing -> expectationFailure "parse failed"
 
+    it "parses --config flag" $ do
+      case parseArgs ["--config", "/path/to/config.toml"] of
+        Just opts -> _co_config opts `shouldBe` Just "/path/to/config.toml"
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses -c short flag for config" $ do
+      case parseArgs ["-c", "myconfig.toml"] of
+        Just opts -> _co_config opts `shouldBe` Just "myconfig.toml"
+        Nothing -> expectationFailure "parse failed"
+
+    it "config defaults to Nothing" $ do
+      case parseArgs [] of
+        Just opts -> _co_config opts `shouldBe` Nothing
+        Nothing -> expectationFailure "parse failed"
+
     it "parses all flags together" $ do
-      case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief"] of
+      case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml"] of
         Just opts -> do
           _co_provider opts `shouldBe` Just OpenAI
           _co_model opts `shouldBe` Just "gpt-4"
@@ -125,6 +140,7 @@ spec = do
           _co_memory opts `shouldBe` Just SQLiteMemory
           _co_soul opts `shouldBe` Just "SOUL.md"
           _co_system opts `shouldBe` Just "Be brief"
+          _co_config opts `shouldBe` Just "my.toml"
         Nothing -> expectationFailure "parse failed"
 
   describe "ProviderType" $ do

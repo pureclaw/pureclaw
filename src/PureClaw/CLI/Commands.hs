@@ -73,6 +73,7 @@ data ChatOptions = ChatOptions
   , _co_allowCommands :: [String]
   , _co_memory        :: Maybe MemoryBackend
   , _co_soul          :: Maybe String
+  , _co_config        :: Maybe FilePath
   }
   deriving stock (Show, Eq)
 
@@ -110,6 +111,11 @@ chatOptionsParser = ChatOptions
   <*> optional (strOption
       ( long "soul"
      <> help "Path to SOUL.md identity file (default: ./SOUL.md if it exists)"
+      ))
+  <*> optional (strOption
+      ( long "config"
+     <> short 'c'
+     <> help "Path to config file (default: .pureclaw/config.toml or ~/.config/pureclaw/config.toml)"
       ))
 
 -- | Parse a provider type from a CLI string.
@@ -161,8 +167,8 @@ runChat :: ChatOptions -> IO ()
 runChat opts = do
   let logger = mkStderrLogHandle
 
-  -- Load config file (project-local first, then user-global)
-  fileCfg <- loadConfig
+  -- Load config file: --config flag overrides default search locations
+  fileCfg <- maybe loadConfig loadFileConfig (_co_config opts)
 
   -- Resolve effective values: CLI flag > config file > default
   let effectiveProvider = fromMaybe Anthropic  (_co_provider opts <|> parseProviderMaybe (_fc_provider fileCfg))
