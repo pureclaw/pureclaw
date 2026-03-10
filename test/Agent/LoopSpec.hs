@@ -4,6 +4,7 @@ import Control.Exception
 import Data.Aeson (object, (.=))
 import Data.IORef
 import Data.Text (Text)
+import Data.Text qualified as T
 import Test.Hspec
 
 import PureClaw.Agent.Loop
@@ -85,6 +86,26 @@ spec = do
       sent `shouldBe` []
       errs <- readIORef errRef
       length errs `shouldBe` 1
+
+    it "handles slash commands without calling provider" $ do
+      (channel, sentRef) <- mkMockChannel ["/status", "hello"]
+      runAgentLoop (MockProvider "reply") (ModelId "mock") channel mkNoOpLogHandle Nothing emptyRegistry
+      sent <- readIORef sentRef
+      -- First message is /status output, second is provider reply
+      length sent `shouldBe` 2
+      -- The /status response should contain session info
+      case sent of
+        (statusMsg:replyMsg:_) -> do
+          T.unpack statusMsg `shouldContain` "Messages"
+          replyMsg `shouldBe` "reply"
+        _ -> expectationFailure "expected two messages"
+
+    it "/new clears context (provider sees fresh context)" $ do
+      (channel, sentRef) <- mkMockChannel ["first message", "/new", "after reset"]
+      runAgentLoop (MockProvider "reply") (ModelId "mock") channel mkNoOpLogHandle Nothing emptyRegistry
+      sent <- readIORef sentRef
+      -- Should have: reply to "first message", /new confirmation, reply to "after reset"
+      length sent `shouldBe` 3
 
     it "executes tool calls and sends final text" $ do
       (channel, sentRef) <- mkMockChannel ["do something"]
