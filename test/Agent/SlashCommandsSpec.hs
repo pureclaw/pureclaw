@@ -442,7 +442,7 @@ spec = do
         Just t -> T.unpack t `shouldContain` "Error reading secret"
         Nothing -> expectationFailure "Expected error message"
 
-    it "/vault unknown subcommand shows help text" $ do
+    it "/vault unknown subcommand refers to /help" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       let env = mkEnvWithVault sentRef vault
@@ -452,15 +452,106 @@ spec = do
       case sent of
         Just t -> do
           T.unpack t `shouldContain` "Unknown vault command"
-          T.unpack t `shouldContain` "init"
-          T.unpack t `shouldContain` "list"
+          T.unpack t `shouldContain` "/help"
         Nothing -> expectationFailure "Expected help text"
+
+  describe "allCommandSpecs / CommandSpec registry" $ do
+    it "is non-empty" $
+      length allCommandSpecs `shouldSatisfy` (> 0)
+
+    it "every spec parses its own syntax keyword" $
+      -- Each spec's _cs_parse should recognise the command it was built for.
+      -- We verify this by checking that parseSlashCommand can find all
+      -- non-argument commands (the ones whose syntax has no '<').
+      let noArgSpecs = filter (not . T.isInfixOf "<" . _cs_syntax) allCommandSpecs
+      in mapM_ (\s -> parseSlashCommand (_cs_syntax s) `shouldSatisfy` (not . null)) noArgSpecs
+
+    it "parseSlashCommand covers all spec syntaxes (no orphan specs)" $
+      -- No spec should produce Nothing when its own syntax is parsed.
+      -- Argument-bearing commands ("/vault add <name>") need a concrete arg,
+      -- so we only test exact-match specs here.
+      let exactSpecs = filter (not . T.isInfixOf "<" . _cs_syntax) allCommandSpecs
+      in mapM_ (\s -> parseSlashCommand (_cs_syntax s) `shouldSatisfy` (not . null)) exactSpecs
+
+  describe "parseSlashCommand — /help" $ do
+    it "parses /help" $
+      parseSlashCommand "/help" `shouldBe` Just CmdHelp
+
+    it "parses /HELP (case-insensitive)" $
+      parseSlashCommand "/HELP" `shouldBe` Just CmdHelp
+
+    it "parses /Help with surrounding whitespace" $
+      parseSlashCommand "  /help  " `shouldBe` Just CmdHelp
+
+  describe "executeSlashCommand — /help" $ do
+    it "/help sends a message containing all command syntaxes" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = Nothing
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env CmdHelp ctx
+      sent <- readIORef sentRef
+      case sent of
+        Nothing -> expectationFailure "Expected /help output"
+        Just t  -> do
+          -- Every spec syntax should appear in the /help output
+          mapM_ (\s -> T.unpack t `shouldContain` T.unpack (_cs_syntax s)) allCommandSpecs
+
+    it "/help output contains group headings" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = Nothing
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env CmdHelp ctx
+      sent <- readIORef sentRef
+      case sent of
+        Nothing -> expectationFailure "Expected /help output"
+        Just t  -> do
+          T.unpack t `shouldContain` "Session"
+          T.unpack t `shouldContain` "Vault"
+
+    it "/help does not modify context" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = Nothing
+            }
+          ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
+      ctx' <- executeSlashCommand env CmdHelp ctx
+      ctx' `shouldBe` ctx
 
   describe "SlashCommand" $ do
     it "has Show and Eq instances" $ do
       show CmdNew `shouldContain` "CmdNew"
       CmdNew `shouldBe` CmdNew
       CmdNew `shouldNotBe` CmdReset
+
+    it "CmdHelp has Show and Eq instances" $ do
+      show CmdHelp `shouldContain` "CmdHelp"
+      CmdHelp `shouldBe` CmdHelp
+      CmdHelp `shouldNotBe` CmdNew
 
     it "vault subcommands have Show and Eq instances" $ do
       show (CmdVault VaultList) `shouldContain` "VaultList"
