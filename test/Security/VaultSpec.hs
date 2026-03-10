@@ -16,12 +16,11 @@ withMockVault :: UnlockMode -> (VaultHandle -> FilePath -> IO ()) -> IO ()
 withMockVault mode action =
   withSystemTempDirectory "pureclaw-vault-test" $ \dir -> do
     let cfg = VaultConfig
-              { _vc_path      = dir <> "/test.vault"
-              , _vc_recipient = "age1examplerecipient"
-              , _vc_identity  = "/path/to/identity"
-              , _vc_unlock    = mode
+              { _vc_path    = dir <> "/test.vault"
+              , _vc_keyType = "Mock"
+              , _vc_unlock  = mode
               }
-    vh <- openVault cfg mkMockAgeEncryptor
+    vh <- openVault cfg mkMockVaultEncryptor
     action vh (dir <> "/test.vault")
 
 spec :: Spec
@@ -166,8 +165,14 @@ spec = do
         st <- _vh_status vh
         _vs_secretCount st `shouldBe` 2
 
-    it "reports X25519 key type for age1 recipient prefix" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+    it "reports X25519 key type when configured" $ do
+      withSystemTempDirectory "pureclaw-vault-test" $ \dir -> do
+        let cfg = VaultConfig
+                  { _vc_path    = dir <> "/test2.vault"
+                  , _vc_keyType = "X25519"
+                  , _vc_unlock  = UnlockStartup
+                  }
+        vh <- openVault cfg mkMockVaultEncryptor
         _ <- _vh_init vh
         st <- _vh_status vh
         _vs_keyType st `shouldBe` "X25519"
@@ -175,12 +180,11 @@ spec = do
     it "reports YubiKey PIV key type for age-plugin-yubikey prefix" $ do
       withSystemTempDirectory "pureclaw-vault-test" $ \dir -> do
         let cfg = VaultConfig
-                  { _vc_path      = dir <> "/test2.vault"
-                  , _vc_recipient = "age-plugin-yubikey-1abc"
-                  , _vc_identity  = "/path/to/identity"
-                  , _vc_unlock    = UnlockStartup
+                  { _vc_path    = dir <> "/test3.vault"
+                  , _vc_keyType = "YubiKey PIV"
+                  , _vc_unlock  = UnlockStartup
                   }
-        vh <- openVault cfg mkMockAgeEncryptor
+        vh <- openVault cfg mkMockVaultEncryptor
         _ <- _vh_init vh
         st <- _vh_status vh
         _vs_keyType st `shouldBe` "YubiKey PIV"
@@ -207,7 +211,7 @@ spec = do
 
   describe "VaultConfig" $ do
     it "has Show and Eq instances" $ do
-      let cfg = VaultConfig "/tmp/test.vault" "age1abc" "/id" UnlockStartup
+      let cfg = VaultConfig "/tmp/test.vault" "Mock" UnlockStartup
       show cfg `shouldContain` "VaultConfig"
       cfg `shouldBe` cfg
 
@@ -217,3 +221,15 @@ spec = do
       show UnlockOnDemand  `shouldBe` "UnlockOnDemand"
       show UnlockPerAccess `shouldBe` "UnlockPerAccess"
       UnlockStartup `shouldNotBe` UnlockOnDemand
+
+  describe "_vh_unlock" $ do
+    it "returns VaultNotFound when vault file does not exist" $ do
+      withSystemTempDirectory "pureclaw-vault-test" $ \dir -> do
+        let cfg = VaultConfig
+                  { _vc_path    = dir <> "/nonexistent.vault"
+                  , _vc_keyType = "Mock"
+                  , _vc_unlock  = UnlockStartup
+                  }
+        vh <- openVault cfg mkMockVaultEncryptor
+        result <- _vh_unlock vh
+        result `shouldBe` Left VaultNotFound

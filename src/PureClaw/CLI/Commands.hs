@@ -9,6 +9,7 @@ module PureClaw.CLI.Commands
   , MemoryBackend (..)
   ) where
 
+import Control.Exception (bracket_)
 import Data.ByteString (ByteString)
 import Data.Maybe
 import Data.Set qualified as Set
@@ -17,6 +18,7 @@ import Data.Text.Encoding qualified as TE
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
+import System.Directory (doesFileExist)
 import System.Environment
 import System.Exit
 import System.IO
@@ -44,6 +46,7 @@ import PureClaw.Security.Policy
 import PureClaw.Security.Secrets
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
+import PureClaw.Security.Vault.Passphrase
 import PureClaw.Tools.FileRead
 import PureClaw.Tools.FileWrite
 import PureClaw.Tools.Git
@@ -335,44 +338,89 @@ resolveMemory MarkdownMemory = do
   dir <- getPureclawDir
   mkMarkdownMemoryHandle (dir ++ "/memory")
 
--- | Open the vault if configured. Returns 'Nothing' if:
--- - @--no-vault@ flag is set, or
--- - vault_recipient or vault_identity are not configured, or
--- - the age binary is not installed (logs warning and continues).
--- For 'UnlockStartup' mode, also attempts to unlock the vault at startup.
+-- | Open the vault if configured. Returns 'Nothing' if @--no-vault@ is set.
+-- When age keys are configured, uses age public-key encryption.
+-- Otherwise, falls back to passphrase-based encryption (works out of the box).
 resolveVault :: FileConfig -> Bool -> LogHandle -> IO (Maybe VaultHandle)
 resolveVault _ True _ = pure Nothing
 resolveVault fileCfg False logger =
   case (_fc_vault_recipient fileCfg, _fc_vault_identity fileCfg) of
-    (Nothing, _) -> pure Nothing
-    (_, Nothing) -> pure Nothing
-    (Just recipient, Just identity) -> do
-      encResult <- mkAgeEncryptor
-      case encResult of
-        Left err -> do
-          _lh_logInfo logger $ "Vault disabled (age not available): " <> T.pack (show err)
-          pure Nothing
-        Right enc -> do
-          dir <- getPureclawDir
-          let path   = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
-              mode   = parseUnlockMode (_fc_vault_unlock fileCfg)
-              cfg    = VaultConfig
-                { _vc_path      = path
-                , _vc_recipient = recipient
-                , _vc_identity  = identity
-                , _vc_unlock    = mode
-                }
-          vault <- openVault cfg enc
-          -- For startup mode, attempt unlock now; failure is non-fatal
-          case mode of
-            UnlockStartup -> do
-              result <- _vh_unlock vault
-              case result of
-                Left err -> _lh_logInfo logger $
-                  "Vault startup unlock failed (vault will be locked): " <> T.pack (show err)
-                Right () -> _lh_logInfo logger "Vault unlocked."
-            _ -> pure ()
-          pure (Just vault)
+    (Just recipient, Just identity) -> resolveAgeVault fileCfg recipient identity logger
+    _                               -> resolvePassphraseVault fileCfg logger
+
+-- | Resolve vault using age public-key encryption (existing behaviour).
+resolveAgeVault :: FileConfig -> T.Text -> T.Text -> LogHandle -> IO (Maybe VaultHandle)
+resolveAgeVault fileCfg recipient identity logger = do
+  encResult <- mkAgeEncryptor
+  case encResult of
+    Left err -> do
+      _lh_logInfo logger $ "Vault disabled (age not available): " <> T.pack (show err)
+      pure Nothing
+    Right enc -> do
+      dir <- getPureclawDir
+      let path  = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
+          mode  = parseUnlockMode (_fc_vault_unlock fileCfg)
+          enc'  = ageVaultEncryptor enc recipient identity
+          cfg   = VaultConfig
+            { _vc_path    = path
+            , _vc_keyType = inferAgeKeyType recipient
+            , _vc_unlock  = mode
+            }
+      vault <- openVault cfg enc'
+      case mode of
+        UnlockStartup -> do
+          result <- _vh_unlock vault
+          case result of
+            Left err -> _lh_logInfo logger $
+              "Vault startup unlock failed (vault will be locked): " <> T.pack (show err)
+            Right () -> _lh_logInfo logger "Vault unlocked."
+        _ -> pure ()
+      pure (Just vault)
+
+-- | Resolve vault using passphrase-based encryption (default when no age keys configured).
+-- Prompts for passphrase on stdin at startup (if vault file exists), or reads
+-- from the PURECLAW_VAULT_PASSPHRASE environment variable.
+resolvePassphraseVault :: FileConfig -> LogHandle -> IO (Maybe VaultHandle)
+resolvePassphraseVault fileCfg logger = do
+  dir <- getPureclawDir
+  let path = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
+      cfg  = VaultConfig
+        { _vc_path    = path
+        , _vc_keyType = "AES-256 (passphrase)"
+        , _vc_unlock  = UnlockStartup
+        }
+  let getPass = do
+        envPass <- lookupEnv "PURECLAW_VAULT_PASSPHRASE"
+        case envPass of
+          Just p  -> pure (TE.encodeUtf8 (T.pack p))
+          Nothing -> do
+            putStr "Vault passphrase: "
+            hFlush stdout
+            pass <- bracket_
+              (hSetEcho stdin False)
+              (hSetEcho stdin True >> putStrLn "")
+              getLine
+            pure (TE.encodeUtf8 (T.pack pass))
+  enc <- mkPassphraseVaultEncryptor getPass
+  vault <- openVault cfg enc
+  exists <- doesFileExist path
+  if exists
+    then do
+      result <- _vh_unlock vault
+      case result of
+        Left err -> _lh_logInfo logger $
+          "Vault unlock failed: " <> T.pack (show err)
+        Right () -> _lh_logInfo logger "Vault unlocked."
+    else
+      _lh_logInfo logger "Vault ready (not yet initialized — use /vault init to set up)."
+  pure (Just vault)
+
+-- | Infer a human-readable key type from the age recipient prefix.
+inferAgeKeyType :: T.Text -> T.Text
+inferAgeKeyType recipient
+  | "age-plugin-yubikey" `T.isPrefixOf` recipient = "YubiKey PIV"
+  | "age1"               `T.isPrefixOf` recipient = "X25519"
+  | otherwise                                      = "Unknown"
 
 -- | Parse vault unlock mode from config text.
 parseUnlockMode :: Maybe T.Text -> UnlockMode

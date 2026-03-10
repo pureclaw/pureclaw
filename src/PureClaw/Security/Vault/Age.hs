@@ -8,6 +8,10 @@ module PureClaw.Security.Vault.Age
   , mkAgeEncryptor
   , mkMockAgeEncryptor
   , mkFailingAgeEncryptor
+    -- * Simplified vault encryptor (credentials captured in closure)
+  , VaultEncryptor (..)
+  , ageVaultEncryptor
+  , mkMockVaultEncryptor
   ) where
 
 import Data.Bits (xor)
@@ -95,3 +99,27 @@ mkFailingAgeEncryptor err = AgeEncryptor
   { _ae_encrypt = \_ _ -> pure (Left err)
   , _ae_decrypt = \_ _ -> pure (Left err)
   }
+
+-- | Simplified encryptor: credentials are captured in the closure.
+-- Replaces the explicit AgeRecipient/AgeIdentity arguments at call sites.
+data VaultEncryptor = VaultEncryptor
+  { _ve_encrypt :: ByteString -> IO (Either VaultError ByteString)
+  , _ve_decrypt :: ByteString -> IO (Either VaultError ByteString)
+  }
+
+-- | Create a 'VaultEncryptor' from an 'AgeEncryptor' with specific recipient/identity.
+ageVaultEncryptor :: AgeEncryptor -> Text -> Text -> VaultEncryptor
+ageVaultEncryptor enc recipient identity = VaultEncryptor
+  { _ve_encrypt = _ae_encrypt enc (AgeRecipient recipient)
+  , _ve_decrypt = _ae_decrypt enc (AgeIdentity identity)
+  }
+
+-- | A mock 'VaultEncryptor' for unit tests (XOR like 'mkMockAgeEncryptor').
+mkMockVaultEncryptor :: VaultEncryptor
+mkMockVaultEncryptor = VaultEncryptor
+  { _ve_encrypt = pure . Right . mockXor
+  , _ve_decrypt = pure . Right . mockXor
+  }
+  where
+    mockXor :: ByteString -> ByteString
+    mockXor = BS.map (`xor` 0xAB)

@@ -11,6 +11,7 @@ module PureClaw.Security.Vault
 
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
+import Control.Exception (IOException, try)
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -33,10 +34,9 @@ data UnlockMode
 
 -- | Configuration for a vault.
 data VaultConfig = VaultConfig
-  { _vc_path      :: FilePath
-  , _vc_recipient :: Text    -- ^ age recipient string
-  , _vc_identity  :: Text    -- ^ age identity path or plugin string
-  , _vc_unlock    :: UnlockMode
+  { _vc_path    :: FilePath
+  , _vc_keyType :: Text    -- ^ human-readable key type for /vault status
+  , _vc_unlock  :: UnlockMode
   }
   deriving stock (Show, Eq)
 
@@ -63,13 +63,13 @@ data VaultHandle = VaultHandle
 -- Internal state, not exported.
 data VaultState = VaultState
   { _vst_config    :: VaultConfig
-  , _vst_encryptor :: AgeEncryptor
+  , _vst_encryptor :: VaultEncryptor
   , _vst_tvar      :: TVar (Maybe (Map Text ByteString))
   , _vst_writeLock :: MVar ()  -- ^ serialises init/put/delete
   }
 
 -- | Construct a 'VaultHandle'. Does not unlock; caller decides when.
-openVault :: VaultConfig -> AgeEncryptor -> IO VaultHandle
+openVault :: VaultConfig -> VaultEncryptor -> IO VaultHandle
 openVault cfg enc = do
   tvar  <- newTVarIO Nothing
   mvar  <- newMVar ()
@@ -97,9 +97,7 @@ vaultInit st = withMVar (_vst_writeLock st) $ \_ -> do
     else do
       let emptyMap = Map.empty :: Map Text ByteString
           jsonBs   = BS.toStrict (Aeson.encode (encodedMap emptyMap))
-      encrypted <- _ae_encrypt (_vst_encryptor st)
-                    (AgeRecipient (_vc_recipient (_vst_config st)))
-                    jsonBs
+      encrypted <- _ve_encrypt (_vst_encryptor st) jsonBs
       case encrypted of
         Left err  -> pure (Left err)
         Right ciphertext -> do
@@ -108,21 +106,22 @@ vaultInit st = withMVar (_vst_writeLock st) $ \_ -> do
 
 vaultUnlock :: VaultState -> IO (Either VaultError ())
 vaultUnlock st = do
-  fileBs <- BS.readFile (_vc_path (_vst_config st))
-  plainResult <- _ae_decrypt (_vst_encryptor st)
-                   (AgeIdentity (_vc_identity (_vst_config st)))
-                   fileBs
-  case plainResult of
-    Left err -> pure (Left err)
-    Right plain ->
-      case Aeson.decodeStrict plain of
-        Nothing  -> pure (Left (VaultCorrupted "invalid JSON"))
-        Just encoded ->
-          case decodeMap encoded of
-            Nothing  -> pure (Left (VaultCorrupted "invalid base64 in vault"))
-            Just m   -> do
-              atomically (writeTVar (_vst_tvar st) (Just m))
-              pure (Right ())
+  fileResult <- try @IOException (BS.readFile (_vc_path (_vst_config st)))
+  case fileResult of
+    Left  _      -> pure (Left VaultNotFound)
+    Right fileBs -> do
+      plainResult <- _ve_decrypt (_vst_encryptor st) fileBs
+      case plainResult of
+        Left err -> pure (Left err)
+        Right plain ->
+          case Aeson.decodeStrict plain of
+            Nothing  -> pure (Left (VaultCorrupted "invalid JSON"))
+            Just encoded ->
+              case decodeMap encoded of
+                Nothing  -> pure (Left (VaultCorrupted "invalid base64 in vault"))
+                Just m   -> do
+                  atomically (writeTVar (_vst_tvar st) (Just m))
+                  pure (Right ())
 
 vaultLock :: VaultState -> IO ()
 vaultLock st = atomically (writeTVar (_vst_tvar st) Nothing)
@@ -254,11 +253,10 @@ vaultStatus st = do
                  Nothing -> True
                  Just _  -> False
       count  = maybe 0 Map.size current
-      keyTy  = inferKeyType (_vc_recipient (_vst_config st))
   pure VaultStatus
     { _vs_locked      = locked
     , _vs_secretCount = count
-    , _vs_keyType     = keyTy
+    , _vs_keyType     = _vc_keyType (_vst_config st)
     }
 
 -- ---------------------------------------------------------------------------
@@ -268,27 +266,26 @@ vaultStatus st = do
 -- | Read vault file and decrypt to a map.
 readAndDecryptMap :: VaultState -> IO (Either VaultError (Map Text ByteString))
 readAndDecryptMap st = do
-  fileBs <- BS.readFile (_vc_path (_vst_config st))
-  plainResult <- _ae_decrypt (_vst_encryptor st)
-                   (AgeIdentity (_vc_identity (_vst_config st)))
-                   fileBs
-  case plainResult of
-    Left err -> pure (Left err)
-    Right plain ->
-      case Aeson.decodeStrict plain of
-        Nothing      -> pure (Left (VaultCorrupted "invalid JSON"))
-        Just encoded ->
-          case decodeMap encoded of
-            Nothing -> pure (Left (VaultCorrupted "invalid base64 in vault"))
-            Just m  -> pure (Right m)
+  fileResult <- try @IOException (BS.readFile (_vc_path (_vst_config st)))
+  case fileResult of
+    Left  _      -> pure (Left VaultNotFound)
+    Right fileBs -> do
+      plainResult <- _ve_decrypt (_vst_encryptor st) fileBs
+      case plainResult of
+        Left err -> pure (Left err)
+        Right plain ->
+          case Aeson.decodeStrict plain of
+            Nothing      -> pure (Left (VaultCorrupted "invalid JSON"))
+            Just encoded ->
+              case decodeMap encoded of
+                Nothing -> pure (Left (VaultCorrupted "invalid base64 in vault"))
+                Just m  -> pure (Right m)
 
 -- | Serialise map to JSON, encrypt, and atomically write to disk.
 encryptAndWrite :: VaultState -> Map Text ByteString -> IO (Either VaultError ())
 encryptAndWrite st m = do
   let jsonBs = BS.toStrict (Aeson.encode (encodedMap m))
-  encrypted <- _ae_encrypt (_vst_encryptor st)
-                 (AgeRecipient (_vc_recipient (_vst_config st)))
-                 jsonBs
+  encrypted <- _ve_encrypt (_vst_encryptor st) jsonBs
   case encrypted of
     Left err  -> pure (Left err)
     Right ciphertext -> do
@@ -347,9 +344,3 @@ decodeMap = traverse decodeValue
     encodeUtf8 :: Text -> ByteString
     encodeUtf8 = BS.pack . map (fromIntegral . fromEnum) . T.unpack
 
--- | Infer a human-readable key type from the age recipient prefix.
-inferKeyType :: Text -> Text
-inferKeyType recipient
-  | "age-plugin-yubikey" `T.isPrefixOf` recipient = "YubiKey PIV"
-  | "age1"               `T.isPrefixOf` recipient = "X25519"
-  | otherwise                                      = "Unknown"

@@ -48,6 +48,7 @@ library
     PureClaw.Security.Pairing
     PureClaw.Security.Vault
     PureClaw.Security.Vault.Age
+    PureClaw.Security.Vault.Passphrase
     -- Handles (capability interfaces + real implementations)
     PureClaw.Handles.File
     PureClaw.Handles.Shell
@@ -202,6 +203,7 @@ test-suite pureclaw-test
     Security.CryptoSpec
     Security.PairingSpec
     Security.VaultAgeSpec
+    Security.VaultPassphraseSpec
     Security.VaultSpec
     Gateway.AuthSpec
     Gateway.RoutesSpec
