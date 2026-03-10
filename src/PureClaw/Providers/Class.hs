@@ -4,6 +4,8 @@ module PureClaw.Providers.Class
   , ContentBlock (..)
   , Message (..)
   , roleToText
+    -- * Tool result content
+  , ToolResultPart (..)
     -- * Convenience constructors
   , textMessage
   , toolResultMessage
@@ -17,6 +19,8 @@ module PureClaw.Providers.Class
   , CompletionRequest (..)
   , CompletionResponse (..)
   , Usage (..)
+    -- * Streaming
+  , StreamEvent (..)
     -- * Provider typeclass
   , Provider (..)
     -- * Existential wrapper
@@ -24,6 +28,7 @@ module PureClaw.Providers.Class
   ) where
 
 import Data.Aeson (Value)
+import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -39,6 +44,10 @@ data Role = User | Assistant
 -- more content blocks, allowing mixed text and tool interactions.
 data ContentBlock
   = TextBlock Text
+  | ImageBlock
+      { _ib_mediaType :: Text       -- ^ MIME type (e.g. "image/png")
+      , _ib_data      :: ByteString -- ^ base64-encoded image data
+      }
   | ToolUseBlock
       { _tub_id    :: ToolCallId
       , _tub_name  :: Text
@@ -46,9 +55,16 @@ data ContentBlock
       }
   | ToolResultBlock
       { _trb_toolUseId :: ToolCallId
-      , _trb_content   :: Text
+      , _trb_content   :: [ToolResultPart]
       , _trb_isError   :: Bool
       }
+  deriving stock (Show, Eq)
+
+-- | Content within a tool result. Supports text and images so that
+-- vision tools can return image data alongside descriptions.
+data ToolResultPart
+  = TRPText Text
+  | TRPImage Text ByteString  -- ^ (mediaType, base64Data)
   deriving stock (Show, Eq)
 
 -- | A single message in a conversation. Content is a list of blocks
@@ -69,7 +85,7 @@ textMessage :: Role -> Text -> Message
 textMessage role txt = Message role [TextBlock txt]
 
 -- | Create a tool result message (user role with tool results).
-toolResultMessage :: [(ToolCallId, Text, Bool)] -> Message
+toolResultMessage :: [(ToolCallId, [ToolResultPart], Bool)] -> Message
 toolResultMessage results = Message User
   [ ToolResultBlock callId content isErr
   | (callId, content, isErr) <- results
@@ -129,10 +145,24 @@ data CompletionResponse = CompletionResponse
   }
   deriving stock (Show, Eq)
 
+-- | Events emitted during streaming completion.
+data StreamEvent
+  = StreamText Text                -- ^ Partial text content
+  | StreamToolUse ToolCallId Text  -- ^ Tool call started (id, name)
+  | StreamToolInput Text           -- ^ Partial tool input JSON
+  | StreamDone CompletionResponse  -- ^ Stream finished with full response
+  deriving stock (Show, Eq)
+
 -- | LLM provider interface. Each provider (Anthropic, OpenAI, etc.)
 -- implements this typeclass.
 class Provider p where
   complete :: p -> CompletionRequest -> IO CompletionResponse
+  -- | Stream a completion, calling the callback for each event.
+  -- Default falls back to non-streaming 'complete'.
+  completeStream :: p -> CompletionRequest -> (StreamEvent -> IO ()) -> IO ()
+  completeStream p req callback = do
+    resp <- complete p req
+    callback (StreamDone resp)
 
 -- | Existential wrapper for runtime provider selection (e.g. from config).
 data SomeProvider where
@@ -140,3 +170,4 @@ data SomeProvider where
 
 instance Provider SomeProvider where
   complete (MkProvider p) = complete p
+  completeStream (MkProvider p) = completeStream p

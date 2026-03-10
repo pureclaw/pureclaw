@@ -32,6 +32,7 @@ import qualified Handles.ProcessSpec
 import qualified Tools.WebSearchSpec
 import qualified Tools.MessageSpec
 import qualified Tools.CronSpec
+import qualified Tools.ImageSpec
 import qualified Memory.NoneSpec
 import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
@@ -52,6 +53,7 @@ import qualified Channels.SignalSpec
 import qualified Agent.IdentitySpec
 import qualified Scheduler.CronSpec
 import qualified Scheduler.HeartbeatSpec
+import qualified Integration.SignalFlowSpec
 
 main :: IO ()
 main = hspec $ do
@@ -85,6 +87,7 @@ main = hspec $ do
   describe "Tools.WebSearch" Tools.WebSearchSpec.spec
   describe "Tools.Message" Tools.MessageSpec.spec
   describe "Tools.Cron" Tools.CronSpec.spec
+  describe "Tools.Image" Tools.ImageSpec.spec
   describe "Memory.None" Memory.NoneSpec.spec
   describe "Memory.Markdown" Memory.MarkdownSpec.spec
   describe "Memory.SQLite" Memory.SQLiteSpec.spec
@@ -105,3 +108,4 @@ main = hspec $ do
   describe "Agent.Identity" Agent.IdentitySpec.spec
   describe "Scheduler.Cron" Scheduler.CronSpec.spec
   describe "Scheduler.Heartbeat" Scheduler.HeartbeatSpec.spec
+  describe "Integration.SignalFlow" Integration.SignalFlowSpec.spec

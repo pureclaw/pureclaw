@@ -49,6 +49,7 @@ instance Channel SignalChannel where
     { _ch_receive   = receiveEnvelope sc
     , _ch_send      = sendSignalMessage sc
     , _ch_sendError = sendSignalError sc
+    , _ch_sendChunk = \_ -> pure ()  -- Signal doesn't support streaming
     }
 
 -- | Block until a Signal envelope arrives in the queue.

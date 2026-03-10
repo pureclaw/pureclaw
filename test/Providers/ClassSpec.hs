@@ -109,8 +109,8 @@ spec = do
       _tub_name block `shouldBe` "shell"
 
     it "supports ToolResultBlock" $ do
-      let block = ToolResultBlock (ToolCallId "1") "output" False
-      _trb_content block `shouldBe` "output"
+      let block = ToolResultBlock (ToolCallId "1") [TRPText "output"] False
+      _trb_content block `shouldBe` [TRPText "output"]
       _trb_isError block `shouldBe` False
 
   describe "SomeProvider" $ do

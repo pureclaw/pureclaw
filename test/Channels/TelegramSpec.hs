@@ -2,8 +2,12 @@ module Channels.TelegramSpec (spec) where
 
 import Control.Concurrent.STM
 import Data.Aeson
+import Data.ByteString (ByteString)
 import Data.Either (isLeft)
+import Data.IORef
 import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Test.Hspec
 
 import PureClaw.Channels.Class
@@ -73,15 +77,57 @@ spec = do
       msg `shouldBe` msg
 
   describe "send and sendError" $ do
-    it "send completes without error" $ do
+    it "send without prior receive logs warning (no chat_id)" $ do
       tc <- mkTestTelegramChannel
       let h = toHandle tc
       _ch_send h (OutgoingMessage "test") `shouldReturn` ()
 
-    it "sendError completes without error" $ do
+    it "sendError without prior receive logs warning" $ do
       tc <- mkTestTelegramChannel
       let h = toHandle tc
       _ch_sendError h (TemporaryError "oops") `shouldReturn` ()
+
+    it "send after receive POSTs to Telegram API" $ do
+      postRef <- newIORef (Nothing :: Maybe (Text, ByteString))
+      let nh = mkNoOpNetworkHandle
+            { _nh_httpPost = \url body -> do
+                writeIORef postRef (Just (getAllowedUrl url, body))
+                pure HttpResponse { _hr_statusCode = 200, _hr_body = "{}" }
+            }
+      tc <- mkTelegramChannel (TelegramConfig "test-token" "https://api.telegram.org") nh mkNoOpLogHandle
+      let update = mkTestUpdate 1 42 "Alice" 100 "private" "Hello"
+      atomically $ writeTQueue (_tch_inbox tc) update
+      let h = toHandle tc
+      _ <- _ch_receive h
+      _ch_send h (OutgoingMessage "reply text")
+      posted <- readIORef postRef
+      case posted of
+        Nothing -> expectationFailure "expected POST call"
+        Just (url, body) -> do
+          T.unpack url `shouldContain` "/bot"
+          T.unpack url `shouldContain` "test-token"
+          T.unpack url `shouldContain` "sendMessage"
+          T.unpack (TE.decodeUtf8 body) `shouldContain` "chat_id="
+          T.unpack (TE.decodeUtf8 body) `shouldContain` "text="
+
+    it "sendError after receive POSTs error message" $ do
+      postRef <- newIORef (Nothing :: Maybe (Text, ByteString))
+      let nh = mkNoOpNetworkHandle
+            { _nh_httpPost = \url body -> do
+                writeIORef postRef (Just (getAllowedUrl url, body))
+                pure HttpResponse { _hr_statusCode = 200, _hr_body = "{}" }
+            }
+      tc <- mkTelegramChannel (TelegramConfig "tok" "https://api.telegram.org") nh mkNoOpLogHandle
+      let update = mkTestUpdate 1 42 "Bob" 200 "private" "hi"
+      atomically $ writeTQueue (_tch_inbox tc) update
+      let h = toHandle tc
+      _ <- _ch_receive h
+      _ch_sendError h RateLimitError
+      posted <- readIORef postRef
+      case posted of
+        Nothing -> expectationFailure "expected POST call"
+        Just (_, body) ->
+          T.unpack (TE.decodeUtf8 body) `shouldContain` "text="
 
 -- Helpers
 

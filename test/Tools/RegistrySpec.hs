@@ -28,7 +28,7 @@ spec = do
           handler = ToolHandler $ \_ -> pure ("echoed", False)
           reg = registerTool def' handler emptyRegistry
       result <- executeTool reg "echo" (object [])
-      result `shouldBe` Just ("echoed", False)
+      result `shouldBe` Just ([TRPText "echoed"], False)
 
     it "returns Nothing for unregistered tools" $ do
       let def' = ToolDefinition "echo" "Echo tool" (object [])

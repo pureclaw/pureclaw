@@ -14,6 +14,7 @@ instance Channel TestChannel where
     { _ch_receive   = pure msg
     , _ch_send      = \_ -> pure ()
     , _ch_sendError = \_ -> pure ()
+    , _ch_sendChunk = \_ -> pure ()
     }
 
 spec :: Spec

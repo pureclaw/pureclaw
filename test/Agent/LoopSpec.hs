@@ -31,6 +31,23 @@ data FailingProvider = FailingProvider
 instance Provider FailingProvider where
   complete FailingProvider _ = throwIO (userError "provider failure")
 
+-- | A mock provider that streams text chunks.
+newtype StreamingProvider = StreamingProvider [Text]
+
+instance Provider StreamingProvider where
+  complete (StreamingProvider chunks) _ = pure CompletionResponse
+    { _crsp_content = [TextBlock (mconcat chunks)]
+    , _crsp_model   = ModelId "mock"
+    , _crsp_usage   = Nothing
+    }
+  completeStream (StreamingProvider chunks) _ callback = do
+    mapM_ (callback . StreamText) chunks
+    callback $ StreamDone CompletionResponse
+      { _crsp_content = [TextBlock (mconcat chunks)]
+      , _crsp_model   = ModelId "mock"
+      , _crsp_usage   = Nothing
+      }
+
 -- | A mock provider that returns a tool use block, then text on the follow-up.
 data ToolCallProvider = ToolCallProvider
 
@@ -107,6 +124,16 @@ spec = do
       -- Should have: reply to "first message", /new confirmation, reply to "after reset"
       length sent `shouldBe` 3
 
+    it "streams text chunks to the channel" $ do
+      chunksRef <- newIORef ([] :: [StreamChunk])
+      (channel, _sentRef) <- mkMockChannel ["hello"]
+      let channel' = channel { _ch_sendChunk = \c -> modifyIORef chunksRef (<> [c]) }
+      runAgentLoop (StreamingProvider ["He", "llo!"]) (ModelId "mock") channel' mkNoOpLogHandle Nothing emptyRegistry
+      chunks <- readIORef chunksRef
+      -- Should get text chunks plus ChunkDone
+      length chunks `shouldSatisfy` (>= 2)
+      last chunks `shouldBe` ChunkDone
+
     it "executes tool calls and sends final text" $ do
       (channel, sentRef) <- mkMockChannel ["do something"]
       let testHandler = ToolHandler $ \_ -> pure ("tool output", False)
@@ -137,5 +164,6 @@ mkMockChannel messages = do
         , _ch_send = \msg ->
             modifyIORef sentRef (<> [_om_content msg])
         , _ch_sendError = \_ -> pure ()
+        , _ch_sendChunk = \_ -> pure ()
         }
   pure (channel, sentRef)

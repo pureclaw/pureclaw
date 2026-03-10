@@ -101,17 +101,20 @@ encodeMsg msg = case _msg_content msg of
 encodeContentBlock :: ContentBlock -> Value
 encodeContentBlock (TextBlock t) = object
   [ "type" .= ("text" :: Text), "text" .= t ]
+encodeContentBlock (ImageBlock mediaType imageData) = object
+  [ "type" .= ("image_url" :: Text)
+  , "image_url" .= object
+      [ "url" .= ("data:" <> mediaType <> ";base64," <> TE.decodeUtf8 imageData) ]
+  ]
 encodeContentBlock (ToolUseBlock callId name input) = object
   [ "type" .= ("function" :: Text)
   , "id"   .= unToolCallId callId
-  , "function" .= object ["name" .= name, "arguments" .= decodeUtf8Lenient (BL.toStrict (encode input))]
+  , "function" .= object ["name" .= name, "arguments" .= TE.decodeUtf8 (BL.toStrict (encode input))]
   ]
-  where
-    decodeUtf8Lenient = TE.decodeUtf8
-encodeContentBlock (ToolResultBlock callId content _) = object
+encodeContentBlock (ToolResultBlock callId parts _) = object
   [ "type"         .= ("tool_result" :: Text)
   , "tool_call_id" .= unToolCallId callId
-  , "content"      .= content
+  , "content"      .= T.intercalate "\n" [t | TRPText t <- parts]
   ]
 
 encodeTool :: ToolDefinition -> Value

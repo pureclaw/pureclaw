@@ -83,7 +83,12 @@ formatMessage msg =
 extractText :: ContentBlock -> Text
 extractText (TextBlock t) = t
 extractText (ToolUseBlock _ name _) = "[tool:" <> name <> "]"
-extractText (ToolResultBlock _ content _) = "[result:" <> T.take 100 content <> "]"
+extractText (ImageBlock mediaType _) = "[image:" <> mediaType <> "]"
+extractText (ToolResultBlock _ parts _) = "[result:" <> T.take 100 (partsText parts) <> "]"
+
+-- | Extract text from tool result parts.
+partsText :: [ToolResultPart] -> Text
+partsText ps = T.intercalate " " [t | TRPText t <- ps]
 
 -- | Call the provider to generate a summary.
 summarize :: Provider p => p -> ModelId -> Text -> IO (Either Text Text)

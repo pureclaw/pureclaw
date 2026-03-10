@@ -23,6 +23,7 @@ module PureClaw.Agent.Context
   ) where
 
 import Data.Aeson (encode)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -72,7 +73,13 @@ estimateBlockTokens :: ContentBlock -> Int
 estimateBlockTokens (TextBlock t) = estimateTokens t
 estimateBlockTokens (ToolUseBlock _ name input) =
   estimateTokens name + fromIntegral (BL.length (encode input) `div` 4)
-estimateBlockTokens (ToolResultBlock _ content _) = estimateTokens content
+estimateBlockTokens (ImageBlock _ bs) = max 1 (BS.length bs `div` 4)
+estimateBlockTokens (ToolResultBlock _ parts _) = sum (map estimatePartTokens parts)
+
+-- | Estimate tokens for a tool result part.
+estimatePartTokens :: ToolResultPart -> Int
+estimatePartTokens (TRPText t) = estimateTokens t
+estimatePartTokens (TRPImage _ bs) = max 1 (BS.length bs `div` 4)
 
 -- | Estimate token count for a message.
 estimateMessageTokens :: Message -> Int

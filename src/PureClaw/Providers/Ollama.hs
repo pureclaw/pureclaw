@@ -85,8 +85,14 @@ encodeMsg msg = case _msg_content msg of
     object ["role" .= roleToText (_msg_role msg), "content" .= t]
   blocks ->
     -- Ollama supports content as string only; concatenate text blocks
-    let textParts = [t | TextBlock t <- blocks]
+    let textParts = concatMap blockText blocks
     in object ["role" .= roleToText (_msg_role msg), "content" .= T.intercalate "\n" textParts]
+
+blockText :: ContentBlock -> [Text]
+blockText (TextBlock t) = [t]
+blockText (ImageBlock _ _) = ["[image]"]
+blockText (ToolUseBlock _ name _) = ["[tool:" <> name <> "]"]
+blockText (ToolResultBlock _ parts _) = [t | TRPText t <- parts]
 
 encodeTool :: ToolDefinition -> Value
 encodeTool td = object

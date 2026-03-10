@@ -83,7 +83,7 @@ spec = do
       estimateBlockTokens block `shouldSatisfy` (> 0)
 
     it "estimates tool result blocks" $ do
-      let block = ToolResultBlock (ToolCallId "c1") "file contents here" False
+      let block = ToolResultBlock (ToolCallId "c1") [TRPText "file contents here"] False
       estimateBlockTokens block `shouldSatisfy` (> 0)
 
   describe "estimateMessageTokens" $ do

@@ -12,9 +12,13 @@ module PureClaw.Channels.Telegram
   ) where
 
 import Control.Concurrent.STM
+import Control.Exception
 import Data.Aeson
+import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Network.HTTP.Types.URI qualified as URI
 
 import PureClaw.Channels.Class
 import PureClaw.Core.Errors
@@ -35,21 +39,24 @@ data TelegramConfig = TelegramConfig
 -- pulls them out via 'receive'. Responses are sent via the Telegram
 -- Bot API using the provided 'NetworkHandle'.
 data TelegramChannel = TelegramChannel
-  { _tch_config  :: TelegramConfig
-  , _tch_inbox   :: TQueue TelegramUpdate
-  , _tch_network :: NetworkHandle
-  , _tch_log     :: LogHandle
+  { _tch_config   :: TelegramConfig
+  , _tch_inbox    :: TQueue TelegramUpdate
+  , _tch_network  :: NetworkHandle
+  , _tch_log      :: LogHandle
+  , _tch_lastChat :: IORef (Maybe Int)
   }
 
 -- | Create a Telegram channel with an empty inbox.
 mkTelegramChannel :: TelegramConfig -> NetworkHandle -> LogHandle -> IO TelegramChannel
 mkTelegramChannel config nh lh = do
   inbox <- newTQueueIO
+  chatRef <- newIORef Nothing
   pure TelegramChannel
-    { _tch_config  = config
-    , _tch_inbox   = inbox
-    , _tch_network = nh
-    , _tch_log     = lh
+    { _tch_config   = config
+    , _tch_inbox    = inbox
+    , _tch_network  = nh
+    , _tch_log      = lh
+    , _tch_lastChat = chatRef
     }
 
 instance Channel TelegramChannel where
@@ -57,6 +64,7 @@ instance Channel TelegramChannel where
     { _ch_receive   = receiveUpdate tc
     , _ch_send      = sendMessage tc
     , _ch_sendError = sendTelegramError tc
+    , _ch_sendChunk = \_ -> pure ()  -- Telegram doesn't support streaming
     }
 
 -- | Block until a Telegram update arrives in the queue.
@@ -65,23 +73,56 @@ receiveUpdate tc = do
   update <- atomically $ readTQueue (_tch_inbox tc)
   let msg = _tu_message update
       userId = T.pack (show (_tu_id (_tm_from msg)))
+      chatId = _tcht_id (_tm_chat msg)
       content = _tm_text msg
+  writeIORef (_tch_lastChat tc) (Just chatId)
   pure IncomingMessage
     { _im_userId  = UserId userId
     , _im_content = content
     }
 
--- | Send a message to the chat that the last update came from.
--- In a full implementation this would POST to the Telegram sendMessage API.
--- For now, logs the outgoing message.
+-- | Send a message to the last active chat via the Telegram Bot API.
 sendMessage :: TelegramChannel -> OutgoingMessage -> IO ()
-sendMessage tc msg =
-  _lh_logInfo (_tch_log tc) $ "Telegram send: " <> _om_content msg
+sendMessage tc msg = do
+  chatId <- readIORef (_tch_lastChat tc)
+  case chatId of
+    Nothing -> _lh_logWarn (_tch_log tc) "No chat_id available for send"
+    Just cid -> do
+      result <- try @SomeException (postTelegram tc "sendMessage" cid (_om_content msg))
+      case result of
+        Left e -> _lh_logError (_tch_log tc) $ "Telegram send failed: " <> T.pack (show e)
+        Right resp
+          | _hr_statusCode resp == 200 -> pure ()
+          | otherwise ->
+              _lh_logError (_tch_log tc) $
+                "Telegram API error " <> T.pack (show (_hr_statusCode resp))
 
--- | Send an error to the Telegram chat.
+-- | Send an error message to the Telegram chat.
 sendTelegramError :: TelegramChannel -> PublicError -> IO ()
-sendTelegramError tc err =
-  _lh_logWarn (_tch_log tc) $ "Telegram error: " <> T.pack (show err)
+sendTelegramError tc err = do
+  chatId <- readIORef (_tch_lastChat tc)
+  case chatId of
+    Nothing -> _lh_logWarn (_tch_log tc) "No chat_id available for error send"
+    Just cid -> do
+      let errText = case err of
+            RateLimitError -> "Rate limited. Please try again in a moment."
+            NotAllowedError -> "Not allowed."
+            TemporaryError t -> t
+      result <- try @SomeException (postTelegram tc "sendMessage" cid errText)
+      case result of
+        Left e -> _lh_logError (_tch_log tc) $ "Telegram error send failed: " <> T.pack (show e)
+        Right _ -> pure ()
+
+-- | POST to a Telegram Bot API method with chat_id and text parameters.
+postTelegram :: TelegramChannel -> Text -> Int -> Text -> IO HttpResponse
+postTelegram tc method chatId text = do
+  let config = _tch_config tc
+      url = _tc_apiBase config <> "/bot" <> _tc_botToken config <> "/" <> method
+      body = "chat_id=" <> URI.urlEncode False (TE.encodeUtf8 (T.pack (show chatId)))
+          <> "&text=" <> URI.urlEncode False (TE.encodeUtf8 text)
+  case mkAllowedUrl AllowAll url of
+    Left e -> throwIO (userError ("Bad Telegram URL: " <> show e))
+    Right allowed -> _nh_httpPost (_tch_network tc) allowed body
 
 -- | A Telegram Update object (simplified).
 data TelegramUpdate = TelegramUpdate

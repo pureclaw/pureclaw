@@ -182,8 +182,28 @@ spec = do
       show (AnthropicAPIError 401 "unauthorized") `shouldContain` "401"
       show (AnthropicParseError "bad json") `shouldContain` "bad json"
 
+  describe "parseSSELine" $ do
+    it "parses a data line with JSON" $ do
+      let line = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}"
+      parseSSELine line `shouldSatisfy` isJust
+
+    it "returns Nothing for non-data lines" $ do
+      parseSSELine "event: content_block_delta" `shouldBe` Nothing
+      parseSSELine "" `shouldBe` Nothing
+
+    it "returns Nothing for malformed JSON" $ do
+      parseSSELine "data: not-json" `shouldBe` Nothing
+
+    it "parses message_start events" $ do
+      let line = "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\",\"content\":[]}}"
+      parseSSELine line `shouldSatisfy` isJust
+
 -- | Check if a JSON Value (assumed Object) contains a given key.
 hasKey :: Key -> Value -> Bool
 hasKey k (Object obj) = KM.member k obj
 hasKey _ _ = False
+
+isJust :: Maybe a -> Bool
+isJust (Just _) = True
+isJust Nothing = False
 

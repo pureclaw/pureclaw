@@ -67,6 +67,7 @@ library
     PureClaw.Tools.WebSearch
     PureClaw.Tools.Message
     PureClaw.Tools.Cron
+    PureClaw.Tools.Image
     -- Agent
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
@@ -103,6 +104,7 @@ library
     aeson,
     async,
     base16-bytestring,
+    base64-bytestring,
     bytestring,
     containers,
     crypton,
@@ -181,6 +183,7 @@ test-suite pureclaw-test
     Tools.WebSearchSpec
     Tools.MessageSpec
     Tools.CronSpec
+    Tools.ImageSpec
     Memory.MarkdownSpec
     Memory.SQLiteSpec
     Memory.NoneSpec
@@ -201,12 +204,15 @@ test-suite pureclaw-test
     Agent.IdentitySpec
     Scheduler.CronSpec
     Scheduler.HeartbeatSpec
+    Integration.SignalFlowSpec
   hs-source-dirs:   test
   build-depends:
     base,
     pureclaw,
     aeson,
+    async,
     base16-bytestring,
+    base64-bytestring,
     bytestring,
     containers,
     directory,
