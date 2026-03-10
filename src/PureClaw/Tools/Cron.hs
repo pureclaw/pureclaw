@@ -34,13 +34,12 @@ mkCronHandle ref = CronHandle
       let job = CronJob { _cj_name = name, _cj_expr = expr, _cj_action = action }
       atomicModifyIORef' ref $ \sched -> (addJob job sched, ())
       pure True
-  , _crh_remove = \name -> do
-      found <- atomicModifyIORef' ref $ \sched ->
+  , _crh_remove = \name ->
+      atomicModifyIORef' ref $ \sched ->
         let before = length (schedulerJobNames sched)
             sched' = removeJob name sched
             after = length (schedulerJobNames sched')
         in (sched', before /= after)
-      pure found
   , _crh_list = do
       sched <- readIORef ref
       pure [(name, formatCronExpr expr)
