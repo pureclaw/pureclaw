@@ -9,6 +9,7 @@ module PureClaw.CLI.Commands
   , MemoryBackend (..)
   ) where
 
+import Data.ByteString (ByteString)
 import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -41,6 +42,8 @@ import PureClaw.Providers.OpenAI
 import PureClaw.Providers.OpenRouter
 import PureClaw.Security.Policy
 import PureClaw.Security.Secrets
+import PureClaw.Security.Vault
+import PureClaw.Security.Vault.Age
 import PureClaw.Tools.FileRead
 import PureClaw.Tools.FileWrite
 import PureClaw.Tools.Git
@@ -75,6 +78,7 @@ data ChatOptions = ChatOptions
   , _co_memory        :: Maybe MemoryBackend
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
+  , _co_noVault       :: Bool
   }
   deriving stock (Show, Eq)
 
@@ -118,6 +122,10 @@ chatOptionsParser = ChatOptions
      <> short 'c'
      <> help "Path to config file (default: .pureclaw/config.toml or ~/.config/pureclaw/config.toml)"
       ))
+  <*> switch
+      ( long "no-vault"
+     <> help "Disable vault even if configured in config file"
+      )
 
 -- | Parse a provider type from a CLI string.
 parseProviderType :: ReadM ProviderType
@@ -179,9 +187,12 @@ runChat opts = do
       effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
       effectiveAllow    = _co_allowCommands opts <> maybe [] (map T.unpack) (_fc_allow fileCfg)
 
+  -- Vault (opened before provider so API keys can be fetched from vault)
+  vaultOpt <- resolveVault fileCfg (_co_noVault opts) logger
+
   -- Provider
   manager <- HTTP.newTlsManager
-  provider <- resolveProvider effectiveProvider effectiveApiKey manager
+  provider <- resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
 
   -- Model
   let model = ModelId (T.pack effectiveModel)
@@ -227,7 +238,7 @@ runChat opts = do
         , _env_logger       = logger
         , _env_systemPrompt = sysPrompt
         , _env_registry     = registry
-        , _env_vault        = Nothing
+        , _env_vault        = vaultOpt
         }
   runAgentLoop env
 
@@ -274,30 +285,95 @@ buildPolicy cmds =
     }
 
 -- | Resolve the LLM provider from the provider type.
-resolveProvider :: ProviderType -> Maybe String -> HTTP.Manager -> IO SomeProvider
-resolveProvider Anthropic keyOpt manager = do
-  apiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY"
+-- Checks the vault for the API key (using the env var name as the vault key)
+-- before falling back to CLI flag or environment variable.
+resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
+resolveProvider Anthropic keyOpt vaultOpt manager = do
+  apiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
   pure (MkProvider (mkAnthropicProvider manager apiKey))
-resolveProvider OpenAI keyOpt manager = do
-  apiKey <- resolveApiKey keyOpt "OPENAI_API_KEY"
+resolveProvider OpenAI keyOpt vaultOpt manager = do
+  apiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
   pure (MkProvider (mkOpenAIProvider manager apiKey))
-resolveProvider OpenRouter keyOpt manager = do
-  apiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY"
+resolveProvider OpenRouter keyOpt vaultOpt manager = do
+  apiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
   pure (MkProvider (mkOpenRouterProvider manager apiKey))
-resolveProvider Ollama _ manager =
+resolveProvider Ollama _ _ manager =
   pure (MkProvider (mkOllamaProvider manager))
 
--- | Resolve an API key from a CLI flag or an environment variable.
-resolveApiKey :: Maybe String -> String -> IO ApiKey
-resolveApiKey (Just key) _ = pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
-resolveApiKey Nothing envVar = do
-  envKey <- lookupEnv envVar
-  case envKey of
-    Just key -> pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
-    Nothing  -> die $ "No API key provided. Use --api-key or set " <> envVar
+-- | Resolve an API key from: CLI flag → vault → environment variable.
+resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO ApiKey
+resolveApiKey (Just key) _ _ = pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
+resolveApiKey Nothing envVar vaultOpt = do
+  vaultKey <- tryVaultLookup vaultOpt (T.pack envVar)
+  case vaultKey of
+    Just bs -> pure (mkApiKey bs)
+    Nothing -> do
+      envKey <- lookupEnv envVar
+      case envKey of
+        Just key -> pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
+        Nothing  -> die $
+          "No API key provided. Use --api-key, set " <> envVar
+          <> ", or store in vault with /vault add " <> envVar
+
+-- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
+-- absent, locked, or does not contain the key.
+tryVaultLookup :: Maybe VaultHandle -> T.Text -> IO (Maybe ByteString)
+tryVaultLookup Nothing   _   = pure Nothing
+tryVaultLookup (Just vh) key = do
+  result <- _vh_get vh key
+  case result of
+    Right bs -> pure (Just bs)
+    Left  _  -> pure Nothing
 
 -- | Resolve the memory backend.
 resolveMemory :: MemoryBackend -> IO MemoryHandle
 resolveMemory NoMemory       = pure mkNoOpMemoryHandle
 resolveMemory SQLiteMemory   = mkSQLiteMemoryHandle ".pureclaw/memory.db"
 resolveMemory MarkdownMemory = mkMarkdownMemoryHandle ".pureclaw/memory"
+
+-- | Open the vault if configured. Returns 'Nothing' if:
+-- - @--no-vault@ flag is set, or
+-- - vault_recipient or vault_identity are not configured, or
+-- - the age binary is not installed (logs warning and continues).
+-- For 'UnlockStartup' mode, also attempts to unlock the vault at startup.
+resolveVault :: FileConfig -> Bool -> LogHandle -> IO (Maybe VaultHandle)
+resolveVault _ True _ = pure Nothing
+resolveVault fileCfg False logger =
+  case (_fc_vault_recipient fileCfg, _fc_vault_identity fileCfg) of
+    (Nothing, _) -> pure Nothing
+    (_, Nothing) -> pure Nothing
+    (Just recipient, Just identity) -> do
+      encResult <- mkAgeEncryptor
+      case encResult of
+        Left err -> do
+          _lh_logInfo logger $ "Vault disabled (age not available): " <> T.pack (show err)
+          pure Nothing
+        Right enc -> do
+          let path   = maybe ".pureclaw/vault.age" T.unpack (_fc_vault_path fileCfg)
+              mode   = parseUnlockMode (_fc_vault_unlock fileCfg)
+              cfg    = VaultConfig
+                { _vc_path      = path
+                , _vc_recipient = recipient
+                , _vc_identity  = identity
+                , _vc_unlock    = mode
+                }
+          vault <- openVault cfg enc
+          -- For startup mode, attempt unlock now; failure is non-fatal
+          case mode of
+            UnlockStartup -> do
+              result <- _vh_unlock vault
+              case result of
+                Left err -> _lh_logInfo logger $
+                  "Vault startup unlock failed (vault will be locked): " <> T.pack (show err)
+                Right () -> _lh_logInfo logger "Vault unlocked."
+            _ -> pure ()
+          pure (Just vault)
+
+-- | Parse vault unlock mode from config text.
+parseUnlockMode :: Maybe T.Text -> UnlockMode
+parseUnlockMode Nothing            = UnlockOnDemand
+parseUnlockMode (Just t) = case t of
+  "startup"    -> UnlockStartup
+  "on_demand"  -> UnlockOnDemand
+  "per_access" -> UnlockPerAccess
+  _            -> UnlockOnDemand

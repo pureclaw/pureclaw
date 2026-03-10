@@ -63,35 +63,75 @@ spec = do
         cfg <- loadFileConfig path
         _fc_allow cfg `shouldBe` Just ["git", "ls"]
 
+    it "parses vault_recipient" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "vault_recipient = \"age1abc\"\n"
+        cfg <- loadFileConfig path
+        _fc_vault_recipient cfg `shouldBe` Just "age1abc"
+
+    it "parses vault_identity" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "vault_identity = \"~/.age/key.txt\"\n"
+        cfg <- loadFileConfig path
+        _fc_vault_identity cfg `shouldBe` Just "~/.age/key.txt"
+
+    it "parses vault_path" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "vault_path = \"/custom/vault.age\"\n"
+        cfg <- loadFileConfig path
+        _fc_vault_path cfg `shouldBe` Just "/custom/vault.age"
+
+    it "parses vault_unlock" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "vault_unlock = \"startup\"\n"
+        cfg <- loadFileConfig path
+        _fc_vault_unlock cfg `shouldBe` Just "startup"
+
     it "parses all fields together" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
         TIO.writeFile path $ mconcat
-          [ "api_key  = \"sk-test\"\n"
-          , "model    = \"claude-haiku-4-5-20251001\"\n"
-          , "provider = \"anthropic\"\n"
-          , "system   = \"Be helpful.\"\n"
-          , "memory   = \"markdown\"\n"
-          , "allow    = [\"git\", \"curl\"]\n"
+          [ "api_key          = \"sk-test\"\n"
+          , "model            = \"claude-haiku-4-5-20251001\"\n"
+          , "provider         = \"anthropic\"\n"
+          , "system           = \"Be helpful.\"\n"
+          , "memory           = \"markdown\"\n"
+          , "allow            = [\"git\", \"curl\"]\n"
+          , "vault_recipient  = \"age1xyz\"\n"
+          , "vault_identity   = \"~/.age/key.txt\"\n"
+          , "vault_path       = \".pureclaw/vault.age\"\n"
+          , "vault_unlock     = \"on_demand\"\n"
           ]
         cfg <- loadFileConfig path
-        _fc_apiKey   cfg `shouldBe` Just "sk-test"
-        _fc_model    cfg `shouldBe` Just "claude-haiku-4-5-20251001"
-        _fc_provider cfg `shouldBe` Just "anthropic"
-        _fc_system   cfg `shouldBe` Just "Be helpful."
-        _fc_memory   cfg `shouldBe` Just "markdown"
-        _fc_allow    cfg `shouldBe` Just ["git", "curl"]
+        _fc_apiKey          cfg `shouldBe` Just "sk-test"
+        _fc_model           cfg `shouldBe` Just "claude-haiku-4-5-20251001"
+        _fc_provider        cfg `shouldBe` Just "anthropic"
+        _fc_system          cfg `shouldBe` Just "Be helpful."
+        _fc_memory          cfg `shouldBe` Just "markdown"
+        _fc_allow           cfg `shouldBe` Just ["git", "curl"]
+        _fc_vault_recipient cfg `shouldBe` Just "age1xyz"
+        _fc_vault_identity  cfg `shouldBe` Just "~/.age/key.txt"
+        _fc_vault_path      cfg `shouldBe` Just ".pureclaw/vault.age"
+        _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
 
     it "ignores missing optional fields" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
         TIO.writeFile path "api_key = \"sk-x\"\n"
         cfg <- loadFileConfig path
-        _fc_model    cfg `shouldBe` Nothing
-        _fc_provider cfg `shouldBe` Nothing
-        _fc_system   cfg `shouldBe` Nothing
-        _fc_memory   cfg `shouldBe` Nothing
-        _fc_allow    cfg `shouldBe` Nothing
+        _fc_model           cfg `shouldBe` Nothing
+        _fc_provider        cfg `shouldBe` Nothing
+        _fc_system          cfg `shouldBe` Nothing
+        _fc_memory          cfg `shouldBe` Nothing
+        _fc_allow           cfg `shouldBe` Nothing
+        _fc_vault_recipient cfg `shouldBe` Nothing
+        _fc_vault_identity  cfg `shouldBe` Nothing
+        _fc_vault_path      cfg `shouldBe` Nothing
+        _fc_vault_unlock    cfg `shouldBe` Nothing
 
     it "returns emptyFileConfig for invalid TOML" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
@@ -102,9 +142,13 @@ spec = do
 
   describe "emptyFileConfig" $ do
     it "has all Nothing fields" $ do
-      _fc_apiKey   emptyFileConfig `shouldBe` Nothing
-      _fc_model    emptyFileConfig `shouldBe` Nothing
-      _fc_provider emptyFileConfig `shouldBe` Nothing
-      _fc_system   emptyFileConfig `shouldBe` Nothing
-      _fc_memory   emptyFileConfig `shouldBe` Nothing
-      _fc_allow    emptyFileConfig `shouldBe` Nothing
+      _fc_apiKey          emptyFileConfig `shouldBe` Nothing
+      _fc_model           emptyFileConfig `shouldBe` Nothing
+      _fc_provider        emptyFileConfig `shouldBe` Nothing
+      _fc_system          emptyFileConfig `shouldBe` Nothing
+      _fc_memory          emptyFileConfig `shouldBe` Nothing
+      _fc_allow           emptyFileConfig `shouldBe` Nothing
+      _fc_vault_recipient emptyFileConfig `shouldBe` Nothing
+      _fc_vault_identity  emptyFileConfig `shouldBe` Nothing
+      _fc_vault_path      emptyFileConfig `shouldBe` Nothing
+      _fc_vault_unlock    emptyFileConfig `shouldBe` Nothing

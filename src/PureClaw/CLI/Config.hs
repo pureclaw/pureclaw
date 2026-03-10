@@ -17,16 +17,22 @@ import Toml qualified
 -- | Configuration that can be read from a TOML file.
 -- All fields are optional — missing fields default to Nothing.
 data FileConfig = FileConfig
-  { _fc_apiKey   :: Maybe Text
-  , _fc_model    :: Maybe Text
-  , _fc_provider :: Maybe Text
-  , _fc_system   :: Maybe Text
-  , _fc_memory   :: Maybe Text
-  , _fc_allow    :: Maybe [Text]
+  { _fc_apiKey         :: Maybe Text
+  , _fc_model          :: Maybe Text
+  , _fc_provider       :: Maybe Text
+  , _fc_system         :: Maybe Text
+  , _fc_memory         :: Maybe Text
+  , _fc_allow          :: Maybe [Text]
+  , _fc_vault_path      :: Maybe Text  -- ^ vault file path (default: .pureclaw/vault.age)
+  , _fc_vault_recipient :: Maybe Text  -- ^ age recipient string (required to enable vault)
+  , _fc_vault_identity  :: Maybe Text  -- ^ age identity path or plugin string
+  , _fc_vault_unlock    :: Maybe Text  -- ^ "startup", "on_demand", or "per_access"
   } deriving stock (Show, Eq)
 
 emptyFileConfig :: FileConfig
-emptyFileConfig = FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
+emptyFileConfig =
+  FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing
 
 fileConfigCodec :: TomlCodec FileConfig
 fileConfigCodec = FileConfig
@@ -36,6 +42,10 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.text "system")                    .= _fc_system
   <*> Toml.dioptional (Toml.text "memory")                    .= _fc_memory
   <*> Toml.dioptional (Toml.arrayOf Toml._Text "allow")       .= _fc_allow
+  <*> Toml.dioptional (Toml.text "vault_path")                .= _fc_vault_path
+  <*> Toml.dioptional (Toml.text "vault_recipient")           .= _fc_vault_recipient
+  <*> Toml.dioptional (Toml.text "vault_identity")            .= _fc_vault_identity
+  <*> Toml.dioptional (Toml.text "vault_unlock")              .= _fc_vault_unlock
 
 -- | Load config from a single file path.
 -- Returns 'emptyFileConfig' if the file does not exist or cannot be parsed.

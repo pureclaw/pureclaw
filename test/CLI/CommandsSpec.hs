@@ -130,8 +130,18 @@ spec = do
         Just opts -> _co_config opts `shouldBe` Nothing
         Nothing -> expectationFailure "parse failed"
 
+    it "parses --no-vault flag" $ do
+      case parseArgs ["--no-vault"] of
+        Just opts -> _co_noVault opts `shouldBe` True
+        Nothing -> expectationFailure "parse failed"
+
+    it "no-vault defaults to False" $ do
+      case parseArgs [] of
+        Just opts -> _co_noVault opts `shouldBe` False
+        Nothing -> expectationFailure "parse failed"
+
     it "parses all flags together" $ do
-      case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml"] of
+      case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml", "--no-vault"] of
         Just opts -> do
           _co_provider opts `shouldBe` Just OpenAI
           _co_model opts `shouldBe` Just "gpt-4"
@@ -141,6 +151,7 @@ spec = do
           _co_soul opts `shouldBe` Just "SOUL.md"
           _co_system opts `shouldBe` Just "Be brief"
           _co_config opts `shouldBe` Just "my.toml"
+          _co_noVault opts `shouldBe` True
         Nothing -> expectationFailure "parse failed"
 
   describe "ProviderType" $ do

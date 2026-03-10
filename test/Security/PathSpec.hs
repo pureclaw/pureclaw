@@ -65,6 +65,15 @@ spec = do
         Left e   -> expectationFailure $ "Expected PathIsBlocked, got: " ++ show e
         Right _  -> expectationFailure "Expected Left, got Right"
 
+    it "rejects blocked paths (.pureclaw)" $ withWorkspace $ \root wsDir -> do
+      createDirectoryIfMissing True (wsDir </> ".pureclaw")
+      writeFile (wsDir </> ".pureclaw" </> "vault.age") "encrypted"
+      result <- mkSafePath root ".pureclaw/vault.age"
+      case result of
+        Left (PathIsBlocked _ _) -> pure ()
+        Left e   -> expectationFailure $ "Expected PathIsBlocked, got: " ++ show e
+        Right _  -> expectationFailure "Expected Left, got Right"
+
     it "returns PathDoesNotExist for missing files" $ withWorkspace $ \root _ -> do
       result <- mkSafePath root "nonexistent.txt"
       case result of

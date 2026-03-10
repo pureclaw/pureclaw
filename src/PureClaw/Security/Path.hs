@@ -44,6 +44,7 @@ blockedPaths = Set.fromList
   , ".ssh"
   , ".gnupg"
   , ".netrc"
+  , ".pureclaw"  -- protects vault and config from agent file tools
   ]
 
 -- | The ONLY way to obtain a 'SafePath'. Canonicalizes the path (following
