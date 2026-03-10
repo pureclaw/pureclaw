@@ -20,6 +20,8 @@ import System.Environment
 import System.Exit
 import System.IO
 
+import PureClaw.CLI.Config
+
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Channels.CLI
@@ -62,13 +64,14 @@ data MemoryBackend
   deriving stock (Show, Eq, Ord, Bounded, Enum)
 
 -- | CLI chat options.
+-- Fields with defaults use 'Maybe' so config file values can fill in omitted flags.
 data ChatOptions = ChatOptions
-  { _co_model         :: String
+  { _co_model         :: Maybe String
   , _co_apiKey        :: Maybe String
   , _co_system        :: Maybe String
-  , _co_provider      :: ProviderType
+  , _co_provider      :: Maybe ProviderType
   , _co_allowCommands :: [String]
-  , _co_memory        :: MemoryBackend
+  , _co_memory        :: Maybe MemoryBackend
   , _co_soul          :: Maybe String
   }
   deriving stock (Show, Eq)
@@ -76,40 +79,34 @@ data ChatOptions = ChatOptions
 -- | Parser for chat options.
 chatOptionsParser :: Parser ChatOptions
 chatOptionsParser = ChatOptions
-  <$> strOption
+  <$> optional (strOption
       ( long "model"
      <> short 'm'
-     <> value "claude-sonnet-4-20250514"
-     <> showDefault
-     <> help "Model to use"
-      )
+     <> help "Model to use (default: claude-sonnet-4-20250514)"
+      ))
   <*> optional (strOption
       ( long "api-key"
-     <> help "API key (default: from env var for chosen provider)"
+     <> help "API key (default: from config file or env var for chosen provider)"
       ))
   <*> optional (strOption
       ( long "system"
      <> short 's'
      <> help "System prompt (overrides SOUL.md)"
       ))
-  <*> option parseProviderType
+  <*> optional (option parseProviderType
       ( long "provider"
      <> short 'p'
-     <> value Anthropic
-     <> showDefaultWith providerToText
-     <> help "LLM provider: anthropic, openai, openrouter, ollama"
-      )
+     <> help "LLM provider: anthropic, openai, openrouter, ollama (default: anthropic)"
+      ))
   <*> many (strOption
       ( long "allow"
      <> short 'a'
      <> help "Allow a shell command (repeatable, e.g. --allow git --allow ls)"
       ))
-  <*> option parseMemoryBackend
+  <*> optional (option parseMemoryBackend
       ( long "memory"
-     <> value NoMemory
-     <> showDefaultWith memoryToText
-     <> help "Memory backend: none, sqlite, markdown"
-      )
+     <> help "Memory backend: none, sqlite, markdown (default: none)"
+      ))
   <*> optional (strOption
       ( long "soul"
      <> help "Path to SOUL.md identity file (default: ./SOUL.md if it exists)"
@@ -164,15 +161,26 @@ runChat :: ChatOptions -> IO ()
 runChat opts = do
   let logger = mkStderrLogHandle
 
+  -- Load config file (project-local first, then user-global)
+  fileCfg <- loadConfig
+
+  -- Resolve effective values: CLI flag > config file > default
+  let effectiveProvider = fromMaybe Anthropic  (_co_provider opts <|> parseProviderMaybe (_fc_provider fileCfg))
+      effectiveModel    = fromMaybe "claude-sonnet-4-20250514" (_co_model opts <|> fmap T.unpack (_fc_model fileCfg))
+      effectiveMemory   = fromMaybe NoMemory    (_co_memory opts <|> parseMemoryMaybe (_fc_memory fileCfg))
+      effectiveApiKey   = _co_apiKey opts <|> fmap T.unpack (_fc_apiKey fileCfg)
+      effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
+      effectiveAllow    = _co_allowCommands opts <> maybe [] (map T.unpack) (_fc_allow fileCfg)
+
   -- Provider
   manager <- HTTP.newTlsManager
-  provider <- resolveProvider (_co_provider opts) (_co_apiKey opts) manager
+  provider <- resolveProvider effectiveProvider effectiveApiKey manager
 
   -- Model
-  let model = ModelId (T.pack (_co_model opts))
+  let model = ModelId (T.pack effectiveModel)
 
-  -- System prompt: explicit --system flag > SOUL.md > nothing
-  sysPrompt <- case _co_system opts of
+  -- System prompt: effective --system flag > SOUL.md > nothing
+  sysPrompt <- case effectiveSystem of
     Just s  -> pure (Just (T.pack s))
     Nothing -> do
       let soulPath = fromMaybe "SOUL.md" (_co_soul opts)
@@ -182,7 +190,7 @@ runChat opts = do
         else pure (Just (identitySystemPrompt ident))
 
   -- Security policy
-  let policy = buildPolicy (_co_allowCommands opts)
+  let policy = buildPolicy effectiveAllow
 
   -- Handles
   let channel   = mkCLIChannelHandle
@@ -190,22 +198,41 @@ runChat opts = do
       sh        = mkShellHandle logger
       fh        = mkFileHandle workspace
       nh        = mkNetworkHandle manager
-  mh <- resolveMemory (_co_memory opts)
+  mh <- resolveMemory effectiveMemory
 
   -- Tool registry
   let registry = buildRegistry policy sh workspace fh mh nh
 
   hSetBuffering stdout LineBuffering
-  _lh_logInfo logger $ "Provider: " <> T.pack (providerToText (_co_provider opts))
-  _lh_logInfo logger $ "Model: " <> T.pack (_co_model opts)
-  _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText (_co_memory opts))
-  case _co_allowCommands opts of
+  _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
+  _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
+  _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
+  case effectiveAllow of
     [] -> _lh_logInfo logger "Commands: none (deny all)"
     cmds -> _lh_logInfo logger $ "Commands: " <> T.intercalate ", " (map T.pack cmds)
   putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
   putStrLn "Type your message and press Enter. Ctrl-D to exit."
   putStrLn ""
   runAgentLoop provider model channel logger sysPrompt registry
+
+-- | Parse a provider type from a text value (used for config file).
+parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType
+parseProviderMaybe Nothing  = Nothing
+parseProviderMaybe (Just t) = case T.unpack t of
+  "anthropic"  -> Just Anthropic
+  "openai"     -> Just OpenAI
+  "openrouter" -> Just OpenRouter
+  "ollama"     -> Just Ollama
+  _            -> Nothing
+
+-- | Parse a memory backend from a text value (used for config file).
+parseMemoryMaybe :: Maybe T.Text -> Maybe MemoryBackend
+parseMemoryMaybe Nothing  = Nothing
+parseMemoryMaybe (Just t) = case T.unpack t of
+  "none"     -> Just NoMemory
+  "sqlite"   -> Just SQLiteMemory
+  "markdown" -> Just MarkdownMemory
+  _          -> Nothing
 
 -- | Build the tool registry with all available tools.
 buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> NetworkHandle -> ToolRegistry

@@ -14,19 +14,19 @@ parseArgs args = case execParserPure defaultPrefs (info chatOptionsParser mempty
 spec :: Spec
 spec = do
   describe "chatOptionsParser" $ do
-    it "parses with default model" $ do
+    it "parses with default model (Nothing — resolved at runtime)" $ do
       case parseArgs [] of
-        Just opts -> _co_model opts `shouldBe` "claude-sonnet-4-20250514"
+        Just opts -> _co_model opts `shouldBe` Nothing
         Nothing -> expectationFailure "parse failed"
 
     it "parses --model flag" $ do
       case parseArgs ["--model", "claude-opus-4-20250514"] of
-        Just opts -> _co_model opts `shouldBe` "claude-opus-4-20250514"
+        Just opts -> _co_model opts `shouldBe` Just "claude-opus-4-20250514"
         Nothing -> expectationFailure "parse failed"
 
     it "parses -m short flag" $ do
       case parseArgs ["-m", "test-model"] of
-        Just opts -> _co_model opts `shouldBe` "test-model"
+        Just opts -> _co_model opts `shouldBe` Just "test-model"
         Nothing -> expectationFailure "parse failed"
 
     it "parses --api-key flag" $ do
@@ -51,22 +51,22 @@ spec = do
 
     it "parses --provider flag" $ do
       case parseArgs ["--provider", "openai"] of
-        Just opts -> _co_provider opts `shouldBe` OpenAI
+        Just opts -> _co_provider opts `shouldBe` Just OpenAI
         Nothing -> expectationFailure "parse failed"
 
-    it "provider defaults to Anthropic" $ do
+    it "provider defaults to Nothing (resolved at runtime)" $ do
       case parseArgs [] of
-        Just opts -> _co_provider opts `shouldBe` Anthropic
+        Just opts -> _co_provider opts `shouldBe` Nothing
         Nothing -> expectationFailure "parse failed"
 
     it "parses -p short flag for provider" $ do
       case parseArgs ["-p", "ollama"] of
-        Just opts -> _co_provider opts `shouldBe` Ollama
+        Just opts -> _co_provider opts `shouldBe` Just Ollama
         Nothing -> expectationFailure "parse failed"
 
     it "parses openrouter provider" $ do
       case parseArgs ["-p", "openrouter"] of
-        Just opts -> _co_provider opts `shouldBe` OpenRouter
+        Just opts -> _co_provider opts `shouldBe` Just OpenRouter
         Nothing -> expectationFailure "parse failed"
 
     it "rejects invalid provider" $
@@ -89,17 +89,17 @@ spec = do
 
     it "parses --memory flag" $ do
       case parseArgs ["--memory", "sqlite"] of
-        Just opts -> _co_memory opts `shouldBe` SQLiteMemory
+        Just opts -> _co_memory opts `shouldBe` Just SQLiteMemory
         Nothing -> expectationFailure "parse failed"
 
     it "parses markdown memory" $ do
       case parseArgs ["--memory", "markdown"] of
-        Just opts -> _co_memory opts `shouldBe` MarkdownMemory
+        Just opts -> _co_memory opts `shouldBe` Just MarkdownMemory
         Nothing -> expectationFailure "parse failed"
 
-    it "memory defaults to NoMemory" $ do
+    it "memory defaults to Nothing (resolved at runtime)" $ do
       case parseArgs [] of
-        Just opts -> _co_memory opts `shouldBe` NoMemory
+        Just opts -> _co_memory opts `shouldBe` Nothing
         Nothing -> expectationFailure "parse failed"
 
     it "rejects invalid memory backend" $
@@ -118,11 +118,11 @@ spec = do
     it "parses all flags together" $ do
       case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief"] of
         Just opts -> do
-          _co_provider opts `shouldBe` OpenAI
-          _co_model opts `shouldBe` "gpt-4"
+          _co_provider opts `shouldBe` Just OpenAI
+          _co_model opts `shouldBe` Just "gpt-4"
           _co_apiKey opts `shouldBe` Just "sk-x"
           _co_allowCommands opts `shouldBe` ["git"]
-          _co_memory opts `shouldBe` SQLiteMemory
+          _co_memory opts `shouldBe` Just SQLiteMemory
           _co_soul opts `shouldBe` Just "SOUL.md"
           _co_system opts `shouldBe` Just "Be brief"
         Nothing -> expectationFailure "parse failed"
