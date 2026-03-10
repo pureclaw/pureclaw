@@ -210,8 +210,17 @@ executeSlashCommand env CmdCompact ctx = do
 executeSlashCommand env (CmdVault sub) ctx =
   case _env_vault env of
     Nothing -> do
-      _ch_send (_env_channel env)
-        (OutgoingMessage "No vault configured. Add vault settings to ~/.pureclaw/config.toml.")
+      let msg = case sub of
+            VaultInit -> T.intercalate "\n"
+              [ "Vault not configured. To use the vault, add to ~/.pureclaw/config.toml:"
+              , ""
+              , "  vault_recipient = \"age1...\"      # your age public key (from: age-keygen)"
+              , "  vault_identity  = \"~/.age/key.txt\"  # path to your age private key"
+              , ""
+              , "Then run /vault init to create the vault file."
+              ]
+            _ -> "No vault configured. Add vault settings to ~/.pureclaw/config.toml."
+      _ch_send (_env_channel env) (OutgoingMessage msg)
       pure ctx
     Just vault ->
       executeVaultCommand env vault sub ctx

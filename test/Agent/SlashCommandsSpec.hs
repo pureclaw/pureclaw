@@ -252,6 +252,19 @@ spec = do
         Just t -> T.unpack t `shouldContain` "No vault configured"
         Nothing -> expectationFailure "Expected message"
 
+    it "/vault init with no vault → config instructions" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let env = mkEnvNoVault sentRef
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultInit) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "vault_recipient"
+          T.unpack t `shouldContain` "vault_identity"
+          T.unpack t `shouldContain` "/vault init"
+        Nothing -> expectationFailure "Expected message"
+
   describe "vault commands — with mock vault" $ do
     let mkEnvWithVault sentRef vault = AgentEnv
           { _env_provider     = MkProvider (MockProvider "summary")
