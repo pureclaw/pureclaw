@@ -4,11 +4,17 @@ import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Data.Either (isLeft)
+import Data.IORef
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime (..), addUTCTime)
+import Network.HTTP.Client.TLS qualified as TLS
 import Test.Hspec
 
+import PureClaw.Auth.AnthropicOAuth
 import PureClaw.Core.Types
 import PureClaw.Providers.Anthropic
 import PureClaw.Providers.Class
+import PureClaw.Security.Secrets
 
 spec :: Spec
 spec = do
@@ -197,6 +203,83 @@ spec = do
     it "parses message_start events" $ do
       let line = "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\",\"content\":[]}}"
       parseSSELine line `shouldSatisfy` isJust
+
+  describe "buildAuthHeaders (API key)" $ do
+    it "uses x-api-key header for ApiKey auth" $ do
+      manager <- TLS.newTlsManager
+      let provider = mkAnthropicProvider manager (mkApiKey "test-key")
+      headers <- buildAuthHeaders provider
+      let names = map fst headers
+      names `shouldContain` ["x-api-key"]
+      names `shouldNotContain` ["authorization"]
+
+    it "includes anthropic-version header" $ do
+      manager <- TLS.newTlsManager
+      let provider = mkAnthropicProvider manager (mkApiKey "k")
+      headers <- buildAuthHeaders provider
+      map fst headers `shouldContain` ["anthropic-version"]
+
+    it "does not include anthropic-beta header for API key auth" $ do
+      manager <- TLS.newTlsManager
+      let provider = mkAnthropicProvider manager (mkApiKey "k")
+      headers <- buildAuthHeaders provider
+      map fst headers `shouldNotContain` ["anthropic-beta"]
+
+  describe "buildAuthHeaders (OAuth)" $ do
+    it "uses Authorization: Bearer header for OAuth auth" $ do
+      manager <- TLS.newTlsManager
+      let futureExpiry = addUTCTime 3600 (UTCTime (fromGregorian 2099 1 1) 0)
+          tokens = OAuthTokens
+            { _oat_accessToken  = mkBearerToken "oauth-token"
+            , _oat_refreshToken = "refresh"
+            , _oat_expiresAt    = futureExpiry
+            }
+      handle <- mkOAuthHandle defaultOAuthConfig manager tokens
+      let provider = mkAnthropicProviderOAuth manager handle
+      headers <- buildAuthHeaders provider
+      let names = map fst headers
+      names `shouldContain` ["authorization"]
+      names `shouldNotContain` ["x-api-key"]
+
+    it "includes anthropic-beta header for OAuth auth" $ do
+      manager <- TLS.newTlsManager
+      let futureExpiry = addUTCTime 3600 (UTCTime (fromGregorian 2099 1 1) 0)
+          tokens = OAuthTokens
+            { _oat_accessToken  = mkBearerToken "tok"
+            , _oat_refreshToken = "ref"
+            , _oat_expiresAt    = futureExpiry
+            }
+      handle <- mkOAuthHandle defaultOAuthConfig manager tokens
+      let provider = mkAnthropicProviderOAuth manager handle
+      headers <- buildAuthHeaders provider
+      map fst headers `shouldContain` ["anthropic-beta"]
+
+    it "refreshes token when expired and uses new token" $ do
+      manager <- TLS.newTlsManager
+      let pastExpiry = UTCTime (fromGregorian 2020 1 1) 0
+          freshExpiry = addUTCTime 3600 (UTCTime (fromGregorian 2099 1 1) 0)
+          oldTokens = OAuthTokens
+            { _oat_accessToken  = mkBearerToken "old-token"
+            , _oat_refreshToken = "ref"
+            , _oat_expiresAt    = pastExpiry
+            }
+          newTokens = OAuthTokens
+            { _oat_accessToken  = mkBearerToken "new-token"
+            , _oat_refreshToken = "ref2"
+            , _oat_expiresAt    = freshExpiry
+            }
+      ref <- newIORef oldTokens
+      let handle = OAuthHandle
+            { _oah_tokensRef = ref
+            , _oah_refresh   = \_ -> pure newTokens
+            }
+          provider = mkAnthropicProviderOAuth manager handle
+      headers <- buildAuthHeaders provider
+      let authVal = lookup "authorization" headers
+      authVal `shouldBe` Just ("Bearer " <> "new-token")
+      -- Confirm the ref was updated
+      stored <- readIORef ref
+      withBearerToken (_oat_accessToken stored) id `shouldBe` "new-token"
 
 -- | Check if a JSON Value (assumed Object) contains a given key.
 hasKey :: Key -> Value -> Bool

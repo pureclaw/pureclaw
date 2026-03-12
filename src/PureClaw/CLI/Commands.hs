@@ -15,6 +15,7 @@ import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
@@ -23,6 +24,7 @@ import System.Environment
 import System.Exit
 import System.IO
 
+import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
 
 import PureClaw.Agent.Env
@@ -82,6 +84,7 @@ data ChatOptions = ChatOptions
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
   , _co_noVault       :: Bool
+  , _co_oauth         :: Bool
   }
   deriving stock (Show, Eq)
 
@@ -128,6 +131,10 @@ chatOptionsParser = ChatOptions
   <*> switch
       ( long "no-vault"
      <> help "Disable vault even if configured in config file"
+      )
+  <*> switch
+      ( long "oauth"
+     <> help "Authenticate with Anthropic via OAuth (opens browser). Tokens are cached in the vault."
       )
 
 -- | Parse a provider type from a CLI string.
@@ -195,7 +202,9 @@ runChat opts = do
 
   -- Provider
   manager <- HTTP.newTlsManager
-  provider <- resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
+  provider <- if effectiveProvider == Anthropic && _co_oauth opts
+    then resolveAnthropicOAuth vaultOpt manager
+    else resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
 
   -- Model
   let model = ModelId (T.pack effectiveModel)
@@ -302,6 +311,48 @@ resolveProvider OpenRouter keyOpt vaultOpt manager = do
   pure (MkProvider (mkOpenRouterProvider manager apiKey))
 resolveProvider Ollama _ _ manager =
   pure (MkProvider (mkOllamaProvider manager))
+
+-- | Vault key used to cache OAuth tokens between sessions.
+oauthVaultKey :: T.Text
+oauthVaultKey = "ANTHROPIC_OAUTH_TOKENS"
+
+-- | Resolve an Anthropic provider via OAuth 2.0 PKCE.
+-- Loads cached tokens from the vault if available; runs the full browser
+-- flow otherwise. Refreshes expired access tokens automatically.
+resolveAnthropicOAuth :: Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
+resolveAnthropicOAuth vaultOpt manager = do
+  let cfg = defaultOAuthConfig
+  cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
+  tokens <- case cachedBs >>= eitherToMaybe . deserializeTokens of
+    Just t -> do
+      now <- getCurrentTime
+      if _oat_expiresAt t <= now
+        then do
+          putStrLn "OAuth access token expired — refreshing..."
+          newT <- refreshOAuthToken cfg manager (_oat_refreshToken t)
+          saveOAuthTokens vaultOpt newT
+          pure newT
+        else pure t
+    Nothing -> do
+      t <- runOAuthFlow cfg manager
+      saveOAuthTokens vaultOpt t
+      pure t
+  handle <- mkOAuthHandle cfg manager tokens
+  pure (MkProvider (mkAnthropicProviderOAuth manager handle))
+
+-- | Save OAuth tokens to the vault (best-effort; logs on failure).
+saveOAuthTokens :: Maybe VaultHandle -> OAuthTokens -> IO ()
+saveOAuthTokens Nothing      _      = pure ()
+saveOAuthTokens (Just vh) tokens = do
+  result <- _vh_put vh oauthVaultKey (serializeTokens tokens)
+  case result of
+    Left err -> putStrLn $ "Warning: could not cache OAuth tokens: " <> show err
+    Right () -> pure ()
+
+-- | Convert 'Either' to 'Maybe', discarding the error.
+eitherToMaybe :: Either e a -> Maybe a
+eitherToMaybe (Left  _) = Nothing
+eitherToMaybe (Right a) = Just a
 
 -- | Resolve an API key from: CLI flag → vault → environment variable.
 resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO ApiKey

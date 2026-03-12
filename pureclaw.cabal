@@ -35,6 +35,8 @@ common warnings
 library
   import:           warnings
   exposed-modules:
+    -- Auth
+    PureClaw.Auth.AnthropicOAuth
     -- Core types (no IO, no handles)
     PureClaw.Core.Types
     PureClaw.Core.Config
@@ -159,6 +161,7 @@ test-suite pureclaw-test
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   other-modules:
+    Auth.AnthropicOAuthSpec
     Core.TypesSpec
     Security.SecretsSpec
     Core.ErrorsSpec
@@ -227,6 +230,8 @@ test-suite pureclaw-test
     containers,
     directory,
     filepath,
+    http-client,
+    http-client-tls,
     http-types,
     optparse-applicative,
     stm,
