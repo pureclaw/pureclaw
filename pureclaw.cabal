@@ -110,7 +110,6 @@ library
     base              >= 4.20,
     aeson,
     async,
-    network,
     base16-bytestring,
     base64-bytestring,
     bytestring,

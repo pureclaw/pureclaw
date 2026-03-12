@@ -47,32 +47,32 @@ spec = do
 
   describe "buildAuthorizationUrl" $ do
     it "starts with the configured auth URL" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state"
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
       url `shouldSatisfy` T.isPrefixOf "https://claude.ai/oauth/authorize"
 
     it "includes response_type=code" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state"
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
       url `shouldSatisfy` T.isInfixOf "response_type=code"
 
     it "includes code_challenge_method=S256" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state"
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
       url `shouldSatisfy` T.isInfixOf "code_challenge_method=S256"
 
     it "includes the client_id" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state"
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
       url `shouldSatisfy` T.isInfixOf "client_id="
 
     it "includes the scope" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state"
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
       url `shouldSatisfy` T.isInfixOf "scope="
 
     it "includes the state parameter" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "mystate"
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "mystate" oobRedirectUri
       url `shouldSatisfy` T.isInfixOf "state=mystate"
 
-    it "includes the redirect_uri with callback port" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state"
-      url `shouldSatisfy` T.isInfixOf "redirect_uri="
+    it "uses the OOB redirect URI" $ do
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
+      url `shouldSatisfy` T.isInfixOf "urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob"
 
   describe "parseTokenResponse" $ do
     let baseTime = UTCTime (fromGregorian 2025 1 1) 0
