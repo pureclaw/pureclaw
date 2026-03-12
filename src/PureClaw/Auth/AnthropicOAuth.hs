@@ -45,7 +45,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Network.HTTP.Client qualified as HTTP
-import Network.HTTP.Types (renderSimpleQuery)
+import Network.HTTP.Types (Header, renderSimpleQuery)
 import Network.HTTP.Types.Status qualified as Status
 import System.Info (os)
 import System.IO (hFlush, stdout)
@@ -65,14 +65,14 @@ defaultOAuthConfig :: OAuthConfig
 defaultOAuthConfig = OAuthConfig
   { _oac_clientId  = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
   , _oac_authUrl   = "https://claude.ai/oauth/authorize"
-  , _oac_tokenUrl  = "https://platform.claude.com/v1/oauth/token"
+  , _oac_tokenUrl  = "https://console.anthropic.com/v1/oauth/token"
   }
 
 -- | Redirect URI for the CLI paste-code flow. Anthropic hosts a page at this
 -- URL that displays the authorization code for the user to copy and paste
 -- back into the CLI.
 cliRedirectUri :: ByteString
-cliRedirectUri = "https://platform.claude.com/oauth/code/callback"
+cliRedirectUri = "https://console.anthropic.com/oauth/code/callback"
 
 -- | OAuth tokens returned from a successful flow or refresh.
 data OAuthTokens = OAuthTokens
@@ -146,7 +146,7 @@ buildAuthorizationUrl cfg verifier state redirectUri =
              [ ("response_type",         "code")
              , ("client_id",             TE.encodeUtf8 (_oac_clientId cfg))
              , ("redirect_uri",          redirectUri)
-             , ("scope",                 "user:inference")
+             , ("scope",                 "org:create_api_key user:profile user:inference")
              , ("state",                 state)
              , ("code_challenge",        challenge)
              , ("code_challenge_method", "S256")
@@ -210,6 +210,14 @@ deserializeTokens bs =
         , _oat_expiresAt    = expiresAt
         }
 
+-- | Headers required for all requests to the Anthropic OAuth token endpoint.
+oauthRequestHeaders :: [Header]
+oauthRequestHeaders =
+  [ ("content-type",      "application/json")
+  , ("anthropic-version", "2023-06-01")
+  , ("anthropic-beta",    "oauth-2025-04-20")
+  ]
+
 -- ---------------------------------------------------------------------------
 -- OAuth flows
 -- ---------------------------------------------------------------------------
@@ -221,9 +229,9 @@ deserializeTokens bs =
 --   4. Exchange the code for tokens
 runOAuthFlow :: OAuthConfig -> HTTP.Manager -> IO OAuthTokens
 runOAuthFlow cfg manager = do
-  verifier   <- generateCodeVerifier
-  stateBytes <- generateCodeVerifier  -- reuse random generator for state
-  let authUrl = buildAuthorizationUrl cfg verifier stateBytes cliRedirectUri
+  verifier <- generateCodeVerifier
+  -- Use verifier as state (matching the pi-ai / Claude Code convention)
+  let authUrl = buildAuthorizationUrl cfg verifier verifier cliRedirectUri
   putStrLn "Anthropic OAuth login required."
   putStrLn "Visit this URL to authenticate:"
   TIO.putStrLn authUrl
@@ -231,9 +239,11 @@ runOAuthFlow cfg manager = do
   tryOpenBrowser (T.unpack authUrl)
   putStrLn ""
   putStr "Paste the authorization code shown in your browser: " >> hFlush stdout
-  code <- stripCodeFragment . T.pack <$> getLine
-  now  <- getCurrentTime
-  exchangeCodeForTokens cfg manager verifier code now
+  rawInput <- T.strip . T.pack <$> getLine
+  let code  = T.takeWhile (/= '#') rawInput
+      state = T.drop 1 (T.dropWhile (/= '#') rawInput)
+  now <- getCurrentTime
+  exchangeCodeForTokens cfg manager verifier code state now
 
 -- | Strip whitespace and any trailing @#fragment@ from a pasted authorization
 -- code. The @platform.claude.com@ callback page appends @#state@ to the
@@ -242,22 +252,24 @@ stripCodeFragment :: Text -> Text
 stripCodeFragment = T.takeWhile (/= '#') . T.strip
 
 -- | Exchange an authorization code for tokens.
--- 'redirectUri' must exactly match what was used in the authorization request.
+-- 'state' is the value from the @#fragment@ of the pasted callback code,
+-- which equals the PKCE verifier (per the Anthropic convention).
 exchangeCodeForTokens
-  :: OAuthConfig -> HTTP.Manager -> ByteString -> Text -> UTCTime -> IO OAuthTokens
-exchangeCodeForTokens cfg manager verifier code now = do
-  let body = renderSimpleQuery False
-               [ ("grant_type",    "authorization_code")
-               , ("client_id",     TE.encodeUtf8 (_oac_clientId cfg))
-               , ("code",          TE.encodeUtf8 code)
-               , ("redirect_uri",  cliRedirectUri)
-               , ("code_verifier", verifier)
+  :: OAuthConfig -> HTTP.Manager -> ByteString -> Text -> Text -> UTCTime -> IO OAuthTokens
+exchangeCodeForTokens cfg manager verifier code state now = do
+  let body = encode $ object
+               [ "grant_type"    .= ("authorization_code" :: Text)
+               , "client_id"     .= _oac_clientId cfg
+               , "code"          .= code
+               , "state"         .= state
+               , "redirect_uri"  .= TE.decodeUtf8 cliRedirectUri
+               , "code_verifier" .= TE.decodeUtf8 verifier
                ]
   req <- HTTP.parseRequest (_oac_tokenUrl cfg)
   let httpReq = req
         { HTTP.method         = "POST"
-        , HTTP.requestBody    = HTTP.RequestBodyBS body
-        , HTTP.requestHeaders = [("content-type", "application/x-www-form-urlencoded")]
+        , HTTP.requestBody    = HTTP.RequestBodyLBS body
+        , HTTP.requestHeaders = oauthRequestHeaders
         }
   resp <- HTTP.httpLbs httpReq manager
   let statusCode = Status.statusCode (HTTP.responseStatus resp)
@@ -272,16 +284,16 @@ exchangeCodeForTokens cfg manager verifier code now = do
 refreshOAuthToken :: OAuthConfig -> HTTP.Manager -> ByteString -> IO OAuthTokens
 refreshOAuthToken cfg manager refreshTok = do
   now <- getCurrentTime
-  let body = renderSimpleQuery False
-               [ ("grant_type",    "refresh_token")
-               , ("client_id",     TE.encodeUtf8 (_oac_clientId cfg))
-               , ("refresh_token", refreshTok)
+  let body = encode $ object
+               [ "grant_type"    .= ("refresh_token" :: Text)
+               , "client_id"     .= _oac_clientId cfg
+               , "refresh_token" .= TE.decodeUtf8 refreshTok
                ]
   req <- HTTP.parseRequest (_oac_tokenUrl cfg)
   let httpReq = req
         { HTTP.method         = "POST"
-        , HTTP.requestBody    = HTTP.RequestBodyBS body
-        , HTTP.requestHeaders = [("content-type", "application/x-www-form-urlencoded")]
+        , HTTP.requestBody    = HTTP.RequestBodyLBS body
+        , HTTP.requestHeaders = oauthRequestHeaders
         }
   resp <- HTTP.httpLbs httpReq manager
   let statusCode = Status.statusCode (HTTP.responseStatus resp)
