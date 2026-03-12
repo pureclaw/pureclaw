@@ -69,6 +69,16 @@ strings dist-newstyle/build/aarch64-osx/ghc-9.12.1/pureclaw-0.1.0.0/x/pureclaw/b
 nix develop . --command bash -c "cabal clean && cabal build"
 ```
 
+## Git Hooks
+
+The canonical hooks live in `.githooks/`. The active hooks in `.git/hooks/` are copied from there. After editing `.githooks/pre-push`, sync it:
+
+```bash
+cp .githooks/pre-push .git/hooks/pre-push
+```
+
+`core.hooksPath` is set to `.git/hooks` (the default). All hook commands use `nix develop . --command` — never bare `cabal` or `nix develop` without the `.`.
+
 ## Testing
 
 - **TDD is mandatory** — Write tests first, watch them fail, then implement
