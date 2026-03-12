@@ -13,6 +13,8 @@ module PureClaw.Auth.AnthropicOAuth
   , computeCodeChallenge
     -- * URL building (exported for testing)
   , buildAuthorizationUrl
+    -- * Code parsing (exported for testing)
+  , stripCodeFragment
     -- * Token parsing (exported for testing)
   , parseTokenResponse
     -- * Vault serialization (exported for testing)
@@ -229,9 +231,15 @@ runOAuthFlow cfg manager = do
   tryOpenBrowser (T.unpack authUrl)
   putStrLn ""
   putStr "Paste the authorization code shown in your browser: " >> hFlush stdout
-  code <- T.strip . T.pack <$> getLine
+  code <- stripCodeFragment . T.pack <$> getLine
   now  <- getCurrentTime
   exchangeCodeForTokens cfg manager verifier code now
+
+-- | Strip whitespace and any trailing @#fragment@ from a pasted authorization
+-- code. The @platform.claude.com@ callback page appends @#state@ to the
+-- displayed code.
+stripCodeFragment :: Text -> Text
+stripCodeFragment = T.takeWhile (/= '#') . T.strip
 
 -- | Exchange an authorization code for tokens.
 -- 'redirectUri' must exactly match what was used in the authorization request.

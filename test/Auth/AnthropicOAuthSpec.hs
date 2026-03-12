@@ -74,6 +74,19 @@ spec = do
       let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
       url `shouldSatisfy` T.isInfixOf "platform.claude.com"
 
+  describe "stripCodeFragment" $ do
+    it "strips the #state fragment appended by the callback page" $ do
+      stripCodeFragment "authcode123#stateval456" `shouldBe` "authcode123"
+
+    it "leaves a plain code unchanged" $ do
+      stripCodeFragment "authcode123" `shouldBe` "authcode123"
+
+    it "strips leading/trailing whitespace" $ do
+      stripCodeFragment "  authcode  " `shouldBe` "authcode"
+
+    it "strips whitespace before stripping fragment" $ do
+      stripCodeFragment " code#state " `shouldBe` "code"
+
   describe "parseTokenResponse" $ do
     let baseTime = UTCTime (fromGregorian 2025 1 1) 0
 
