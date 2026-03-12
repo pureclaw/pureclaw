@@ -43,12 +43,38 @@ This triggers the full pipeline: Research → Plan → Design Review Gate → Wo
 
 Use the `visual-review` skill to take screenshots of web pages, presentations, or UIs for visual inspection. Requires Playwright (`npx playwright install chromium`). See `skills/visual-review/SKILL.md`.
 
+## Build & Run
+
+This project uses a **Nix flake** — all `cabal` commands must be prefixed with `nix develop . --command`:
+
+```bash
+nix develop . --command cabal build
+nix develop . --command cabal test
+nix develop . --command cabal run pureclaw -- [flags]
+```
+
+**The `pureclaw` binary is NOT on PATH.** Never use `which pureclaw`. To run or inspect the built binary directly:
+
+```bash
+# Run
+dist-newstyle/build/aarch64-osx/ghc-9.12.1/pureclaw-0.1.0.0/x/pureclaw/build/pureclaw/pureclaw [flags]
+
+# Inspect embedded strings
+strings dist-newstyle/build/aarch64-osx/ghc-9.12.1/pureclaw-0.1.0.0/x/pureclaw/build/pureclaw/pureclaw | grep <pattern>
+```
+
+**Stale builds:** `cabal build` sometimes reports "Up to date" when the binary is stale (e.g. after branch switches). Fix with:
+
+```bash
+nix develop . --command bash -c "cabal clean && cabal build"
+```
+
 ## Testing
 
 - **TDD is mandatory** — Write tests first, watch them fail, then implement
 - **100% test coverage required** — Lines, branches, functions, and statements. Enforced via `.coverage-thresholds.json` as a blocking gate before PR creation and task completion
-- Test command: `cabal test`
-- Coverage command: `cabal test --enable-coverage`
+- Test command: `nix develop . --command cabal test`
+- Coverage command: `nix develop . --command cabal test --enable-coverage`
 
 ## Coverage
 
