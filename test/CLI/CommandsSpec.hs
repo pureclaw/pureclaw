@@ -140,6 +140,16 @@ spec = do
         Just opts -> _co_noVault opts `shouldBe` False
         Nothing -> expectationFailure "parse failed"
 
+    it "parses --oauth flag" $ do
+      case parseArgs ["--oauth"] of
+        Just opts -> _co_oauth opts `shouldBe` True
+        Nothing -> expectationFailure "parse failed"
+
+    it "oauth defaults to False" $ do
+      case parseArgs [] of
+        Just opts -> _co_oauth opts `shouldBe` False
+        Nothing -> expectationFailure "parse failed"
+
     it "parses all flags together" $ do
       case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml", "--no-vault"] of
         Just opts -> do

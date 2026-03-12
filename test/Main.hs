@@ -2,6 +2,7 @@ module Main where
 
 import Test.Hspec
 
+import qualified Auth.AnthropicOAuthSpec
 import qualified Core.TypesSpec
 import qualified Core.ErrorsSpec
 import qualified Core.ConfigSpec
@@ -61,6 +62,7 @@ import qualified Integration.SignalFlowSpec
 
 main :: IO ()
 main = hspec $ do
+  describe "Auth.AnthropicOAuth" Auth.AnthropicOAuthSpec.spec
   describe "Core.Types" Core.TypesSpec.spec
   describe "Core.Errors" Core.ErrorsSpec.spec
   describe "Core.Config" Core.ConfigSpec.spec

@@ -2,6 +2,9 @@ module PureClaw.Providers.Anthropic
   ( -- * Provider type (constructor intentionally NOT exported)
     AnthropicProvider
   , mkAnthropicProvider
+  , mkAnthropicProviderOAuth
+    -- * Auth headers (exported for testing)
+  , buildAuthHeaders
     -- * Errors
   , AnthropicError (..)
     -- * Request/response encoding (exported for testing)
@@ -22,24 +25,64 @@ import Data.Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Types.Header qualified as Header
 import Network.HTTP.Types.Status qualified as Status
 
+import PureClaw.Auth.AnthropicOAuth
 import PureClaw.Core.Errors
 import PureClaw.Core.Types
 import PureClaw.Providers.Class
 import PureClaw.Security.Secrets
 
+-- | Authentication method for the Anthropic provider.
+data AnthropicAuth
+  = ApiKeyAuth ApiKey
+    -- ^ Authenticate with a static API key via the @x-api-key@ header.
+  | OAuthAuth OAuthHandle
+    -- ^ Authenticate via OAuth 2.0; access tokens are refreshed automatically.
+
 -- | Anthropic API provider. Constructor is not exported — use
--- 'mkAnthropicProvider'.
+-- 'mkAnthropicProvider' or 'mkAnthropicProviderOAuth'.
 data AnthropicProvider = AnthropicProvider
   { _ap_manager :: HTTP.Manager
-  , _ap_apiKey  :: ApiKey
+  , _ap_auth    :: AnthropicAuth
   }
 
--- | Create an Anthropic provider with an HTTP manager and API key.
+-- | Create an Anthropic provider authenticated with an API key.
 mkAnthropicProvider :: HTTP.Manager -> ApiKey -> AnthropicProvider
-mkAnthropicProvider = AnthropicProvider
+mkAnthropicProvider m k = AnthropicProvider m (ApiKeyAuth k)
+
+-- | Create an Anthropic provider authenticated via OAuth.
+-- Tokens are refreshed automatically when they expire.
+mkAnthropicProviderOAuth :: HTTP.Manager -> OAuthHandle -> AnthropicProvider
+mkAnthropicProviderOAuth m h = AnthropicProvider m (OAuthAuth h)
+
+-- | Build the authentication headers for a request.
+-- For OAuth, checks token expiry and refreshes if needed.
+buildAuthHeaders :: AnthropicProvider -> IO [Header.Header]
+buildAuthHeaders p = case _ap_auth p of
+  ApiKeyAuth key ->
+    pure [ ("x-api-key",          withApiKey key id)
+         , ("anthropic-version",  "2023-06-01")
+         , ("content-type",       "application/json")
+         ]
+  OAuthAuth oauthHandle -> do
+    tokens <- readIORef (_oah_tokensRef oauthHandle)
+    now    <- getCurrentTime
+    freshTokens <-
+      if _oat_expiresAt tokens <= now
+        then do
+          newT <- _oah_refresh oauthHandle (_oat_refreshToken tokens)
+          writeIORef (_oah_tokensRef oauthHandle) newT
+          pure newT
+        else pure tokens
+    pure [ ("authorization",     "Bearer " <> withBearerToken (_oat_accessToken freshTokens) id)
+         , ("anthropic-version", "2023-06-01")
+         , ("anthropic-beta",    "oauth-2025-04-20")
+         , ("content-type",      "application/json")
+         ]
 
 instance Provider AnthropicProvider where
   complete = anthropicComplete
@@ -65,15 +108,12 @@ anthropicBaseUrl = "https://api.anthropic.com/v1/messages"
 -- | Call the Anthropic Messages API.
 anthropicComplete :: AnthropicProvider -> CompletionRequest -> IO CompletionResponse
 anthropicComplete provider req = do
+  authHeaders <- buildAuthHeaders provider
   initReq <- HTTP.parseRequest anthropicBaseUrl
   let httpReq = initReq
-        { HTTP.method = "POST"
-        , HTTP.requestBody = HTTP.RequestBodyLBS (encodeRequest req)
-        , HTTP.requestHeaders =
-            [ ("x-api-key", withApiKey (_ap_apiKey provider) id)
-            , ("anthropic-version", "2023-06-01")
-            , ("content-type", "application/json")
-            ]
+        { HTTP.method         = "POST"
+        , HTTP.requestBody    = HTTP.RequestBodyLBS (encodeRequest req)
+        , HTTP.requestHeaders = authHeaders
         }
   resp <- HTTP.httpLbs httpReq (_ap_manager provider)
   let status = Status.statusCode (HTTP.responseStatus resp)
@@ -204,15 +244,12 @@ encodeStreamRequest req = encode $ object $
 -- the full response for the final StreamDone event.
 anthropicCompleteStream :: AnthropicProvider -> CompletionRequest -> (StreamEvent -> IO ()) -> IO ()
 anthropicCompleteStream provider req callback = do
+  authHeaders <- buildAuthHeaders provider
   initReq <- HTTP.parseRequest anthropicBaseUrl
   let httpReq = initReq
-        { HTTP.method = "POST"
-        , HTTP.requestBody = HTTP.RequestBodyLBS (encodeStreamRequest req)
-        , HTTP.requestHeaders =
-            [ ("x-api-key", withApiKey (_ap_apiKey provider) id)
-            , ("anthropic-version", "2023-06-01")
-            , ("content-type", "application/json")
-            ]
+        { HTTP.method         = "POST"
+        , HTTP.requestBody    = HTTP.RequestBodyLBS (encodeStreamRequest req)
+        , HTTP.requestHeaders = authHeaders
         }
   HTTP.withResponse httpReq (_ap_manager provider) $ \resp -> do
     let status = Status.statusCode (HTTP.responseStatus resp)
