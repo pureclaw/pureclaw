@@ -3,7 +3,7 @@ module PureClaw.Auth.AnthropicOAuth
     OAuthConfig (..)
   , defaultOAuthConfig
     -- * Redirect URIs (exported for testing)
-  , oobRedirectUri
+  , cliRedirectUri
     -- * Tokens and handle
   , OAuthTokens (..)
   , OAuthHandle (..)
@@ -63,13 +63,14 @@ defaultOAuthConfig :: OAuthConfig
 defaultOAuthConfig = OAuthConfig
   { _oac_clientId  = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
   , _oac_authUrl   = "https://claude.ai/oauth/authorize"
-  , _oac_tokenUrl  = "https://console.anthropic.com/v1/oauth/token"
+  , _oac_tokenUrl  = "https://platform.claude.com/v1/oauth/token"
   }
 
--- | Out-of-band redirect URI. The authorization server displays the code
--- on-page for the user to copy and paste back to the CLI.
-oobRedirectUri :: ByteString
-oobRedirectUri = "urn:ietf:wg:oauth:2.0:oob"
+-- | Redirect URI for the CLI paste-code flow. Anthropic hosts a page at this
+-- URL that displays the authorization code for the user to copy and paste
+-- back into the CLI.
+cliRedirectUri :: ByteString
+cliRedirectUri = "https://platform.claude.com/oauth/code/callback"
 
 -- | OAuth tokens returned from a successful flow or refresh.
 data OAuthTokens = OAuthTokens
@@ -135,7 +136,7 @@ stripPadding = BS.filter (/= 0x3d)
 
 -- | Build the authorization URL.
 -- 'redirectUri' is included verbatim — callers choose the redirect strategy
--- (use 'oobRedirectUri' for the out-of-band / paste-code flow).
+-- Use 'cliRedirectUri' for the paste-code flow.
 buildAuthorizationUrl :: OAuthConfig -> ByteString -> ByteString -> ByteString -> Text
 buildAuthorizationUrl cfg verifier state redirectUri =
   let challenge = computeCodeChallenge verifier
@@ -220,7 +221,7 @@ runOAuthFlow :: OAuthConfig -> HTTP.Manager -> IO OAuthTokens
 runOAuthFlow cfg manager = do
   verifier   <- generateCodeVerifier
   stateBytes <- generateCodeVerifier  -- reuse random generator for state
-  let authUrl = buildAuthorizationUrl cfg verifier stateBytes oobRedirectUri
+  let authUrl = buildAuthorizationUrl cfg verifier stateBytes cliRedirectUri
   putStrLn "Anthropic OAuth login required."
   putStrLn "Visit this URL to authenticate:"
   TIO.putStrLn authUrl
@@ -241,7 +242,7 @@ exchangeCodeForTokens cfg manager verifier code now = do
                [ ("grant_type",    "authorization_code")
                , ("client_id",     TE.encodeUtf8 (_oac_clientId cfg))
                , ("code",          TE.encodeUtf8 code)
-               , ("redirect_uri",  oobRedirectUri)
+               , ("redirect_uri",  cliRedirectUri)
                , ("code_verifier", verifier)
                ]
   req <- HTTP.parseRequest (_oac_tokenUrl cfg)

@@ -47,32 +47,32 @@ spec = do
 
   describe "buildAuthorizationUrl" $ do
     it "starts with the configured auth URL" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
       url `shouldSatisfy` T.isPrefixOf "https://claude.ai/oauth/authorize"
 
     it "includes response_type=code" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
       url `shouldSatisfy` T.isInfixOf "response_type=code"
 
     it "includes code_challenge_method=S256" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
       url `shouldSatisfy` T.isInfixOf "code_challenge_method=S256"
 
     it "includes the client_id" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
       url `shouldSatisfy` T.isInfixOf "client_id="
 
     it "includes the scope" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
       url `shouldSatisfy` T.isInfixOf "scope="
 
     it "includes the state parameter" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "mystate" oobRedirectUri
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "mystate" cliRedirectUri
       url `shouldSatisfy` T.isInfixOf "state=mystate"
 
     it "uses the OOB redirect URI" $ do
-      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" oobRedirectUri
-      url `shouldSatisfy` T.isInfixOf "urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob"
+      let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
+      url `shouldSatisfy` T.isInfixOf "platform.claude.com"
 
   describe "parseTokenResponse" $ do
     let baseTime = UTCTime (fromGregorian 2025 1 1) 0
