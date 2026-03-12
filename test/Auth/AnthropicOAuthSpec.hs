@@ -72,7 +72,7 @@ spec = do
 
     it "uses the OOB redirect URI" $ do
       let url = buildAuthorizationUrl defaultOAuthConfig "verifier" "state" cliRedirectUri
-      url `shouldSatisfy` T.isInfixOf "platform.claude.com"
+      url `shouldSatisfy` T.isInfixOf "console.anthropic.com"
 
   describe "stripCodeFragment" $ do
     it "strips the #state fragment appended by the callback page" $ do
