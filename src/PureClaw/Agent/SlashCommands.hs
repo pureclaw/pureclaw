@@ -17,10 +17,12 @@ import Control.Applicative ((<|>))
 import Control.Exception
 import Data.Foldable (asum)
 import Data.IORef
+import Data.List qualified as L
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.IO qualified as TIO
 import Network.HTTP.Client.TLS qualified as HTTP
 import System.Directory qualified as Dir
 import System.FilePath ((</>))
@@ -568,29 +570,43 @@ createEncryptorForChoice ch _ph SetupPassphrase = do
       enc <- mkPassphraseVaultEncryptor (pure (TE.encodeUtf8 passphrase))
       pure (Right (enc, "passphrase", Nothing, Nothing))
 createEncryptorForChoice ch _ph (SetupPlugin plugin) = do
-  let generateCmd = _ap_binary plugin <> " --generate"
+  pureclawDir <- getPureclawDir
+  let vaultDir      = pureclawDir </> "vault"
+      identityFile  = vaultDir </> T.unpack (_ap_name plugin) <> "-identity.txt"
+      identityFileT = T.pack identityFile
+      cmd = T.pack (_ap_binary plugin) <> " --generate > " <> identityFileT
+  Dir.createDirectoryIfMissing True vaultDir
   _ch_send ch (OutgoingMessage (T.intercalate "\n"
-    [ "To generate a " <> _ap_label plugin <> " identity, run this in another terminal:"
+    [ "Run this in another terminal to generate a " <> _ap_label plugin <> " identity:"
     , ""
-    , "  " <> T.pack generateCmd
+    , "  " <> cmd
     , ""
-    , "Then paste the recipient (public key) and identity file path below."
+    , "The plugin will prompt you for a PIN and touch confirmation."
+    , "Press Enter here when done (or 'q' to cancel)."
     ]))
-  recipient <- T.strip <$> _ch_prompt ch "Recipient (age1...): "
-  if T.null recipient
-    then pure (Left "No recipient provided. Setup cancelled.")
+  answer <- T.strip <$> _ch_prompt ch ""
+  if answer == "q" || answer == "Q"
+    then pure (Left "Setup cancelled.")
     else do
-      identityPath <- T.strip <$> _ch_prompt ch "Identity file path: "
-      if T.null identityPath
-        then pure (Left "No identity path provided. Setup cancelled.")
+      exists <- Dir.doesFileExist identityFile
+      if not exists
+        then pure (Left ("Identity file not found: " <> identityFileT))
         else do
-          ageResult <- mkAgeEncryptor
-          case ageResult of
-            Left err ->
-              pure (Left ("age error: " <> T.pack (show err)))
-            Right ageEnc -> do
-              let enc = ageVaultEncryptor ageEnc recipient identityPath
-              pure (Right (enc, _ap_label plugin, Just recipient, Just identityPath))
+          contents <- TIO.readFile identityFile
+          let outputLines  = T.lines contents
+              recipientLine = L.find (T.isPrefixOf "# public key: ") outputLines
+          case recipientLine of
+            Nothing ->
+              pure (Left "No public key found in identity file. Expected a '# public key: age1...' line.")
+            Just rLine -> do
+              let recipient = T.strip (T.drop (T.length "# public key: ") rLine)
+              ageResult <- mkAgeEncryptor
+              case ageResult of
+                Left err ->
+                  pure (Left ("age error: " <> T.pack (show err)))
+                Right ageEnc -> do
+                  let enc = ageVaultEncryptor ageEnc recipient identityFileT
+                  pure (Right (enc, _ap_label plugin, Just recipient, Just identityFileT))
 
 -- | First-time vault setup: create directory, open vault, init, write to IORef.
 firstTimeSetup :: AgentEnv -> VaultEncryptor -> Text -> IO (Either Text ())
