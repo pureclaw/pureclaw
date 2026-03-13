@@ -563,7 +563,7 @@ resolveAgeVault fileCfg recipient identity logger = do
             }
       vault <- openVault cfg enc'
       case mode of
-        UnlockStartup -> do
+        UnlockCached -> do
           result <- _vh_unlock vault
           case result of
             Left err -> _lh_logInfo logger $
@@ -582,7 +582,7 @@ resolvePassphraseVault fileCfg logger = do
       cfg  = VaultConfig
         { _vc_path    = path
         , _vc_keyType = "AES-256 (passphrase)"
-        , _vc_unlock  = UnlockStartup
+        , _vc_unlock  = UnlockCached
         }
   let getPass = do
         envPass <- lookupEnv "PURECLAW_VAULT_PASSPHRASE"
@@ -684,10 +684,12 @@ inferAgeKeyType recipient
   | otherwise                                      = "Unknown"
 
 -- | Parse vault unlock mode from config text.
+-- "cached" or "startup" → UnlockCached (decrypt once at startup, keep in memory)
+-- "per_access"          → UnlockPerAccess (decrypt on every access; for hardware keys)
 parseUnlockMode :: Maybe T.Text -> UnlockMode
-parseUnlockMode Nothing            = UnlockOnDemand
+parseUnlockMode Nothing = UnlockCached
 parseUnlockMode (Just t) = case t of
-  "startup"    -> UnlockStartup
-  "on_demand"  -> UnlockOnDemand
+  "cached"     -> UnlockCached
+  "startup"    -> UnlockCached
   "per_access" -> UnlockPerAccess
-  _            -> UnlockOnDemand
+  _            -> UnlockCached

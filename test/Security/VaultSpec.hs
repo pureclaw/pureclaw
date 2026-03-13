@@ -27,21 +27,21 @@ spec :: Spec
 spec = do
   describe "_vh_init" $ do
     it "creates the vault file on disk" $ do
-      withMockVault UnlockStartup $ \vh path -> do
+      withMockVault UnlockCached $ \vh path -> do
         result <- _vh_init vh
         result `shouldBe` Right ()
         contents <- BS.readFile path
         BS.length contents `shouldSatisfy` (> 0)
 
     it "returns VaultAlreadyExists if called twice" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         result <- _vh_init vh
         result `shouldBe` Left VaultAlreadyExists
 
-  describe "_vh_put and _vh_get (UnlockStartup)" $ do
+  describe "_vh_put and _vh_get (UnlockCached)" $ do
     it "roundtrip: put then get returns the stored value" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         putResult <- _vh_put vh "mykey" "myvalue"
@@ -50,7 +50,7 @@ spec = do
         getResult `shouldBe` Right "myvalue"
 
     it "get on missing key returns VaultCorrupted" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         result <- _vh_get vh "nonexistent"
@@ -58,7 +58,7 @@ spec = do
 
   describe "_vh_list" $ do
     it "returns all stored key names" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         _ <- _vh_put vh "alpha" "1"
@@ -70,7 +70,7 @@ spec = do
           Right keys -> sort keys `shouldBe` ["alpha", "beta", "gamma"]
 
     it "returns empty list on fresh vault" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         result <- _vh_list vh
@@ -78,7 +78,7 @@ spec = do
 
   describe "_vh_delete" $ do
     it "removes a key so get returns error" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         _ <- _vh_put vh "key1" "val1"
@@ -88,7 +88,7 @@ spec = do
         getResult `shouldBe` Left (VaultCorrupted "no such key")
 
     it "delete on missing key returns error" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         result <- _vh_delete vh "missing"
@@ -96,7 +96,7 @@ spec = do
 
   describe "_vh_lock and _vh_unlock" $ do
     it "lock then unlock cycle preserves data" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         _ <- _vh_put vh "secret" "secretvalue"
@@ -105,24 +105,13 @@ spec = do
         result <- _vh_get vh "secret"
         result `shouldBe` Right "secretvalue"
 
-  describe "UnlockStartup: get on locked vault" $ do
+  describe "UnlockCached: get on locked vault" $ do
     it "returns VaultLocked when TVar is empty" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         -- Do NOT unlock — vault stays locked
         result <- _vh_get vh "anykey"
         result `shouldBe` Left VaultLocked
-
-  describe "UnlockOnDemand: get auto-unlocks" $ do
-    it "get on locked vault triggers unlock and returns value" $ do
-      withMockVault UnlockOnDemand $ \vh _ -> do
-        _ <- _vh_init vh
-        _ <- _vh_unlock vh
-        _ <- _vh_put vh "k" "v"
-        _vh_lock vh
-        -- Auto-unlock on demand
-        result <- _vh_get vh "k"
-        result `shouldBe` Right "v"
 
   describe "UnlockPerAccess" $ do
     it "put and get roundtrip without explicit unlock" $ do
@@ -144,20 +133,20 @@ spec = do
 
   describe "_vh_status" $ do
     it "reports locked=True before unlock" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         st <- _vh_status vh
         _vs_locked st `shouldBe` True
 
     it "reports locked=False after unlock" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         st <- _vh_status vh
         _vs_locked st `shouldBe` False
 
     it "reports correct secret count after puts" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         _ <- _vh_put vh "a" "1"
@@ -170,7 +159,7 @@ spec = do
         let cfg = VaultConfig
                   { _vc_path    = dir <> "/test2.vault"
                   , _vc_keyType = "X25519"
-                  , _vc_unlock  = UnlockStartup
+                  , _vc_unlock  = UnlockCached
                   }
         vh <- openVault cfg mkMockVaultEncryptor
         _ <- _vh_init vh
@@ -182,7 +171,7 @@ spec = do
         let cfg = VaultConfig
                   { _vc_path    = dir <> "/test3.vault"
                   , _vc_keyType = "YubiKey PIV"
-                  , _vc_unlock  = UnlockStartup
+                  , _vc_unlock  = UnlockCached
                   }
         vh <- openVault cfg mkMockVaultEncryptor
         _ <- _vh_init vh
@@ -191,7 +180,7 @@ spec = do
 
   describe "concurrent puts" $ do
     it "two concurrent puts both persist" $ do
-      withMockVault UnlockStartup $ \vh _ -> do
+      withMockVault UnlockCached $ \vh _ -> do
         _ <- _vh_init vh
         _ <- _vh_unlock vh
         done1 <- newEmptyMVar :: IO (MVar ())
@@ -211,16 +200,15 @@ spec = do
 
   describe "VaultConfig" $ do
     it "has Show and Eq instances" $ do
-      let cfg = VaultConfig "/tmp/test.vault" "Mock" UnlockStartup
+      let cfg = VaultConfig "/tmp/test.vault" "Mock" UnlockCached
       show cfg `shouldContain` "VaultConfig"
       cfg `shouldBe` cfg
 
   describe "UnlockMode" $ do
     it "has Show and Eq instances" $ do
-      show UnlockStartup   `shouldBe` "UnlockStartup"
-      show UnlockOnDemand  `shouldBe` "UnlockOnDemand"
+      show UnlockCached    `shouldBe` "UnlockCached"
       show UnlockPerAccess `shouldBe` "UnlockPerAccess"
-      UnlockStartup `shouldNotBe` UnlockOnDemand
+      UnlockCached `shouldNotBe` UnlockPerAccess
 
   describe "_vh_unlock" $ do
     it "returns VaultNotFound when vault file does not exist" $ do
@@ -228,7 +216,7 @@ spec = do
         let cfg = VaultConfig
                   { _vc_path    = dir <> "/nonexistent.vault"
                   , _vc_keyType = "Mock"
-                  , _vc_unlock  = UnlockStartup
+                  , _vc_unlock  = UnlockCached
                   }
         vh <- openVault cfg mkMockVaultEncryptor
         result <- _vh_unlock vh

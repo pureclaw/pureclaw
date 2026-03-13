@@ -27,9 +27,8 @@ import PureClaw.Security.Vault.Age
 
 -- | When the vault is automatically unlocked.
 data UnlockMode
-  = UnlockStartup   -- ^ Must be explicitly unlocked; returns VaultLocked if locked.
-  | UnlockOnDemand  -- ^ Unlocks automatically on first access if locked.
-  | UnlockPerAccess -- ^ Decrypts from disk on every operation; TVar unused.
+  = UnlockCached    -- ^ Decrypt once at startup; cache in memory. Returns VaultLocked if not unlocked.
+  | UnlockPerAccess -- ^ Decrypt from disk on every operation; ideal for hardware keys (e.g. YubiKey).
   deriving stock (Show, Eq)
 
 -- | Configuration for a vault.
@@ -134,13 +133,7 @@ vaultGet st key =
       case mapResult of
         Left err -> pure (Left err)
         Right m  -> pure (lookupKey key m)
-    UnlockStartup -> do
-      current <- readTVarIO (_vst_tvar st)
-      case current of
-        Nothing -> pure (Left VaultLocked)
-        Just m  -> pure (lookupKey key m)
-    UnlockOnDemand -> do
-      ensureUnlocked st
+    UnlockCached -> do
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -154,22 +147,7 @@ vaultPut st key value =
       case mapResult of
         Left err -> pure (Left err)
         Right m  -> encryptAndWrite st (Map.insert key value m)
-    UnlockOnDemand -> do
-      -- Unlock outside the write lock to avoid deadlock
-      ensureUnlocked st
-      withMVar (_vst_writeLock st) $ \_ -> do
-        current <- readTVarIO (_vst_tvar st)
-        case current of
-          Nothing -> pure (Left VaultLocked)
-          Just m  -> do
-            let m' = Map.insert key value m
-            result <- encryptAndWrite st m'
-            case result of
-              Left err -> pure (Left err)
-              Right () -> do
-                atomically (writeTVar (_vst_tvar st) (Just m'))
-                pure (Right ())
-    UnlockStartup -> withMVar (_vst_writeLock st) $ \_ -> do
+    UnlockCached -> withMVar (_vst_writeLock st) $ \_ -> do
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -193,24 +171,7 @@ vaultDelete st key =
           if Map.member key m
             then encryptAndWrite st (Map.delete key m)
             else pure (Left (VaultCorrupted "key not found"))
-    UnlockOnDemand -> do
-      ensureUnlocked st
-      withMVar (_vst_writeLock st) $ \_ -> do
-        current <- readTVarIO (_vst_tvar st)
-        case current of
-          Nothing -> pure (Left VaultLocked)
-          Just m  ->
-            if Map.member key m
-              then do
-                let m' = Map.delete key m
-                result <- encryptAndWrite st m'
-                case result of
-                  Left err -> pure (Left err)
-                  Right () -> do
-                    atomically (writeTVar (_vst_tvar st) (Just m'))
-                    pure (Right ())
-              else pure (Left (VaultCorrupted "key not found"))
-    UnlockStartup -> withMVar (_vst_writeLock st) $ \_ -> do
+    UnlockCached -> withMVar (_vst_writeLock st) $ \_ -> do
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -234,13 +195,7 @@ vaultList st =
       case mapResult of
         Left err -> pure (Left err)
         Right m  -> pure (Right (Map.keys m))
-    UnlockStartup -> do
-      current <- readTVarIO (_vst_tvar st)
-      case current of
-        Nothing -> pure (Left VaultLocked)
-        Just m  -> pure (Right (Map.keys m))
-    UnlockOnDemand -> do
-      ensureUnlocked st
+    UnlockCached -> do
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -291,20 +246,6 @@ encryptAndWrite st m = do
     Right ciphertext -> do
       atomicWrite (_vc_path (_vst_config st)) ciphertext
       pure (Right ())
-
--- | For UnlockOnDemand: unlock the vault if the TVar is empty.
--- Guarded by write lock to prevent double-init from concurrent calls.
-ensureUnlocked :: VaultState -> IO ()
-ensureUnlocked st =
-  withMVar (_vst_writeLock st) $ \_ -> do
-    current <- readTVarIO (_vst_tvar st)
-    case current of
-      Just _  -> pure ()   -- already unlocked by a concurrent call
-      Nothing -> do
-        result <- vaultUnlock st
-        case result of
-          Right () -> pure ()
-          Left _   -> pure ()  -- best-effort; callers check TVar afterward
 
 -- | Look up a key or return the appropriate error.
 lookupKey :: Text -> Map Text ByteString -> Either VaultError ByteString

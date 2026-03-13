@@ -168,7 +168,7 @@ spec = do
           , "vault_recipient  = \"age1xyz\"\n"
           , "vault_identity   = \"~/.age/key.txt\"\n"
           , "vault_path       = \".pureclaw/vault.age\"\n"
-          , "vault_unlock     = \"on_demand\"\n\n"
+          , "vault_unlock     = \"cached\"\n\n"
           , "[[providers]]\n"
           , "provider = \"anthropic\"\n\n"
           , "[[providers]]\n"
@@ -182,7 +182,7 @@ spec = do
         _fc_vault_recipient cfg `shouldBe` Just "age1xyz"
         _fc_vault_identity  cfg `shouldBe` Just "~/.age/key.txt"
         _fc_vault_path      cfg `shouldBe` Just ".pureclaw/vault.age"
-        _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
+        _fc_vault_unlock    cfg `shouldBe` Just "cached"
         _fc_providers       cfg `shouldBe`
           [ AnthropicProvider (AnthropicProviderConfig AuthApiKey)
           , OpenAIProvider (OpenAIProviderConfig Nothing)
