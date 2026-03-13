@@ -235,7 +235,10 @@ runChat opts = do
   let registry = buildRegistry policy sh workspace fh mh nh
 
   hSetBuffering stdout LineBuffering
-  _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
+  case mProvider of
+    Just _  -> _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
+    Nothing -> _lh_logInfo logger
+      "No credentials configured \x2014 use /vault setup or /vault add to get started"
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case effectiveAllow of
@@ -246,10 +249,6 @@ runChat opts = do
   putStrLn ""
   vaultRef    <- newIORef vaultOpt
   providerRef <- newIORef mProvider
-  case mProvider of
-    Nothing -> _lh_logInfo logger
-      "No credentials configured — use /vault setup or /vault add to get started"
-    Just _  -> pure ()
   let env = AgentEnv
         { _env_provider     = providerRef
         , _env_model        = model
@@ -441,7 +440,7 @@ resolveAgeVault fileCfg recipient identity logger = do
             _ -> pure ()
           pure (Just vault)
         else do
-          _lh_logInfo logger "No vault found — use /vault setup to create one."
+          _lh_logInfo logger "No vault found — use `/vault setup` to create one."
           pure Nothing
 
 -- | Resolve vault using passphrase-based encryption (default when no age keys configured).
@@ -480,7 +479,7 @@ resolvePassphraseVault fileCfg logger = do
         Right () -> _lh_logInfo logger "Vault unlocked."
       pure (Just vault)
     else do
-      _lh_logInfo logger "No vault found — use /vault setup to create one."
+      _lh_logInfo logger "No vault found — use `/vault setup` to create one."
       pure Nothing
 
 -- | Infer a human-readable key type from the age recipient prefix.
