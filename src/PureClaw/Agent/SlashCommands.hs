@@ -349,24 +349,31 @@ executeVaultCommand env vault sub ctx = do
 -- Provider subcommand execution
 -- ---------------------------------------------------------------------------
 
--- | Helper: Attempt to store a secret in the vault, unlocking it first if needed.
--- If vault is locked or corrupted (e.g. wrong passphrase), prompts user to unlock and retries.
+-- | Helper: Attempt to store a secret in the vault, unlocking (and initialising
+-- if needed) first. Handles VaultLocked, VaultCorrupted, and VaultNotFound.
 unlockAndPutVault :: VaultHandle -> Text -> ByteString -> IO (Either VaultError ())
 unlockAndPutVault vault key value = do
   result <- _vh_put vault key value
   case result of
-    Left err@VaultLocked -> do
+    Left VaultLocked        -> unlockThenPut
+    Left (VaultCorrupted _) -> unlockThenPut
+    other                   -> pure other
+  where
+    unlockThenPut = do
       unlockResult <- _vh_unlock vault
       case unlockResult of
-        Left _unlockErr -> pure (Left err)  -- Keep original error if unlock fails
-        Right () -> _vh_put vault key value
-    Left err@(VaultCorrupted _) -> do
-      -- VaultCorrupted (wrong passphrase) — try unlocking with user prompt
-      unlockResult <- _vh_unlock vault
-      case unlockResult of
-        Left _unlockErr -> pure (Left err)  -- Keep original error if unlock fails
-        Right () -> _vh_put vault key value
-    other -> pure other
+        Right ()           -> _vh_put vault key value
+        Left VaultNotFound -> initThenPut
+        Left unlockErr     -> pure (Left unlockErr)
+    initThenPut = do
+      initResult <- _vh_init vault
+      case initResult of
+        Left initErr -> pure (Left initErr)
+        Right () -> do
+          unlockResult <- _vh_unlock vault
+          case unlockResult of
+            Left unlockErr -> pure (Left unlockErr)
+            Right ()       -> _vh_put vault key value
 
 -- | Auth method options for Anthropic provider.
 data AuthOption = AuthOption
