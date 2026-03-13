@@ -15,6 +15,7 @@ module PureClaw.Agent.SlashCommands
 
 import Control.Applicative ((<|>))
 import Control.Exception
+import Data.ByteString (ByteString)
 import Data.Foldable (asum)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -348,6 +349,19 @@ executeVaultCommand env vault sub ctx = do
 -- Provider subcommand execution
 -- ---------------------------------------------------------------------------
 
+-- | Helper: Attempt to store a secret in the vault, unlocking it first if needed.
+-- If vault is locked, prompts user to unlock and retries.
+unlockAndPutVault :: VaultHandle -> Text -> ByteString -> IO (Either VaultError ())
+unlockAndPutVault vault key value = do
+  result <- _vh_put vault key value
+  case result of
+    Left VaultLocked -> do
+      unlockResult <- _vh_unlock vault
+      case unlockResult of
+        Left err -> pure (Left err)
+        Right () -> _vh_put vault key value
+    other -> pure other
+
 -- | Auth method options for Anthropic provider.
 data AuthOption = AuthOption
   { _ao_number :: Int
@@ -377,7 +391,7 @@ handleAnthropicApiKey env vault ctx = do
       send ("Error reading API key: " <> T.pack (show e))
       pure ctx
     Right apiKeyText -> do
-      result <- _vh_put vault "ANTHROPIC_API_KEY" (TE.encodeUtf8 apiKeyText)
+      result <- unlockAndPutVault vault "ANTHROPIC_API_KEY" (TE.encodeUtf8 apiKeyText)
       case result of
         Left err -> do
           send ("Error storing API key: " <> T.pack (show err))
@@ -394,7 +408,7 @@ handleAnthropicOAuth env vault ctx = do
   send "Starting OAuth flow... (opens browser)"
   manager <- HTTP.newTlsManager
   oauthTokens <- runOAuthFlow defaultOAuthConfig manager
-  result <- _vh_put vault "ANTHROPIC_OAUTH_TOKENS" (serializeTokens oauthTokens)
+  result <- unlockAndPutVault vault "ANTHROPIC_OAUTH_TOKENS" (serializeTokens oauthTokens)
   case result of
     Left err -> do
       send ("Error storing OAuth tokens: " <> T.pack (show err))
