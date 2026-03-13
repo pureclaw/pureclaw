@@ -199,9 +199,21 @@ runChat opts = do
 
   -- Provider
   manager <- HTTP.newTlsManager
-  provider <- if useOAuth
-    then resolveAnthropicOAuth vaultOpt manager
+  providerResult <- if useOAuth
+    then fmap Right (resolveAnthropicOAuth vaultOpt manager)
     else resolveProvider effectiveProvider vaultOpt manager
+
+  provider <- case providerResult of
+    Right p -> pure p
+    Left envVar -> do
+      let pt = providerType effectiveProvider
+      putStrLn ""
+      _lh_logInfo logger $ "⚠️  No credentials found for " <> T.pack (providerTypeToText pt)
+      _lh_logInfo logger $ "To configure: /vault add " <> T.pack envVar
+      _lh_logInfo logger $ "Or: export " <> T.pack envVar <> "=your-api-key"
+      putStrLn ""
+      -- Return a stub provider that explains the issue when actually used
+      pure (mkStubProvider pt envVar)
 
   -- Model
   let model = ModelId (T.pack effectiveModel)
@@ -387,20 +399,27 @@ pickModelInteractive ptypes fileCfg = do
 -- | Resolve the LLM provider from its config.
 -- API key lookup order: vault (by env var name) → environment variable.
 -- API keys are never read from the config file.
-resolveProvider :: ModelProvider -> Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
+-- Returns Left with an error message if credentials cannot be resolved.
+resolveProvider :: ModelProvider -> Maybe VaultHandle -> HTTP.Manager -> IO (Either String SomeProvider)
 resolveProvider (AnthropicProvider _) vaultOpt manager = do
-  apiKey <- resolveApiKey "ANTHROPIC_API_KEY" vaultOpt
-  pure (MkProvider (mkAnthropicProvider manager apiKey))
+  result <- resolveApiKeyMaybe "ANTHROPIC_API_KEY" vaultOpt
+  case result of
+    Just apiKey -> pure $ Right (MkProvider (mkAnthropicProvider manager apiKey))
+    Nothing -> pure $ Left "ANTHROPIC_API_KEY"
 resolveProvider (OpenAIProvider _cfg) vaultOpt manager = do
-  apiKey <- resolveApiKey "OPENAI_API_KEY" vaultOpt
+  result <- resolveApiKeyMaybe "OPENAI_API_KEY" vaultOpt
+  case result of
+    Just apiKey -> pure $ Right (MkProvider (mkOpenAIProvider manager apiKey))
+    Nothing -> pure $ Left "OPENAI_API_KEY"
   -- TODO: use _oaipc_baseUrl when mkOpenAIProvider supports custom endpoints
-  pure (MkProvider (mkOpenAIProvider manager apiKey))
 resolveProvider (OpenRouterProvider _) vaultOpt manager = do
-  apiKey <- resolveApiKey "OPENROUTER_API_KEY" vaultOpt
-  pure (MkProvider (mkOpenRouterProvider manager apiKey))
+  result <- resolveApiKeyMaybe "OPENROUTER_API_KEY" vaultOpt
+  case result of
+    Just apiKey -> pure $ Right (MkProvider (mkOpenRouterProvider manager apiKey))
+    Nothing -> pure $ Left "OPENROUTER_API_KEY"
 resolveProvider (OllamaProvider _cfg) _ manager =
   -- TODO: use _olpc_baseUrl when mkOllamaProvider supports custom endpoints
-  pure (MkProvider (mkOllamaProvider manager))
+  pure $ Right (MkProvider (mkOllamaProvider manager))
 
 -- ---------------------------------------------------------------------------
 -- OAuth
@@ -474,21 +493,17 @@ ensureVaultForOAuth fileCfg False = do
 -- ---------------------------------------------------------------------------
 
 -- | Resolve an API key from the vault (preferred) or environment variable.
--- API keys are never read from the config file.
-resolveApiKey :: String -> Maybe VaultHandle -> IO ApiKey
-resolveApiKey envVar vaultOpt = do
+-- Returns Nothing if the key is not found (without dying).
+resolveApiKeyMaybe :: String -> Maybe VaultHandle -> IO (Maybe ApiKey)
+resolveApiKeyMaybe envVar vaultOpt = do
   vaultKey <- tryVaultLookup vaultOpt (T.pack envVar)
   case vaultKey of
-    Just bs -> pure (mkApiKey bs)
+    Just bs -> pure (Just (mkApiKey bs))
     Nothing -> do
       envKey <- lookupEnv envVar
       case envKey of
-        Just key -> pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
-        Nothing  -> die $
-          "No API key found for " <> envVar <> ". Store it in the vault:\n"
-          <> "  pureclaw\n"
-          <> "  /vault add " <> envVar <> "\n"
-          <> "Or set the environment variable: " <> envVar
+        Just key -> pure (Just (mkApiKey (TE.encodeUtf8 (T.pack key))))
+        Nothing  -> pure Nothing
 
 -- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
 -- absent, locked, or does not contain the key.
@@ -621,6 +636,32 @@ buildPolicy cmds =
     { _sp_allowedCommands = AllowList cmdNames
     , _sp_autonomy = Full
     }
+
+-- | A provider that fails with a helpful message.
+-- Used when credentials are not configured, allowing the agent to start
+-- so the user can use /vault add to configure them.
+newtype StubProvider = StubProvider String
+
+instance Provider StubProvider where
+  complete _ _ = failWithMessage
+  completeStream _ _ _ = failWithMessage
+
+failWithMessage :: IO a
+failWithMessage = do
+  putStrLn ""
+  putStrLn "Error: No API credentials configured."
+  putStrLn ""
+  putStrLn "To configure credentials, use the /vault command:"
+  putStrLn "  /vault add ANTHROPIC_API_KEY"
+  putStrLn ""
+  putStrLn "Or set the environment variable:"
+  putStrLn "  export ANTHROPIC_API_KEY=your-api-key"
+  putStrLn ""
+  exitFailure
+
+-- | Create a stub provider that allows the agent to start without credentials.
+mkStubProvider :: ProviderType -> String -> SomeProvider
+mkStubProvider _ envVar = MkProvider (StubProvider envVar)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
