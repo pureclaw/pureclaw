@@ -74,6 +74,14 @@ spec = do
       exitCode `shouldBe` ExitSuccess
       out `shouldContain` "PureClaw"
 
+    it "does not claim a provider is configured when no credentials exist" $ do
+      bin <- findPureclaw
+      (_exitCode, _out, err) <- runPureclaw bin "" 5000000
+      -- Should NOT say "Provider: anthropic" when there are no credentials
+      err `shouldNotContain` "Provider: anthropic"
+      -- Should indicate no provider is configured
+      err `shouldContain` "No credentials configured"
+
     it "shows a helpful message when sending a chat message without a provider" $ do
       bin <- findPureclaw
       -- Send a non-slash message. Without a configured provider, the
