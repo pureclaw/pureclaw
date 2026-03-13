@@ -209,7 +209,7 @@ runChat opts = do
       let pt = providerType effectiveProvider
       putStrLn ""
       _lh_logInfo logger $ "⚠️  No credentials found for " <> T.pack (providerTypeToText pt)
-      _lh_logInfo logger $ "To configure: /vault add " <> T.pack envVar
+      _lh_logInfo logger $ "Run /provider " <> T.pack (providerTypeToText pt) <> " to configure credentials."
       _lh_logInfo logger $ "Or: export " <> T.pack envVar <> "=your-api-key"
       putStrLn ""
       -- Return a stub provider that explains the issue when actually used
