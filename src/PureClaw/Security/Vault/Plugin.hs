@@ -72,7 +72,7 @@ mkPluginHandle = PluginHandle
 detectPlugins :: IO [AgePlugin]
 detectPlugins = do
   pathVar <- FP.getSearchPath
-  binaries <- fmap concat $ mapM listAgePlugins pathVar
+  binaries <- concat <$> mapM listAgePlugins pathVar
   pure (map pluginFromBinary (L.nub binaries))
 
 -- | List age-plugin-* executables in a single directory.

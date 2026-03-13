@@ -12,6 +12,7 @@ module PureClaw.Security.Vault
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception (IOException, try)
+import Control.Monad (when)
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -340,7 +341,7 @@ vaultRekey st newEnc newKeyType confirm = withMVar (_vst_writeLock st) $ \_ -> d
 cleanupNewFile :: FilePath -> IO ()
 cleanupNewFile path = do
   exists <- doesFileExist path
-  if exists then removeFile path else pure ()
+  when exists $ removeFile path
 
 -- ---------------------------------------------------------------------------
 -- Internal helpers

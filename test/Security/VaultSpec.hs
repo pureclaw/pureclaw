@@ -274,7 +274,7 @@ spec = do
         -- Use an encryptor whose decrypt returns corrupted data,
         -- so verification (encrypt then decrypt) produces a mismatch.
         let badEnc = VaultEncryptor
-              { _ve_encrypt = \bs -> pure (Right (BS.map (`xor` 0xCD) bs))
+              { _ve_encrypt = pure . Right . BS.map (`xor` 0xCD)
               , _ve_decrypt = \_ -> pure (Right "garbage that is not valid JSON")
               }
         result <- _vh_rekey vh badEnc "Bad" (\_ -> pure True)

@@ -312,13 +312,13 @@ buildPolicy cmds =
 resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO (Maybe SomeProvider)
 resolveProvider Anthropic keyOpt vaultOpt manager = do
   mApiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
-  pure (fmap (\k -> MkProvider (mkAnthropicProvider manager k)) mApiKey)
+  pure (fmap (MkProvider . mkAnthropicProvider manager) mApiKey)
 resolveProvider OpenAI keyOpt vaultOpt manager = do
   mApiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
-  pure (fmap (\k -> MkProvider (mkOpenAIProvider manager k)) mApiKey)
+  pure (fmap (MkProvider . mkOpenAIProvider manager) mApiKey)
 resolveProvider OpenRouter keyOpt vaultOpt manager = do
   mApiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
-  pure (fmap (\k -> MkProvider (mkOpenRouterProvider manager k)) mApiKey)
+  pure (fmap (MkProvider . mkOpenRouterProvider manager) mApiKey)
 resolveProvider Ollama _ _ manager =
   pure (Just (MkProvider (mkOllamaProvider manager)))
 
