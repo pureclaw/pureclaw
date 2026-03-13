@@ -312,7 +312,7 @@ findProvider pt cfg = listToMaybe
 -- | Try to infer a provider from a bare model name (e.g. "claude-*" → Anthropic).
 inferProvider :: String -> [ProviderType] -> Maybe ProviderType
 inferProvider m ps
-  | ("claude-" `isPrefixOf` m)        , PTAnthropic  `elem` ps = Just PTAnthropic
+  | "claude-" `isPrefixOf` m          , PTAnthropic  `elem` ps = Just PTAnthropic
   | any (`isPrefixOf` m) ["gpt-", "o1-", "o3-", "o4-"]
                                       , PTOpenAI     `elem` ps = Just PTOpenAI
   | '/' `elem` m                     , PTOpenRouter `elem` ps = Just PTOpenRouter
