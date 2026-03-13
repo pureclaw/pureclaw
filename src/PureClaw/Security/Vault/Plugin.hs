@@ -117,13 +117,19 @@ generateIdentity plugin dir = do
     ExitSuccess -> do
       let outText = TE.decodeUtf8 (BL.toStrict out)
           outputLines = T.lines outText
-          recipientLine = L.find (T.isPrefixOf "# public key: ") outputLines
+          -- age-plugin-yubikey uses "#    Recipient: age1..."
+          -- other plugins may use "# public key: age1..."
+          recipientLine = L.find (\l ->
+            let stripped = T.strip (T.dropWhile (== '#') (T.strip l))
+            in T.isPrefixOf "Recipient:" stripped
+               || T.isPrefixOf "public key:" stripped) outputLines
           identityLines = filter (\l -> not (T.null l) && not (T.isPrefixOf "#" l)) outputLines
       case recipientLine of
         Nothing ->
-          pure (Left (AgeError "no public key found in plugin output"))
+          pure (Left (AgeError "no recipient found in plugin output"))
         Just rLine -> do
-          let recipient = T.drop (T.length "# public key: ") rLine
+          let afterHash = T.strip (T.dropWhile (== '#') (T.strip rLine))
+              recipient = T.strip (T.drop 1 (T.dropWhile (/= ':') afterHash))
               identityPath = dir FP.</> T.unpack (_ap_name plugin) <> "-identity.txt"
           TIO.writeFile identityPath (T.unlines identityLines)
           pure (Right (AgeRecipient recipient, identityPath))

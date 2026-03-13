@@ -593,13 +593,20 @@ createEncryptorForChoice ch _ph (SetupPlugin plugin) = do
         then pure (Left ("Identity file not found: " <> identityFileT))
         else do
           contents <- TIO.readFile identityFile
-          let outputLines  = T.lines contents
-              recipientLine = L.find (T.isPrefixOf "# public key: ") outputLines
-          case recipientLine of
+          let outputLines = T.lines contents
+              -- age-plugin-yubikey uses "#    Recipient: age1..."
+              -- other plugins may use "# public key: age1..."
+              findRecipient = L.find (\l ->
+                let stripped = T.strip (T.dropWhile (== '#') (T.strip l))
+                in T.isPrefixOf "Recipient:" stripped
+                   || T.isPrefixOf "public key:" stripped) outputLines
+          case findRecipient of
             Nothing ->
-              pure (Left "No public key found in identity file. Expected a '# public key: age1...' line.")
+              pure (Left "No recipient found in identity file. Expected a '# Recipient: age1...' line.")
             Just rLine -> do
-              let recipient = T.strip (T.drop (T.length "# public key: ") rLine)
+              -- Extract value after the label (Recipient: or public key:)
+              let afterHash = T.strip (T.dropWhile (== '#') (T.strip rLine))
+                  recipient = T.strip (T.drop 1 (T.dropWhile (/= ':') afterHash))
               ageResult <- mkAgeEncryptor
               case ageResult of
                 Left err ->
