@@ -428,15 +428,21 @@ resolveAgeVault fileCfg recipient identity logger = do
             , _vc_unlock  = mode
             }
       vault <- openVault cfg enc'
-      case mode of
-        UnlockStartup -> do
-          result <- _vh_unlock vault
-          case result of
-            Left err -> _lh_logInfo logger $
-              "Vault startup unlock failed (vault will be locked): " <> T.pack (show err)
-            Right () -> _lh_logInfo logger "Vault unlocked."
-        _ -> pure ()
-      pure (Just vault)
+      exists <- doesFileExist path
+      if exists
+        then do
+          case mode of
+            UnlockStartup -> do
+              result <- _vh_unlock vault
+              case result of
+                Left err -> _lh_logInfo logger $
+                  "Vault startup unlock failed (vault will be locked): " <> T.pack (show err)
+                Right () -> _lh_logInfo logger "Vault unlocked."
+            _ -> pure ()
+          pure (Just vault)
+        else do
+          _lh_logInfo logger "No vault found — use /vault setup to create one."
+          pure Nothing
 
 -- | Resolve vault using passphrase-based encryption (default when no age keys configured).
 -- Prompts for passphrase on stdin at startup (if vault file exists), or reads
@@ -472,9 +478,10 @@ resolvePassphraseVault fileCfg logger = do
         Left err -> _lh_logInfo logger $
           "Vault unlock failed: " <> T.pack (show err)
         Right () -> _lh_logInfo logger "Vault unlocked."
-    else
-      _lh_logInfo logger "Vault ready (not yet initialized — use /vault setup to set up)."
-  pure (Just vault)
+      pure (Just vault)
+    else do
+      _lh_logInfo logger "No vault found — use /vault setup to create one."
+      pure Nothing
 
 -- | Infer a human-readable key type from the age recipient prefix.
 inferAgeKeyType :: T.Text -> T.Text

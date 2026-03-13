@@ -349,31 +349,42 @@ executeVaultSetup env ctx = do
           vaultOpt <- readIORef (_env_vault env)
           case vaultOpt of
             Nothing -> do
-              -- First-time setup: create vault
+              -- No vault handle at all: create from scratch
               setupResult <- firstTimeSetup env newEnc keyLabel
               case setupResult of
                 Left err -> send err
                 Right () -> do
                   send ("Vault created with " <> keyLabel <> " encryption.")
-                  -- Update config
                   updateConfigAfterSetup mRecipient mIdentity keyLabel
             Just vault -> do
-              -- Rekey existing vault
-              let confirmFn msg = do
-                    send msg
-                    send "Proceed? [y/N]:"
-                    confirmResp <- _ch_receive ch
-                    let answer = T.strip (_im_content confirmResp)
-                    pure (answer == "y" || answer == "Y")
-              rekeyResult <- _vh_rekey vault newEnc keyLabel confirmFn
-              case rekeyResult of
-                Left (VaultCorrupted "rekey cancelled by user") ->
-                  send "Rekey cancelled."
-                Left err ->
-                  send ("Rekey failed: " <> T.pack (show err))
+              -- Vault handle exists — but the file may not.
+              -- Try init: if it succeeds, this is first-time setup.
+              -- If VaultAlreadyExists, we need to rekey.
+              initResult <- _vh_init vault
+              case initResult of
                 Right () -> do
-                  send ("Vault rekeyed to " <> keyLabel <> ".")
+                  -- First-time init succeeded (file didn't exist)
+                  send ("Vault created with " <> keyLabel <> " encryption.")
                   updateConfigAfterSetup mRecipient mIdentity keyLabel
+                Left VaultAlreadyExists -> do
+                  -- Vault exists — rekey it
+                  let confirmFn msg = do
+                        send msg
+                        send "Proceed? [y/N]:"
+                        confirmResp <- _ch_receive ch
+                        let answer = T.strip (_im_content confirmResp)
+                        pure (answer == "y" || answer == "Y")
+                  rekeyResult <- _vh_rekey vault newEnc keyLabel confirmFn
+                  case rekeyResult of
+                    Left (VaultCorrupted "rekey cancelled by user") ->
+                      send "Rekey cancelled."
+                    Left err ->
+                      send ("Rekey failed: " <> T.pack (show err))
+                    Right () -> do
+                      send ("Vault rekeyed to " <> keyLabel <> ".")
+                      updateConfigAfterSetup mRecipient mIdentity keyLabel
+                Left err ->
+                  send ("Vault init failed: " <> T.pack (show err))
           pure ctx
 
 -- | A setup option: either passphrase or a detected plugin.
