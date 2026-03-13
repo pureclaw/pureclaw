@@ -405,7 +405,10 @@ resolveProvider (AnthropicProvider _) vaultOpt manager = do
   result <- resolveApiKeyMaybe "ANTHROPIC_API_KEY" vaultOpt
   case result of
     Just apiKey -> pure $ Right (MkProvider (mkAnthropicProvider manager apiKey))
-    Nothing -> pure $ Left "ANTHROPIC_API_KEY"
+    Nothing -> do
+      -- Fall back to OAuth tokens cached in vault (e.g. configured via /provider anthropic)
+      oauthOpt <- loadCachedOAuthProvider vaultOpt manager
+      pure $ maybe (Left "ANTHROPIC_API_KEY") Right oauthOpt
 resolveProvider (OpenAIProvider _cfg) vaultOpt manager = do
   result <- resolveApiKeyMaybe "OPENAI_API_KEY" vaultOpt
   case result of
@@ -429,29 +432,39 @@ resolveProvider (OllamaProvider _cfg) _ manager =
 oauthVaultKey :: T.Text
 oauthVaultKey = "ANTHROPIC_OAUTH_TOKENS"
 
--- | Resolve an Anthropic provider via OAuth 2.0 PKCE.
--- Loads cached tokens from the vault if available; runs the full browser
--- flow otherwise. Refreshes expired access tokens automatically.
-resolveAnthropicOAuth :: Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
-resolveAnthropicOAuth vaultOpt manager = do
+-- | Load a cached Anthropic OAuth provider from the vault, refreshing if expired.
+-- Returns Nothing if no cached tokens exist.
+loadCachedOAuthProvider :: Maybe VaultHandle -> HTTP.Manager -> IO (Maybe SomeProvider)
+loadCachedOAuthProvider vaultOpt manager = do
   let cfg = defaultOAuthConfig
   cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
-  tokens <- case cachedBs >>= eitherToMaybe . deserializeTokens of
-    Just t -> do
+  case cachedBs >>= eitherToMaybe . deserializeTokens of
+    Nothing -> pure Nothing
+    Just t  -> do
       now <- getCurrentTime
-      if _oat_expiresAt t <= now
+      tokens <- if _oat_expiresAt t <= now
         then do
           putStrLn "OAuth access token expired — refreshing..."
           newT <- refreshOAuthToken cfg manager (_oat_refreshToken t)
           saveOAuthTokens vaultOpt newT
           pure newT
         else pure t
+      handle <- mkOAuthHandle cfg manager tokens
+      pure $ Just (MkProvider (mkAnthropicProviderOAuth manager handle))
+
+-- | Resolve an Anthropic provider via OAuth 2.0 PKCE.
+-- Loads cached tokens from the vault if available; runs the full browser
+-- flow otherwise. Refreshes expired access tokens automatically.
+resolveAnthropicOAuth :: Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
+resolveAnthropicOAuth vaultOpt manager = do
+  cached <- loadCachedOAuthProvider vaultOpt manager
+  case cached of
+    Just p  -> pure p
     Nothing -> do
-      t <- runOAuthFlow cfg manager
-      saveOAuthTokens vaultOpt t
-      pure t
-  handle <- mkOAuthHandle cfg manager tokens
-  pure (MkProvider (mkAnthropicProviderOAuth manager handle))
+      tokens <- runOAuthFlow defaultOAuthConfig manager
+      saveOAuthTokens vaultOpt tokens
+      handle <- mkOAuthHandle defaultOAuthConfig manager tokens
+      pure (MkProvider (mkAnthropicProviderOAuth manager handle))
 
 -- | Save OAuth tokens to the vault (best-effort; logs on failure).
 saveOAuthTokens :: Maybe VaultHandle -> OAuthTokens -> IO ()
