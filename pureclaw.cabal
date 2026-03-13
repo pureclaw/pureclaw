@@ -223,6 +223,8 @@ test-suite pureclaw-test
     Integration.SignalFlowSpec
     Integration.CLISpec
   hs-source-dirs:   test
+  build-tool-depends:
+    pureclaw:pureclaw
   build-depends:
     base,
     pureclaw,

@@ -238,7 +238,7 @@ runChat opts = do
   case mProvider of
     Just _  -> _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
     Nothing -> _lh_logInfo logger
-      "No credentials configured \x2014 use /vault setup or /vault add to get started"
+      "No providers configured \x2014 use /provider to get started"
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case effectiveAllow of

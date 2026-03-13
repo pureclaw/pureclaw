@@ -80,7 +80,7 @@ spec = do
       -- Should NOT say "Provider: anthropic" when there are no credentials
       err `shouldNotContain` "Provider: anthropic"
       -- Should indicate no provider is configured
-      err `shouldContain` "No credentials configured"
+      err `shouldContain` "No providers configured"
 
     it "shows a helpful message when sending a chat message without a provider" $ do
       bin <- findPureclaw
