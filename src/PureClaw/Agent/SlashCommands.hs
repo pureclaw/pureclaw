@@ -16,6 +16,7 @@ module PureClaw.Agent.SlashCommands
 import Control.Applicative ((<|>))
 import Control.Exception
 import Data.Foldable (asum)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -347,6 +348,62 @@ executeVaultCommand env vault sub ctx = do
 -- Provider subcommand execution
 -- ---------------------------------------------------------------------------
 
+-- | Auth method options for Anthropic provider.
+data AuthOption = AuthOption
+  { _ao_number :: Int
+  , _ao_name :: Text
+  , _ao_description :: Text
+  , _ao_handler :: AgentEnv -> VaultHandle -> Context -> IO Context
+  }
+
+-- | Available Anthropic auth methods.
+anthropicAuthOptions :: AgentEnv -> VaultHandle -> [AuthOption]
+anthropicAuthOptions env vault =
+  [ AuthOption 1 "API Key" "Use an API key"
+      (\_ _ ctx -> handleAnthropicApiKey env vault ctx)
+  , AuthOption 2 "OAuth 2.0" "Use OAuth 2.0 PKCE flow"
+      (\_ _ ctx -> handleAnthropicOAuth env vault ctx)
+  ]
+
+-- | Handle Anthropic API Key authentication.
+handleAnthropicApiKey :: AgentEnv -> VaultHandle -> Context -> IO Context
+handleAnthropicApiKey env vault ctx = do
+  let ch   = _env_channel env
+      send = _ch_send ch . OutgoingMessage
+  send "Enter your Anthropic API key (input will not be echoed):"
+  keyResult <- try @IOError (_ch_readSecret ch)
+  case keyResult of
+    Left e -> do
+      send ("Error reading API key: " <> T.pack (show e))
+      pure ctx
+    Right apiKeyText -> do
+      result <- _vh_put vault "ANTHROPIC_API_KEY" (TE.encodeUtf8 apiKeyText)
+      case result of
+        Left err -> do
+          send ("Error storing API key: " <> T.pack (show err))
+          pure ctx
+        Right () -> do
+          send "Anthropic API key configured successfully."
+          pure ctx
+
+-- | Handle Anthropic OAuth authentication.
+handleAnthropicOAuth :: AgentEnv -> VaultHandle -> Context -> IO Context
+handleAnthropicOAuth env vault ctx = do
+  let ch   = _env_channel env
+      send = _ch_send ch . OutgoingMessage
+  send "Starting OAuth flow... (opens browser)"
+  manager <- HTTP.newTlsManager
+  oauthTokens <- runOAuthFlow defaultOAuthConfig manager
+  result <- _vh_put vault "ANTHROPIC_OAUTH_TOKENS" (serializeTokens oauthTokens)
+  case result of
+    Left err -> do
+      send ("Error storing OAuth tokens: " <> T.pack (show err))
+      pure ctx
+    Right () -> do
+      send "Anthropic OAuth configured successfully."
+      send "Tokens cached in vault and will be auto-refreshed."
+      pure ctx
+
 executeProviderCommand :: AgentEnv -> VaultHandle -> ProviderSubCommand -> Context -> IO Context
 executeProviderCommand env vault (ProviderConfigure providerName) ctx = do
   let ch   = _env_channel env
@@ -355,50 +412,19 @@ executeProviderCommand env vault (ProviderConfigure providerName) ctx = do
 
   case lowerName of
     "anthropic" -> do
-      send $ T.intercalate "\n"
-        [ "Configure Anthropic provider. Choose auth method:"
-        , "  [1] API Key"
-        , "  [2] OAuth 2.0"
-        ]
+      let options = anthropicAuthOptions env vault
+          optionLines = map (\o -> "  [" <> T.pack (show (_ao_number o)) <> "] " <> _ao_name o) options
+          menu = T.intercalate "\n" ("Configure Anthropic provider. Choose auth method:" : optionLines)
+      send menu
 
       choiceMsg <- _ch_receive ch
       let choice = T.strip (_im_content choiceMsg)
+          selectedOption = listToMaybe [o | o <- options, T.pack (show (_ao_number o)) == choice]
 
-      case choice of
-        "1" -> do
-          send "Enter your Anthropic API key (input will not be echoed):"
-          keyResult <- try @IOError (_ch_readSecret ch)
-          case keyResult of
-            Left e -> do
-              send ("Error reading API key: " <> T.pack (show e))
-              pure ctx
-            Right apiKeyText -> do
-              result <- _vh_put vault "ANTHROPIC_API_KEY" (TE.encodeUtf8 apiKeyText)
-              case result of
-                Left err -> do
-                  send ("Error storing API key: " <> T.pack (show err))
-                  pure ctx
-                Right () -> do
-                  send "Anthropic API key configured successfully."
-                  pure ctx
-
-        "2" -> do
-          send "Starting OAuth flow... (opens browser)"
-          send ""
-          manager <- HTTP.newTlsManager
-          oauthTokens <- runOAuthFlow defaultOAuthConfig manager
-          result <- _vh_put vault "ANTHROPIC_OAUTH_TOKENS" (serializeTokens oauthTokens)
-          case result of
-            Left err -> do
-              send ("Error storing OAuth tokens: " <> T.pack (show err))
-              pure ctx
-            Right () -> do
-              send "Anthropic OAuth configured successfully."
-              send "Tokens cached in vault and will be auto-refreshed."
-              pure ctx
-
-        _ -> do
-          send "Invalid choice. Please enter 1 or 2."
+      case selectedOption of
+        Just opt -> _ao_handler opt env vault ctx
+        Nothing  -> do
+          send $ "Invalid choice. Please enter 1 to " <> T.pack (show (length options)) <> "."
           pure ctx
 
     _ -> do
