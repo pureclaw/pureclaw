@@ -17,6 +17,7 @@ import PureClaw.Handles.Log
 import PureClaw.Providers.Class
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
+import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
 
 -- | Mock provider for testing.
@@ -96,8 +97,8 @@ spec = do
     it "parses /compact" $ do
       parseSlashCommand "/compact" `shouldBe` Just CmdCompact
 
-    it "parses /vault init" $ do
-      parseSlashCommand "/vault init" `shouldBe` Just (CmdVault VaultInit)
+    it "parses /vault setup" $ do
+      parseSlashCommand "/vault setup" `shouldBe` Just (CmdVault VaultSetup)
 
     it "parses /vault list" $ do
       parseSlashCommand "/vault list" `shouldBe` Just (CmdVault VaultList)
@@ -151,6 +152,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -236,6 +238,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -258,17 +261,34 @@ spec = do
         Just t -> T.unpack t `shouldContain` "No vault configured"
         Nothing -> expectationFailure "Expected message"
 
-    it "/vault init with no vault → config instructions" $ do
+    it "/vault setup with no vault and invalid choice → cancelled" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      env <- mkEnvNoVault sentRef
-      let ctx = emptyContext Nothing
-      _ <- executeSlashCommand env (CmdVault VaultInit) ctx
+      msgsRef <- newIORef ["bad"]
+      vaultRef <- newIORef Nothing
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = writeIORef sentRef . Just . _om_content
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
       sent <- readIORef sentRef
       case sent of
-        Just t -> do
-          T.unpack t `shouldContain` "vault_recipient"
-          T.unpack t `shouldContain` "vault_identity"
-          T.unpack t `shouldContain` "/vault init"
+        Just t -> T.unpack t `shouldContain` "Invalid choice"
         Nothing -> expectationFailure "Expected message"
 
   describe "vault commands — with mock vault" $ do
@@ -283,30 +303,190 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
 
-    it "/vault init succeeds on fresh vault" $ do
-      sentRef <- newIORef (Nothing :: Maybe Text)
-      vault <- mkMockVaultHandle
-      env <- mkEnvWithVault sentRef vault
-      let ctx = emptyContext Nothing
-      _ <- executeSlashCommand env (CmdVault VaultInit) ctx
-      sent <- readIORef sentRef
-      case sent of
-        Just t -> T.unpack t `shouldContain` "initialized"
-        Nothing -> expectationFailure "Expected message"
+    it "/vault setup presents menu with passphrase option" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
+      vaultRef <- newIORef Nothing
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
+      allSent <- readIORef allSentRef
+      let menuMsg = last allSent  -- menu is sent first (list is in reverse)
+      T.unpack menuMsg `shouldContain` "Passphrase"
+      T.unpack menuMsg `shouldContain` "Choose your vault"
 
-    it "/vault init on already-initialized vault reports error" $ do
-      sentRef <- newIORef (Nothing :: Maybe Text)
+    it "/vault setup shows detected plugins in menu" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
+      vaultRef <- newIORef Nothing
+      let yubikey = AgePlugin
+            { _ap_name   = "yubikey"
+            , _ap_binary = "age-plugin-yubikey"
+            , _ap_label  = "YubiKey PIV"
+            }
+          env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [yubikey] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
+      allSent <- readIORef allSentRef
+      let menuMsg = last allSent
+      T.unpack menuMsg `shouldContain` "YubiKey PIV"
+      T.unpack menuMsg `shouldContain` "2."  -- yubikey should be option 2
+
+    it "/vault setup rekeys existing vault with passphrase" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      -- User picks "1" (passphrase), then enters passphrase, then confirms rekey
+      msgsRef <- newIORef ["1", "y"]
       vault <- mkMockVaultHandle
-      _ <- _vh_init vault  -- initialize once
-      env <- mkEnvWithVault sentRef vault
-      let ctx = emptyContext Nothing
-      _ <- executeSlashCommand env (CmdVault VaultInit) ctx
-      sent <- readIORef sentRef
-      case sent of
-        Just t -> T.unpack t `shouldContain` "already exists"
-        Nothing -> expectationFailure "Expected message"
+      _ <- _vh_init vault
+      vaultRef <- newIORef (Just vault)
+      rekeyCalledRef <- newIORef False
+      let vaultWithRekey = vault
+            { _vh_rekey = \_ _ confirmFn -> do
+                writeIORef rekeyCalledRef True
+                _ <- confirmFn "Confirm rekey?"
+                pure (Right ())
+            }
+      writeIORef vaultRef (Just vaultWithRekey)
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                , _ch_readSecret = pure "test-passphrase"
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
+      rekeyCalled <- readIORef rekeyCalledRef
+      rekeyCalled `shouldBe` True
+      allSent <- readIORef allSentRef
+      case allSent of
+        (lastMsg:_) -> T.unpack lastMsg `shouldContain` "rekeyed"
+        []          -> expectationFailure "Expected messages"
+
+    it "/vault setup rekey cancelled by user" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      -- User picks "1" (passphrase), then enters passphrase, then refuses rekey
+      msgsRef <- newIORef ["1", "n"]
+      vault <- mkMockVaultHandle
+      _ <- _vh_init vault
+      vaultRef <- newIORef (Just vault)
+      let vaultWithRekey = vault
+            { _vh_rekey = \_ _ confirmFn -> do
+                confirmed <- confirmFn "Confirm rekey?"
+                if confirmed
+                  then pure (Right ())
+                  else pure (Left (VaultCorrupted "rekey cancelled by user"))
+            }
+      writeIORef vaultRef (Just vaultWithRekey)
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                , _ch_readSecret = pure "test-passphrase"
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
+      allSent <- readIORef allSentRef
+      case allSent of
+        (lastMsg:_) -> T.unpack lastMsg `shouldContain` "cancelled"
+        []          -> expectationFailure "Expected messages"
+
+    it "/vault setup passphrase read error" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ["1"]
+      vaultRef <- newIORef Nothing
+      let env = AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                , _ch_readSecret = ioError (userError "readSecret not supported")
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
+      allSent <- readIORef allSentRef
+      case allSent of
+        (lastMsg:_) -> T.unpack lastMsg `shouldContain` "Error reading passphrase"
+        []          -> expectationFailure "Expected messages"
 
     it "/vault list with empty vault" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
@@ -397,6 +577,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -431,6 +612,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -458,6 +640,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -520,6 +703,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -542,6 +726,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -564,6 +749,7 @@ spec = do
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx

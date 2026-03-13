@@ -19,13 +19,18 @@ import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import System.Directory qualified as Dir
+import System.FilePath ((</>))
 
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
 import PureClaw.Agent.Env
+import PureClaw.CLI.Config
 import PureClaw.Handles.Channel
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
+import PureClaw.Security.Vault.Passphrase
+import PureClaw.Security.Vault.Plugin
 
 -- ---------------------------------------------------------------------------
 -- Command taxonomy
@@ -61,7 +66,7 @@ data CommandSpec = CommandSpec
 
 -- | Subcommands of the '/vault' family.
 data VaultSubCommand
-  = VaultInit               -- ^ Initialise the vault file on disk
+  = VaultSetup              -- ^ Interactive vault setup wizard
   | VaultAdd Text           -- ^ Store a named secret
   | VaultList               -- ^ List secret names
   | VaultDelete Text        -- ^ Delete a named secret
@@ -108,7 +113,7 @@ sessionCommandSpecs =
 
 vaultCommandSpecs :: [CommandSpec]
 vaultCommandSpecs =
-  [ CommandSpec "/vault init"            "Initialise the encrypted secrets vault"    GroupVault (vaultExactP "init"   VaultInit)
+  [ CommandSpec "/vault setup"           "Set up or rekey the encrypted secrets vault" GroupVault (vaultExactP "setup"  VaultSetup)
   , CommandSpec "/vault add <name>"      "Store a named secret (prompts for value)"  GroupVault (vaultArgP   "add"    VaultAdd)
   , CommandSpec "/vault list"            "List all stored secret names"              GroupVault (vaultExactP "list"   VaultList)
   , CommandSpec "/vault delete <name>"   "Delete a named secret"                     GroupVault (vaultArgP   "delete" VaultDelete)
@@ -210,22 +215,16 @@ executeSlashCommand env CmdCompact ctx = do
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
-  case vaultOpt of
-    Nothing -> do
-      let msg = case sub of
-            VaultInit -> T.intercalate "\n"
-              [ "Vault not configured. To use the vault, add to ~/.pureclaw/config.toml:"
-              , ""
-              , "  vault_recipient = \"age1...\"      # your age public key (from: age-keygen)"
-              , "  vault_identity  = \"~/.age/key.txt\"  # path to your age private key"
-              , ""
-              , "Then run /vault init to create the vault file."
-              ]
-            _ -> "No vault configured. Add vault settings to ~/.pureclaw/config.toml."
-      _ch_send (_env_channel env) (OutgoingMessage msg)
-      pure ctx
-    Just vault ->
-      executeVaultCommand env vault sub ctx
+  case sub of
+    VaultSetup -> do
+      executeVaultSetup env ctx
+    _ -> case vaultOpt of
+      Nothing -> do
+        _ch_send (_env_channel env) (OutgoingMessage
+          "No vault configured. Run /vault setup to create one.")
+        pure ctx
+      Just vault ->
+        executeVaultCommand env vault sub ctx
 
 -- ---------------------------------------------------------------------------
 -- Vault subcommand execution
@@ -236,16 +235,10 @@ executeVaultCommand env vault sub ctx = do
   let ch   = _env_channel env
       send = _ch_send ch . OutgoingMessage
   case sub of
-    VaultInit -> do
-      result <- _vh_init vault
-      case result of
-        Left VaultAlreadyExists ->
-          send "Vault already exists. Use /vault status to inspect."
-        Left err ->
-          send ("Vault init failed: " <> T.pack (show err))
-        Right () ->
-          send "Vault initialized successfully."
-      pure ctx
+    VaultSetup ->
+      -- VaultSetup is handled before dispatch; should not reach here.
+      send "Use /vault setup to set up or rekey the vault."
+      >> pure ctx
 
     VaultAdd name -> do
       send ("Enter value for '" <> name <> "' (input will not be echoed):")
@@ -309,6 +302,167 @@ executeVaultCommand env vault sub ctx = do
     VaultUnknown _ ->
       send "Unknown vault command. Type /help to see all available commands."
       >> pure ctx
+
+-- ---------------------------------------------------------------------------
+-- Vault setup wizard
+-- ---------------------------------------------------------------------------
+
+-- | Interactive vault setup wizard. Detects auth mechanisms, lets the user
+-- choose, then creates or rekeys the vault.
+executeVaultSetup :: AgentEnv -> Context -> IO Context
+executeVaultSetup env ctx = do
+  let ch   = _env_channel env
+      send = _ch_send ch . OutgoingMessage
+      ph   = _env_pluginHandle env
+
+  -- Step 1: Detect available plugins
+  plugins <- _ph_detect ph
+
+  -- Step 2: Build choice menu
+  let options = buildSetupOptions plugins
+      menu    = formatSetupMenu options
+  send menu
+
+  -- Step 3: Read user's choice
+  choiceMsg <- _ch_receive ch
+  let choiceText = T.strip (_im_content choiceMsg)
+  case parseChoice (length options) choiceText of
+    Nothing -> do
+      send "Invalid choice. Setup cancelled."
+      pure ctx
+    Just idx -> do
+      let chosen = snd (options !! idx)
+      -- Step 4: Create encryptor based on choice
+      encResult <- createEncryptorForChoice ch ph chosen
+      case encResult of
+        Left err -> do
+          send err
+          pure ctx
+        Right (newEnc, keyLabel, mRecipient, mIdentity) -> do
+          -- Step 5: Init or rekey
+          vaultOpt <- readIORef (_env_vault env)
+          case vaultOpt of
+            Nothing -> do
+              -- First-time setup: create vault
+              setupResult <- firstTimeSetup env newEnc keyLabel
+              case setupResult of
+                Left err -> send err
+                Right () -> do
+                  send ("Vault created with " <> keyLabel <> " encryption.")
+                  -- Update config
+                  updateConfigAfterSetup mRecipient mIdentity keyLabel
+            Just vault -> do
+              -- Rekey existing vault
+              let confirmFn msg = do
+                    send msg
+                    send "Proceed? [y/N]:"
+                    confirmResp <- _ch_receive ch
+                    let answer = T.strip (_im_content confirmResp)
+                    pure (answer == "y" || answer == "Y")
+              rekeyResult <- _vh_rekey vault newEnc keyLabel confirmFn
+              case rekeyResult of
+                Left (VaultCorrupted "rekey cancelled by user") ->
+                  send "Rekey cancelled."
+                Left err ->
+                  send ("Rekey failed: " <> T.pack (show err))
+                Right () -> do
+                  send ("Vault rekeyed to " <> keyLabel <> ".")
+                  updateConfigAfterSetup mRecipient mIdentity keyLabel
+          pure ctx
+
+-- | A setup option: either passphrase or a detected plugin.
+data SetupOption
+  = SetupPassphrase
+  | SetupPlugin AgePlugin
+  deriving stock (Show, Eq)
+
+-- | Build the list of available setup options.
+-- Passphrase is always first.
+buildSetupOptions :: [AgePlugin] -> [(Text, SetupOption)]
+buildSetupOptions plugins =
+  ("Passphrase", SetupPassphrase)
+    : [(labelFor p, SetupPlugin p) | p <- plugins]
+  where
+    labelFor p = _ap_label p <> " (" <> _ap_name p <> ")"
+
+-- | Format the setup menu for display.
+formatSetupMenu :: [(Text, SetupOption)] -> Text
+formatSetupMenu options =
+  T.intercalate "\n" $
+    "Choose your vault authentication method:"
+    : [T.pack (show i) <> ". " <> label | (i, (label, _)) <- zip [(1::Int)..] options]
+
+-- | Parse a numeric choice (1-based) to a 0-based index.
+parseChoice :: Int -> Text -> Maybe Int
+parseChoice maxN t =
+  case reads (T.unpack t) of
+    [(n, "")] | n >= 1 && n <= maxN -> Just (n - 1)
+    _ -> Nothing
+
+-- | Create an encryptor based on the user's setup choice.
+-- Returns (encryptor, key label, maybe recipient, maybe identity path).
+createEncryptorForChoice
+  :: ChannelHandle
+  -> PluginHandle
+  -> SetupOption
+  -> IO (Either Text (VaultEncryptor, Text, Maybe Text, Maybe Text))
+createEncryptorForChoice ch _ph SetupPassphrase = do
+  _ch_send ch (OutgoingMessage "Enter passphrase for vault:")
+  passResult <- try @IOError (_ch_readSecret ch)
+  case passResult of
+    Left e ->
+      pure (Left ("Error reading passphrase: " <> T.pack (show e)))
+    Right passphrase -> do
+      enc <- mkPassphraseVaultEncryptor (pure (TE.encodeUtf8 passphrase))
+      pure (Right (enc, "passphrase", Nothing, Nothing))
+createEncryptorForChoice ch ph (SetupPlugin plugin) = do
+  _ch_send ch (OutgoingMessage ("Generating identity on " <> _ap_label plugin <> "..."))
+  pureclawDir <- getPureclawDir
+  let vaultDir = pureclawDir </> "vault"
+  Dir.createDirectoryIfMissing True vaultDir
+  genResult <- _ph_generate ph plugin vaultDir
+  case genResult of
+    Left err ->
+      pure (Left ("Plugin error: " <> T.pack (show err)))
+    Right (AgeRecipient recipient, identityPath) -> do
+      ageResult <- mkAgeEncryptor
+      case ageResult of
+        Left err ->
+          pure (Left ("age error: " <> T.pack (show err)))
+        Right ageEnc -> do
+          let enc = ageVaultEncryptor ageEnc recipient (T.pack identityPath)
+          pure (Right (enc, _ap_label plugin, Just recipient, Just (T.pack identityPath)))
+
+-- | First-time vault setup: create directory, open vault, init, write to IORef.
+firstTimeSetup :: AgentEnv -> VaultEncryptor -> Text -> IO (Either Text ())
+firstTimeSetup env enc keyLabel = do
+  pureclawDir <- getPureclawDir
+  Dir.createDirectoryIfMissing True pureclawDir
+  let vaultPath = pureclawDir </> "vault.age"
+      cfg = VaultConfig
+        { _vc_path    = vaultPath
+        , _vc_keyType = keyLabel
+        , _vc_unlock  = UnlockOnDemand
+        }
+  vault <- openVault cfg enc
+  initResult <- _vh_init vault
+  case initResult of
+    Left VaultAlreadyExists ->
+      pure (Left "A vault file already exists. Use /vault setup to rekey.")
+    Left err ->
+      pure (Left ("Vault creation failed: " <> T.pack (show err)))
+    Right () -> do
+      writeIORef (_env_vault env) (Just vault)
+      pure (Right ())
+
+-- | Update the config file after a successful setup/rekey.
+updateConfigAfterSetup :: Maybe Text -> Maybe Text -> Text -> IO ()
+updateConfigAfterSetup mRecipient mIdentity _keyLabel = do
+  pureclawDir <- getPureclawDir
+  Dir.createDirectoryIfMissing True pureclawDir
+  let configPath = pureclawDir </> "config.toml"
+      unlockMode = Just "on_demand"
+  updateVaultConfig configPath Nothing mRecipient mIdentity unlockMode
 
 -- ---------------------------------------------------------------------------
 -- Help rendering — derived from allCommandSpecs

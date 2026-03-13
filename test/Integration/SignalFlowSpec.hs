@@ -17,6 +17,8 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Security.Vault.Age
+import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
 
 -- | Mock provider that echoes user messages with a prefix.
@@ -45,6 +47,7 @@ mkTestEnv p ch = do
     , _env_systemPrompt = Nothing
     , _env_registry     = emptyRegistry
     , _env_vault        = vaultRef
+    , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
     }
 
 spec :: Spec

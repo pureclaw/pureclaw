@@ -50,6 +50,7 @@ import PureClaw.Security.Secrets
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
+import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.FileRead
 import PureClaw.Tools.FileWrite
 import PureClaw.Tools.Git
@@ -253,6 +254,7 @@ runChat opts = do
         , _env_systemPrompt = sysPrompt
         , _env_registry     = registry
         , _env_vault        = vaultRef
+        , _env_pluginHandle = mkPluginHandle
         }
   runAgentLoop env
 
@@ -465,7 +467,7 @@ resolvePassphraseVault fileCfg logger = do
           "Vault unlock failed: " <> T.pack (show err)
         Right () -> _lh_logInfo logger "Vault unlocked."
     else
-      _lh_logInfo logger "Vault ready (not yet initialized — use /vault init to set up)."
+      _lh_logInfo logger "Vault ready (not yet initialized — use /vault setup to set up)."
   pure (Just vault)
 
 -- | Infer a human-readable key type from the age recipient prefix.

@@ -11,6 +11,7 @@ import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
 import PureClaw.Security.Vault
+import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
 
 -- | All runtime dependencies for the agent loop, gathered into a single record.
@@ -32,4 +33,6 @@ data AgentEnv = AgentEnv
     -- ^ All registered tools available for the agent to call.
   , _env_vault        :: IORef (Maybe VaultHandle)
     -- ^ Optional secrets vault. 'Nothing' if no vault is configured.
+  , _env_pluginHandle :: PluginHandle
+    -- ^ Handle for detecting and generating age plugin identities.
   }
