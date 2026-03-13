@@ -240,9 +240,10 @@ runOAuthFlow cfg manager = do
   putStrLn ""
   putStr "Paste the authorization code shown in your browser: " >> hFlush stdout
   rawInput <- T.strip . T.pack <$> getLine
-  let code = stripCodeFragment rawInput
+  let code  = T.takeWhile (/= '#') rawInput
+      state = T.drop 1 (T.dropWhile (/= '#') rawInput)
   now <- getCurrentTime
-  exchangeCodeForTokens cfg manager verifier code now
+  exchangeCodeForTokens cfg manager verifier code state now
 
 -- | Strip whitespace and any trailing @#fragment@ from a pasted authorization
 -- code. The @platform.claude.com@ callback page appends @#state@ to the
@@ -251,13 +252,17 @@ stripCodeFragment :: Text -> Text
 stripCodeFragment = T.takeWhile (/= '#') . T.strip
 
 -- | Exchange an authorization code for tokens.
+-- 'state' is extracted from the @#fragment@ of the pasted callback code
+-- (Anthropic's token endpoint requires it to match the value sent in the
+-- authorisation URL).
 exchangeCodeForTokens
-  :: OAuthConfig -> HTTP.Manager -> ByteString -> Text -> UTCTime -> IO OAuthTokens
-exchangeCodeForTokens cfg manager verifier code now = do
+  :: OAuthConfig -> HTTP.Manager -> ByteString -> Text -> Text -> UTCTime -> IO OAuthTokens
+exchangeCodeForTokens cfg manager verifier code state now = do
   let body = encode $ object
                [ "grant_type"    .= ("authorization_code" :: Text)
                , "client_id"     .= _oac_clientId cfg
                , "code"          .= code
+               , "state"         .= state
                , "redirect_uri"  .= TE.decodeUtf8 cliRedirectUri
                , "code_verifier" .= TE.decodeUtf8 verifier
                ]
