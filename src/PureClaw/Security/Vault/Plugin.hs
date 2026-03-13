@@ -100,13 +100,20 @@ filterIO p (x:xs) = do
   pure (if keep then x : rest else rest)
 
 -- | Run @age-plugin-\<name\> --generate@ and parse the output.
+--
+-- The plugin process inherits the terminal (stdin, stderr) so it can
+-- prompt the user for PIN entry and touch confirmation. Only stdout
+-- is captured — that's where the plugin writes the identity and
+-- recipient.
 generateIdentity :: AgePlugin -> FilePath -> IO (Either VaultError (AgeRecipient, FilePath))
 generateIdentity plugin dir = do
-  let cfg = proc (_ap_binary plugin) ["--generate"]
-  (exitCode, out, err) <- readProcess cfg
+  let cfg = setStdin inherit
+          $ setStderr inherit
+          $ proc (_ap_binary plugin) ["--generate"]
+  (exitCode, out, _ignored) <- readProcess cfg
   case exitCode of
-    ExitFailure _ ->
-      pure (Left (AgeError (TE.decodeUtf8 (BL.toStrict err))))
+    ExitFailure code ->
+      pure (Left (AgeError ("plugin exited with code " <> T.pack (show code))))
     ExitSuccess -> do
       let outText = TE.decodeUtf8 (BL.toStrict out)
           outputLines = T.lines outText
