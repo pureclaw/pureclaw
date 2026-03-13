@@ -243,8 +243,13 @@ runChat opts = do
   let registry = buildRegistry policy sh workspace fh mh nh
 
   hSetBuffering stdout LineBuffering
-  let pt = providerType effectiveProvider
-  _lh_logInfo logger $ "Provider: " <> T.pack (providerTypeToText pt)
+  let activePt       = providerType effectiveProvider
+      configuredPts  = map providerType (_fc_providers fileCfg)
+      labelPt pt     = T.pack (providerTypeToText pt) <> if pt == activePt then " (active)" else ""
+      providerList   = case configuredPts of
+        [] -> T.pack (providerTypeToText activePt)
+        pts -> T.intercalate ", " (map labelPt pts)
+  _lh_logInfo logger $ "Providers: " <> providerList
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case effectiveAllow of
