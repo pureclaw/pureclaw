@@ -25,6 +25,10 @@ import PureClaw.Tools.Registry
 -- Slash commands (messages starting with '/') are intercepted and
 -- handled before being sent to the provider.
 --
+-- If no provider is configured ('Nothing' in the IORef), chat messages
+-- produce a helpful error directing the user to configure credentials.
+-- Slash commands always work regardless of provider state.
+--
 -- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
 -- Provider errors are logged and a 'PublicError' is sent to the channel.
 runAgentLoop :: AgentEnv -> IO ()
@@ -32,7 +36,6 @@ runAgentLoop env = do
   _lh_logInfo logger "Agent loop started"
   go (emptyContext (_env_systemPrompt env))
   where
-    provider = _env_provider env
     model    = _env_model env
     channel  = _env_channel env
     logger   = _env_logger env
@@ -61,14 +64,20 @@ runAgentLoop env = do
                       <> "\nType /status for session info, /help for available commands."))
                   go ctx
           | otherwise -> do
-              let userMsg = textMessage User stripped
-                  ctx' = addMessage userMsg ctx
-              _lh_logDebug logger $
-                "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-              handleCompletion ctx'
+              mProvider <- readIORef (_env_provider env)
+              case mProvider of
+                Nothing -> do
+                  _ch_send channel (OutgoingMessage noProviderMessage)
+                  go ctx
+                Just provider -> do
+                  let userMsg = textMessage User stripped
+                      ctx' = addMessage userMsg ctx
+                  _lh_logDebug logger $
+                    "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
+                  handleCompletion provider ctx'
           where stripped = T.strip (_im_content msg)
 
-    handleCompletion ctx = do
+    handleCompletion provider ctx = do
       let req = CompletionRequest
             { _cr_model        = model
             , _cr_messages     = contextMessages ctx
@@ -115,7 +124,7 @@ runAgentLoop env = do
                       ctx'' = addMessage resultMsg ctx'
                   _lh_logDebug logger $
                     "Executed " <> T.pack (show (length results)) <> " tool calls, continuing"
-                  handleCompletion ctx''
+                  handleCompletion provider ctx''
 
     executeCall (callId, name, input) = do
       _lh_logInfo logger $ "Tool call: " <> name
@@ -130,3 +139,14 @@ runAgentLoop env = do
 
     partsToText :: [ToolResultPart] -> Text
     partsToText parts = T.intercalate "\n" [t | TRPText t <- parts]
+
+-- | Message shown when user sends a chat message but no provider is configured.
+noProviderMessage :: Text
+noProviderMessage = T.intercalate "\n"
+  [ "No provider configured. To start chatting, configure your credentials:"
+  , ""
+  , "  /vault setup          Set up the encrypted vault and store API keys"
+  , "  /vault add <KEY>      Store a specific API key (e.g. ANTHROPIC_API_KEY)"
+  , ""
+  , "Or set an environment variable (e.g. ANTHROPIC_API_KEY) and restart."
+  ]

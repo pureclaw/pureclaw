@@ -22,7 +22,6 @@ import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
 import System.Directory (doesFileExist)
 import System.Environment
-import System.Exit
 import System.IO
 
 import PureClaw.Auth.AnthropicOAuth
@@ -202,10 +201,10 @@ runChat opts = do
   -- Vault (opened before provider so API keys can be fetched from vault)
   vaultOpt <- resolveVault fileCfg (_co_noVault opts) logger
 
-  -- Provider
+  -- Provider (may be Nothing if no credentials are configured yet)
   manager <- HTTP.newTlsManager
-  provider <- if effectiveProvider == Anthropic && _co_oauth opts
-    then resolveAnthropicOAuth vaultOpt manager
+  mProvider <- if effectiveProvider == Anthropic && _co_oauth opts
+    then Just <$> resolveAnthropicOAuth vaultOpt manager
     else resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
 
   -- Model
@@ -245,9 +244,14 @@ runChat opts = do
   putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
   putStrLn "Type your message and press Enter. Ctrl-D to exit."
   putStrLn ""
-  vaultRef <- newIORef vaultOpt
+  vaultRef    <- newIORef vaultOpt
+  providerRef <- newIORef mProvider
+  case mProvider of
+    Nothing -> _lh_logInfo logger
+      "No credentials configured — use /vault setup or /vault add to get started"
+    Just _  -> pure ()
   let env = AgentEnv
-        { _env_provider     = provider
+        { _env_provider     = providerRef
         , _env_model        = model
         , _env_channel      = channel
         , _env_logger       = logger
@@ -303,18 +307,21 @@ buildPolicy cmds =
 -- | Resolve the LLM provider from the provider type.
 -- Checks the vault for the API key (using the env var name as the vault key)
 -- before falling back to CLI flag or environment variable.
-resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
+-- Returns 'Nothing' if no credentials are available (the agent loop
+-- will still start, allowing the user to configure credentials via
+-- slash commands like /vault setup).
+resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO (Maybe SomeProvider)
 resolveProvider Anthropic keyOpt vaultOpt manager = do
-  apiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
-  pure (MkProvider (mkAnthropicProvider manager apiKey))
+  mApiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
+  pure (fmap (\k -> MkProvider (mkAnthropicProvider manager k)) mApiKey)
 resolveProvider OpenAI keyOpt vaultOpt manager = do
-  apiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
-  pure (MkProvider (mkOpenAIProvider manager apiKey))
+  mApiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
+  pure (fmap (\k -> MkProvider (mkOpenAIProvider manager k)) mApiKey)
 resolveProvider OpenRouter keyOpt vaultOpt manager = do
-  apiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
-  pure (MkProvider (mkOpenRouterProvider manager apiKey))
+  mApiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
+  pure (fmap (\k -> MkProvider (mkOpenRouterProvider manager k)) mApiKey)
 resolveProvider Ollama _ _ manager =
-  pure (MkProvider (mkOllamaProvider manager))
+  pure (Just (MkProvider (mkOllamaProvider manager)))
 
 -- | Vault key used to cache OAuth tokens between sessions.
 oauthVaultKey :: T.Text
@@ -359,19 +366,18 @@ eitherToMaybe (Left  _) = Nothing
 eitherToMaybe (Right a) = Just a
 
 -- | Resolve an API key from: CLI flag → vault → environment variable.
-resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO ApiKey
-resolveApiKey (Just key) _ _ = pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
+-- Returns 'Nothing' if no key is found anywhere.
+resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO (Maybe ApiKey)
+resolveApiKey (Just key) _ _ = pure (Just (mkApiKey (TE.encodeUtf8 (T.pack key))))
 resolveApiKey Nothing envVar vaultOpt = do
   vaultKey <- tryVaultLookup vaultOpt (T.pack envVar)
   case vaultKey of
-    Just bs -> pure (mkApiKey bs)
+    Just bs -> pure (Just (mkApiKey bs))
     Nothing -> do
       envKey <- lookupEnv envVar
       case envKey of
-        Just key -> pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
-        Nothing  -> die $
-          "No API key provided. Use --api-key, set " <> envVar
-          <> ", or store in vault with /vault add " <> envVar
+        Just key -> pure (Just (mkApiKey (TE.encodeUtf8 (T.pack key))))
+        Nothing  -> pure Nothing
 
 -- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
 -- absent, locked, or does not contain the key.

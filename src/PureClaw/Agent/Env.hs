@@ -19,8 +19,8 @@ import PureClaw.Tools.Registry
 -- 'executeSlashCommand', making it easy to add new capabilities (e.g.
 -- 'VaultHandle') in later work units without touching call sites.
 data AgentEnv = AgentEnv
-  { _env_provider     :: SomeProvider
-    -- ^ The LLM provider (wrapped existential, erases the concrete type).
+  { _env_provider     :: IORef (Maybe SomeProvider)
+    -- ^ The LLM provider. 'Nothing' when no credentials are configured yet.
   , _env_model        :: ModelId
     -- ^ The model to use for completions.
   , _env_channel      :: ChannelHandle

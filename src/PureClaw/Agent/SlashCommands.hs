@@ -199,19 +199,25 @@ executeSlashCommand env CmdStatus ctx = do
   pure ctx
 
 executeSlashCommand env CmdCompact ctx = do
-  (ctx', result) <- compactContext
-    (_env_provider env)
-    (_env_model env)
-    0
-    defaultKeepRecent
-    ctx
-  let msg = case result of
-        NotNeeded         -> "Nothing to compact (too few messages)."
-        Compacted o n     -> "Compacted: " <> T.pack (show o)
-                          <> " messages \x2192 " <> T.pack (show n)
-        CompactionError e -> "Compaction failed: " <> e
-  _ch_send (_env_channel env) (OutgoingMessage msg)
-  pure ctx'
+  mProvider <- readIORef (_env_provider env)
+  case mProvider of
+    Nothing -> do
+      _ch_send (_env_channel env) (OutgoingMessage "Cannot compact: no provider configured.")
+      pure ctx
+    Just provider -> do
+      (ctx', result) <- compactContext
+        provider
+        (_env_model env)
+        0
+        defaultKeepRecent
+        ctx
+      let msg = case result of
+            NotNeeded         -> "Nothing to compact (too few messages)."
+            Compacted o n     -> "Compacted: " <> T.pack (show o)
+                              <> " messages \x2192 " <> T.pack (show n)
+            CompactionError e -> "Compaction failed: " <> e
+      _ch_send (_env_channel env) (OutgoingMessage msg)
+      pure ctx'
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)

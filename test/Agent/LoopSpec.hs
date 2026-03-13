@@ -91,9 +91,10 @@ instance Provider ToolCallProvider where
 -- | Build a test AgentEnv from a provider and channel.
 mkTestEnv :: Provider p => p -> ChannelHandle -> IO AgentEnv
 mkTestEnv p ch = do
-  vaultRef <- newIORef Nothing
+  vaultRef    <- newIORef Nothing
+  providerRef <- newIORef (Just (MkProvider p))
   pure AgentEnv
-    { _env_provider     = MkProvider p
+    { _env_provider     = providerRef
     , _env_model        = ModelId "mock"
     , _env_channel      = ch
     , _env_logger       = mkNoOpLogHandle

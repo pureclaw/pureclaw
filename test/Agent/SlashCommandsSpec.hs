@@ -142,9 +142,10 @@ spec = do
 
   describe "executeSlashCommand" $ do
     let mkEnv sentRef = do
-          vaultRef <- newIORef Nothing
+          vaultRef    <- newIORef Nothing
+          providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           pure AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
@@ -228,9 +229,10 @@ spec = do
 
   describe "vault commands — no vault configured" $ do
     let mkEnvNoVault sentRef = do
-          vaultRef <- newIORef Nothing
+          vaultRef    <- newIORef Nothing
+          providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           pure AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
@@ -264,9 +266,10 @@ spec = do
     it "/vault setup with no vault and invalid choice → cancelled" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       msgsRef <- newIORef ["bad"]
-      vaultRef <- newIORef Nothing
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = writeIORef sentRef . Just . _om_content
@@ -293,9 +296,10 @@ spec = do
 
   describe "vault commands — with mock vault" $ do
     let mkEnvWithVault sentRef vault = do
-          vaultRef <- newIORef (Just vault)
+          vaultRef    <- newIORef (Just vault)
+          providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           pure AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
@@ -309,9 +313,10 @@ spec = do
     it "/vault setup presents menu with passphrase option" $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
-      vaultRef <- newIORef Nothing
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
@@ -339,14 +344,15 @@ spec = do
     it "/vault setup shows detected plugins in menu" $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
-      vaultRef <- newIORef Nothing
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let yubikey = AgePlugin
             { _ap_name   = "yubikey"
             , _ap_binary = "age-plugin-yubikey"
             , _ap_label  = "YubiKey PIV"
             }
           env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
@@ -386,8 +392,9 @@ spec = do
                 pure (Right ())
             }
       writeIORef vaultRef (Just vaultWithRekey)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
@@ -430,8 +437,9 @@ spec = do
                   else pure (Left (VaultCorrupted "rekey cancelled by user"))
             }
       writeIORef vaultRef (Just vaultWithRekey)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
@@ -460,9 +468,10 @@ spec = do
     it "/vault setup passphrase read error" $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ["1"]
-      vaultRef <- newIORef Nothing
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
@@ -559,9 +568,10 @@ spec = do
       sentRef  <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "todelete" "val"
-      vaultRef <- newIORef (Just vault)
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = writeIORef sentRef . Just . _om_content
@@ -594,9 +604,10 @@ spec = do
       sentRef  <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "keep" (TE.encodeUtf8 "val")
-      vaultRef <- newIORef (Just vault)
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send    = writeIORef sentRef . Just . _om_content
@@ -627,9 +638,10 @@ spec = do
     it "/vault add on non-CLI channel sends error message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
-      vaultRef <- newIORef (Just vault)
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send       = writeIORef sentRef . Just . _om_content
@@ -693,9 +705,10 @@ spec = do
   describe "executeSlashCommand — /help" $ do
     it "/help sends a message containing all command syntaxes" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      vaultRef <- newIORef Nothing
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
@@ -716,9 +729,10 @@ spec = do
 
     it "/help output contains group headings" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      vaultRef <- newIORef Nothing
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
@@ -739,9 +753,10 @@ spec = do
 
     it "/help does not modify context" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      vaultRef <- newIORef Nothing
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       let env = AgentEnv
-            { _env_provider     = MkProvider (MockProvider "summary")
+            { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
