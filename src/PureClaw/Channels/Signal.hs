@@ -46,11 +46,16 @@ mkSignalChannel config lh = do
 
 instance Channel SignalChannel where
   toHandle sc = ChannelHandle
-    { _ch_receive    = receiveEnvelope sc
-    , _ch_send       = sendSignalMessage sc
-    , _ch_sendError  = sendSignalError sc
-    , _ch_sendChunk  = \_ -> pure ()  -- Signal doesn't support streaming
-    , _ch_readSecret = ioError (userError "Vault management requires the CLI interface")
+    { _ch_receive      = receiveEnvelope sc
+    , _ch_send         = sendSignalMessage sc
+    , _ch_sendError    = sendSignalError sc
+    , _ch_sendChunk    = \_ -> pure ()  -- Signal doesn't support streaming
+    , _ch_readSecret   = ioError (userError "Vault management requires the CLI interface")
+    , _ch_prompt       = \promptText -> do
+        sendSignalMessage sc (OutgoingMessage promptText)
+        _im_content <$> receiveEnvelope sc
+    , _ch_promptSecret = \_ ->
+        ioError (userError "Vault management requires the CLI interface")
     }
 
 -- | Block until a Signal envelope arrives in the queue.

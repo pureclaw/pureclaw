@@ -82,6 +82,38 @@ mkMockVaultHandle = do
     , _vh_rekey = \_ _ _ -> pure (Right ())
     }
 
+-- | Pop the next message from a queue IORef. Throws IOError on empty.
+popMsg :: IORef [Text] -> IO Text
+popMsg msgsRef = do
+  msgs <- readIORef msgsRef
+  case msgs of
+    []     -> throwIO (userError "EOF" :: IOError)
+    (m:rest) -> do
+      writeIORef msgsRef rest
+      pure m
+
+-- | Build a mock channel that pops prompt/secret responses from a queue.
+mkMockChannel :: IORef (Maybe Text) -> IORef [Text] -> ChannelHandle
+mkMockChannel sentRef msgsRef = mkNoOpChannelHandle
+  { _ch_send         = writeIORef sentRef . Just . _om_content
+  , _ch_receive      = do
+      m <- popMsg msgsRef
+      pure (IncomingMessage (UserId "test") m)
+  , _ch_prompt       = \_ -> popMsg msgsRef
+  , _ch_promptSecret = \_ -> popMsg msgsRef
+  }
+
+-- | Like mkMockChannel but captures ALL sent messages (not just the last).
+mkMockChannelAll :: IORef [Text] -> IORef [Text] -> ChannelHandle
+mkMockChannelAll allSentRef msgsRef = mkNoOpChannelHandle
+  { _ch_send         = \msg -> modifyIORef allSentRef (_om_content msg :)
+  , _ch_receive      = do
+      m <- popMsg msgsRef
+      pure (IncomingMessage (UserId "test") m)
+  , _ch_prompt       = \_ -> popMsg msgsRef
+  , _ch_promptSecret = \_ -> popMsg msgsRef
+  }
+
 spec :: Spec
 spec = do
   describe "parseSlashCommand" $ do
@@ -123,6 +155,18 @@ spec = do
 
     it "parses bare /vault as unknown" $ do
       parseSlashCommand "/vault" `shouldBe` Just (CmdVault (VaultUnknown ""))
+
+    it "parses /provider with no arg as list" $ do
+      parseSlashCommand "/provider" `shouldBe` Just (CmdProvider ProviderList)
+
+    it "parses /provider with trailing space as list" $ do
+      parseSlashCommand "/provider " `shouldBe` Just (CmdProvider ProviderList)
+
+    it "parses /provider anthropic" $ do
+      parseSlashCommand "/provider anthropic" `shouldBe` Just (CmdProvider (ProviderConfigure "anthropic"))
+
+    it "parses /provider case-insensitively but preserves arg case" $ do
+      parseSlashCommand "/Provider Anthropic" `shouldBe` Just (CmdProvider (ProviderConfigure "Anthropic"))
 
     it "is case-insensitive" $ do
       parseSlashCommand "/NEW" `shouldBe` Just CmdNew
@@ -227,6 +271,80 @@ spec = do
         Just t -> T.unpack t `shouldContain` "Compacted"
         Nothing -> expectationFailure "Expected compact message"
 
+  describe "provider commands" $ do
+    it "/provider with no arg lists available providers" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vault <- mkMockVaultHandle
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "Available providers"
+          T.unpack t `shouldContain` "anthropic"
+          T.unpack t `shouldContain` "openai"
+          T.unpack t `shouldContain` "openrouter"
+          T.unpack t `shouldContain` "ollama"
+        Nothing -> expectationFailure "Expected provider list"
+
+    it "/provider with no vault shows helpful message" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "Vault not configured"
+        Nothing -> expectationFailure "Expected message"
+
+    it "/provider unknown-name shows error" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ([] :: [Text])
+      vault <- mkMockVaultHandle
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
+      allSent <- readIORef allSentRef
+      let combined = T.unpack (T.intercalate " " allSent)
+      combined `shouldContain` "Unknown provider"
+      combined `shouldContain` "Supported providers"
+
   describe "vault commands — no vault configured" $ do
     let mkEnvNoVault sentRef = do
           vaultRef    <- newIORef Nothing
@@ -271,16 +389,7 @@ spec = do
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = writeIORef sentRef . Just . _om_content
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                }
+            , _env_channel      = mkMockChannel sentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -300,7 +409,7 @@ spec = do
       -- /vault setup, executeVaultSetup sees Just vault and tries to rekey
       -- instead of calling firstTimeSetup. The rekey fails with VaultNotFound.
       allSentRef <- newIORef ([] :: [Text])
-      msgsRef <- newIORef ["1"]  -- pick passphrase
+      msgsRef <- newIORef ["1", "test-passphrase"]  -- pick passphrase, then enter it
       -- Create a vault handle but do NOT call _vh_init — simulates
       -- the state after resolvePassphraseVault on a fresh install.
       uninitVault <- mkMockVaultHandle
@@ -312,17 +421,7 @@ spec = do
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                , _ch_readSecret = pure "test-passphrase"
-                }
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -363,16 +462,7 @@ spec = do
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                }
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -399,16 +489,7 @@ spec = do
           env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                }
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -425,7 +506,7 @@ spec = do
     it "/vault setup rekeys existing vault with passphrase" $ do
       allSentRef <- newIORef ([] :: [Text])
       -- User picks "1" (passphrase), then enters passphrase, then confirms rekey
-      msgsRef <- newIORef ["1", "y"]
+      msgsRef <- newIORef ["1", "test-passphrase", "y"]
       vault <- mkMockVaultHandle
       _ <- _vh_init vault
       vaultRef <- newIORef (Just vault)
@@ -441,17 +522,7 @@ spec = do
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                , _ch_readSecret = pure "test-passphrase"
-                }
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -470,7 +541,7 @@ spec = do
     it "/vault setup rekey cancelled by user" $ do
       allSentRef <- newIORef ([] :: [Text])
       -- User picks "1" (passphrase), then enters passphrase, then refuses rekey
-      msgsRef <- newIORef ["1", "n"]
+      msgsRef <- newIORef ["1", "test-passphrase", "n"]
       vault <- mkMockVaultHandle
       _ <- _vh_init vault
       vaultRef <- newIORef (Just vault)
@@ -486,17 +557,7 @@ spec = do
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                , _ch_readSecret = pure "test-passphrase"
-                }
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -512,23 +573,15 @@ spec = do
 
     it "/vault setup passphrase read error" $ do
       allSentRef <- newIORef ([] :: [Text])
-      msgsRef <- newIORef ["1"]
+      msgsRef <- newIORef ["1"]  -- pick passphrase
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      let env = AgentEnv
+      let ch = mkMockChannelAll allSentRef msgsRef
+          env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                , _ch_readSecret = ioError (userError "readSecret not supported")
-                }
+            , _env_channel      = ch
+                { _ch_promptSecret = \_ -> ioError (userError "readSecret not supported") }
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -609,8 +662,8 @@ spec = do
         Nothing -> expectationFailure "Expected message"
 
     it "/vault delete with confirmation deletes secret" $ do
-      msgsRef  <- newIORef ["y"]
-      sentRef  <- newIORef (Nothing :: Maybe Text)
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      msgsRef <- newIORef ["y"]
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "todelete" "val"
       vaultRef    <- newIORef (Just vault)
@@ -618,16 +671,7 @@ spec = do
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = writeIORef sentRef . Just . _om_content
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                }
+            , _env_channel      = mkMockChannel sentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -645,8 +689,8 @@ spec = do
       result `shouldBe` Left (VaultCorrupted "no such key")
 
     it "/vault delete with cancellation does not delete" $ do
-      msgsRef  <- newIORef ["n"]
-      sentRef  <- newIORef (Nothing :: Maybe Text)
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      msgsRef <- newIORef ["n"]
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "keep" (TE.encodeUtf8 "val")
       vaultRef    <- newIORef (Just vault)
@@ -654,16 +698,7 @@ spec = do
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send    = writeIORef sentRef . Just . _om_content
-                , _ch_receive = do
-                    msgs <- readIORef msgsRef
-                    case msgs of
-                      []     -> throwIO (userError "EOF" :: IOError)
-                      (m:rest) -> do
-                        writeIORef msgsRef rest
-                        pure (IncomingMessage (UserId "test") m)
-                }
+            , _env_channel      = mkMockChannel sentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
@@ -689,9 +724,8 @@ spec = do
             { _env_provider     = providerRef
             , _env_model        = ModelId "test"
             , _env_channel      = mkNoOpChannelHandle
-                { _ch_send       = writeIORef sentRef . Just . _om_content
-                  -- readSecret throws (like non-CLI channels)
-                , _ch_readSecret = ioError (userError "readSecret not supported")
+                { _ch_send         = writeIORef sentRef . Just . _om_content
+                , _ch_promptSecret = \_ -> ioError (userError "readSecret not supported")
                 }
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -794,6 +828,7 @@ spec = do
         Nothing -> expectationFailure "Expected /help output"
         Just t  -> do
           T.unpack t `shouldContain` "Session"
+          T.unpack t `shouldContain` "Provider"
           T.unpack t `shouldContain` "Vault"
 
     it "/help does not modify context" $ do
@@ -830,3 +865,8 @@ spec = do
       show (CmdVault VaultList) `shouldContain` "VaultList"
       CmdVault VaultList `shouldBe` CmdVault VaultList
       CmdVault VaultList `shouldNotBe` CmdVault VaultLock
+
+    it "provider subcommands have Show and Eq instances" $ do
+      show (CmdProvider ProviderList) `shouldContain` "ProviderList"
+      CmdProvider ProviderList `shouldBe` CmdProvider ProviderList
+      CmdProvider ProviderList `shouldNotBe` CmdProvider (ProviderConfigure "x")
