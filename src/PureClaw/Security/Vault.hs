@@ -16,19 +16,21 @@ import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base64 qualified as B64
+import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
-import System.Directory (doesFileExist, renameFile)
+import System.Directory (doesFileExist, removeFile, renameFile)
 import System.Posix.Files (setFileMode)
 
 import PureClaw.Security.Vault.Age
 
 -- | When the vault is automatically unlocked.
 data UnlockMode
-  = UnlockCached    -- ^ Decrypt once at startup; cache in memory. Returns VaultLocked if not unlocked.
-  | UnlockPerAccess -- ^ Decrypt from disk on every operation; ideal for hardware keys (e.g. YubiKey).
+  = UnlockStartup   -- ^ Must be explicitly unlocked; returns VaultLocked if locked.
+  | UnlockOnDemand  -- ^ Unlocks automatically on first access if locked.
+  | UnlockPerAccess -- ^ Decrypts from disk on every operation; TVar unused.
   deriving stock (Show, Eq)
 
 -- | Configuration for a vault.
@@ -57,12 +59,16 @@ data VaultHandle = VaultHandle
   , _vh_lock   :: IO ()
   , _vh_unlock :: IO (Either VaultError ())
   , _vh_status :: IO VaultStatus
+  , _vh_rekey  :: VaultEncryptor -> Text -> (Text -> IO Bool) -> IO (Either VaultError ())
+    -- ^ Re-encrypt the vault with a new encryptor.
+    -- Args: new encryptor, new key type label, confirmation callback.
   }
 
 -- Internal state, not exported.
 data VaultState = VaultState
   { _vst_config    :: VaultConfig
-  , _vst_encryptor :: VaultEncryptor
+  , _vst_encryptor :: IORef VaultEncryptor
+  , _vst_keyType   :: IORef Text
   , _vst_tvar      :: TVar (Maybe (Map Text ByteString))
   , _vst_writeLock :: MVar ()  -- ^ serialises init/put/delete
   }
@@ -70,9 +76,11 @@ data VaultState = VaultState
 -- | Construct a 'VaultHandle'. Does not unlock; caller decides when.
 openVault :: VaultConfig -> VaultEncryptor -> IO VaultHandle
 openVault cfg enc = do
-  tvar  <- newTVarIO Nothing
-  mvar  <- newMVar ()
-  let st = VaultState cfg enc tvar mvar
+  encRef <- newIORef enc
+  ktRef  <- newIORef (_vc_keyType cfg)
+  tvar   <- newTVarIO Nothing
+  mvar   <- newMVar ()
+  let st = VaultState cfg encRef ktRef tvar mvar
   pure VaultHandle
     { _vh_init   = vaultInit   st
     , _vh_get    = vaultGet    st
@@ -82,6 +90,7 @@ openVault cfg enc = do
     , _vh_lock   = vaultLock   st
     , _vh_unlock = vaultUnlock st
     , _vh_status = vaultStatus st
+    , _vh_rekey  = vaultRekey  st
     }
 
 -- ---------------------------------------------------------------------------
@@ -94,9 +103,10 @@ vaultInit st = withMVar (_vst_writeLock st) $ \_ -> do
   if exists
     then pure (Left VaultAlreadyExists)
     else do
+      enc <- readIORef (_vst_encryptor st)
       let emptyMap = Map.empty :: Map Text ByteString
           jsonBs   = BS.toStrict (Aeson.encode (encodedMap emptyMap))
-      encrypted <- _ve_encrypt (_vst_encryptor st) jsonBs
+      encrypted <- _ve_encrypt enc jsonBs
       case encrypted of
         Left err  -> pure (Left err)
         Right ciphertext -> do
@@ -105,11 +115,12 @@ vaultInit st = withMVar (_vst_writeLock st) $ \_ -> do
 
 vaultUnlock :: VaultState -> IO (Either VaultError ())
 vaultUnlock st = do
+  enc <- readIORef (_vst_encryptor st)
   fileResult <- try @IOException (BS.readFile (_vc_path (_vst_config st)))
   case fileResult of
     Left  _      -> pure (Left VaultNotFound)
     Right fileBs -> do
-      plainResult <- _ve_decrypt (_vst_encryptor st) fileBs
+      plainResult <- _ve_decrypt enc fileBs
       case plainResult of
         Left err -> pure (Left err)
         Right plain ->
@@ -133,7 +144,13 @@ vaultGet st key =
       case mapResult of
         Left err -> pure (Left err)
         Right m  -> pure (lookupKey key m)
-    UnlockCached -> do
+    UnlockStartup -> do
+      current <- readTVarIO (_vst_tvar st)
+      case current of
+        Nothing -> pure (Left VaultLocked)
+        Just m  -> pure (lookupKey key m)
+    UnlockOnDemand -> do
+      ensureUnlocked st
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -147,7 +164,22 @@ vaultPut st key value =
       case mapResult of
         Left err -> pure (Left err)
         Right m  -> encryptAndWrite st (Map.insert key value m)
-    UnlockCached -> withMVar (_vst_writeLock st) $ \_ -> do
+    UnlockOnDemand -> do
+      -- Unlock outside the write lock to avoid deadlock
+      ensureUnlocked st
+      withMVar (_vst_writeLock st) $ \_ -> do
+        current <- readTVarIO (_vst_tvar st)
+        case current of
+          Nothing -> pure (Left VaultLocked)
+          Just m  -> do
+            let m' = Map.insert key value m
+            result <- encryptAndWrite st m'
+            case result of
+              Left err -> pure (Left err)
+              Right () -> do
+                atomically (writeTVar (_vst_tvar st) (Just m'))
+                pure (Right ())
+    UnlockStartup -> withMVar (_vst_writeLock st) $ \_ -> do
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -171,7 +203,24 @@ vaultDelete st key =
           if Map.member key m
             then encryptAndWrite st (Map.delete key m)
             else pure (Left (VaultCorrupted "key not found"))
-    UnlockCached -> withMVar (_vst_writeLock st) $ \_ -> do
+    UnlockOnDemand -> do
+      ensureUnlocked st
+      withMVar (_vst_writeLock st) $ \_ -> do
+        current <- readTVarIO (_vst_tvar st)
+        case current of
+          Nothing -> pure (Left VaultLocked)
+          Just m  ->
+            if Map.member key m
+              then do
+                let m' = Map.delete key m
+                result <- encryptAndWrite st m'
+                case result of
+                  Left err -> pure (Left err)
+                  Right () -> do
+                    atomically (writeTVar (_vst_tvar st) (Just m'))
+                    pure (Right ())
+              else pure (Left (VaultCorrupted "key not found"))
+    UnlockStartup -> withMVar (_vst_writeLock st) $ \_ -> do
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -195,7 +244,13 @@ vaultList st =
       case mapResult of
         Left err -> pure (Left err)
         Right m  -> pure (Right (Map.keys m))
-    UnlockCached -> do
+    UnlockStartup -> do
+      current <- readTVarIO (_vst_tvar st)
+      case current of
+        Nothing -> pure (Left VaultLocked)
+        Just m  -> pure (Right (Map.keys m))
+    UnlockOnDemand -> do
+      ensureUnlocked st
       current <- readTVarIO (_vst_tvar st)
       case current of
         Nothing -> pure (Left VaultLocked)
@@ -204,6 +259,7 @@ vaultList st =
 vaultStatus :: VaultState -> IO VaultStatus
 vaultStatus st = do
   current <- readTVarIO (_vst_tvar st)
+  keyType <- readIORef (_vst_keyType st)
   let locked = case current of
                  Nothing -> True
                  Just _  -> False
@@ -211,8 +267,80 @@ vaultStatus st = do
   pure VaultStatus
     { _vs_locked      = locked
     , _vs_secretCount = count
-    , _vs_keyType     = _vc_keyType (_vst_config st)
+    , _vs_keyType     = keyType
     }
+
+-- | Re-encrypt the vault with a new encryptor.
+-- Safe rekey: write to .new, verify, then atomically replace.
+vaultRekey :: VaultState -> VaultEncryptor -> Text -> (Text -> IO Bool) -> IO (Either VaultError ())
+vaultRekey st newEnc newKeyType confirm = withMVar (_vst_writeLock st) $ \_ -> do
+  let path    = _vc_path (_vst_config st)
+      newPath = path <> ".new"
+  -- Step 1: Decrypt all secrets with current encryptor
+  mapResult <- readAndDecryptMap st
+  case mapResult of
+    Left err -> pure (Left err)
+    Right plainMap -> do
+      -- Step 2: Re-encrypt with NEW encryptor, write to .new
+      let jsonBs = BS.toStrict (Aeson.encode (encodedMap plainMap))
+      encrypted <- _ve_encrypt newEnc jsonBs
+      case encrypted of
+        Left err -> pure (Left err)
+        Right ciphertext -> do
+          atomicWrite newPath ciphertext
+          -- Step 3: Verify: read .new, decrypt with new encryptor, compare
+          verifyResult <- try @IOException (BS.readFile newPath)
+          case verifyResult of
+            Left _ -> do
+              cleanupNewFile newPath
+              pure (Left (VaultCorrupted "rekey verification failed"))
+            Right verifyBs -> do
+              decResult <- _ve_decrypt newEnc verifyBs
+              case decResult of
+                Left _ -> do
+                  cleanupNewFile newPath
+                  pure (Left (VaultCorrupted "rekey verification failed"))
+                Right decrypted -> do
+                  -- Compare decoded map byte-for-byte with original
+                  case Aeson.decodeStrict decrypted of
+                    Nothing -> do
+                      cleanupNewFile newPath
+                      pure (Left (VaultCorrupted "rekey verification failed"))
+                    Just encoded ->
+                      case decodeMap encoded of
+                        Nothing -> do
+                          cleanupNewFile newPath
+                          pure (Left (VaultCorrupted "rekey verification failed"))
+                        Just verifiedMap
+                          | verifiedMap /= plainMap -> do
+                              cleanupNewFile newPath
+                              pure (Left (VaultCorrupted "rekey verification failed"))
+                          | otherwise -> do
+                              -- Step 4: Ask for confirmation
+                              oldKeyType <- readIORef (_vst_keyType st)
+                              let secretCount = Map.size plainMap
+                                  msg = "Replace vault? Old: " <> oldKeyType
+                                     <> ", New: " <> newKeyType
+                                     <> ", " <> T.pack (show secretCount)
+                                     <> " secrets verified identical"
+                              confirmed <- confirm msg
+                              if confirmed
+                                then do
+                                  -- Step 5: Atomic replace
+                                  renameFile newPath path
+                                  writeIORef (_vst_encryptor st) newEnc
+                                  writeIORef (_vst_keyType st) newKeyType
+                                  atomically (writeTVar (_vst_tvar st) (Just plainMap))
+                                  pure (Right ())
+                                else do
+                                  cleanupNewFile newPath
+                                  pure (Left (VaultCorrupted "rekey cancelled by user"))
+
+-- | Remove the .new file, ignoring errors if it doesn't exist.
+cleanupNewFile :: FilePath -> IO ()
+cleanupNewFile path = do
+  exists <- doesFileExist path
+  if exists then removeFile path else pure ()
 
 -- ---------------------------------------------------------------------------
 -- Internal helpers
@@ -221,11 +349,12 @@ vaultStatus st = do
 -- | Read vault file and decrypt to a map.
 readAndDecryptMap :: VaultState -> IO (Either VaultError (Map Text ByteString))
 readAndDecryptMap st = do
+  enc <- readIORef (_vst_encryptor st)
   fileResult <- try @IOException (BS.readFile (_vc_path (_vst_config st)))
   case fileResult of
     Left  _      -> pure (Left VaultNotFound)
     Right fileBs -> do
-      plainResult <- _ve_decrypt (_vst_encryptor st) fileBs
+      plainResult <- _ve_decrypt enc fileBs
       case plainResult of
         Left err -> pure (Left err)
         Right plain ->
@@ -239,13 +368,28 @@ readAndDecryptMap st = do
 -- | Serialise map to JSON, encrypt, and atomically write to disk.
 encryptAndWrite :: VaultState -> Map Text ByteString -> IO (Either VaultError ())
 encryptAndWrite st m = do
+  enc <- readIORef (_vst_encryptor st)
   let jsonBs = BS.toStrict (Aeson.encode (encodedMap m))
-  encrypted <- _ve_encrypt (_vst_encryptor st) jsonBs
+  encrypted <- _ve_encrypt enc jsonBs
   case encrypted of
     Left err  -> pure (Left err)
     Right ciphertext -> do
       atomicWrite (_vc_path (_vst_config st)) ciphertext
       pure (Right ())
+
+-- | For UnlockOnDemand: unlock the vault if the TVar is empty.
+-- Guarded by write lock to prevent double-init from concurrent calls.
+ensureUnlocked :: VaultState -> IO ()
+ensureUnlocked st =
+  withMVar (_vst_writeLock st) $ \_ -> do
+    current <- readTVarIO (_vst_tvar st)
+    case current of
+      Just _  -> pure ()   -- already unlocked by a concurrent call
+      Nothing -> do
+        result <- vaultUnlock st
+        case result of
+          Right () -> pure ()
+          Left _   -> pure ()  -- best-effort; callers check TVar afterward
 
 -- | Look up a key or return the appropriate error.
 lookupKey :: Text -> Map Text ByteString -> Either VaultError ByteString

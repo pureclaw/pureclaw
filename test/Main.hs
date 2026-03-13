@@ -48,6 +48,7 @@ import qualified Security.CryptoSpec
 import qualified Security.PairingSpec
 import qualified Security.VaultAgeSpec
 import qualified Security.VaultPassphraseSpec
+import qualified Security.VaultPluginSpec
 import qualified Security.VaultSpec
 import qualified Gateway.AuthSpec
 import qualified Gateway.RoutesSpec
@@ -108,6 +109,7 @@ main = hspec $ do
   describe "Security.Pairing" Security.PairingSpec.spec
   describe "Security.VaultAge" Security.VaultAgeSpec.spec
   describe "Security.VaultPassphrase" Security.VaultPassphraseSpec.spec
+  describe "Security.VaultPlugin" Security.VaultPluginSpec.spec
   describe "Security.Vault" Security.VaultSpec.spec
   describe "Gateway.Auth" Gateway.AuthSpec.spec
   describe "Gateway.Routes" Gateway.RoutesSpec.spec

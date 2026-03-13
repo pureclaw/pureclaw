@@ -5,13 +5,13 @@ module PureClaw.CLI.Commands
   , ChatOptions (..)
   , chatOptionsParser
     -- * Enums (exported for testing)
+  , ProviderType (..)
   , MemoryBackend (..)
   ) where
 
 import Control.Exception (bracket_)
-import Control.Monad (forM_, unless, when)
 import Data.ByteString (ByteString)
-import Data.List (isPrefixOf)
+import Data.IORef
 import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -24,7 +24,6 @@ import System.Directory (doesFileExist)
 import System.Environment
 import System.Exit
 import System.IO
-import Text.Read (readMaybe)
 
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
@@ -59,6 +58,14 @@ import PureClaw.Tools.Memory
 import PureClaw.Tools.Registry
 import PureClaw.Tools.Shell
 
+-- | Supported LLM providers.
+data ProviderType
+  = Anthropic
+  | OpenAI
+  | OpenRouter
+  | Ollama
+  deriving stock (Show, Eq, Ord, Bounded, Enum)
+
 -- | Supported memory backends.
 data MemoryBackend
   = NoMemory
@@ -70,6 +77,7 @@ data MemoryBackend
 -- Fields with defaults use 'Maybe' so config file values can fill in omitted flags.
 data ChatOptions = ChatOptions
   { _co_model         :: Maybe String
+  , _co_apiKey        :: Maybe String
   , _co_system        :: Maybe String
   , _co_provider      :: Maybe ProviderType
   , _co_allowCommands :: [String]
@@ -77,6 +85,7 @@ data ChatOptions = ChatOptions
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
   , _co_noVault       :: Bool
+  , _co_oauth         :: Bool
   }
   deriving stock (Show, Eq)
 
@@ -86,7 +95,11 @@ chatOptionsParser = ChatOptions
   <$> optional (strOption
       ( long "model"
      <> short 'm'
-     <> help "Model to use, e.g. claude-sonnet-4-20250514 or anthropic:claude-opus-4-5"
+     <> help "Model to use (default: claude-sonnet-4-20250514)"
+      ))
+  <*> optional (strOption
+      ( long "api-key"
+     <> help "API key (default: from config file or env var for chosen provider)"
       ))
   <*> optional (strOption
       ( long "system"
@@ -96,7 +109,7 @@ chatOptionsParser = ChatOptions
   <*> optional (option parseProviderType
       ( long "provider"
      <> short 'p'
-     <> help "LLM provider override: anthropic, openai, openrouter, ollama"
+     <> help "LLM provider: anthropic, openai, openrouter, ollama (default: anthropic)"
       ))
   <*> many (strOption
       ( long "allow"
@@ -120,27 +133,26 @@ chatOptionsParser = ChatOptions
       ( long "no-vault"
      <> help "Disable vault even if configured in config file"
       )
+  <*> switch
+      ( long "oauth"
+     <> help "Authenticate with Anthropic via OAuth (opens browser). Tokens are cached in the vault."
+      )
 
 -- | Parse a provider type from a CLI string.
 parseProviderType :: ReadM ProviderType
-parseProviderType = eitherReader $ \s -> case parseProviderString s of
-  Just p  -> Right p
-  Nothing -> Left $ "Unknown provider: " <> s <> ". Choose: anthropic, openai, openrouter, ollama"
-
--- | Parse a provider type from a string.
-parseProviderString :: String -> Maybe ProviderType
-parseProviderString "anthropic"  = Just PTAnthropic
-parseProviderString "openai"     = Just PTOpenAI
-parseProviderString "openrouter" = Just PTOpenRouter
-parseProviderString "ollama"     = Just PTOllama
-parseProviderString _            = Nothing
+parseProviderType = eitherReader $ \s -> case s of
+  "anthropic"  -> Right Anthropic
+  "openai"     -> Right OpenAI
+  "openrouter" -> Right OpenRouter
+  "ollama"     -> Right Ollama
+  _            -> Left $ "Unknown provider: " <> s <> ". Choose: anthropic, openai, openrouter, ollama"
 
 -- | Display a provider type as a CLI string.
-providerTypeToText :: ProviderType -> String
-providerTypeToText PTAnthropic  = "anthropic"
-providerTypeToText PTOpenAI     = "openai"
-providerTypeToText PTOpenRouter = "openrouter"
-providerTypeToText PTOllama     = "ollama"
+providerToText :: ProviderType -> String
+providerToText Anthropic  = "anthropic"
+providerToText OpenAI     = "openai"
+providerToText OpenRouter = "openrouter"
+providerToText Ollama     = "ollama"
 
 -- | Parse a memory backend from a CLI string.
 parseMemoryBackend :: ReadM MemoryBackend
@@ -178,42 +190,22 @@ runChat opts = do
   -- Load config file: --config flag overrides default search locations
   fileCfg <- maybe loadConfig loadFileConfig (_co_config opts)
 
-  -- Resolve model and provider (handles "provider:model" syntax and interactive picker)
-  (effectiveProvider, effectiveModel) <- resolveModelAndProvider opts fileCfg
-
-  let effectiveMemory = fromMaybe NoMemory    (_co_memory opts <|> parseMemoryMaybe (_fc_memory fileCfg))
-      effectiveSystem = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
-      effectiveAllow  = _co_allowCommands opts <> maybe [] (map T.unpack) (_fc_allow fileCfg)
+  -- Resolve effective values: CLI flag > config file > default
+  let effectiveProvider = fromMaybe Anthropic  (_co_provider opts <|> parseProviderMaybe (_fc_provider fileCfg))
+      effectiveModel    = fromMaybe "claude-sonnet-4-20250514" (_co_model opts <|> fmap T.unpack (_fc_model fileCfg))
+      effectiveMemory   = fromMaybe NoMemory    (_co_memory opts <|> parseMemoryMaybe (_fc_memory fileCfg))
+      effectiveApiKey   = _co_apiKey opts <|> fmap T.unpack (_fc_apiKey fileCfg)
+      effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
+      effectiveAllow    = _co_allowCommands opts <> maybe [] (map T.unpack) (_fc_allow fileCfg)
 
   -- Vault (opened before provider so API keys can be fetched from vault)
   vaultOpt <- resolveVault fileCfg (_co_noVault opts) logger
 
-  -- Check if OAuth is needed (from provider config)
-  let useOAuth = case effectiveProvider of
-        AnthropicProvider cfg -> _apc_auth cfg == AuthOAuth
-        _                     -> False
-
-  -- For OAuth: require an initialised vault before opening the browser.
-  when useOAuth $
-    ensureVaultForOAuth fileCfg (_co_noVault opts)
-
   -- Provider
   manager <- HTTP.newTlsManager
-  providerResult <- if useOAuth
-    then fmap Right (resolveAnthropicOAuth vaultOpt manager)
-    else resolveProvider effectiveProvider vaultOpt manager
-
-  provider <- case providerResult of
-    Right p -> pure p
-    Left envVar -> do
-      let pt = providerType effectiveProvider
-      putStrLn ""
-      _lh_logInfo logger $ "⚠️  No credentials found for " <> T.pack (providerTypeToText pt)
-      _lh_logInfo logger "Run `/provider <your-chosen-provider>` to configure credentials."
-      _lh_logInfo logger $ "Or: export " <> T.pack envVar <> "=your-api-key"
-      putStrLn ""
-      -- Return a stub provider that explains the issue when actually used
-      pure (mkStubProvider pt envVar)
+  provider <- if effectiveProvider == Anthropic && _co_oauth opts
+    then resolveAnthropicOAuth vaultOpt manager
+    else resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
 
   -- Model
   let model = ModelId (T.pack effectiveModel)
@@ -243,13 +235,7 @@ runChat opts = do
   let registry = buildRegistry policy sh workspace fh mh nh
 
   hSetBuffering stdout LineBuffering
-  let activePt       = providerType effectiveProvider
-      configuredPts  = map providerType (_fc_providers fileCfg)
-      labelPt pt     = T.pack (providerTypeToText pt) <> if pt == activePt then " (active)" else ""
-      providerList   = case configuredPts of
-        [] -> T.pack (providerTypeToText activePt)
-        pts -> T.intercalate ", " (map labelPt pts)
-  _lh_logInfo logger $ "Providers: " <> providerList
+  _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case effectiveAllow of
@@ -258,6 +244,7 @@ runChat opts = do
   putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
   putStrLn "Type your message and press Enter. Ctrl-D to exit."
   putStrLn ""
+  vaultRef <- newIORef vaultOpt
   let env = AgentEnv
         { _env_provider     = provider
         , _env_model        = model
@@ -265,211 +252,95 @@ runChat opts = do
         , _env_logger       = logger
         , _env_systemPrompt = sysPrompt
         , _env_registry     = registry
-        , _env_vault        = vaultOpt
+        , _env_vault        = vaultRef
         }
   runAgentLoop env
 
--- ---------------------------------------------------------------------------
--- Model / provider resolution
--- ---------------------------------------------------------------------------
+-- | Parse a provider type from a text value (used for config file).
+parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType
+parseProviderMaybe Nothing  = Nothing
+parseProviderMaybe (Just t) = case T.unpack t of
+  "anthropic"  -> Just Anthropic
+  "openai"     -> Just OpenAI
+  "openrouter" -> Just OpenRouter
+  "ollama"     -> Just Ollama
+  _            -> Nothing
 
--- | A provider type + model pair parsed from @"provider:model"@ syntax.
-data ModelSpec = ModelSpec ProviderType String
+-- | Parse a memory backend from a text value (used for config file).
+parseMemoryMaybe :: Maybe T.Text -> Maybe MemoryBackend
+parseMemoryMaybe Nothing  = Nothing
+parseMemoryMaybe (Just t) = case T.unpack t of
+  "none"     -> Just NoMemory
+  "sqlite"   -> Just SQLiteMemory
+  "markdown" -> Just MarkdownMemory
+  _          -> Nothing
 
--- | Parse @"provider:model"@ syntax. Returns Nothing if no colon is present
--- or the prefix is not a known provider name.
-parseModelSpec :: String -> Maybe ModelSpec
-parseModelSpec s = case break (== ':') s of
-  (prefix, ':' : model') | not (null model') ->
-    ModelSpec <$> parseProviderString prefix <*> pure model'
-  _ -> Nothing
+-- | Build the tool registry with all available tools.
+buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> NetworkHandle -> ToolRegistry
+buildRegistry policy sh workspace fh mh nh =
+  let reg = uncurry registerTool
+  in reg (shellTool policy sh)
+   $ reg (fileReadTool workspace fh)
+   $ reg (fileWriteTool workspace fh)
+   $ reg (gitTool policy sh)
+   $ reg (memoryStoreTool mh)
+   $ reg (memoryRecallTool mh)
+   $ reg (httpRequestTool AllowAll nh)
+     emptyRegistry
 
--- | Well-known models for each provider, used in the interactive picker.
--- Ollama and OpenRouter have no fixed list — the user enters the model name.
-knownModels :: ProviderType -> [String]
-knownModels PTAnthropic  = [ "claude-opus-4-5"
-                            , "claude-sonnet-4-20250514"
-                            , "claude-haiku-4-5-20251001"
-                            ]
-knownModels PTOpenAI     = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"]
-knownModels PTOpenRouter = []
-knownModels PTOllama     = []
+-- | Build a security policy from the list of allowed commands.
+buildPolicy :: [String] -> SecurityPolicy
+buildPolicy [] = defaultPolicy
+buildPolicy cmds =
+  let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
+  in defaultPolicy
+    { _sp_allowedCommands = AllowList cmdNames
+    , _sp_autonomy = Full
+    }
 
--- | Default model for a provider when none is specified.
-defaultModel :: ProviderType -> String
-defaultModel PTAnthropic  = "claude-sonnet-4-20250514"
-defaultModel PTOpenAI     = "gpt-4o"
-defaultModel PTOpenRouter = "openai/gpt-4o"
-defaultModel PTOllama     = "llama3.2"
-
--- | Build a default 'ModelProvider' for a 'ProviderType' (all defaults).
-defaultProviderConfig :: ProviderType -> ModelProvider
-defaultProviderConfig PTAnthropic  = AnthropicProvider (AnthropicProviderConfig AuthApiKey)
-defaultProviderConfig PTOpenAI     = OpenAIProvider (OpenAIProviderConfig Nothing)
-defaultProviderConfig PTOpenRouter = OpenRouterProvider OpenRouterProviderConfig
-defaultProviderConfig PTOllama     = OllamaProvider (OllamaProviderConfig Nothing)
-
--- | Find the config entry for a given provider type, if configured.
-findProvider :: ProviderType -> FileConfig -> Maybe ModelProvider
-findProvider pt cfg = listToMaybe
-  [ p | p <- _fc_providers cfg, providerType p == pt ]
-
--- | Try to infer a provider from a bare model name (e.g. "claude-*" → Anthropic).
-inferProvider :: String -> [ProviderType] -> Maybe ProviderType
-inferProvider m ps
-  | "claude-" `isPrefixOf` m          , PTAnthropic  `elem` ps = Just PTAnthropic
-  | any (`isPrefixOf` m) ["gpt-", "o1-", "o3-", "o4-"]
-                                      , PTOpenAI     `elem` ps = Just PTOpenAI
-  | '/' `elem` m                     , PTOpenRouter `elem` ps = Just PTOpenRouter
-  | otherwise                                                  = Nothing
-
--- | Resolve the effective (provider, model) pair from CLI options and config.
---
--- Priority:
---
--- 1. @"provider:model"@ in @--model@ flag or config @model = "..."@
--- 2. @--provider@ flag with model from @--model@ or config
--- 3. Single configured provider → auto-select
--- 4. Multiple configured providers with a bare model → infer provider
--- 5. Multiple configured providers, no model → interactive picker
--- 6. No providers configured → default to Anthropic (backward compat)
-resolveModelAndProvider :: ChatOptions -> FileConfig -> IO (ModelProvider, String)
-resolveModelAndProvider opts fileCfg = do
-  let modelStr  = _co_model opts <|> fmap T.unpack (_fc_model fileCfg)
-      providers = _fc_providers fileCfg
-      ptypes    = map providerType providers
-  case modelStr >>= parseModelSpec of
-    Just (ModelSpec pt m) ->
-      let mp = fromMaybe (defaultProviderConfig pt) (findProvider pt fileCfg)
-      in pure (mp, m)
-    Nothing -> case _co_provider opts of
-      Just pt ->
-        let mp = fromMaybe (defaultProviderConfig pt) (findProvider pt fileCfg)
-        in pure (mp, fromMaybe (defaultModel pt) modelStr)
-      Nothing -> case providers of
-        [p] -> pure (p, fromMaybe (defaultModel (providerType p)) modelStr)
-        []  -> pure (defaultProviderConfig PTAnthropic, fromMaybe (defaultModel PTAnthropic) modelStr)
-        _   -> case modelStr of
-          Just m -> case inferProvider m ptypes of
-            Just pt -> let mp = fromMaybe (defaultProviderConfig pt) (findProvider pt fileCfg)
-                       in pure (mp, m)
-            Nothing -> case providers of
-              (p:_) -> pure (p, m)
-          Nothing -> pickModelInteractive ptypes fileCfg
-
--- | Interactive model picker shown when multiple providers are configured
--- and no model is specified.
-pickModelInteractive :: [ProviderType] -> FileConfig -> IO (ModelProvider, String)
-pickModelInteractive ptypes fileCfg = do
-  putStrLn "\nSelect a model:"
-  putStrLn ""
-  let entries = concatMap providerEntries ptypes
-      providerEntries p =
-        let models = knownModels p
-        in if null models
-           then [(p, Nothing)]
-           else map (\m -> (p, Just m)) models
-      numbered = zip [1 :: Int ..] entries
-  forM_ numbered $ \(n, (p, mModel)) -> case mModel of
-    Nothing ->
-      putStrLn $ "  " <> show n <> ".  " <> providerTypeToText p <> ":...  (enter model name)"
-    Just m ->
-      let mark = if m == defaultModel p then "  [default]" else ""
-      in putStrLn $ "  " <> show n <> ".  " <> providerTypeToText p <> ":" <> m <> mark
-  putStrLn ""
-  putStr "Enter number or provider:model — " >> hFlush stdout
-  line <- T.unpack . T.strip . T.pack <$> getLine
-  case readMaybe line :: Maybe Int of
-    Just n | n >= 1 && n <= length numbered ->
-      let (p, mModel) = snd (numbered !! (n - 1))
-          mp = fromMaybe (defaultProviderConfig p) (findProvider p fileCfg)
-      in case mModel of
-        Just m  -> pure (mp, m)
-        Nothing -> do
-          putStr ("  Model name for " <> providerTypeToText p <> ": ") >> hFlush stdout
-          m <- T.unpack . T.strip . T.pack <$> getLine
-          pure (mp, m)
-    _ -> case parseModelSpec line of
-      Just (ModelSpec p m) ->
-        let mp = fromMaybe (defaultProviderConfig p) (findProvider p fileCfg)
-        in pure (mp, m)
-      Nothing -> do
-        putStrLn "Invalid. Enter a number or use provider:model format (e.g. anthropic:claude-sonnet-4-20250514)."
-        pickModelInteractive ptypes fileCfg
-
--- ---------------------------------------------------------------------------
--- Provider resolution
--- ---------------------------------------------------------------------------
-
--- | Resolve the LLM provider from its config.
--- API key lookup order: vault (by env var name) → environment variable.
--- API keys are never read from the config file.
--- Returns Left with an error message if credentials cannot be resolved.
-resolveProvider :: ModelProvider -> Maybe VaultHandle -> HTTP.Manager -> IO (Either String SomeProvider)
-resolveProvider (AnthropicProvider _) vaultOpt manager = do
-  result <- resolveApiKeyMaybe "ANTHROPIC_API_KEY" vaultOpt
-  case result of
-    Just apiKey -> pure $ Right (MkProvider (mkAnthropicProvider manager apiKey))
-    Nothing -> do
-      -- Fall back to OAuth tokens cached in vault (e.g. configured via /provider anthropic)
-      oauthOpt <- loadCachedOAuthProvider vaultOpt manager
-      pure $ maybe (Left "ANTHROPIC_API_KEY") Right oauthOpt
-resolveProvider (OpenAIProvider _cfg) vaultOpt manager = do
-  result <- resolveApiKeyMaybe "OPENAI_API_KEY" vaultOpt
-  case result of
-    Just apiKey -> pure $ Right (MkProvider (mkOpenAIProvider manager apiKey))
-    Nothing -> pure $ Left "OPENAI_API_KEY"
-  -- TODO: use _oaipc_baseUrl when mkOpenAIProvider supports custom endpoints
-resolveProvider (OpenRouterProvider _) vaultOpt manager = do
-  result <- resolveApiKeyMaybe "OPENROUTER_API_KEY" vaultOpt
-  case result of
-    Just apiKey -> pure $ Right (MkProvider (mkOpenRouterProvider manager apiKey))
-    Nothing -> pure $ Left "OPENROUTER_API_KEY"
-resolveProvider (OllamaProvider _cfg) _ manager =
-  -- TODO: use _olpc_baseUrl when mkOllamaProvider supports custom endpoints
-  pure $ Right (MkProvider (mkOllamaProvider manager))
-
--- ---------------------------------------------------------------------------
--- OAuth
--- ---------------------------------------------------------------------------
+-- | Resolve the LLM provider from the provider type.
+-- Checks the vault for the API key (using the env var name as the vault key)
+-- before falling back to CLI flag or environment variable.
+resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
+resolveProvider Anthropic keyOpt vaultOpt manager = do
+  apiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
+  pure (MkProvider (mkAnthropicProvider manager apiKey))
+resolveProvider OpenAI keyOpt vaultOpt manager = do
+  apiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
+  pure (MkProvider (mkOpenAIProvider manager apiKey))
+resolveProvider OpenRouter keyOpt vaultOpt manager = do
+  apiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
+  pure (MkProvider (mkOpenRouterProvider manager apiKey))
+resolveProvider Ollama _ _ manager =
+  pure (MkProvider (mkOllamaProvider manager))
 
 -- | Vault key used to cache OAuth tokens between sessions.
 oauthVaultKey :: T.Text
 oauthVaultKey = "ANTHROPIC_OAUTH_TOKENS"
-
--- | Load a cached Anthropic OAuth provider from the vault, refreshing if expired.
--- Returns Nothing if no cached tokens exist.
-loadCachedOAuthProvider :: Maybe VaultHandle -> HTTP.Manager -> IO (Maybe SomeProvider)
-loadCachedOAuthProvider vaultOpt manager = do
-  let cfg = defaultOAuthConfig
-  cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
-  case cachedBs >>= eitherToMaybe . deserializeTokens of
-    Nothing -> pure Nothing
-    Just t  -> do
-      now <- getCurrentTime
-      tokens <- if _oat_expiresAt t <= now
-        then do
-          putStrLn "OAuth access token expired — refreshing..."
-          newT <- refreshOAuthToken cfg manager (_oat_refreshToken t)
-          saveOAuthTokens vaultOpt newT
-          pure newT
-        else pure t
-      handle <- mkOAuthHandle cfg manager tokens
-      pure $ Just (MkProvider (mkAnthropicProviderOAuth manager handle))
 
 -- | Resolve an Anthropic provider via OAuth 2.0 PKCE.
 -- Loads cached tokens from the vault if available; runs the full browser
 -- flow otherwise. Refreshes expired access tokens automatically.
 resolveAnthropicOAuth :: Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
 resolveAnthropicOAuth vaultOpt manager = do
-  cached <- loadCachedOAuthProvider vaultOpt manager
-  case cached of
-    Just p  -> pure p
+  let cfg = defaultOAuthConfig
+  cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
+  tokens <- case cachedBs >>= eitherToMaybe . deserializeTokens of
+    Just t -> do
+      now <- getCurrentTime
+      if _oat_expiresAt t <= now
+        then do
+          putStrLn "OAuth access token expired — refreshing..."
+          newT <- refreshOAuthToken cfg manager (_oat_refreshToken t)
+          saveOAuthTokens vaultOpt newT
+          pure newT
+        else pure t
     Nothing -> do
-      tokens <- runOAuthFlow defaultOAuthConfig manager
-      saveOAuthTokens vaultOpt tokens
-      handle <- mkOAuthHandle defaultOAuthConfig manager tokens
-      pure (MkProvider (mkAnthropicProviderOAuth manager handle))
+      t <- runOAuthFlow cfg manager
+      saveOAuthTokens vaultOpt t
+      pure t
+  handle <- mkOAuthHandle cfg manager tokens
+  pure (MkProvider (mkAnthropicProviderOAuth manager handle))
 
 -- | Save OAuth tokens to the vault (best-effort; logs on failure).
 saveOAuthTokens :: Maybe VaultHandle -> OAuthTokens -> IO ()
@@ -485,43 +356,20 @@ eitherToMaybe :: Either e a -> Maybe a
 eitherToMaybe (Left  _) = Nothing
 eitherToMaybe (Right a) = Just a
 
--- | Abort with a helpful message if no vault file exists when OAuth is requested.
--- Tokens cannot be persisted without an initialised vault, making every session
--- require a fresh browser flow.
-ensureVaultForOAuth :: FileConfig -> Bool -> IO ()
-ensureVaultForOAuth _ True =
-  die "--no-vault is incompatible with OAuth: tokens cannot be persisted between sessions."
-ensureVaultForOAuth fileCfg False = do
-  dir  <- getPureclawDir
-  let path = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
-  exists <- doesFileExist path
-  unless exists $ die $ unlines
-    [ "OAuth requires a vault to store tokens between sessions."
-    , "No vault found at: " <> path
-    , ""
-    , "Create one first:"
-    , "  pureclaw"
-    , "  /vault init"
-    , ""
-    , "Then re-run with auth = \"oauth\" in your config."
-    ]
-
--- ---------------------------------------------------------------------------
--- API key resolution
--- ---------------------------------------------------------------------------
-
--- | Resolve an API key from the vault (preferred) or environment variable.
--- Returns Nothing if the key is not found (without dying).
-resolveApiKeyMaybe :: String -> Maybe VaultHandle -> IO (Maybe ApiKey)
-resolveApiKeyMaybe envVar vaultOpt = do
+-- | Resolve an API key from: CLI flag → vault → environment variable.
+resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO ApiKey
+resolveApiKey (Just key) _ _ = pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
+resolveApiKey Nothing envVar vaultOpt = do
   vaultKey <- tryVaultLookup vaultOpt (T.pack envVar)
   case vaultKey of
-    Just bs -> pure (Just (mkApiKey bs))
+    Just bs -> pure (mkApiKey bs)
     Nothing -> do
       envKey <- lookupEnv envVar
       case envKey of
-        Just key -> pure (Just (mkApiKey (TE.encodeUtf8 (T.pack key))))
-        Nothing  -> pure Nothing
+        Just key -> pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
+        Nothing  -> die $
+          "No API key provided. Use --api-key, set " <> envVar
+          <> ", or store in vault with /vault add " <> envVar
 
 -- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
 -- absent, locked, or does not contain the key.
@@ -533,10 +381,6 @@ tryVaultLookup (Just vh) key = do
     Right bs -> pure (Just bs)
     Left  _  -> pure Nothing
 
--- ---------------------------------------------------------------------------
--- Memory
--- ---------------------------------------------------------------------------
-
 -- | Resolve the memory backend.
 resolveMemory :: MemoryBackend -> IO MemoryHandle
 resolveMemory NoMemory       = pure mkNoOpMemoryHandle
@@ -546,10 +390,6 @@ resolveMemory SQLiteMemory   = do
 resolveMemory MarkdownMemory = do
   dir <- getPureclawDir
   mkMarkdownMemoryHandle (dir ++ "/memory")
-
--- ---------------------------------------------------------------------------
--- Vault
--- ---------------------------------------------------------------------------
 
 -- | Open the vault if configured. Returns 'Nothing' if @--no-vault@ is set.
 -- When age keys are configured, uses age public-key encryption.
@@ -571,7 +411,7 @@ resolveAgeVault fileCfg recipient identity logger = do
       pure Nothing
     Right enc -> do
       dir <- getPureclawDir
-      let path  = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
+      let path  = maybe (dir ++ "/vault/vault.age") T.unpack (_fc_vault_path fileCfg)
           mode  = parseUnlockMode (_fc_vault_unlock fileCfg)
           enc'  = ageVaultEncryptor enc recipient identity
           cfg   = VaultConfig
@@ -581,7 +421,7 @@ resolveAgeVault fileCfg recipient identity logger = do
             }
       vault <- openVault cfg enc'
       case mode of
-        UnlockCached -> do
+        UnlockStartup -> do
           result <- _vh_unlock vault
           case result of
             Left err -> _lh_logInfo logger $
@@ -596,11 +436,11 @@ resolveAgeVault fileCfg recipient identity logger = do
 resolvePassphraseVault :: FileConfig -> LogHandle -> IO (Maybe VaultHandle)
 resolvePassphraseVault fileCfg logger = do
   dir <- getPureclawDir
-  let path = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
+  let path = maybe (dir ++ "/vault/vault.age") T.unpack (_fc_vault_path fileCfg)
       cfg  = VaultConfig
         { _vc_path    = path
         , _vc_keyType = "AES-256 (passphrase)"
-        , _vc_unlock  = UnlockCached
+        , _vc_unlock  = UnlockStartup
         }
   let getPass = do
         envPass <- lookupEnv "PURECLAW_VAULT_PASSPHRASE"
@@ -628,72 +468,6 @@ resolvePassphraseVault fileCfg logger = do
       _lh_logInfo logger "Vault ready (not yet initialized — use /vault init to set up)."
   pure (Just vault)
 
--- ---------------------------------------------------------------------------
--- Policy and registry
--- ---------------------------------------------------------------------------
-
--- | Build the tool registry with all available tools.
-buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> NetworkHandle -> ToolRegistry
-buildRegistry policy sh workspace fh mh nh =
-  let reg = uncurry registerTool
-  in reg (shellTool policy sh)
-   $ reg (fileReadTool workspace fh)
-   $ reg (fileWriteTool workspace fh)
-   $ reg (gitTool policy sh)
-   $ reg (memoryStoreTool mh)
-   $ reg (memoryRecallTool mh)
-   $ reg (httpRequestTool AllowAll nh)
-     emptyRegistry
-
--- | Build a security policy from the list of allowed commands.
-buildPolicy :: [String] -> SecurityPolicy
-buildPolicy [] = defaultPolicy
-buildPolicy cmds =
-  let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
-  in defaultPolicy
-    { _sp_allowedCommands = AllowList cmdNames
-    , _sp_autonomy = Full
-    }
-
--- | A provider that fails with a helpful message.
--- Used when credentials are not configured, allowing the agent to start
--- so the user can use /vault add to configure them.
-newtype StubProvider = StubProvider String
-
-instance Provider StubProvider where
-  complete _ _ = failWithMessage
-  completeStream _ _ _ = failWithMessage
-
-failWithMessage :: IO a
-failWithMessage = do
-  putStrLn ""
-  putStrLn "Error: No API credentials configured."
-  putStrLn ""
-  putStrLn "To configure credentials, use the /vault command:"
-  putStrLn "  /vault add ANTHROPIC_API_KEY"
-  putStrLn ""
-  putStrLn "Or set the environment variable:"
-  putStrLn "  export ANTHROPIC_API_KEY=your-api-key"
-  putStrLn ""
-  exitFailure
-
--- | Create a stub provider that allows the agent to start without credentials.
-mkStubProvider :: ProviderType -> String -> SomeProvider
-mkStubProvider _ envVar = MkProvider (StubProvider envVar)
-
--- ---------------------------------------------------------------------------
--- Helpers
--- ---------------------------------------------------------------------------
-
--- | Parse a memory backend from a text value (used for config file).
-parseMemoryMaybe :: Maybe T.Text -> Maybe MemoryBackend
-parseMemoryMaybe Nothing  = Nothing
-parseMemoryMaybe (Just t) = case T.unpack t of
-  "none"     -> Just NoMemory
-  "sqlite"   -> Just SQLiteMemory
-  "markdown" -> Just MarkdownMemory
-  _          -> Nothing
-
 -- | Infer a human-readable key type from the age recipient prefix.
 inferAgeKeyType :: T.Text -> T.Text
 inferAgeKeyType recipient
@@ -702,12 +476,10 @@ inferAgeKeyType recipient
   | otherwise                                      = "Unknown"
 
 -- | Parse vault unlock mode from config text.
--- "cached" or "startup" → UnlockCached (decrypt once at startup, keep in memory)
--- "per_access"          → UnlockPerAccess (decrypt on every access; for hardware keys)
 parseUnlockMode :: Maybe T.Text -> UnlockMode
-parseUnlockMode Nothing = UnlockCached
+parseUnlockMode Nothing            = UnlockOnDemand
 parseUnlockMode (Just t) = case t of
-  "cached"     -> UnlockCached
-  "startup"    -> UnlockCached
+  "startup"    -> UnlockStartup
+  "on_demand"  -> UnlockOnDemand
   "per_access" -> UnlockPerAccess
-  _            -> UnlockCached
+  _            -> UnlockOnDemand

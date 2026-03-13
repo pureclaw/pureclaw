@@ -77,6 +77,8 @@ mkMockVaultHandle = do
           , _vs_secretCount = length secrets
           , _vs_keyType     = "X25519"
           }
+
+    , _vh_rekey = \_ _ _ -> pure (Right ())
     }
 
 spec :: Spec
@@ -138,22 +140,24 @@ spec = do
       parseSlashCommand "" `shouldBe` Nothing
 
   describe "executeSlashCommand" $ do
-    let mkEnv sentRef = AgentEnv
-          { _env_provider     = MkProvider (MockProvider "summary")
-          , _env_model        = ModelId "test"
-          , _env_channel      = mkNoOpChannelHandle
-              { _ch_send = writeIORef sentRef . Just . _om_content }
-          , _env_logger       = mkNoOpLogHandle
-          , _env_systemPrompt = Nothing
-          , _env_registry     = emptyRegistry
-          , _env_vault        = Nothing
-          }
+    let mkEnv sentRef = do
+          vaultRef <- newIORef Nothing
+          pure AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            }
 
     it "/new clears messages but keeps system prompt" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let ctx = addMessage (textMessage User "hello")
               $ emptyContext (Just "sys")
-          env = mkEnv sentRef
+      env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdNew ctx
       contextMessages ctx' `shouldBe` []
       contextSystemPrompt ctx' `shouldBe` Just "sys"
@@ -167,7 +171,7 @@ spec = do
       let ctx = recordUsage (Just (Usage 100 50))
               $ addMessage (textMessage User "hello")
               $ emptyContext Nothing
-          env = mkEnv sentRef
+      env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdNew ctx
       contextTotalInputTokens ctx' `shouldBe` 100
 
@@ -176,7 +180,7 @@ spec = do
       let ctx = recordUsage (Just (Usage 100 50))
               $ addMessage (textMessage User "hello")
               $ emptyContext (Just "sys")
-          env = mkEnv sentRef
+      env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdReset ctx
       contextMessages ctx' `shouldBe` []
       contextTotalInputTokens ctx' `shouldBe` 0
@@ -187,7 +191,7 @@ spec = do
       let ctx = recordUsage (Just (Usage 100 50))
               $ addMessage (textMessage User "hello world")
               $ emptyContext Nothing
-          env = mkEnv sentRef
+      env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdStatus ctx
       ctx' `shouldBe` ctx  -- status doesn't modify context
       sent <- readIORef sentRef
@@ -201,7 +205,7 @@ spec = do
     it "/compact with few messages returns NotNeeded" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
-          env = mkEnv sentRef
+      env <- mkEnv sentRef
       _ <- executeSlashCommand env CmdCompact ctx
       sent <- readIORef sentRef
       case sent of
@@ -212,7 +216,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let msgs = [textMessage User ("msg" <> T.pack (show i)) | i <- [(1::Int)..20]]
           ctx = foldl (flip addMessage) (emptyContext Nothing) msgs
-          env = mkEnv sentRef
+      env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdCompact ctx
       contextMessageCount ctx' `shouldSatisfy` (< 20)
       sent <- readIORef sentRef
@@ -221,21 +225,23 @@ spec = do
         Nothing -> expectationFailure "Expected compact message"
 
   describe "vault commands — no vault configured" $ do
-    let mkEnvNoVault sentRef = AgentEnv
-          { _env_provider     = MkProvider (MockProvider "summary")
-          , _env_model        = ModelId "test"
-          , _env_channel      = mkNoOpChannelHandle
-              { _ch_send = writeIORef sentRef . Just . _om_content }
-          , _env_logger       = mkNoOpLogHandle
-          , _env_systemPrompt = Nothing
-          , _env_registry     = emptyRegistry
-          , _env_vault        = Nothing
-          }
+    let mkEnvNoVault sentRef = do
+          vaultRef <- newIORef Nothing
+          pure AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            }
 
     it "/vault list with no vault → helpful message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      let env = mkEnvNoVault sentRef
-          ctx = emptyContext Nothing
+      env <- mkEnvNoVault sentRef
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultList) ctx
       sent <- readIORef sentRef
       case sent of
@@ -244,8 +250,8 @@ spec = do
 
     it "/vault lock with no vault → helpful message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      let env = mkEnvNoVault sentRef
-          ctx = emptyContext Nothing
+      env <- mkEnvNoVault sentRef
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultLock) ctx
       sent <- readIORef sentRef
       case sent of
@@ -254,8 +260,8 @@ spec = do
 
     it "/vault init with no vault → config instructions" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      let env = mkEnvNoVault sentRef
-          ctx = emptyContext Nothing
+      env <- mkEnvNoVault sentRef
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultInit) ctx
       sent <- readIORef sentRef
       case sent of
@@ -266,22 +272,24 @@ spec = do
         Nothing -> expectationFailure "Expected message"
 
   describe "vault commands — with mock vault" $ do
-    let mkEnvWithVault sentRef vault = AgentEnv
-          { _env_provider     = MkProvider (MockProvider "summary")
-          , _env_model        = ModelId "test"
-          , _env_channel      = mkNoOpChannelHandle
-              { _ch_send = writeIORef sentRef . Just . _om_content }
-          , _env_logger       = mkNoOpLogHandle
-          , _env_systemPrompt = Nothing
-          , _env_registry     = emptyRegistry
-          , _env_vault        = Just vault
-          }
+    let mkEnvWithVault sentRef vault = do
+          vaultRef <- newIORef (Just vault)
+          pure AgentEnv
+            { _env_provider     = MkProvider (MockProvider "summary")
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            }
 
     it "/vault init succeeds on fresh vault" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultInit) ctx
       sent <- readIORef sentRef
       case sent of
@@ -292,8 +300,8 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       _ <- _vh_init vault  -- initialize once
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultInit) ctx
       sent <- readIORef sentRef
       case sent of
@@ -303,8 +311,8 @@ spec = do
     it "/vault list with empty vault" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultList) ctx
       sent <- readIORef sentRef
       case sent of
@@ -316,8 +324,8 @@ spec = do
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "alpha" "v1"
       _ <- _vh_put vault "beta" "v2"
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultList) ctx
       sent <- readIORef sentRef
       case sent of
@@ -329,8 +337,8 @@ spec = do
     it "/vault lock delegates to handle and sends confirmation" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultLock) ctx
       sent <- readIORef sentRef
       case sent of
@@ -345,8 +353,8 @@ spec = do
       vault <- mkMockVaultHandle
       -- Lock first
       _vh_lock vault
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultUnlock) ctx
       status <- _vh_status vault
       _vs_locked status `shouldBe` False
@@ -355,8 +363,8 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "key1" "val"
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultStatus') ctx
       sent <- readIORef sentRef
       case sent of
@@ -371,6 +379,7 @@ spec = do
       sentRef  <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "todelete" "val"
+      vaultRef <- newIORef (Just vault)
       let env = AgentEnv
             { _env_provider     = MkProvider (MockProvider "summary")
             , _env_model        = ModelId "test"
@@ -387,7 +396,7 @@ spec = do
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
-            , _env_vault        = Just vault
+            , _env_vault        = vaultRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -404,6 +413,7 @@ spec = do
       sentRef  <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       _ <- _vh_put vault "keep" (TE.encodeUtf8 "val")
+      vaultRef <- newIORef (Just vault)
       let env = AgentEnv
             { _env_provider     = MkProvider (MockProvider "summary")
             , _env_model        = ModelId "test"
@@ -420,7 +430,7 @@ spec = do
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
-            , _env_vault        = Just vault
+            , _env_vault        = vaultRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -435,6 +445,7 @@ spec = do
     it "/vault add on non-CLI channel sends error message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
+      vaultRef <- newIORef (Just vault)
       let env = AgentEnv
             { _env_provider     = MkProvider (MockProvider "summary")
             , _env_model        = ModelId "test"
@@ -446,7 +457,7 @@ spec = do
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
-            , _env_vault        = Just vault
+            , _env_vault        = vaultRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -458,8 +469,8 @@ spec = do
     it "/vault unknown subcommand refers to /help" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
-      let env = mkEnvWithVault sentRef vault
-          ctx = emptyContext Nothing
+      env <- mkEnvWithVault sentRef vault
+      let ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultUnknown "foo")) ctx
       sent <- readIORef sentRef
       case sent of
@@ -499,6 +510,7 @@ spec = do
   describe "executeSlashCommand — /help" $ do
     it "/help sends a message containing all command syntaxes" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
+      vaultRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = MkProvider (MockProvider "summary")
             , _env_model        = ModelId "test"
@@ -507,7 +519,7 @@ spec = do
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
-            , _env_vault        = Nothing
+            , _env_vault        = vaultRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -520,6 +532,7 @@ spec = do
 
     it "/help output contains group headings" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
+      vaultRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = MkProvider (MockProvider "summary")
             , _env_model        = ModelId "test"
@@ -528,7 +541,7 @@ spec = do
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
-            , _env_vault        = Nothing
+            , _env_vault        = vaultRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -541,6 +554,7 @@ spec = do
 
     it "/help does not modify context" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
+      vaultRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = MkProvider (MockProvider "summary")
             , _env_model        = ModelId "test"
@@ -549,7 +563,7 @@ spec = do
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
             , _env_registry     = emptyRegistry
-            , _env_vault        = Nothing
+            , _env_vault        = vaultRef
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx

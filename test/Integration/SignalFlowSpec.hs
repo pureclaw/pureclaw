@@ -34,16 +34,18 @@ instance Provider EchoProvider where
       }
 
 -- | Build a test AgentEnv from a provider and channel.
-mkTestEnv :: Provider p => p -> ChannelHandle -> AgentEnv
-mkTestEnv p ch = AgentEnv
-  { _env_provider     = MkProvider p
-  , _env_model        = ModelId "mock"
-  , _env_channel      = ch
-  , _env_logger       = mkNoOpLogHandle
-  , _env_systemPrompt = Nothing
-  , _env_registry     = emptyRegistry
-  , _env_vault        = Nothing
-  }
+mkTestEnv :: Provider p => p -> ChannelHandle -> IO AgentEnv
+mkTestEnv p ch = do
+  vaultRef <- newIORef Nothing
+  pure AgentEnv
+    { _env_provider     = MkProvider p
+    , _env_model        = ModelId "mock"
+    , _env_channel      = ch
+    , _env_logger       = mkNoOpLogHandle
+    , _env_systemPrompt = Nothing
+    , _env_registry     = emptyRegistry
+    , _env_vault        = vaultRef
+    }
 
 spec :: Spec
 spec = do
@@ -54,8 +56,8 @@ spec = do
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
-          env = (mkTestEnv (EchoProvider "Echo: ") handle)
-            { _env_systemPrompt = Just "You are a test agent." }
+      baseEnv <- mkTestEnv (EchoProvider "Echo: ") handle
+      let env = baseEnv { _env_systemPrompt = Just "You are a test agent." }
 
       -- Run agent loop in a separate thread
       agentThread <- async $ runAgentLoop env
@@ -92,7 +94,8 @@ spec = do
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
 
-      agentThread <- async $ runAgentLoop (mkTestEnv (EchoProvider "Re: ") handle)
+      env2 <- mkTestEnv (EchoProvider "Re: ") handle
+      agentThread <- async $ runAgentLoop env2
 
       -- Push two messages
       let mkEnvelope txt ts = SignalEnvelope
@@ -117,7 +120,8 @@ spec = do
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
 
-      agentThread <- async $ runAgentLoop (mkTestEnv (EchoProvider "Echo: ") handle)
+      env3 <- mkTestEnv (EchoProvider "Echo: ") handle
+      agentThread <- async $ runAgentLoop env3
 
       -- Send /status slash command
       let statusEnvelope = SignalEnvelope
@@ -147,7 +151,8 @@ spec = do
       let testHandler = ToolHandler $ \_ -> pure ("tool result", False)
           testDef = ToolDefinition "test_tool" "A test tool" (object [])
           registry = registerTool testDef testHandler emptyRegistry
-          env = (mkTestEnv ToolCallThenTextProvider handle) { _env_registry = registry }
+      baseEnv4 <- mkTestEnv ToolCallThenTextProvider handle
+      let env = baseEnv4 { _env_registry = registry }
 
       agentThread <- async $ runAgentLoop env
 

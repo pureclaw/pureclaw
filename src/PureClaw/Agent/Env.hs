@@ -3,6 +3,7 @@ module PureClaw.Agent.Env
     AgentEnv (..)
   ) where
 
+import Data.IORef
 import Data.Text (Text)
 
 import PureClaw.Core.Types
@@ -29,6 +30,6 @@ data AgentEnv = AgentEnv
     -- ^ Optional system prompt prepended to every conversation.
   , _env_registry     :: ToolRegistry
     -- ^ All registered tools available for the agent to call.
-  , _env_vault        :: Maybe VaultHandle
+  , _env_vault        :: IORef (Maybe VaultHandle)
     -- ^ Optional secrets vault. 'Nothing' if no vault is configured.
   }

@@ -51,6 +51,7 @@ library
     PureClaw.Security.Vault
     PureClaw.Security.Vault.Age
     PureClaw.Security.Vault.Passphrase
+    PureClaw.Security.Vault.Plugin
     -- Handles (capability interfaces + real implementations)
     PureClaw.Handles.File
     PureClaw.Handles.Shell
@@ -108,13 +109,13 @@ library
     PureClaw.CLI.Commands
   build-depends:
     base              >= 4.20,
+    age,
     aeson,
     async,
     base16-bytestring,
     base64-bytestring,
     bytestring,
     containers,
-    age,
     crypton,
     directory,
     filepath,
@@ -208,6 +209,7 @@ test-suite pureclaw-test
     Security.PairingSpec
     Security.VaultAgeSpec
     Security.VaultPassphraseSpec
+    Security.VaultPluginSpec
     Security.VaultSpec
     Gateway.AuthSpec
     Gateway.RoutesSpec

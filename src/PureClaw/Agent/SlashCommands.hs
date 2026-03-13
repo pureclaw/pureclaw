@@ -2,7 +2,6 @@ module PureClaw.Agent.SlashCommands
   ( -- * Command data types
     SlashCommand (..)
   , VaultSubCommand (..)
-  , ProviderSubCommand (..)
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)
@@ -15,18 +14,15 @@ module PureClaw.Agent.SlashCommands
 
 import Control.Applicative ((<|>))
 import Control.Exception
-import Data.ByteString (ByteString)
 import Data.Foldable (asum)
-import Data.Maybe (listToMaybe)
+import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Network.HTTP.Client.TLS qualified as HTTP
 
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
 import PureClaw.Agent.Env
-import PureClaw.Auth.AnthropicOAuth
 import PureClaw.Handles.Channel
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
@@ -37,16 +33,14 @@ import PureClaw.Security.Vault.Age
 
 -- | Organisational group for display in '/help'.
 data CommandGroup
-  = GroupSession   -- ^ Session and context management
-  | GroupProvider  -- ^ Model provider configuration
-  | GroupVault     -- ^ Encrypted secrets vault
+  = GroupSession  -- ^ Session and context management
+  | GroupVault    -- ^ Encrypted secrets vault
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 -- | Human-readable section heading for '/help' output.
 groupHeading :: CommandGroup -> Text
-groupHeading GroupSession  = "Session"
-groupHeading GroupProvider = "Provider"
-groupHeading GroupVault    = "Vault"
+groupHeading GroupSession = "Session"
+groupHeading GroupVault   = "Vault"
 
 -- | Specification for a single slash command.
 -- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
@@ -77,24 +71,18 @@ data VaultSubCommand
   | VaultUnknown Text       -- ^ Unrecognised subcommand (not in allCommandSpecs)
   deriving stock (Show, Eq)
 
--- | Subcommands of the '/provider' family.
-data ProviderSubCommand
-  = ProviderConfigure Text  -- ^ Configure a provider (provider name as argument)
-  deriving stock (Show, Eq)
-
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
 
 -- | All recognised slash commands.
 data SlashCommand
-  = CmdHelp                         -- ^ Show command reference
-  | CmdNew                          -- ^ Clear conversation, keep configuration
-  | CmdReset                        -- ^ Full reset including usage counters
-  | CmdStatus                       -- ^ Show session status
-  | CmdCompact                      -- ^ Summarise conversation to save context
-  | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
-  | CmdVault VaultSubCommand        -- ^ Vault command family
+  = CmdHelp                      -- ^ Show command reference
+  | CmdNew                       -- ^ Clear conversation, keep configuration
+  | CmdReset                     -- ^ Full reset including usage counters
+  | CmdStatus                    -- ^ Show session status
+  | CmdCompact                   -- ^ Summarise conversation to save context
+  | CmdVault VaultSubCommand     -- ^ Vault command family
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -107,7 +95,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ vaultCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ vaultCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -116,11 +104,6 @@ sessionCommandSpecs =
   , CommandSpec "/new"     "Clear conversation, keep configuration"   GroupSession (exactP "/new"     CmdNew)
   , CommandSpec "/reset"   "Full reset including usage counters"      GroupSession (exactP "/reset"   CmdReset)
   , CommandSpec "/compact" "Summarise conversation to save context"   GroupSession (exactP "/compact" CmdCompact)
-  ]
-
-providerCommandSpecs :: [CommandSpec]
-providerCommandSpecs =
-  [ CommandSpec "/provider <name>" "Configure a model provider (e.g. /provider anthropic)" GroupProvider (providerArgP ProviderConfigure)
   ]
 
 vaultCommandSpecs :: [CommandSpec]
@@ -167,16 +150,6 @@ vaultArgP sub mkCmd t =
       lower = T.toLower t
   in if lower == pfx || (pfx <> " ") `T.isPrefixOf` lower
      then Just (CmdVault (mkCmd (T.strip (T.drop (T.length pfx) t))))
-     else Nothing
-
--- | Case-insensitive prefix match for "/provider <name>".
--- Argument is extracted from the original-case input, preserving its case.
-providerArgP :: (Text -> ProviderSubCommand) -> Text -> Maybe SlashCommand
-providerArgP mkCmd t =
-  let pfx   = "/provider"
-      lower = T.toLower t
-  in if lower == pfx || (pfx <> " ") `T.isPrefixOf` lower
-     then Just (CmdProvider (mkCmd (T.strip (T.drop (T.length pfx) t))))
      else Nothing
 
 -- | Catch-all for any "/vault <X>" not matched by 'allCommandSpecs'.
@@ -235,17 +208,9 @@ executeSlashCommand env CmdCompact ctx = do
   _ch_send (_env_channel env) (OutgoingMessage msg)
   pure ctx'
 
-executeSlashCommand env (CmdProvider sub) ctx =
-  case _env_vault env of
-    Nothing -> do
-      _ch_send (_env_channel env) (OutgoingMessage
-        "Vault not configured. Cannot store provider credentials.")
-      pure ctx
-    Just vault ->
-      executeProviderCommand env vault sub ctx
-
-executeSlashCommand env (CmdVault sub) ctx =
-  case _env_vault env of
+executeSlashCommand env (CmdVault sub) ctx = do
+  vaultOpt <- readIORef (_env_vault env)
+  case vaultOpt of
     Nothing -> do
       let msg = case sub of
             VaultInit -> T.intercalate "\n"
@@ -344,120 +309,6 @@ executeVaultCommand env vault sub ctx = do
     VaultUnknown _ ->
       send "Unknown vault command. Type /help to see all available commands."
       >> pure ctx
-
--- ---------------------------------------------------------------------------
--- Provider subcommand execution
--- ---------------------------------------------------------------------------
-
--- | Helper: Attempt to store a secret in the vault, unlocking (and initialising
--- if needed) first. Handles VaultLocked, VaultCorrupted, and VaultNotFound.
-unlockAndPutVault :: VaultHandle -> Text -> ByteString -> IO (Either VaultError ())
-unlockAndPutVault vault key value = do
-  result <- _vh_put vault key value
-  case result of
-    Left VaultLocked        -> unlockThenPut
-    Left (VaultCorrupted _) -> unlockThenPut
-    other                   -> pure other
-  where
-    unlockThenPut = do
-      unlockResult <- _vh_unlock vault
-      case unlockResult of
-        Right ()           -> _vh_put vault key value
-        Left VaultNotFound -> initThenPut
-        Left unlockErr     -> pure (Left unlockErr)
-    initThenPut = do
-      initResult <- _vh_init vault
-      case initResult of
-        Left initErr -> pure (Left initErr)
-        Right () -> do
-          unlockResult <- _vh_unlock vault
-          case unlockResult of
-            Left unlockErr -> pure (Left unlockErr)
-            Right ()       -> _vh_put vault key value
-
--- | Auth method options for Anthropic provider.
-data AuthOption = AuthOption
-  { _ao_number :: Int
-  , _ao_name :: Text
-  , _ao_description :: Text
-  , _ao_handler :: AgentEnv -> VaultHandle -> Context -> IO Context
-  }
-
--- | Available Anthropic auth methods.
-anthropicAuthOptions :: AgentEnv -> VaultHandle -> [AuthOption]
-anthropicAuthOptions env vault =
-  [ AuthOption 1 "API Key" "Use an API key"
-      (\_ _ ctx -> handleAnthropicApiKey env vault ctx)
-  , AuthOption 2 "OAuth 2.0" "Use OAuth 2.0 PKCE flow"
-      (\_ _ ctx -> handleAnthropicOAuth env vault ctx)
-  ]
-
--- | Handle Anthropic API Key authentication.
-handleAnthropicApiKey :: AgentEnv -> VaultHandle -> Context -> IO Context
-handleAnthropicApiKey env vault ctx = do
-  let ch   = _env_channel env
-      send = _ch_send ch . OutgoingMessage
-  send "Enter your Anthropic API key (input will not be echoed):"
-  keyResult <- try @IOError (_ch_readSecret ch)
-  case keyResult of
-    Left e -> do
-      send ("Error reading API key: " <> T.pack (show e))
-      pure ctx
-    Right apiKeyText -> do
-      result <- unlockAndPutVault vault "ANTHROPIC_API_KEY" (TE.encodeUtf8 apiKeyText)
-      case result of
-        Left err -> do
-          send ("Error storing API key: " <> T.pack (show err))
-          pure ctx
-        Right () -> do
-          send "Anthropic API key configured successfully."
-          pure ctx
-
--- | Handle Anthropic OAuth authentication.
-handleAnthropicOAuth :: AgentEnv -> VaultHandle -> Context -> IO Context
-handleAnthropicOAuth env vault ctx = do
-  let ch   = _env_channel env
-      send = _ch_send ch . OutgoingMessage
-  send "Starting OAuth flow... (opens browser)"
-  manager <- HTTP.newTlsManager
-  oauthTokens <- runOAuthFlow defaultOAuthConfig manager
-  result <- unlockAndPutVault vault "ANTHROPIC_OAUTH_TOKENS" (serializeTokens oauthTokens)
-  case result of
-    Left err -> do
-      send ("Error storing OAuth tokens: " <> T.pack (show err))
-      pure ctx
-    Right () -> do
-      send "Anthropic OAuth configured successfully."
-      send "Tokens cached in vault and will be auto-refreshed."
-      pure ctx
-
-executeProviderCommand :: AgentEnv -> VaultHandle -> ProviderSubCommand -> Context -> IO Context
-executeProviderCommand env vault (ProviderConfigure providerName) ctx = do
-  let ch   = _env_channel env
-      send = _ch_send ch . OutgoingMessage
-      lowerName = T.toLower (T.strip providerName)
-
-  case lowerName of
-    "anthropic" -> do
-      let options = anthropicAuthOptions env vault
-          optionLines = map (\o -> "  [" <> T.pack (show (_ao_number o)) <> "] " <> _ao_name o) options
-          menu = T.intercalate "\n" ("Configure Anthropic provider. Choose auth method:" : optionLines)
-      send menu
-
-      choiceMsg <- _ch_receive ch
-      let choice = T.strip (_im_content choiceMsg)
-          selectedOption = listToMaybe [o | o <- options, T.pack (show (_ao_number o)) == choice]
-
-      case selectedOption of
-        Just opt -> _ao_handler opt env vault ctx
-        Nothing  -> do
-          send $ "Invalid choice. Please enter 1 to " <> T.pack (show (length options)) <> "."
-          pure ctx
-
-    _ -> do
-      send $ "Unknown provider: " <> providerName
-      send "Supported providers: anthropic, openai, openrouter, ollama"
-      pure ctx
 
 -- ---------------------------------------------------------------------------
 -- Help rendering — derived from allCommandSpecs

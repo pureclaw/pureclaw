@@ -1,12 +1,19 @@
 module CLI.ConfigSpec (spec) where
 
+import Data.Text (Text)
+import Data.Text.IO qualified as TIO
 import System.Directory (getHomeDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
-import Data.Text.IO qualified as TIO
 import Test.Hspec
 
 import PureClaw.CLI.Config
+
+-- | Helper: update vault config and read it back
+updateAndRead :: FilePath -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> IO FileConfig
+updateAndRead path vp vr vi vu = do
+  updateVaultConfig path vp vr vi vu
+  loadFileConfig path
 
 spec :: Spec
 spec = do
@@ -22,12 +29,26 @@ spec = do
         cfg <- loadFileConfig path
         cfg `shouldBe` emptyFileConfig
 
+    it "parses api_key" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "api_key = \"sk-ant-test\"\n"
+        cfg <- loadFileConfig path
+        _fc_apiKey cfg `shouldBe` Just "sk-ant-test"
+
     it "parses model" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
         TIO.writeFile path "model = \"claude-opus-4-20250514\"\n"
         cfg <- loadFileConfig path
         _fc_model cfg `shouldBe` Just "claude-opus-4-20250514"
+
+    it "parses provider" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "provider = \"openai\"\n"
+        cfg <- loadFileConfig path
+        _fc_provider cfg `shouldBe` Just "openai"
 
     it "parses system" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
@@ -78,121 +99,40 @@ spec = do
         cfg <- loadFileConfig path
         _fc_vault_unlock cfg `shouldBe` Just "startup"
 
-    it "parses [[providers]] with anthropic api-key (default)" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path "[[providers]]\nprovider = \"anthropic\"\n"
-        cfg <- loadFileConfig path
-        _fc_providers cfg `shouldBe`
-          [AnthropicProvider (AnthropicProviderConfig AuthApiKey)]
-
-    it "parses [[providers]] with anthropic oauth" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path "[[providers]]\nprovider = \"anthropic\"\nauth = \"oauth\"\n"
-        cfg <- loadFileConfig path
-        _fc_providers cfg `shouldBe`
-          [AnthropicProvider (AnthropicProviderConfig AuthOAuth)]
-
-    it "parses [[providers]] with ollama and base_url" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path "[[providers]]\nprovider = \"ollama\"\nbase_url = \"http://gpu:11434\"\n"
-        cfg <- loadFileConfig path
-        _fc_providers cfg `shouldBe`
-          [OllamaProvider (OllamaProviderConfig (Just "http://gpu:11434"))]
-
-    it "parses [[providers]] with openai" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path "[[providers]]\nprovider = \"openai\"\n"
-        cfg <- loadFileConfig path
-        _fc_providers cfg `shouldBe`
-          [OpenAIProvider (OpenAIProviderConfig Nothing)]
-
-    it "parses [[providers]] with openrouter" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path "[[providers]]\nprovider = \"openrouter\"\n"
-        cfg <- loadFileConfig path
-        _fc_providers cfg `shouldBe`
-          [OpenRouterProvider OpenRouterProviderConfig]
-
-    it "parses multiple providers" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path $ mconcat
-          [ "model = \"anthropic:claude-opus-4-5\"\n\n"
-          , "[[providers]]\n"
-          , "provider = \"anthropic\"\n"
-          , "auth = \"oauth\"\n\n"
-          , "[[providers]]\n"
-          , "provider = \"ollama\"\n"
-          , "base_url = \"http://localhost:11434\"\n"
-          ]
-        cfg <- loadFileConfig path
-        _fc_model cfg `shouldBe` Just "anthropic:claude-opus-4-5"
-        _fc_providers cfg `shouldBe`
-          [ AnthropicProvider (AnthropicProviderConfig AuthOAuth)
-          , OllamaProvider (OllamaProviderConfig (Just "http://localhost:11434"))
-          ]
-
-    it "defaults to empty providers list when no [[providers]] section" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path "model = \"claude-opus-4-20250514\"\n"
-        cfg <- loadFileConfig path
-        _fc_providers cfg `shouldBe` []
-
-    it "ignores unknown provider names" $
-      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
-        let path = dir </> "config.toml"
-        TIO.writeFile path $ mconcat
-          [ "[[providers]]\n"
-          , "provider = \"unknown-provider\"\n\n"
-          , "[[providers]]\n"
-          , "provider = \"anthropic\"\n"
-          ]
-        cfg <- loadFileConfig path
-        _fc_providers cfg `shouldBe`
-          [AnthropicProvider (AnthropicProviderConfig AuthApiKey)]
-
     it "parses all fields together" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
         TIO.writeFile path $ mconcat
-          [ "model            = \"claude-haiku-4-5-20251001\"\n"
+          [ "api_key          = \"sk-test\"\n"
+          , "model            = \"claude-haiku-4-5-20251001\"\n"
+          , "provider         = \"anthropic\"\n"
           , "system           = \"Be helpful.\"\n"
           , "memory           = \"markdown\"\n"
           , "allow            = [\"git\", \"curl\"]\n"
           , "vault_recipient  = \"age1xyz\"\n"
           , "vault_identity   = \"~/.age/key.txt\"\n"
           , "vault_path       = \".pureclaw/vault.age\"\n"
-          , "vault_unlock     = \"cached\"\n\n"
-          , "[[providers]]\n"
-          , "provider = \"anthropic\"\n\n"
-          , "[[providers]]\n"
-          , "provider = \"openai\"\n"
+          , "vault_unlock     = \"on_demand\"\n"
           ]
         cfg <- loadFileConfig path
+        _fc_apiKey          cfg `shouldBe` Just "sk-test"
         _fc_model           cfg `shouldBe` Just "claude-haiku-4-5-20251001"
+        _fc_provider        cfg `shouldBe` Just "anthropic"
         _fc_system          cfg `shouldBe` Just "Be helpful."
         _fc_memory          cfg `shouldBe` Just "markdown"
         _fc_allow           cfg `shouldBe` Just ["git", "curl"]
         _fc_vault_recipient cfg `shouldBe` Just "age1xyz"
         _fc_vault_identity  cfg `shouldBe` Just "~/.age/key.txt"
         _fc_vault_path      cfg `shouldBe` Just ".pureclaw/vault.age"
-        _fc_vault_unlock    cfg `shouldBe` Just "cached"
-        _fc_providers       cfg `shouldBe`
-          [ AnthropicProvider (AnthropicProviderConfig AuthApiKey)
-          , OpenAIProvider (OpenAIProviderConfig Nothing)
-          ]
+        _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
 
     it "ignores missing optional fields" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
-        TIO.writeFile path "model = \"claude-haiku-4-5-20251001\"\n"
+        TIO.writeFile path "api_key = \"sk-x\"\n"
         cfg <- loadFileConfig path
+        _fc_model           cfg `shouldBe` Nothing
+        _fc_provider        cfg `shouldBe` Nothing
         _fc_system          cfg `shouldBe` Nothing
         _fc_memory          cfg `shouldBe` Nothing
         _fc_allow           cfg `shouldBe` Nothing
@@ -200,7 +140,6 @@ spec = do
         _fc_vault_identity  cfg `shouldBe` Nothing
         _fc_vault_path      cfg `shouldBe` Nothing
         _fc_vault_unlock    cfg `shouldBe` Nothing
-        _fc_providers       cfg `shouldBe` []
 
     it "returns emptyFileConfig for invalid TOML" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
@@ -209,23 +148,6 @@ spec = do
         cfg <- loadFileConfig path
         cfg `shouldBe` emptyFileConfig
 
-  describe "providerType" $ do
-    it "returns PTAnthropic for AnthropicProvider" $
-      providerType (AnthropicProvider (AnthropicProviderConfig AuthApiKey))
-        `shouldBe` PTAnthropic
-
-    it "returns PTOllama for OllamaProvider" $
-      providerType (OllamaProvider (OllamaProviderConfig Nothing))
-        `shouldBe` PTOllama
-
-    it "returns PTOpenAI for OpenAIProvider" $
-      providerType (OpenAIProvider (OpenAIProviderConfig Nothing))
-        `shouldBe` PTOpenAI
-
-    it "returns PTOpenRouter for OpenRouterProvider" $
-      providerType (OpenRouterProvider OpenRouterProviderConfig)
-        `shouldBe` PTOpenRouter
-
   describe "getPureclawDir" $ do
     it "returns a path ending in .pureclaw under the home directory" $ do
       dir <- getPureclawDir
@@ -233,8 +155,10 @@ spec = do
       dir `shouldBe` (home </> ".pureclaw")
 
   describe "emptyFileConfig" $ do
-    it "has all Nothing/empty fields" $ do
+    it "has all Nothing fields" $ do
+      _fc_apiKey          emptyFileConfig `shouldBe` Nothing
       _fc_model           emptyFileConfig `shouldBe` Nothing
+      _fc_provider        emptyFileConfig `shouldBe` Nothing
       _fc_system          emptyFileConfig `shouldBe` Nothing
       _fc_memory          emptyFileConfig `shouldBe` Nothing
       _fc_allow           emptyFileConfig `shouldBe` Nothing
@@ -242,4 +166,76 @@ spec = do
       _fc_vault_identity  emptyFileConfig `shouldBe` Nothing
       _fc_vault_path      emptyFileConfig `shouldBe` Nothing
       _fc_vault_unlock    emptyFileConfig `shouldBe` Nothing
-      _fc_providers       emptyFileConfig `shouldBe` []
+
+  describe "updateVaultConfig" $ do
+    it "round-trips vault fields" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        cfg <- updateAndRead path
+          (Just "/my/vault.age")
+          (Just "age1recipient")
+          (Just "~/.age/key.txt")
+          (Just "startup")
+        _fc_vault_path      cfg `shouldBe` Just "/my/vault.age"
+        _fc_vault_recipient cfg `shouldBe` Just "age1recipient"
+        _fc_vault_identity  cfg `shouldBe` Just "~/.age/key.txt"
+        _fc_vault_unlock    cfg `shouldBe` Just "startup"
+
+    it "preserves non-vault fields" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        -- Write a config with model and system set
+        TIO.writeFile path $ mconcat
+          [ "model  = \"claude-opus-4-20250514\"\n"
+          , "system = \"Be concise.\"\n"
+          ]
+        -- Update vault fields only
+        updateVaultConfig path
+          (Just "/v.age") (Just "age1x") Nothing Nothing
+        cfg <- loadFileConfig path
+        -- Non-vault fields must be preserved
+        _fc_model           cfg `shouldBe` Just "claude-opus-4-20250514"
+        _fc_system          cfg `shouldBe` Just "Be concise."
+        -- Vault fields should be set
+        _fc_vault_path      cfg `shouldBe` Just "/v.age"
+        _fc_vault_recipient cfg `shouldBe` Just "age1x"
+
+    it "creates file from scratch on non-existent path" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        -- File does not exist yet — updateVaultConfig should create it
+        cfg <- updateAndRead path
+          (Just "/new/vault.age") (Just "age1new") Nothing Nothing
+        _fc_vault_path      cfg `shouldBe` Just "/new/vault.age"
+        _fc_vault_recipient cfg `shouldBe` Just "age1new"
+        _fc_vault_identity  cfg `shouldBe` Nothing
+        _fc_vault_unlock    cfg `shouldBe` Nothing
+
+    it "leaves fields unchanged when given Nothing" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        -- Set all vault fields
+        updateVaultConfig path
+          (Just "/v.age") (Just "age1r") (Just "~/.age/k") (Just "startup")
+        -- Update with all Nothing — should be a no-op
+        updateVaultConfig path Nothing Nothing Nothing Nothing
+        cfg <- loadFileConfig path
+        _fc_vault_path      cfg `shouldBe` Just "/v.age"
+        _fc_vault_recipient cfg `shouldBe` Just "age1r"
+        _fc_vault_identity  cfg `shouldBe` Just "~/.age/k"
+        _fc_vault_unlock    cfg `shouldBe` Just "startup"
+
+    it "updates existing vault fields with new values" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        -- Set initial values
+        updateVaultConfig path
+          (Just "/old.age") (Just "age1old") (Just "~/.age/old") (Just "startup")
+        -- Update with new values
+        updateVaultConfig path
+          (Just "/new.age") (Just "age1new") (Just "~/.age/new") (Just "on_demand")
+        cfg <- loadFileConfig path
+        _fc_vault_path      cfg `shouldBe` Just "/new.age"
+        _fc_vault_recipient cfg `shouldBe` Just "age1new"
+        _fc_vault_identity  cfg `shouldBe` Just "~/.age/new"
+        _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
