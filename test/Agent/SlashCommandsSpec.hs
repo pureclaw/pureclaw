@@ -294,6 +294,51 @@ spec = do
         Just t -> T.unpack t `shouldContain` "Invalid choice"
         Nothing -> expectationFailure "Expected message"
 
+    it "/vault setup from fresh install with uninitialized vault handle succeeds" $ do
+      -- Reproduces the bug: resolvePassphraseVault returns Just vault even
+      -- when the vault file doesn't exist. When the user then runs
+      -- /vault setup, executeVaultSetup sees Just vault and tries to rekey
+      -- instead of calling firstTimeSetup. The rekey fails with VaultNotFound.
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ["1"]  -- pick passphrase
+      -- Create a vault handle but do NOT call _vh_init — simulates
+      -- the state after resolvePassphraseVault on a fresh install.
+      uninitVault <- mkMockVaultHandle
+      let vaultWithRealisticRekey = uninitVault
+            { _vh_rekey = \_ _ _ -> pure (Left VaultNotFound)
+            }
+      vaultRef    <- newIORef (Just vaultWithRealisticRekey)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = ModelId "test"
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send    = \msg -> modifyIORef allSentRef (_om_content msg :)
+                , _ch_receive = do
+                    msgs <- readIORef msgsRef
+                    case msgs of
+                      []     -> throwIO (userError "EOF" :: IOError)
+                      (m:rest) -> do
+                        writeIORef msgsRef rest
+                        pure (IncomingMessage (UserId "test") m)
+                , _ch_readSecret = pure "test-passphrase"
+                }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
+      allSent <- readIORef allSentRef
+      -- Should NOT contain "Rekey failed" — it should succeed with firstTimeSetup
+      let combined = T.unpack (T.intercalate " " allSent)
+      combined `shouldNotContain` "Rekey failed"
+      combined `shouldNotContain` "VaultNotFound"
+      -- Should indicate successful vault creation
+      combined `shouldContain` "created"
+
   describe "vault commands — with mock vault" $ do
     let mkEnvWithVault sentRef vault = do
           vaultRef    <- newIORef (Just vault)
