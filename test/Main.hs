@@ -60,6 +60,7 @@ import qualified Agent.IdentitySpec
 import qualified Scheduler.CronSpec
 import qualified Scheduler.HeartbeatSpec
 import qualified Integration.SignalFlowSpec
+import qualified Integration.CLISpec
 
 main :: IO ()
 main = hspec $ do
@@ -121,3 +122,4 @@ main = hspec $ do
   describe "Scheduler.Cron" Scheduler.CronSpec.spec
   describe "Scheduler.Heartbeat" Scheduler.HeartbeatSpec.spec
   describe "Integration.SignalFlow" Integration.SignalFlowSpec.spec
+  describe "Integration.CLI" Integration.CLISpec.spec

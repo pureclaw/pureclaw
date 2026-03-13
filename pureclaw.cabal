@@ -221,6 +221,7 @@ test-suite pureclaw-test
     Scheduler.CronSpec
     Scheduler.HeartbeatSpec
     Integration.SignalFlowSpec
+    Integration.CLISpec
   hs-source-dirs:   test
   build-depends:
     base,
@@ -244,6 +245,7 @@ test-suite pureclaw-test
     wai,
     warp,
     hspec,
+    typed-process,
     QuickCheck,
   default-language: GHC2021
   default-extensions:
