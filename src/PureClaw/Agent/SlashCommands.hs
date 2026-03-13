@@ -567,23 +567,30 @@ createEncryptorForChoice ch _ph SetupPassphrase = do
     Right passphrase -> do
       enc <- mkPassphraseVaultEncryptor (pure (TE.encodeUtf8 passphrase))
       pure (Right (enc, "passphrase", Nothing, Nothing))
-createEncryptorForChoice ch ph (SetupPlugin plugin) = do
-  _ch_send ch (OutgoingMessage ("Generating identity on " <> _ap_label plugin <> "..."))
-  pureclawDir <- getPureclawDir
-  let vaultDir = pureclawDir </> "vault"
-  Dir.createDirectoryIfMissing True vaultDir
-  genResult <- _ph_generate ph plugin vaultDir
-  case genResult of
-    Left err ->
-      pure (Left ("Plugin error: " <> T.pack (show err)))
-    Right (AgeRecipient recipient, identityPath) -> do
-      ageResult <- mkAgeEncryptor
-      case ageResult of
-        Left err ->
-          pure (Left ("age error: " <> T.pack (show err)))
-        Right ageEnc -> do
-          let enc = ageVaultEncryptor ageEnc recipient (T.pack identityPath)
-          pure (Right (enc, _ap_label plugin, Just recipient, Just (T.pack identityPath)))
+createEncryptorForChoice ch _ph (SetupPlugin plugin) = do
+  let generateCmd = _ap_binary plugin <> " --generate"
+  _ch_send ch (OutgoingMessage (T.intercalate "\n"
+    [ "To generate a " <> _ap_label plugin <> " identity, run this in another terminal:"
+    , ""
+    , "  " <> T.pack generateCmd
+    , ""
+    , "Then paste the recipient (public key) and identity file path below."
+    ]))
+  recipient <- T.strip <$> _ch_prompt ch "Recipient (age1...): "
+  if T.null recipient
+    then pure (Left "No recipient provided. Setup cancelled.")
+    else do
+      identityPath <- T.strip <$> _ch_prompt ch "Identity file path: "
+      if T.null identityPath
+        then pure (Left "No identity path provided. Setup cancelled.")
+        else do
+          ageResult <- mkAgeEncryptor
+          case ageResult of
+            Left err ->
+              pure (Left ("age error: " <> T.pack (show err)))
+            Right ageEnc -> do
+              let enc = ageVaultEncryptor ageEnc recipient identityPath
+              pure (Right (enc, _ap_label plugin, Just recipient, Just identityPath))
 
 -- | First-time vault setup: create directory, open vault, init, write to IORef.
 firstTimeSetup :: AgentEnv -> VaultEncryptor -> Text -> IO (Either Text ())
