@@ -355,10 +355,11 @@ executeProviderCommand env vault (ProviderConfigure providerName) ctx = do
 
   case lowerName of
     "anthropic" -> do
-      send "Configure Anthropic provider. Choose auth method:"
-      send "  [1] API Key"
-      send "  [2] OAuth 2.0"
-      send ""
+      send $ T.intercalate "\n"
+        [ "Configure Anthropic provider. Choose auth method:"
+        , "  [1] API Key"
+        , "  [2] OAuth 2.0"
+        ]
 
       choiceMsg <- _ch_receive ch
       let choice = T.strip (_im_content choiceMsg)
