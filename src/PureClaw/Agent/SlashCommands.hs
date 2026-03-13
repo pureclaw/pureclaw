@@ -350,15 +350,21 @@ executeVaultCommand env vault sub ctx = do
 -- ---------------------------------------------------------------------------
 
 -- | Helper: Attempt to store a secret in the vault, unlocking it first if needed.
--- If vault is locked, prompts user to unlock and retries.
+-- If vault is locked or corrupted (e.g. wrong passphrase), prompts user to unlock and retries.
 unlockAndPutVault :: VaultHandle -> Text -> ByteString -> IO (Either VaultError ())
 unlockAndPutVault vault key value = do
   result <- _vh_put vault key value
   case result of
-    Left VaultLocked -> do
+    Left err@VaultLocked -> do
       unlockResult <- _vh_unlock vault
       case unlockResult of
-        Left err -> pure (Left err)
+        Left _unlockErr -> pure (Left err)  -- Keep original error if unlock fails
+        Right () -> _vh_put vault key value
+    Left err@(VaultCorrupted _) -> do
+      -- VaultCorrupted (wrong passphrase) — try unlocking with user prompt
+      unlockResult <- _vh_unlock vault
+      case unlockResult of
+        Left _unlockErr -> pure (Left err)  -- Keep original error if unlock fails
         Right () -> _vh_put vault key value
     other -> pure other
 
