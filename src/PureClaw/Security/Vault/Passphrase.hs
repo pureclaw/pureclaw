@@ -3,34 +3,31 @@ module PureClaw.Security.Vault.Passphrase
   ) where
 
 import Control.Concurrent.STM
-import Crypto.KDF.PBKDF2 (Parameters (..), fastPBKDF2_SHA256)
+import Control.Monad.Trans.Except (runExceptT)
+import Crypto.Age (decrypt, encrypt)
+import Crypto.Age.Identity (Identity (..), ScryptIdentity (..))
+import Crypto.Age.Recipient (Recipients (..), ScryptRecipient (..))
+import Crypto.Age.Scrypt (Passphrase (..), WorkFactor, bytesToSalt, mkWorkFactor)
 import Crypto.Random (getRandomBytes)
+import Data.ByteArray (convert)
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Maybe (fromJust)
+import Data.Text qualified as T
 
-import PureClaw.Security.Crypto (decrypt, encrypt)
-import PureClaw.Security.Secrets (mkSecretKey)
 import PureClaw.Security.Vault.Age (VaultEncryptor (..), VaultError (..))
 
--- Magic header identifying passphrase-encrypted vault files.
-magicHeader :: ByteString
-magicHeader = "PCLAWPW1"
+-- | scrypt work factor (N = 2^22), matching the age CLI default.
+ageWorkFactor :: WorkFactor
+ageWorkFactor = fromJust (mkWorkFactor 22)
 
--- Magic prefix prepended to plaintext before encryption for passphrase verification.
-checkMagic :: ByteString
-checkMagic = "PCLAWCHK"
+-- | Convert a passphrase 'ByteString' to an age 'Passphrase'.
+toAgePass :: ByteString -> Passphrase
+toAgePass bs = Passphrase (convert bs)
 
-saltLen :: Int
-saltLen = 32
-
-pbkdf2Params :: Parameters
-pbkdf2Params = Parameters { iterCounts = 100_000, outputLength = 32 }
-
--- | Derive a 32-byte encryption key from a passphrase and salt using PBKDF2-SHA256.
-deriveKey :: ByteString -> ByteString -> ByteString
-deriveKey = fastPBKDF2_SHA256 pbkdf2Params
-
--- | Create a passphrase-based vault encryptor.
+-- | Create a passphrase-based vault encryptor using the age encryption format.
+-- The resulting ciphertext is a standard age binary file, compatible with
+-- @age -d --passphrase@.
 -- The IO action is called at most once to obtain the passphrase, then cached.
 mkPassphraseVaultEncryptor :: IO ByteString -> IO VaultEncryptor
 mkPassphraseVaultEncryptor getPass = do
@@ -46,27 +43,27 @@ mkPassphraseVaultEncryptor getPass = do
   pure VaultEncryptor
     { _ve_encrypt = \plaintext -> do
         passphrase <- getOrPrompt
-        salt <- getRandomBytes saltLen
-        let key = deriveKey passphrase salt
-        result <- encrypt (mkSecretKey key) (checkMagic <> plaintext)
-        case result of
-          Left  _          -> pure (Left (VaultCorrupted "encryption failed"))
-          Right ciphertext -> pure (Right (magicHeader <> salt <> ciphertext))
+        saltBytes  <- getRandomBytes 16
+        case bytesToSalt saltBytes of
+          Nothing   -> pure (Left (VaultCorrupted "salt generation failed"))
+          Just salt -> do
+            let recipient = ScryptRecipient
+                  { srPassphrase  = toAgePass passphrase
+                  , srSalt        = salt
+                  , srWorkFactor  = ageWorkFactor
+                  }
+            result <- runExceptT (encrypt (RecipientsScrypt recipient) plaintext)
+            case result of
+              Left  err -> pure (Left (VaultCorrupted ("age encrypt: " <> T.pack (show err))))
+              Right ct  -> pure (Right ct)
     , _ve_decrypt = \ciphertext -> do
         passphrase <- getOrPrompt
-        let (hdr, rest) = BS.splitAt (BS.length magicHeader) ciphertext
-        if hdr /= magicHeader
-          then pure (Left (VaultCorrupted "not a passphrase-encrypted vault"))
-          else do
-            let (salt, encrypted) = BS.splitAt saltLen rest
-            if BS.length salt < saltLen
-              then pure (Left (VaultCorrupted "truncated vault file"))
-              else do
-                let key = deriveKey passphrase salt
-                case decrypt (mkSecretKey key) encrypted of
-                  Left  _ -> pure (Left (VaultCorrupted "decryption failed"))
-                  Right plain ->
-                    if checkMagic `BS.isPrefixOf` plain
-                      then pure (Right (BS.drop (BS.length checkMagic) plain))
-                      else pure (Left (VaultCorrupted "wrong passphrase"))
+        let identity   = ScryptIdentity
+              { siPassphrase    = toAgePass passphrase
+              , siMaxWorkFactor = ageWorkFactor
+              }
+            identities = IdentityScrypt identity :| []
+        case decrypt identities ciphertext of
+          Left  _  -> pure (Left (VaultCorrupted "wrong passphrase"))
+          Right pt -> pure (Right pt)
     }

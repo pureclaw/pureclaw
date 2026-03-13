@@ -1,6 +1,7 @@
 module Security.VaultPassphraseSpec (spec) where
 
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
 import Data.IORef
 import Test.Hspec
 
@@ -23,10 +24,10 @@ spec = do
       Right ct <- _ve_encrypt enc "hello"
       ct `shouldNotBe` "hello"
 
-    it "ciphertext has magic header" $ do
+    it "ciphertext has age format header" $ do
       enc <- mkEnc "pass"
       Right ct <- _ve_encrypt enc "data"
-      BS.take 8 ct `shouldBe` "PCLAWPW1"
+      ct `shouldSatisfy` BS.isPrefixOf "age-encryption.org/v1"
 
     it "wrong passphrase returns VaultCorrupted" $ do
       enc1 <- mkEnc "correctpass"
@@ -35,16 +36,10 @@ spec = do
       result   <- _ve_decrypt enc2 ct
       result `shouldBe` Left (VaultCorrupted "wrong passphrase")
 
-    it "returns VaultCorrupted for non-passphrase ciphertext" $ do
+    it "returns VaultCorrupted for corrupt ciphertext" $ do
       enc <- mkEnc "pass"
-      result <- _ve_decrypt enc "age-encryption.org/v1\nthis is age format"
-      result `shouldBe` Left (VaultCorrupted "not a passphrase-encrypted vault")
-
-    it "returns VaultCorrupted for truncated ciphertext" $ do
-      enc <- mkEnc "pass"
-      -- Valid header but too short for salt
-      result <- _ve_decrypt enc "PCLAWPW1short"
-      result `shouldBe` Left (VaultCorrupted "truncated vault file")
+      result <- _ve_decrypt enc "not valid age ciphertext"
+      result `shouldSatisfy` isLeft
 
     it "each encrypt produces different ciphertext (fresh salt)" $ do
       enc <- mkEnc "pass"

@@ -114,6 +114,7 @@ library
     base64-bytestring,
     bytestring,
     containers,
+    age,
     crypton,
     directory,
     filepath,
