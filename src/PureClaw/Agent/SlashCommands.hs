@@ -437,8 +437,9 @@ createEncryptorForChoice ch ph (SetupPlugin plugin) = do
 firstTimeSetup :: AgentEnv -> VaultEncryptor -> Text -> IO (Either Text ())
 firstTimeSetup env enc keyLabel = do
   pureclawDir <- getPureclawDir
-  Dir.createDirectoryIfMissing True pureclawDir
-  let vaultPath = pureclawDir </> "vault.age"
+  let vaultDir = pureclawDir </> "vault"
+  Dir.createDirectoryIfMissing True vaultDir
+  let vaultPath = vaultDir </> "vault.age"
       cfg = VaultConfig
         { _vc_path    = vaultPath
         , _vc_keyType = keyLabel
@@ -461,8 +462,9 @@ updateConfigAfterSetup mRecipient mIdentity _keyLabel = do
   pureclawDir <- getPureclawDir
   Dir.createDirectoryIfMissing True pureclawDir
   let configPath = pureclawDir </> "config.toml"
+      vaultPath  = Just (T.pack (pureclawDir </> "vault" </> "vault.age"))
       unlockMode = Just "on_demand"
-  updateVaultConfig configPath Nothing mRecipient mIdentity unlockMode
+  updateVaultConfig configPath vaultPath mRecipient mIdentity unlockMode
 
 -- ---------------------------------------------------------------------------
 -- Help rendering — derived from allCommandSpecs
