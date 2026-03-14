@@ -143,10 +143,8 @@ runAgentLoop env = do
 -- | Message shown when user sends a chat message but no provider is configured.
 noProviderMessage :: Text
 noProviderMessage = T.intercalate "\n"
-  [ "No provider configured. To start chatting, configure your credentials:"
+  [ "No provider configured. To start chatting, configure your provider with:"
   , ""
-  , "  /vault setup          Set up the encrypted vault and store API keys"
-  , "  /vault add <KEY>      Store a specific API key (e.g. ANTHROPIC_API_KEY)"
+  , "  /provider <PROVIDER>"
   , ""
-  , "Or set an environment variable (e.g. ANTHROPIC_API_KEY) and restart."
   ]
