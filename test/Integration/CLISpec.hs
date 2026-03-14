@@ -1,3 +1,4 @@
+{-# LANGUAGE DerivingStrategies #-}
 module Integration.CLISpec (spec) where
 
 import Control.Concurrent
@@ -53,6 +54,18 @@ race' left right = do
   killThread t2
   pure result
 
+-- | Wrapper that includes stderr in the Show output so hspec displays it
+-- on failure. Usage: @exitCode \`shouldBe\` annotate err ExitSuccess@
+data Annotated a = Annotated String a
+  deriving stock (Eq)
+
+instance Show a => Show (Annotated a) where
+  show (Annotated stderr' val) =
+    show val <> "\n    --- stderr ---\n" <> stderr'
+
+annotate :: String -> a -> Annotated a
+annotate = Annotated
+
 spec :: Spec
 spec = do
   describe "CLI startup" $ do
@@ -62,16 +75,16 @@ spec = do
       -- Send /help then EOF (Ctrl-D). If the binary enters the loop,
       -- it will process /help and print help text. If it dies on startup
       -- (the current bug), we'll get an error exit code and no help output.
-      (exitCode, out, _err) <- runPureclaw bin "/help\n" 5000000  -- 5s timeout
-      exitCode `shouldBe` ExitSuccess
+      (exitCode, out, err) <- runPureclaw bin "/help\n" 5000000  -- 5s timeout
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "Slash commands:"
 
     it "does not crash on startup without credentials" $ do
       bin <- findPureclaw
       -- Just send EOF immediately. The binary should start up, print
       -- its banner, then exit cleanly on EOF — not die with an error.
-      (exitCode, out, _err) <- runPureclaw bin "" 5000000
-      exitCode `shouldBe` ExitSuccess
+      (exitCode, out, err) <- runPureclaw bin "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "PureClaw"
 
     it "does not claim a provider is configured when no credentials exist" $ do
@@ -86,7 +99,7 @@ spec = do
       bin <- findPureclaw
       -- Send a non-slash message. Without a configured provider, the
       -- binary should tell the user how to configure one, not crash.
-      (exitCode, out, _err) <- runPureclaw bin "Hello world\n" 5000000
-      exitCode `shouldBe` ExitSuccess
+      (exitCode, out, err) <- runPureclaw bin "Hello world\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
       -- Should mention how to configure credentials
       out `shouldContain` "provider"
