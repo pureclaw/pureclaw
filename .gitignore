@@ -28,3 +28,6 @@ result-*
 
 .pureclaw
 config.toml
+
+# Claude Code worktrees
+.claude/
