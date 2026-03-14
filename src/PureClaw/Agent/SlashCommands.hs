@@ -574,7 +574,7 @@ createEncryptorForChoice ch _ph (SetupPlugin plugin) = do
   let vaultDir      = pureclawDir </> "vault"
       identityFile  = vaultDir </> T.unpack (_ap_name plugin) <> "-identity.txt"
       identityFileT = T.pack identityFile
-      cmd = T.pack (_ap_binary plugin) <> " --generate > " <> identityFileT
+      cmd = T.pack (_ap_binary plugin) <> " --generate --pin-policy never --touch-policy never > " <> identityFileT
   Dir.createDirectoryIfMissing True vaultDir
   _ch_send ch (OutgoingMessage (T.intercalate "\n"
     [ "Run this in another terminal to generate a " <> _ap_label plugin <> " identity:"
