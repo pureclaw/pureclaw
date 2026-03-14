@@ -21,7 +21,7 @@ import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
 import System.Directory (doesFileExist)
-import System.Environment
+
 import System.IO
 
 import PureClaw.Auth.AnthropicOAuth
@@ -304,8 +304,7 @@ buildPolicy cmds =
     }
 
 -- | Resolve the LLM provider from the provider type.
--- Checks the vault for the API key (using the env var name as the vault key)
--- before falling back to CLI flag or environment variable.
+-- Checks CLI flag first, then the vault for the API key.
 -- Returns 'Nothing' if no credentials are available (the agent loop
 -- will still start, allowing the user to configure credentials via
 -- slash commands like /vault setup).
@@ -382,19 +381,15 @@ eitherToMaybe :: Either e a -> Maybe a
 eitherToMaybe (Left  _) = Nothing
 eitherToMaybe (Right a) = Just a
 
--- | Resolve an API key from: CLI flag → vault → environment variable.
--- Returns 'Nothing' if no key is found anywhere.
+-- | Resolve an API key from: CLI flag → vault.
+-- Returns 'Nothing' if no key is found.
 resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO (Maybe ApiKey)
 resolveApiKey (Just key) _ _ = pure (Just (mkApiKey (TE.encodeUtf8 (T.pack key))))
-resolveApiKey Nothing envVar vaultOpt = do
-  vaultKey <- tryVaultLookup vaultOpt (T.pack envVar)
+resolveApiKey Nothing vaultKeyName vaultOpt = do
+  vaultKey <- tryVaultLookup vaultOpt (T.pack vaultKeyName)
   case vaultKey of
     Just bs -> pure (Just (mkApiKey bs))
-    Nothing -> do
-      envKey <- lookupEnv envVar
-      case envKey of
-        Just key -> pure (Just (mkApiKey (TE.encodeUtf8 (T.pack key))))
-        Nothing  -> pure Nothing
+    Nothing -> pure Nothing
 
 -- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
 -- absent, locked, or does not contain the key.
@@ -462,8 +457,7 @@ resolveAgeVault fileCfg recipient identity logger = do
           pure Nothing
 
 -- | Resolve vault using passphrase-based encryption (default when no age keys configured).
--- Prompts for passphrase on stdin at startup (if vault file exists), or reads
--- from the PURECLAW_VAULT_PASSPHRASE environment variable.
+-- Prompts for passphrase on stdin at startup (if vault file exists).
 resolvePassphraseVault :: FileConfig -> LogHandle -> IO (Maybe VaultHandle)
 resolvePassphraseVault fileCfg logger = do
   dir <- getPureclawDir
@@ -474,17 +468,13 @@ resolvePassphraseVault fileCfg logger = do
         , _vc_unlock  = UnlockStartup
         }
   let getPass = do
-        envPass <- lookupEnv "PURECLAW_VAULT_PASSPHRASE"
-        case envPass of
-          Just p  -> pure (TE.encodeUtf8 (T.pack p))
-          Nothing -> do
-            putStr "Vault passphrase: "
-            hFlush stdout
-            pass <- bracket_
-              (hSetEcho stdin False)
-              (hSetEcho stdin True >> putStrLn "")
-              getLine
-            pure (TE.encodeUtf8 (T.pack pass))
+        putStr "Vault passphrase: "
+        hFlush stdout
+        pass <- bracket_
+          (hSetEcho stdin False)
+          (hSetEcho stdin True >> putStrLn "")
+          getLine
+        pure (TE.encodeUtf8 (T.pack pass))
   enc <- mkPassphraseVaultEncryptor getPass
   vault <- openVault cfg enc
   exists <- doesFileExist path
