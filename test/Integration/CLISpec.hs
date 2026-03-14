@@ -32,6 +32,7 @@ runPureclaw bin stdinContent timeoutUs = do
                [ ("HOME", tmpDir)             -- No ~/.pureclaw config
                , ("PATH", "/usr/bin:/bin")     -- Minimal PATH, no API keys in env
                , ("TERM", "dumb")
+               , ("LANG", "C.UTF-8")          -- GHC needs UTF-8 locale for em-dashes etc.
                ]
            $ proc bin ["--no-vault"]
     result <- race' (threadDelay timeoutUs) (readProcess pc)
