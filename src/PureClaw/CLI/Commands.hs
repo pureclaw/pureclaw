@@ -312,7 +312,25 @@ buildPolicy cmds =
 resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO (Maybe SomeProvider)
 resolveProvider Anthropic keyOpt vaultOpt manager = do
   mApiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
-  pure (fmap (MkProvider . mkAnthropicProvider manager) mApiKey)
+  case mApiKey of
+    Just k  -> pure (Just (MkProvider (mkAnthropicProvider manager k)))
+    Nothing -> do
+      -- Fall back to cached OAuth tokens in the vault
+      cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
+      case cachedBs >>= eitherToMaybe . deserializeTokens of
+        Nothing -> pure Nothing
+        Just tokens -> do
+          let cfg = defaultOAuthConfig
+          now <- getCurrentTime
+          t <- if _oat_expiresAt tokens <= now
+            then do
+              putStrLn "OAuth access token expired \x2014 refreshing..."
+              newT <- refreshOAuthToken cfg manager (_oat_refreshToken tokens)
+              saveOAuthTokens vaultOpt newT
+              pure newT
+            else pure tokens
+          handle <- mkOAuthHandle cfg manager t
+          pure (Just (MkProvider (mkAnthropicProviderOAuth manager handle)))
 resolveProvider OpenAI keyOpt vaultOpt manager = do
   mApiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
   pure (fmap (MkProvider . mkOpenAIProvider manager) mApiKey)
