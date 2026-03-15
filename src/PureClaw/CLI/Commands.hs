@@ -188,9 +188,7 @@ runChat opts = do
   let logger = mkStderrLogHandle
 
   -- Load config file: --config flag overrides default search locations
-  configResult <- case _co_config opts of
-    Just p  -> loadFileConfigDiag p
-    Nothing -> loadConfigDiag
+  configResult <- maybe loadConfigDiag loadFileConfigDiag (_co_config opts)
   let fileCfg = configFileConfig configResult
 
   -- Log config loading result
