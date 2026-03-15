@@ -1,0 +1,55 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Channels.CLI
+<span class="lineno">    2 </span>  ( -- * CLI channel
+<span class="lineno">    3 </span>    mkCLIChannelHandle
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Data.Text qualified as T
+<span class="lineno">    7 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">    8 </span>import System.IO
+<span class="lineno">    9 </span>
+<span class="lineno">   10 </span>import PureClaw.Core.Types
+<span class="lineno">   11 </span>import PureClaw.Handles.Channel
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>-- | Create a channel handle that reads from stdin and writes to stdout.
+<span class="lineno">   14 </span>-- Receive prints a @&gt;@ prompt and reads a line. EOF (Ctrl-D) causes
+<span class="lineno">   15 </span>-- an 'IOError' which the agent loop catches to exit cleanly.
+<span class="lineno">   16 </span>mkCLIChannelHandle :: ChannelHandle
+<span class="lineno">   17 </span><span class="decl"><span class="istickedoff">mkCLIChannelHandle = ChannelHandle</span>
+<span class="lineno">   18 </span><span class="spaces">  </span><span class="istickedoff">{ _ch_receive = <span class="nottickedoff">do</span></span>
+<span class="lineno">   19 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">putStr &quot;&gt; &quot;</span></span>
+<span class="lineno">   20 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">hFlush stdout</span></span>
+<span class="lineno">   21 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">line &lt;- TIO.getLine</span></span>
+<span class="lineno">   22 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure IncomingMessage</span></span>
+<span class="lineno">   23 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">{ _im_userId  = UserId &quot;cli-user&quot;</span></span>
+<span class="lineno">   24 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _im_content = line</span></span>
+<span class="lineno">   25 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">   26 </span><span class="spaces">  </span><span class="istickedoff">, _ch_send = <span class="nottickedoff">\msg -&gt; do</span></span>
+<span class="lineno">   27 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">TIO.putStrLn &quot;&quot;</span></span>
+<span class="lineno">   28 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">TIO.putStrLn (_om_content msg)</span></span>
+<span class="lineno">   29 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">TIO.putStrLn &quot;&quot;</span></span>
+<span class="lineno">   30 </span><span class="spaces">  </span><span class="istickedoff">, _ch_sendError = <span class="nottickedoff">\err -&gt;</span></span>
+<span class="lineno">   31 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">TIO.hPutStrLn stderr $ &quot;Error: &quot; &lt;&gt; T.pack (show err)</span></span>
+<span class="lineno">   32 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,168 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Vault.Plugin
+<span class="lineno">    2 </span>  ( -- * Plugin type
+<span class="lineno">    3 </span>    AgePlugin (..)
+<span class="lineno">    4 </span>    -- * Plugin handle
+<span class="lineno">    5 </span>  , PluginHandle (..)
+<span class="lineno">    6 </span>  , mkPluginHandle
+<span class="lineno">    7 </span>  , mkMockPluginHandle
+<span class="lineno">    8 </span>    -- * Helpers
+<span class="lineno">    9 </span>  , pluginLabel
+<span class="lineno">   10 </span>  , pluginFromBinary
+<span class="lineno">   11 </span>  ) where
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   14 </span>import Data.List qualified as L
+<span class="lineno">   15 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   16 </span>import Data.Text (Text)
+<span class="lineno">   17 </span>import Data.Text qualified as T
+<span class="lineno">   18 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   19 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   20 </span>import System.Directory qualified as Dir
+<span class="lineno">   21 </span>import System.FilePath qualified as FP
+<span class="lineno">   22 </span>import System.Process.Typed
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>import PureClaw.Security.Vault.Age (AgeRecipient (..), VaultError (..))
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>-- | An age plugin discovered on PATH.
+<span class="lineno">   27 </span>data AgePlugin = AgePlugin
+<span class="lineno">   28 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ap_name</span></span></span>   :: !Text      -- ^ Plugin name, e.g. &quot;yubikey&quot;
+<span class="lineno">   29 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ap_binary</span></span></span> :: !FilePath   -- ^ Binary name, e.g. &quot;age-plugin-yubikey&quot;
+<span class="lineno">   30 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ap_label</span></span></span>  :: !Text      -- ^ Human-readable label, e.g. &quot;YubiKey PIV&quot;
+<span class="lineno">   31 </span>  } deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | Handle for age plugin detection and identity generation.
+<span class="lineno">   34 </span>data PluginHandle = PluginHandle
+<span class="lineno">   35 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ph_detect</span></span></span>   :: IO [AgePlugin]
+<span class="lineno">   36 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ph_generate</span></span></span> :: AgePlugin -&gt; FilePath -&gt; IO (Either VaultError (AgeRecipient, FilePath))
+<span class="lineno">   37 </span>  }
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- | Known age plugins with human-readable labels.
+<span class="lineno">   40 </span>knownPluginLabels :: Map.Map Text Text
+<span class="lineno">   41 </span><span class="decl"><span class="istickedoff">knownPluginLabels = Map.fromList</span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="istickedoff">[ (&quot;yubikey&quot;,    &quot;YubiKey PIV&quot;)</span>
+<span class="lineno">   43 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;tpm&quot;,        &quot;TPM 2.0&quot;)</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;se&quot;,         &quot;Secure Enclave&quot;)</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;fido2-hmac&quot;, &quot;FIDO2 HMAC&quot;)</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>-- | Look up a human-readable label for a plugin name.
+<span class="lineno">   49 </span>-- Falls back to the plugin name itself if not in the known registry.
+<span class="lineno">   50 </span>pluginLabel :: Text -&gt; Text
+<span class="lineno">   51 </span><span class="decl"><span class="istickedoff">pluginLabel name = Map.findWithDefault name name knownPluginLabels</span></span>
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Construct an 'AgePlugin' from a binary name like @&quot;age-plugin-yubikey&quot;@.
+<span class="lineno">   54 </span>-- Strips the @&quot;age-plugin-&quot;@ prefix and looks up the label.
+<span class="lineno">   55 </span>pluginFromBinary :: FilePath -&gt; AgePlugin
+<span class="lineno">   56 </span><span class="decl"><span class="istickedoff">pluginFromBinary binary =</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="istickedoff">let name = T.pack (drop (length (&quot;age-plugin-&quot; :: String)) binary)</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">in AgePlugin</span>
+<span class="lineno">   59 </span><span class="spaces">    </span><span class="istickedoff">{ _ap_name   = name</span>
+<span class="lineno">   60 </span><span class="spaces">    </span><span class="istickedoff">, _ap_binary = binary</span>
+<span class="lineno">   61 </span><span class="spaces">    </span><span class="istickedoff">, _ap_label  = pluginLabel name</span>
+<span class="lineno">   62 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   63 </span>
+<span class="lineno">   64 </span>-- | Construct a real 'PluginHandle' that scans PATH for age plugins.
+<span class="lineno">   65 </span>mkPluginHandle :: PluginHandle
+<span class="lineno">   66 </span><span class="decl"><span class="nottickedoff">mkPluginHandle = PluginHandle</span>
+<span class="lineno">   67 </span><span class="spaces">  </span><span class="nottickedoff">{ _ph_detect = detectPlugins</span>
+<span class="lineno">   68 </span><span class="spaces">  </span><span class="nottickedoff">, _ph_generate = generateIdentity</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>-- | Scan PATH for executables matching @age-plugin-*@.
+<span class="lineno">   72 </span>detectPlugins :: IO [AgePlugin]
+<span class="lineno">   73 </span><span class="decl"><span class="nottickedoff">detectPlugins = do</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="nottickedoff">pathVar &lt;- FP.getSearchPath</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="nottickedoff">binaries &lt;- concat &lt;$&gt; mapM listAgePlugins pathVar</span>
+<span class="lineno">   76 </span><span class="spaces">  </span><span class="nottickedoff">pure (map pluginFromBinary (L.nub binaries))</span></span>
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- | List age-plugin-* executables in a single directory.
+<span class="lineno">   79 </span>listAgePlugins :: FilePath -&gt; IO [FilePath]
+<span class="lineno">   80 </span><span class="decl"><span class="nottickedoff">listAgePlugins dir = do</span>
+<span class="lineno">   81 </span><span class="spaces">  </span><span class="nottickedoff">exists &lt;- Dir.doesDirectoryExist dir</span>
+<span class="lineno">   82 </span><span class="spaces">  </span><span class="nottickedoff">if not exists</span>
+<span class="lineno">   83 </span><span class="spaces">    </span><span class="nottickedoff">then pure []</span>
+<span class="lineno">   84 </span><span class="spaces">    </span><span class="nottickedoff">else do</span>
+<span class="lineno">   85 </span><span class="spaces">      </span><span class="nottickedoff">entries &lt;- Dir.listDirectory dir</span>
+<span class="lineno">   86 </span><span class="spaces">      </span><span class="nottickedoff">let candidates = filter (&quot;age-plugin-&quot; `L.isPrefixOf`) entries</span>
+<span class="lineno">   87 </span><span class="spaces">      </span><span class="nottickedoff">filterIO (\e -&gt; do</span>
+<span class="lineno">   88 </span><span class="spaces">        </span><span class="nottickedoff">let path = dir FP.&lt;/&gt; e</span>
+<span class="lineno">   89 </span><span class="spaces">        </span><span class="nottickedoff">isFile &lt;- Dir.doesFileExist path</span>
+<span class="lineno">   90 </span><span class="spaces">        </span><span class="nottickedoff">if isFile</span>
+<span class="lineno">   91 </span><span class="spaces">          </span><span class="nottickedoff">then Dir.executable &lt;$&gt; Dir.getPermissions path</span>
+<span class="lineno">   92 </span><span class="spaces">          </span><span class="nottickedoff">else pure False) candidates</span></span>
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>-- | Filter a list with an IO predicate.
+<span class="lineno">   95 </span>filterIO :: (a -&gt; IO Bool) -&gt; [a] -&gt; IO [a]
+<span class="lineno">   96 </span><span class="decl"><span class="nottickedoff">filterIO _ [] = pure []</span>
+<span class="lineno">   97 </span><span class="spaces"></span><span class="nottickedoff">filterIO p (x:xs) = do</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="nottickedoff">keep &lt;- p x</span>
+<span class="lineno">   99 </span><span class="spaces">  </span><span class="nottickedoff">rest &lt;- filterIO p xs</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="nottickedoff">pure (if keep then x : rest else rest)</span></span>
+<span class="lineno">  101 </span>
+<span class="lineno">  102 </span>-- | Run @age-plugin-\&lt;name\&gt; --generate@ and parse the output.
+<span class="lineno">  103 </span>--
+<span class="lineno">  104 </span>-- The plugin process inherits the terminal (stdin, stderr) so it can
+<span class="lineno">  105 </span>-- prompt the user for PIN entry and touch confirmation. Only stdout
+<span class="lineno">  106 </span>-- is captured — that's where the plugin writes the identity and
+<span class="lineno">  107 </span>-- recipient.
+<span class="lineno">  108 </span>generateIdentity :: AgePlugin -&gt; FilePath -&gt; IO (Either VaultError (AgeRecipient, FilePath))
+<span class="lineno">  109 </span><span class="decl"><span class="nottickedoff">generateIdentity plugin dir = do</span>
+<span class="lineno">  110 </span><span class="spaces">  </span><span class="nottickedoff">let cfg = setStdin inherit</span>
+<span class="lineno">  111 </span><span class="spaces">          </span><span class="nottickedoff">$ setStderr inherit</span>
+<span class="lineno">  112 </span><span class="spaces">          </span><span class="nottickedoff">$ proc (_ap_binary plugin) [&quot;--generate&quot;]</span>
+<span class="lineno">  113 </span><span class="spaces">  </span><span class="nottickedoff">(exitCode, out, _ignored) &lt;- readProcess cfg</span>
+<span class="lineno">  114 </span><span class="spaces">  </span><span class="nottickedoff">case exitCode of</span>
+<span class="lineno">  115 </span><span class="spaces">    </span><span class="nottickedoff">ExitFailure code -&gt;</span>
+<span class="lineno">  116 </span><span class="spaces">      </span><span class="nottickedoff">pure (Left (AgeError (&quot;plugin exited with code &quot; &lt;&gt; T.pack (show code))))</span>
+<span class="lineno">  117 </span><span class="spaces">    </span><span class="nottickedoff">ExitSuccess -&gt; do</span>
+<span class="lineno">  118 </span><span class="spaces">      </span><span class="nottickedoff">let outText = TE.decodeUtf8 (BL.toStrict out)</span>
+<span class="lineno">  119 </span><span class="spaces">          </span><span class="nottickedoff">outputLines = T.lines outText</span>
+<span class="lineno">  120 </span><span class="spaces">          </span><span class="nottickedoff">-- age-plugin-yubikey uses &quot;#    Recipient: age1...&quot;</span>
+<span class="lineno">  121 </span><span class="spaces">          </span><span class="nottickedoff">-- other plugins may use &quot;# public key: age1...&quot;</span>
+<span class="lineno">  122 </span><span class="spaces">          </span><span class="nottickedoff">recipientLine = L.find (\l -&gt;</span>
+<span class="lineno">  123 </span><span class="spaces">            </span><span class="nottickedoff">let stripped = T.strip (T.dropWhile (== '#') (T.strip l))</span>
+<span class="lineno">  124 </span><span class="spaces">            </span><span class="nottickedoff">in T.isPrefixOf &quot;Recipient:&quot; stripped</span>
+<span class="lineno">  125 </span><span class="spaces">               </span><span class="nottickedoff">|| T.isPrefixOf &quot;public key:&quot; stripped) outputLines</span>
+<span class="lineno">  126 </span><span class="spaces">          </span><span class="nottickedoff">identityLines = filter (\l -&gt; not (T.null l) &amp;&amp; not (T.isPrefixOf &quot;#&quot; l)) outputLines</span>
+<span class="lineno">  127 </span><span class="spaces">      </span><span class="nottickedoff">case recipientLine of</span>
+<span class="lineno">  128 </span><span class="spaces">        </span><span class="nottickedoff">Nothing -&gt;</span>
+<span class="lineno">  129 </span><span class="spaces">          </span><span class="nottickedoff">pure (Left (AgeError &quot;no recipient found in plugin output&quot;))</span>
+<span class="lineno">  130 </span><span class="spaces">        </span><span class="nottickedoff">Just rLine -&gt; do</span>
+<span class="lineno">  131 </span><span class="spaces">          </span><span class="nottickedoff">let afterHash = T.strip (T.dropWhile (== '#') (T.strip rLine))</span>
+<span class="lineno">  132 </span><span class="spaces">              </span><span class="nottickedoff">recipient = T.strip (T.drop 1 (T.dropWhile (/= ':') afterHash))</span>
+<span class="lineno">  133 </span><span class="spaces">              </span><span class="nottickedoff">identityPath = dir FP.&lt;/&gt; T.unpack (_ap_name plugin) &lt;&gt; &quot;-identity.txt&quot;</span>
+<span class="lineno">  134 </span><span class="spaces">          </span><span class="nottickedoff">TIO.writeFile identityPath (T.unlines identityLines)</span>
+<span class="lineno">  135 </span><span class="spaces">          </span><span class="nottickedoff">pure (Right (AgeRecipient recipient, identityPath))</span></span>
+<span class="lineno">  136 </span>
+<span class="lineno">  137 </span>-- | Construct a mock 'PluginHandle' for testing.
+<span class="lineno">  138 </span>mkMockPluginHandle
+<span class="lineno">  139 </span>  :: [AgePlugin]
+<span class="lineno">  140 </span>  -&gt; (AgePlugin -&gt; Either VaultError (AgeRecipient, FilePath))
+<span class="lineno">  141 </span>  -&gt; PluginHandle
+<span class="lineno">  142 </span><span class="decl"><span class="istickedoff">mkMockPluginHandle plugins genFn = PluginHandle</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="istickedoff">{ _ph_detect   = pure plugins</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">, _ph_generate = \p _dir -&gt; pure (genFn <span class="nottickedoff">p</span>)</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

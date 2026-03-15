@@ -1,0 +1,89 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.Shell
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    shellTool
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Control.Exception
+<span class="lineno">    7 </span>import Data.Aeson
+<span class="lineno">    8 </span>import Data.Aeson.Types
+<span class="lineno">    9 </span>import Data.ByteString.Char8 qualified as BS8
+<span class="lineno">   10 </span>import Data.Text (Text)
+<span class="lineno">   11 </span>import Data.Text qualified as T
+<span class="lineno">   12 </span>import System.Exit
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import PureClaw.Handles.Shell
+<span class="lineno">   15 </span>import PureClaw.Providers.Class
+<span class="lineno">   16 </span>import PureClaw.Security.Command
+<span class="lineno">   17 </span>import PureClaw.Security.Policy
+<span class="lineno">   18 </span>import PureClaw.Tools.Registry
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>-- | Create a shell tool that executes commands through the security policy.
+<span class="lineno">   21 </span>shellTool :: SecurityPolicy -&gt; ShellHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   22 </span><span class="decl"><span class="istickedoff">shellTool policy sh = (def, handler)</span>
+<span class="lineno">   23 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   24 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   25 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;shell&quot;</span>
+<span class="lineno">   26 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">&quot;Execute a shell command. The command is validated against the security policy before execution.&quot;</span></span>
+<span class="lineno">   27 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   28 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   29 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   30 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;command&quot; .= object</span></span>
+<span class="lineno">   31 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   32 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The shell command to execute&quot; :: Text)</span></span>
+<span class="lineno">   33 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   34 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   35 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;command&quot;] :: [Text])</span></span>
+<span class="lineno">   36 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   37 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   38 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   39 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt; do</span>
+<span class="lineno">   40 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseInput input of</span>
+<span class="lineno">   41 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">   42 </span><span class="spaces">        </span><span class="istickedoff">Right cmd -&gt; do</span>
+<span class="lineno">   43 </span><span class="spaces">          </span><span class="istickedoff">let parts = T.words cmd</span>
+<span class="lineno">   44 </span><span class="spaces">          </span><span class="istickedoff">case parts of</span>
+<span class="lineno">   45 </span><span class="spaces">            </span><span class="istickedoff">[] -&gt; pure (<span class="nottickedoff">&quot;Empty command&quot;</span>, True)</span>
+<span class="lineno">   46 </span><span class="spaces">            </span><span class="istickedoff">(prog:args) -&gt;</span>
+<span class="lineno">   47 </span><span class="spaces">              </span><span class="istickedoff">case authorize policy (T.unpack prog) <span class="nottickedoff">args</span> of</span>
+<span class="lineno">   48 </span><span class="spaces">                </span><span class="istickedoff">Left (CommandNotAllowed c) -&gt;</span>
+<span class="lineno">   49 </span><span class="spaces">                  </span><span class="istickedoff">pure (&quot;Command not allowed: &quot; &lt;&gt; c, True)</span>
+<span class="lineno">   50 </span><span class="spaces">                </span><span class="istickedoff">Left CommandInAutonomyDeny -&gt;</span>
+<span class="lineno">   51 </span><span class="spaces">                  </span><span class="istickedoff">pure (&quot;All commands denied by security policy&quot;, True)</span>
+<span class="lineno">   52 </span><span class="spaces">                </span><span class="istickedoff">Right authorized -&gt; do</span>
+<span class="lineno">   53 </span><span class="spaces">                  </span><span class="istickedoff">result &lt;- try @SomeException (_sh_execute sh <span class="nottickedoff">authorized</span>)</span>
+<span class="lineno">   54 </span><span class="spaces">                  </span><span class="istickedoff">case result of</span>
+<span class="lineno">   55 </span><span class="spaces">                    </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">pure (T.pack (show e), True)</span></span>
+<span class="lineno">   56 </span><span class="spaces">                    </span><span class="istickedoff">Right pr -&gt; do</span>
+<span class="lineno">   57 </span><span class="spaces">                      </span><span class="istickedoff">let out = T.pack (BS8.unpack (_pr_stdout pr))</span>
+<span class="lineno">   58 </span><span class="spaces">                          </span><span class="istickedoff">err = T.pack (BS8.unpack (_pr_stderr pr))</span>
+<span class="lineno">   59 </span><span class="spaces">                          </span><span class="istickedoff">exitInfo = case _pr_exitCode pr of</span>
+<span class="lineno">   60 </span><span class="spaces">                            </span><span class="istickedoff">ExitSuccess -&gt; &quot;&quot;</span>
+<span class="lineno">   61 </span><span class="spaces">                            </span><span class="istickedoff">ExitFailure n -&gt; &quot;\nExit code: &quot; &lt;&gt; T.pack (show n)</span>
+<span class="lineno">   62 </span><span class="spaces">                          </span><span class="istickedoff">combined = T.strip (out &lt;&gt; err &lt;&gt; exitInfo)</span>
+<span class="lineno">   63 </span><span class="spaces">                      </span><span class="istickedoff">pure (if <span class="tickonlyfalse">T.null combined</span> then <span class="nottickedoff">&quot;(no output)&quot;</span> else combined, False)</span>
+<span class="lineno">   64 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   65 </span><span class="spaces">    </span><span class="istickedoff">parseInput :: Value -&gt; Parser Text</span>
+<span class="lineno">   66 </span><span class="spaces">    </span><span class="istickedoff">parseInput = withObject <span class="nottickedoff">&quot;ShellInput&quot;</span> $ \o -&gt; o .: &quot;command&quot;</span></span>
+
+</pre>
+</body>
+</html>

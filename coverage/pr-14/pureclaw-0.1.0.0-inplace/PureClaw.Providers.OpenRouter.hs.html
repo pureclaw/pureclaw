@@ -1,0 +1,105 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Providers.OpenRouter
+<span class="lineno">    2 </span>  ( -- * Provider type
+<span class="lineno">    3 </span>    OpenRouterProvider
+<span class="lineno">    4 </span>  , mkOpenRouterProvider
+<span class="lineno">    5 </span>    -- * Errors
+<span class="lineno">    6 </span>  , OpenRouterError (..)
+<span class="lineno">    7 </span>    -- * Request/response encoding (exported for testing)
+<span class="lineno">    8 </span>  , encodeRequest
+<span class="lineno">    9 </span>  , decodeResponse
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Control.Exception
+<span class="lineno">   13 </span>import Data.ByteString (ByteString)
+<span class="lineno">   14 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   15 </span>import Data.Text (Text)
+<span class="lineno">   16 </span>import Data.Text qualified as T
+<span class="lineno">   17 </span>import Network.HTTP.Client qualified as HTTP
+<span class="lineno">   18 </span>import Network.HTTP.Types.Status qualified as Status
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>import PureClaw.Core.Errors
+<span class="lineno">   21 </span>import PureClaw.Providers.Class
+<span class="lineno">   22 </span>import PureClaw.Providers.OpenAI qualified as OAI
+<span class="lineno">   23 </span>import PureClaw.Security.Secrets
+<span class="lineno">   24 </span>
+<span class="lineno">   25 </span>-- | OpenRouter provider. Uses the OpenAI-compatible API with a
+<span class="lineno">   26 </span>-- different base URL and authentication header.
+<span class="lineno">   27 </span>data OpenRouterProvider = OpenRouterProvider
+<span class="lineno">   28 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_or_manager</span></span></span> :: HTTP.Manager
+<span class="lineno">   29 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_or_apiKey</span></span></span>  :: ApiKey
+<span class="lineno">   30 </span>  }
+<span class="lineno">   31 </span>
+<span class="lineno">   32 </span>-- | Create an OpenRouter provider.
+<span class="lineno">   33 </span>mkOpenRouterProvider :: HTTP.Manager -&gt; ApiKey -&gt; OpenRouterProvider
+<span class="lineno">   34 </span><span class="decl"><span class="nottickedoff">mkOpenRouterProvider = OpenRouterProvider</span></span>
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>instance Provider OpenRouterProvider where
+<span class="lineno">   37 </span>  <span class="decl"><span class="nottickedoff">complete = openRouterComplete</span></span>
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- | Errors from the OpenRouter API.
+<span class="lineno">   40 </span>data OpenRouterError
+<span class="lineno">   41 </span>  = OpenRouterAPIError Int ByteString
+<span class="lineno">   42 </span>  | OpenRouterParseError Text
+<span class="lineno">   43 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   44 </span>
+<span class="lineno">   45 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Exception OpenRouterError</span></span></span></span></span></span></span></span>
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>instance ToPublicError OpenRouterError where
+<span class="lineno">   48 </span>  <span class="decl"><span class="nottickedoff">toPublicError (OpenRouterAPIError 429 _) = RateLimitError</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="nottickedoff">toPublicError (OpenRouterAPIError 401 _) = NotAllowedError</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="nottickedoff">toPublicError _                           = TemporaryError &quot;Provider error&quot;</span></span>
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>openRouterBaseUrl :: String
+<span class="lineno">   53 </span><span class="decl"><span class="nottickedoff">openRouterBaseUrl = &quot;https://openrouter.ai/api/v1/chat/completions&quot;</span></span>
+<span class="lineno">   54 </span>
+<span class="lineno">   55 </span>openRouterComplete :: OpenRouterProvider -&gt; CompletionRequest -&gt; IO CompletionResponse
+<span class="lineno">   56 </span><span class="decl"><span class="nottickedoff">openRouterComplete provider req = do</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="nottickedoff">initReq &lt;- HTTP.parseRequest openRouterBaseUrl</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="nottickedoff">let httpReq = initReq</span>
+<span class="lineno">   59 </span><span class="spaces">        </span><span class="nottickedoff">{ HTTP.method = &quot;POST&quot;</span>
+<span class="lineno">   60 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestBody = HTTP.RequestBodyLBS (encodeRequest req)</span>
+<span class="lineno">   61 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestHeaders =</span>
+<span class="lineno">   62 </span><span class="spaces">            </span><span class="nottickedoff">[ (&quot;Authorization&quot;, &quot;Bearer &quot; &lt;&gt; withApiKey (_or_apiKey provider) id)</span>
+<span class="lineno">   63 </span><span class="spaces">            </span><span class="nottickedoff">, (&quot;content-type&quot;, &quot;application/json&quot;)</span>
+<span class="lineno">   64 </span><span class="spaces">            </span><span class="nottickedoff">, (&quot;HTTP-Referer&quot;, &quot;https://github.com/pureclaw/pureclaw&quot;)</span>
+<span class="lineno">   65 </span><span class="spaces">            </span><span class="nottickedoff">, (&quot;X-Title&quot;, &quot;PureClaw&quot;)</span>
+<span class="lineno">   66 </span><span class="spaces">            </span><span class="nottickedoff">]</span>
+<span class="lineno">   67 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">   68 </span><span class="spaces">  </span><span class="nottickedoff">resp &lt;- HTTP.httpLbs httpReq (_or_manager provider)</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="nottickedoff">let status = Status.statusCode (HTTP.responseStatus resp)</span>
+<span class="lineno">   70 </span><span class="spaces">  </span><span class="nottickedoff">if status /= 200</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="nottickedoff">then throwIO (OpenRouterAPIError status (BL.toStrict (HTTP.responseBody resp)))</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="nottickedoff">else case decodeResponse (HTTP.responseBody resp) of</span>
+<span class="lineno">   73 </span><span class="spaces">      </span><span class="nottickedoff">Left err -&gt; throwIO (OpenRouterParseError (T.pack err))</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="nottickedoff">Right response -&gt; pure response</span></span>
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | Encode request — reuses OpenAI format.
+<span class="lineno">   77 </span>encodeRequest :: CompletionRequest -&gt; BL.ByteString
+<span class="lineno">   78 </span><span class="decl"><span class="istickedoff">encodeRequest = OAI.encodeRequest</span></span>
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>-- | Decode response — reuses OpenAI format.
+<span class="lineno">   81 </span>decodeResponse :: BL.ByteString -&gt; Either String CompletionResponse
+<span class="lineno">   82 </span><span class="decl"><span class="istickedoff">decodeResponse = OAI.decodeResponse</span></span>
+
+</pre>
+</body>
+</html>
