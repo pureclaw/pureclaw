@@ -29,6 +29,10 @@
                 hlint = {};
                 # haskell-language-server = {};
               };
+              shell.buildInputs = with final; [
+                age
+                age-plugin-yubikey
+              ];
             };
         })
       ];

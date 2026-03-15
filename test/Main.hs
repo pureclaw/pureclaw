@@ -48,6 +48,7 @@ import qualified Security.CryptoSpec
 import qualified Security.PairingSpec
 import qualified Security.VaultAgeSpec
 import qualified Security.VaultPassphraseSpec
+import qualified Security.VaultPluginSpec
 import qualified Security.VaultSpec
 import qualified Gateway.AuthSpec
 import qualified Gateway.RoutesSpec
@@ -59,6 +60,7 @@ import qualified Agent.IdentitySpec
 import qualified Scheduler.CronSpec
 import qualified Scheduler.HeartbeatSpec
 import qualified Integration.SignalFlowSpec
+import qualified Integration.CLISpec
 
 main :: IO ()
 main = hspec $ do
@@ -108,6 +110,7 @@ main = hspec $ do
   describe "Security.Pairing" Security.PairingSpec.spec
   describe "Security.VaultAge" Security.VaultAgeSpec.spec
   describe "Security.VaultPassphrase" Security.VaultPassphraseSpec.spec
+  describe "Security.VaultPlugin" Security.VaultPluginSpec.spec
   describe "Security.Vault" Security.VaultSpec.spec
   describe "Gateway.Auth" Gateway.AuthSpec.spec
   describe "Gateway.Routes" Gateway.RoutesSpec.spec
@@ -119,3 +122,4 @@ main = hspec $ do
   describe "Scheduler.Cron" Scheduler.CronSpec.spec
   describe "Scheduler.Heartbeat" Scheduler.HeartbeatSpec.spec
   describe "Integration.SignalFlow" Integration.SignalFlowSpec.spec
+  describe "Integration.CLI" Integration.CLISpec.spec

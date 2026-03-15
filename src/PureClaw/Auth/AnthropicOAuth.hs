@@ -252,8 +252,9 @@ stripCodeFragment :: Text -> Text
 stripCodeFragment = T.takeWhile (/= '#') . T.strip
 
 -- | Exchange an authorization code for tokens.
--- 'state' is the value from the @#fragment@ of the pasted callback code,
--- which equals the PKCE verifier (per the Anthropic convention).
+-- 'state' is extracted from the @#fragment@ of the pasted callback code
+-- (Anthropic's token endpoint requires it to match the value sent in the
+-- authorisation URL).
 exchangeCodeForTokens
   :: OAuthConfig -> HTTP.Manager -> ByteString -> Text -> Text -> UTCTime -> IO OAuthTokens
 exchangeCodeForTokens cfg manager verifier code state now = do

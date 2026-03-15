@@ -34,11 +34,6 @@ spec = do
         Just opts -> _co_apiKey opts `shouldBe` Just "sk-test"
         Nothing -> expectationFailure "parse failed"
 
-    it "api-key defaults to Nothing" $ do
-      case parseArgs [] of
-        Just opts -> _co_apiKey opts `shouldBe` Nothing
-        Nothing -> expectationFailure "parse failed"
-
     it "parses --system flag" $ do
       case parseArgs ["--system", "Be brief"] of
         Just opts -> _co_system opts `shouldBe` Just "Be brief"
@@ -140,22 +135,11 @@ spec = do
         Just opts -> _co_noVault opts `shouldBe` False
         Nothing -> expectationFailure "parse failed"
 
-    it "parses --oauth flag" $ do
-      case parseArgs ["--oauth"] of
-        Just opts -> _co_oauth opts `shouldBe` True
-        Nothing -> expectationFailure "parse failed"
-
-    it "oauth defaults to False" $ do
-      case parseArgs [] of
-        Just opts -> _co_oauth opts `shouldBe` False
-        Nothing -> expectationFailure "parse failed"
-
     it "parses all flags together" $ do
-      case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml", "--no-vault"] of
+      case parseArgs ["-p", "openai", "-m", "gpt-4", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml", "--no-vault"] of
         Just opts -> do
           _co_provider opts `shouldBe` Just OpenAI
           _co_model opts `shouldBe` Just "gpt-4"
-          _co_apiKey opts `shouldBe` Just "sk-x"
           _co_allowCommands opts `shouldBe` ["git"]
           _co_memory opts `shouldBe` Just SQLiteMemory
           _co_soul opts `shouldBe` Just "SOUL.md"

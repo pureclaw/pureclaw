@@ -39,4 +39,15 @@ mkCLIChannelHandle = ChannelHandle
       (hSetEcho stdin False)
       (hSetEcho stdin True)
       TIO.getLine
+  , _ch_prompt = \promptText -> do
+      TIO.putStr promptText
+      hFlush stdout
+      TIO.getLine
+  , _ch_promptSecret = \promptText -> do
+      TIO.putStr promptText
+      hFlush stdout
+      bracket_ (hSetEcho stdin False) (hSetEcho stdin True) $ do
+        line <- TIO.getLine
+        TIO.putStrLn ""  -- newline after hidden input
+        pure line
   }

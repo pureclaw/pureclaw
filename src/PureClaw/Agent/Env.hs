@@ -3,6 +3,7 @@ module PureClaw.Agent.Env
     AgentEnv (..)
   ) where
 
+import Data.IORef
 import Data.Text (Text)
 
 import PureClaw.Core.Types
@@ -10,6 +11,7 @@ import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
 import PureClaw.Security.Vault
+import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
 
 -- | All runtime dependencies for the agent loop, gathered into a single record.
@@ -17,8 +19,8 @@ import PureClaw.Tools.Registry
 -- 'executeSlashCommand', making it easy to add new capabilities (e.g.
 -- 'VaultHandle') in later work units without touching call sites.
 data AgentEnv = AgentEnv
-  { _env_provider     :: SomeProvider
-    -- ^ The LLM provider (wrapped existential, erases the concrete type).
+  { _env_provider     :: IORef (Maybe SomeProvider)
+    -- ^ The LLM provider. 'Nothing' when no credentials are configured yet.
   , _env_model        :: ModelId
     -- ^ The model to use for completions.
   , _env_channel      :: ChannelHandle
@@ -29,6 +31,8 @@ data AgentEnv = AgentEnv
     -- ^ Optional system prompt prepended to every conversation.
   , _env_registry     :: ToolRegistry
     -- ^ All registered tools available for the agent to call.
-  , _env_vault        :: Maybe VaultHandle
+  , _env_vault        :: IORef (Maybe VaultHandle)
     -- ^ Optional secrets vault. 'Nothing' if no vault is configured.
+  , _env_pluginHandle :: PluginHandle
+    -- ^ Handle for detecting and generating age plugin identities.
   }

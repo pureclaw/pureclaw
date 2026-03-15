@@ -2,9 +2,11 @@ module Security.VaultSpec (spec) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.MVar (MVar)
+import Data.Bits (xor)
 import Data.ByteString qualified as BS
-import Data.Either (isRight)
+import Data.Either (isLeft, isRight)
 import Data.List (sort)
+import Data.Word (Word8)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
@@ -233,3 +235,76 @@ spec = do
         vh <- openVault cfg mkMockVaultEncryptor
         result <- _vh_unlock vh
         result `shouldBe` Left VaultNotFound
+
+  describe "_vh_rekey" $ do
+    it "rekey preserves all secrets" $ do
+      withMockVault UnlockStartup $ \vh _ -> do
+        _ <- _vh_init vh
+        _ <- _vh_unlock vh
+        _ <- _vh_put vh "secret1" "value1"
+        _ <- _vh_put vh "secret2" "value2"
+        _ <- _vh_put vh "secret3" "value3"
+        -- Rekey to a different mock encryptor (XOR with 0xCD instead of 0xAB)
+        let newEnc = mkMockVaultEncryptorAlt 0xCD
+        result <- _vh_rekey vh newEnc "Alt-Mock" (\_ -> pure True)
+        result `shouldBe` Right ()
+        -- All secrets should be retrievable after rekey
+        r1 <- _vh_get vh "secret1"
+        r1 `shouldBe` Right "value1"
+        r2 <- _vh_get vh "secret2"
+        r2 `shouldBe` Right "value2"
+        r3 <- _vh_get vh "secret3"
+        r3 `shouldBe` Right "value3"
+
+    it "rekey updates key type in status" $ do
+      withMockVault UnlockStartup $ \vh _ -> do
+        _ <- _vh_init vh
+        _ <- _vh_unlock vh
+        _ <- _vh_put vh "k" "v"
+        let newEnc = mkMockVaultEncryptorAlt 0xCD
+        _ <- _vh_rekey vh newEnc "NewKeyType" (\_ -> pure True)
+        st <- _vh_status vh
+        _vs_keyType st `shouldBe` "NewKeyType"
+
+    it "rekey verification catches mismatch" $ do
+      withMockVault UnlockStartup $ \vh _ -> do
+        _ <- _vh_init vh
+        _ <- _vh_unlock vh
+        _ <- _vh_put vh "k" "v"
+        -- Use an encryptor whose decrypt returns corrupted data,
+        -- so verification (encrypt then decrypt) produces a mismatch.
+        let badEnc = VaultEncryptor
+              { _ve_encrypt = pure . Right . BS.map (`xor` 0xCD)
+              , _ve_decrypt = \_ -> pure (Right "garbage that is not valid JSON")
+              }
+        result <- _vh_rekey vh badEnc "Bad" (\_ -> pure True)
+        result `shouldSatisfy` isLeft
+        case result of
+          Left (VaultCorrupted msg) -> msg `shouldBe` "rekey verification failed"
+          other -> expectationFailure $ "Expected VaultCorrupted, got: " ++ show other
+
+    it "rekey cancelled leaves vault intact" $ do
+      withMockVault UnlockStartup $ \vh _ -> do
+        _ <- _vh_init vh
+        _ <- _vh_unlock vh
+        _ <- _vh_put vh "mykey" "myval"
+        let newEnc = mkMockVaultEncryptorAlt 0xCD
+        result <- _vh_rekey vh newEnc "NewType" (\_ -> pure False)
+        result `shouldSatisfy` isLeft
+        case result of
+          Left (VaultCorrupted msg) -> msg `shouldBe` "rekey cancelled by user"
+          other -> expectationFailure $ "Expected cancellation error, got: " ++ show other
+        -- Original vault should still work
+        r <- _vh_get vh "mykey"
+        r `shouldBe` Right "myval"
+        -- Key type should be unchanged
+        st <- _vh_status vh
+        _vs_keyType st `shouldBe` "Mock"
+
+-- | A mock 'VaultEncryptor' that XORs each byte with the given mask.
+-- Allows creating distinct encryptors for rekey tests.
+mkMockVaultEncryptorAlt :: Word8 -> VaultEncryptor
+mkMockVaultEncryptorAlt mask = VaultEncryptor
+  { _ve_encrypt = pure . Right . BS.map (`xor` mask)
+  , _ve_decrypt = pure . Right . BS.map (`xor` mask)
+  }

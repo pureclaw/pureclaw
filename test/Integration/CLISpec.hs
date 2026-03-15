@@ -1,0 +1,106 @@
+{-# LANGUAGE DerivingStrategies #-}
+module Integration.CLISpec (spec) where
+
+import Control.Concurrent
+import Data.ByteString.Lazy qualified as LBS
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import System.Exit
+import System.IO.Temp
+import System.Process.Typed
+import Test.Hspec
+
+-- | Find the built pureclaw binary via cabal list-bin.
+findPureclaw :: IO FilePath
+findPureclaw = do
+  (exitCode, out, _err) <- readProcess (proc "cabal" ["list-bin", "pureclaw"])
+  case exitCode of
+    ExitSuccess -> pure (T.unpack (T.strip (TE.decodeUtf8 (LBS.toStrict out))))
+    _           -> fail "Could not find pureclaw binary — run 'cabal build' first"
+
+-- | Run the pureclaw binary with a clean environment (no API keys, no config)
+-- in a temp directory, feeding it stdin and capturing stdout/stderr.
+-- Returns (exit code, stdout, stderr).
+runPureclaw :: FilePath -> String -> Int -> IO (ExitCode, String, String)
+runPureclaw bin stdinContent timeoutUs = do
+  withSystemTempDirectory "pureclaw-cli-test" $ \tmpDir -> do
+    let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 (T.pack stdinContent))))
+           $ setStdout byteStringOutput
+           $ setStderr byteStringOutput
+           $ setWorkingDir tmpDir
+           $ setEnv
+               [ ("HOME", tmpDir)             -- No ~/.pureclaw config
+               , ("PATH", "/usr/bin:/bin")     -- Minimal PATH, no API keys in env
+               , ("TERM", "dumb")
+               , ("LANG", "C.UTF-8")          -- GHC needs UTF-8 locale for em-dashes etc.
+               ]
+           $ proc bin ["--no-vault"]
+    result <- race' (threadDelay timeoutUs) (readProcess pc)
+    case result of
+      Left ()               -> fail "pureclaw timed out"
+      Right (ec, out, err)  ->
+        pure ( ec
+             , T.unpack (TE.decodeUtf8 (LBS.toStrict out))
+             , T.unpack (TE.decodeUtf8 (LBS.toStrict err))
+             )
+
+-- | Race two IO actions; return whichever finishes first.
+race' :: IO a -> IO b -> IO (Either a b)
+race' left right = do
+  resultVar <- newEmptyMVar
+  t1 <- forkIO $ left  >>= putMVar resultVar . Left
+  t2 <- forkIO $ right >>= putMVar resultVar . Right
+  result <- takeMVar resultVar
+  killThread t1
+  killThread t2
+  pure result
+
+-- | Wrapper that includes stderr in the Show output so hspec displays it
+-- on failure. Usage: @exitCode \`shouldBe\` annotate err ExitSuccess@
+data Annotated a = Annotated String a
+  deriving stock (Eq)
+
+instance Show a => Show (Annotated a) where
+  show (Annotated stderr' val) =
+    show val <> "\n    --- stderr ---\n" <> stderr'
+
+annotate :: String -> a -> Annotated a
+annotate = Annotated
+
+spec :: Spec
+spec = do
+  describe "CLI startup" $ do
+
+    it "enters the agent loop and accepts commands when no API key is configured" $ do
+      bin <- findPureclaw
+      -- Send /help then EOF (Ctrl-D). If the binary enters the loop,
+      -- it will process /help and print help text. If it dies on startup
+      -- (the current bug), we'll get an error exit code and no help output.
+      (exitCode, out, err) <- runPureclaw bin "/help\n" 5000000  -- 5s timeout
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "Slash commands:"
+
+    it "does not crash on startup without credentials" $ do
+      bin <- findPureclaw
+      -- Just send EOF immediately. The binary should start up, print
+      -- its banner, then exit cleanly on EOF — not die with an error.
+      (exitCode, out, err) <- runPureclaw bin "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "PureClaw"
+
+    it "does not claim a provider is configured when no credentials exist" $ do
+      bin <- findPureclaw
+      (_exitCode, _out, err) <- runPureclaw bin "" 5000000
+      -- Should NOT say "Provider: anthropic" when there are no credentials
+      err `shouldNotContain` "Provider: anthropic"
+      -- Should indicate no provider is configured
+      err `shouldContain` "No providers configured"
+
+    it "shows a helpful message when sending a chat message without a provider" $ do
+      bin <- findPureclaw
+      -- Send a non-slash message. Without a configured provider, the
+      -- binary should tell the user how to configure one, not crash.
+      (exitCode, out, err) <- runPureclaw bin "Hello world\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      -- Should mention how to configure credentials
+      out `shouldContain` "provider"

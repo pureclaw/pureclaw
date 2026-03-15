@@ -11,6 +11,7 @@ module PureClaw.CLI.Commands
 
 import Control.Exception (bracket_)
 import Data.ByteString (ByteString)
+import Data.IORef
 import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -20,8 +21,7 @@ import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
 import System.Directory (doesFileExist)
-import System.Environment
-import System.Exit
+
 import System.IO
 
 import PureClaw.Auth.AnthropicOAuth
@@ -49,6 +49,7 @@ import PureClaw.Security.Secrets
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
+import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.FileRead
 import PureClaw.Tools.FileWrite
 import PureClaw.Tools.Git
@@ -200,10 +201,10 @@ runChat opts = do
   -- Vault (opened before provider so API keys can be fetched from vault)
   vaultOpt <- resolveVault fileCfg (_co_noVault opts) logger
 
-  -- Provider
+  -- Provider (may be Nothing if no credentials are configured yet)
   manager <- HTTP.newTlsManager
-  provider <- if effectiveProvider == Anthropic && _co_oauth opts
-    then resolveAnthropicOAuth vaultOpt manager
+  mProvider <- if effectiveProvider == Anthropic && _co_oauth opts
+    then Just <$> resolveAnthropicOAuth vaultOpt manager
     else resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
 
   -- Model
@@ -234,7 +235,10 @@ runChat opts = do
   let registry = buildRegistry policy sh workspace fh mh nh
 
   hSetBuffering stdout LineBuffering
-  _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
+  case mProvider of
+    Just _  -> _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
+    Nothing -> _lh_logInfo logger
+      "No providers configured \x2014 use /provider to get started"
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case effectiveAllow of
@@ -243,14 +247,17 @@ runChat opts = do
   putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
   putStrLn "Type your message and press Enter. Ctrl-D to exit."
   putStrLn ""
+  vaultRef    <- newIORef vaultOpt
+  providerRef <- newIORef mProvider
   let env = AgentEnv
-        { _env_provider     = provider
+        { _env_provider     = providerRef
         , _env_model        = model
         , _env_channel      = channel
         , _env_logger       = logger
         , _env_systemPrompt = sysPrompt
         , _env_registry     = registry
-        , _env_vault        = vaultOpt
+        , _env_vault        = vaultRef
+        , _env_pluginHandle = mkPluginHandle
         }
   runAgentLoop env
 
@@ -297,20 +304,40 @@ buildPolicy cmds =
     }
 
 -- | Resolve the LLM provider from the provider type.
--- Checks the vault for the API key (using the env var name as the vault key)
--- before falling back to CLI flag or environment variable.
-resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO SomeProvider
+-- Checks CLI flag first, then the vault for the API key.
+-- Returns 'Nothing' if no credentials are available (the agent loop
+-- will still start, allowing the user to configure credentials via
+-- slash commands like /vault setup).
+resolveProvider :: ProviderType -> Maybe String -> Maybe VaultHandle -> HTTP.Manager -> IO (Maybe SomeProvider)
 resolveProvider Anthropic keyOpt vaultOpt manager = do
-  apiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
-  pure (MkProvider (mkAnthropicProvider manager apiKey))
+  mApiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
+  case mApiKey of
+    Just k  -> pure (Just (MkProvider (mkAnthropicProvider manager k)))
+    Nothing -> do
+      -- Fall back to cached OAuth tokens in the vault
+      cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
+      case cachedBs >>= eitherToMaybe . deserializeTokens of
+        Nothing -> pure Nothing
+        Just tokens -> do
+          let cfg = defaultOAuthConfig
+          now <- getCurrentTime
+          t <- if _oat_expiresAt tokens <= now
+            then do
+              putStrLn "OAuth access token expired \x2014 refreshing..."
+              newT <- refreshOAuthToken cfg manager (_oat_refreshToken tokens)
+              saveOAuthTokens vaultOpt newT
+              pure newT
+            else pure tokens
+          handle <- mkOAuthHandle cfg manager t
+          pure (Just (MkProvider (mkAnthropicProviderOAuth manager handle)))
 resolveProvider OpenAI keyOpt vaultOpt manager = do
-  apiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
-  pure (MkProvider (mkOpenAIProvider manager apiKey))
+  mApiKey <- resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
+  pure (fmap (MkProvider . mkOpenAIProvider manager) mApiKey)
 resolveProvider OpenRouter keyOpt vaultOpt manager = do
-  apiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
-  pure (MkProvider (mkOpenRouterProvider manager apiKey))
+  mApiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
+  pure (fmap (MkProvider . mkOpenRouterProvider manager) mApiKey)
 resolveProvider Ollama _ _ manager =
-  pure (MkProvider (mkOllamaProvider manager))
+  pure (Just (MkProvider (mkOllamaProvider manager)))
 
 -- | Vault key used to cache OAuth tokens between sessions.
 oauthVaultKey :: T.Text
@@ -354,20 +381,15 @@ eitherToMaybe :: Either e a -> Maybe a
 eitherToMaybe (Left  _) = Nothing
 eitherToMaybe (Right a) = Just a
 
--- | Resolve an API key from: CLI flag → vault → environment variable.
-resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO ApiKey
-resolveApiKey (Just key) _ _ = pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
-resolveApiKey Nothing envVar vaultOpt = do
-  vaultKey <- tryVaultLookup vaultOpt (T.pack envVar)
+-- | Resolve an API key from: CLI flag → vault.
+-- Returns 'Nothing' if no key is found.
+resolveApiKey :: Maybe String -> String -> Maybe VaultHandle -> IO (Maybe ApiKey)
+resolveApiKey (Just key) _ _ = pure (Just (mkApiKey (TE.encodeUtf8 (T.pack key))))
+resolveApiKey Nothing vaultKeyName vaultOpt = do
+  vaultKey <- tryVaultLookup vaultOpt (T.pack vaultKeyName)
   case vaultKey of
-    Just bs -> pure (mkApiKey bs)
-    Nothing -> do
-      envKey <- lookupEnv envVar
-      case envKey of
-        Just key -> pure (mkApiKey (TE.encodeUtf8 (T.pack key)))
-        Nothing  -> die $
-          "No API key provided. Use --api-key, set " <> envVar
-          <> ", or store in vault with /vault add " <> envVar
+    Just bs -> pure (Just (mkApiKey bs))
+    Nothing -> pure Nothing
 
 -- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
 -- absent, locked, or does not contain the key.
@@ -409,7 +431,7 @@ resolveAgeVault fileCfg recipient identity logger = do
       pure Nothing
     Right enc -> do
       dir <- getPureclawDir
-      let path  = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
+      let path  = maybe (dir ++ "/vault/vault.age") T.unpack (_fc_vault_path fileCfg)
           mode  = parseUnlockMode (_fc_vault_unlock fileCfg)
           enc'  = ageVaultEncryptor enc recipient identity
           cfg   = VaultConfig
@@ -418,40 +440,41 @@ resolveAgeVault fileCfg recipient identity logger = do
             , _vc_unlock  = mode
             }
       vault <- openVault cfg enc'
-      case mode of
-        UnlockStartup -> do
-          result <- _vh_unlock vault
-          case result of
-            Left err -> _lh_logInfo logger $
-              "Vault startup unlock failed (vault will be locked): " <> T.pack (show err)
-            Right () -> _lh_logInfo logger "Vault unlocked."
-        _ -> pure ()
-      pure (Just vault)
+      exists <- doesFileExist path
+      if exists
+        then do
+          case mode of
+            UnlockStartup -> do
+              result <- _vh_unlock vault
+              case result of
+                Left err -> _lh_logInfo logger $
+                  "Vault startup unlock failed (vault will be locked): " <> T.pack (show err)
+                Right () -> _lh_logInfo logger "Vault unlocked."
+            _ -> pure ()
+          pure (Just vault)
+        else do
+          _lh_logInfo logger "No vault found — use `/vault setup` to create one."
+          pure Nothing
 
 -- | Resolve vault using passphrase-based encryption (default when no age keys configured).
--- Prompts for passphrase on stdin at startup (if vault file exists), or reads
--- from the PURECLAW_VAULT_PASSPHRASE environment variable.
+-- Prompts for passphrase on stdin at startup (if vault file exists).
 resolvePassphraseVault :: FileConfig -> LogHandle -> IO (Maybe VaultHandle)
 resolvePassphraseVault fileCfg logger = do
   dir <- getPureclawDir
-  let path = maybe (dir ++ "/vault.age") T.unpack (_fc_vault_path fileCfg)
+  let path = maybe (dir ++ "/vault/vault.age") T.unpack (_fc_vault_path fileCfg)
       cfg  = VaultConfig
         { _vc_path    = path
         , _vc_keyType = "AES-256 (passphrase)"
         , _vc_unlock  = UnlockStartup
         }
   let getPass = do
-        envPass <- lookupEnv "PURECLAW_VAULT_PASSPHRASE"
-        case envPass of
-          Just p  -> pure (TE.encodeUtf8 (T.pack p))
-          Nothing -> do
-            putStr "Vault passphrase: "
-            hFlush stdout
-            pass <- bracket_
-              (hSetEcho stdin False)
-              (hSetEcho stdin True >> putStrLn "")
-              getLine
-            pure (TE.encodeUtf8 (T.pack pass))
+        putStr "Vault passphrase: "
+        hFlush stdout
+        pass <- bracket_
+          (hSetEcho stdin False)
+          (hSetEcho stdin True >> putStrLn "")
+          getLine
+        pure (TE.encodeUtf8 (T.pack pass))
   enc <- mkPassphraseVaultEncryptor getPass
   vault <- openVault cfg enc
   exists <- doesFileExist path
@@ -462,9 +485,10 @@ resolvePassphraseVault fileCfg logger = do
         Left err -> _lh_logInfo logger $
           "Vault unlock failed: " <> T.pack (show err)
         Right () -> _lh_logInfo logger "Vault unlocked."
-    else
-      _lh_logInfo logger "Vault ready (not yet initialized — use /vault init to set up)."
-  pure (Just vault)
+      pure (Just vault)
+    else do
+      _lh_logInfo logger "No vault found — use `/vault setup` to create one."
+      pure Nothing
 
 -- | Infer a human-readable key type from the age recipient prefix.
 inferAgeKeyType :: T.Text -> T.Text

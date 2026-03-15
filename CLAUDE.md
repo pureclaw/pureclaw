@@ -81,7 +81,12 @@ cp .githooks/pre-push .git/hooks/pre-push
 
 ## Testing
 
-- **TDD is mandatory** — Write tests first, watch them fail, then implement
+- **Red/green TDD is mandatory** — Every change follows the red/green/refactor cycle:
+  1. **Red**: Write a failing test that demonstrates the desired behavior (or reproduces the bug)
+  2. **Green**: Write the minimum code to make the test pass
+  3. **Refactor**: Clean up while keeping tests green
+- **Never skip the red step** — If you're fixing a bug, write a test that fails first. If you're adding a feature, write tests that define the expected behavior before implementing. Commit the failing test separately so the git history shows the progression.
+- **CLI integration tests** live in `test/Integration/CLISpec.hs` — they spawn the real `pureclaw` binary as a subprocess with a clean environment and assert on stdout/stderr/exit code. Use these for end-to-end behavior like startup flows, slash command handling, and error messages.
 - **100% test coverage required** — Lines, branches, functions, and statements. Enforced via `.coverage-thresholds.json` as a blocking gate before PR creation and task completion
 - Test command: `nix develop . --command cabal test`
 - Coverage command: `nix develop . --command cabal test --enable-coverage`

@@ -14,6 +14,8 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Security.Vault.Age
+import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
 
 -- | A mock provider that returns a fixed text response.
@@ -87,35 +89,42 @@ instance Provider ToolCallProvider where
       hasResult _ = False
 
 -- | Build a test AgentEnv from a provider and channel.
-mkTestEnv :: Provider p => p -> ChannelHandle -> AgentEnv
-mkTestEnv p ch = AgentEnv
-  { _env_provider     = MkProvider p
-  , _env_model        = ModelId "mock"
-  , _env_channel      = ch
-  , _env_logger       = mkNoOpLogHandle
-  , _env_systemPrompt = Nothing
-  , _env_registry     = emptyRegistry
-  , _env_vault        = Nothing
-  }
+mkTestEnv :: Provider p => p -> ChannelHandle -> IO AgentEnv
+mkTestEnv p ch = do
+  vaultRef    <- newIORef Nothing
+  providerRef <- newIORef (Just (MkProvider p))
+  pure AgentEnv
+    { _env_provider     = providerRef
+    , _env_model        = ModelId "mock"
+    , _env_channel      = ch
+    , _env_logger       = mkNoOpLogHandle
+    , _env_systemPrompt = Nothing
+    , _env_registry     = emptyRegistry
+    , _env_vault        = vaultRef
+    , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+    }
 
 spec :: Spec
 spec = do
   describe "runAgentLoop" $ do
     it "processes a message and sends response" $ do
       (channel, sentRef) <- mkMockChannel ["hello"]
-      runAgentLoop (mkTestEnv (MockProvider "Hi there!") channel)
+      env <- mkTestEnv (MockProvider "Hi there!") channel
+      runAgentLoop env
       sent <- readIORef sentRef
       sent `shouldBe` ["Hi there!"]
 
     it "processes multiple messages" $ do
       (channel, sentRef) <- mkMockChannel ["first", "second"]
-      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
+      env <- mkTestEnv (MockProvider "reply") channel
+      runAgentLoop env
       sent <- readIORef sentRef
       length sent `shouldBe` 2
 
     it "skips empty messages" $ do
       (channel, sentRef) <- mkMockChannel ["", "  ", "hello"]
-      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
+      env <- mkTestEnv (MockProvider "reply") channel
+      runAgentLoop env
       sent <- readIORef sentRef
       length sent `shouldBe` 1
 
@@ -123,7 +132,8 @@ spec = do
       (channel, sentRef) <- mkMockChannel ["hello"]
       errRef <- newIORef ([] :: [PublicError])
       let channel' = channel { _ch_sendError = \e -> modifyIORef errRef (e :) }
-          env = (mkTestEnv FailingProvider channel) { _env_channel = channel' }
+      baseEnv <- mkTestEnv FailingProvider channel
+      let env = baseEnv { _env_channel = channel' }
       runAgentLoop env
       sent <- readIORef sentRef
       sent `shouldBe` []
@@ -132,7 +142,8 @@ spec = do
 
     it "handles slash commands without calling provider" $ do
       (channel, sentRef) <- mkMockChannel ["/status", "hello"]
-      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
+      env <- mkTestEnv (MockProvider "reply") channel
+      runAgentLoop env
       sent <- readIORef sentRef
       -- First message is /status output, second is provider reply
       length sent `shouldBe` 2
@@ -147,7 +158,7 @@ spec = do
     it "unknown slash command never calls provider" $ do
       callRef <- newIORef (0 :: Int)
       (channel, sentRef) <- mkMockChannel ["/unknown-command", "hello"]
-      let env = mkTestEnv (CountingProvider "reply" callRef) channel
+      env <- mkTestEnv (CountingProvider "reply" callRef) channel
       runAgentLoop env
       calls <- readIORef callRef
       sent <- readIORef sentRef
@@ -162,7 +173,7 @@ spec = do
     it "unrecognized slash command does not add to context" $ do
       (channel, _sentRef) <- mkMockChannel ["/nosuchcommand", "/also-unknown"]
       callRef <- newIORef (0 :: Int)
-      let env = mkTestEnv (CountingProvider "reply" callRef) channel
+      env <- mkTestEnv (CountingProvider "reply" callRef) channel
       runAgentLoop env
       calls <- readIORef callRef
       -- Provider never called — both messages were slash commands
@@ -170,7 +181,8 @@ spec = do
 
     it "/new clears context (provider sees fresh context)" $ do
       (channel, sentRef) <- mkMockChannel ["first message", "/new", "after reset"]
-      runAgentLoop (mkTestEnv (MockProvider "reply") channel)
+      env <- mkTestEnv (MockProvider "reply") channel
+      runAgentLoop env
       sent <- readIORef sentRef
       -- Should have: reply to "first message", /new confirmation, reply to "after reset"
       length sent `shouldBe` 3
@@ -179,7 +191,8 @@ spec = do
       chunksRef <- newIORef ([] :: [StreamChunk])
       (channel, _sentRef) <- mkMockChannel ["hello"]
       let channel' = channel { _ch_sendChunk = \c -> modifyIORef chunksRef (<> [c]) }
-          env = (mkTestEnv (StreamingProvider ["He", "llo!"]) channel) { _env_channel = channel' }
+      baseEnv <- mkTestEnv (StreamingProvider ["He", "llo!"]) channel
+      let env = baseEnv { _env_channel = channel' }
       runAgentLoop env
       chunks <- readIORef chunksRef
       -- Should get text chunks plus ChunkDone
@@ -191,7 +204,8 @@ spec = do
       let testHandler = ToolHandler $ \_ -> pure ("tool output", False)
           testDef = ToolDefinition "test_tool" "A test tool" (object [])
           registry = registerTool testDef testHandler emptyRegistry
-          env = (mkTestEnv ToolCallProvider channel) { _env_registry = registry }
+      baseEnv <- mkTestEnv ToolCallProvider channel
+      let env = baseEnv { _env_registry = registry }
       runAgentLoop env
       sent <- readIORef sentRef
       -- Should get "Let me check." from first response, then "Done!" after tool execution
@@ -216,8 +230,10 @@ mkMockChannel messages = do
                   }
         , _ch_send = \msg ->
             modifyIORef sentRef (<> [_om_content msg])
-        , _ch_sendError = \_ -> pure ()
-        , _ch_sendChunk  = \_ -> pure ()
-        , _ch_readSecret = pure ""
+        , _ch_sendError    = \_ -> pure ()
+        , _ch_sendChunk    = \_ -> pure ()
+        , _ch_readSecret   = pure ""
+        , _ch_prompt       = \_ -> pure ""
+        , _ch_promptSecret = \_ -> pure ""
         }
   pure (channel, sentRef)
