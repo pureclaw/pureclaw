@@ -29,6 +29,7 @@ data FileConfig = FileConfig
   , _fc_system         :: Maybe Text
   , _fc_memory         :: Maybe Text
   , _fc_allow          :: Maybe [Text]
+  , _fc_autonomy       :: Maybe Text  -- ^ "full", "supervised", or "deny"
   , _fc_vault_path      :: Maybe Text  -- ^ vault file path (default: ~/.pureclaw/vault.age)
   , _fc_vault_recipient :: Maybe Text  -- ^ age recipient string (required to enable vault)
   , _fc_vault_identity  :: Maybe Text  -- ^ age identity path or plugin string
@@ -38,7 +39,7 @@ data FileConfig = FileConfig
 emptyFileConfig :: FileConfig
 emptyFileConfig =
   FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
-             Nothing Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing Nothing
 
 fileConfigCodec :: TomlCodec FileConfig
 fileConfigCodec = FileConfig
@@ -48,6 +49,7 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.text "system")                    .= _fc_system
   <*> Toml.dioptional (Toml.text "memory")                    .= _fc_memory
   <*> Toml.dioptional (Toml.arrayOf Toml._Text "allow")       .= _fc_allow
+  <*> Toml.dioptional (Toml.text "autonomy")                  .= _fc_autonomy
   <*> Toml.dioptional (Toml.text "vault_path")                .= _fc_vault_path
   <*> Toml.dioptional (Toml.text "vault_recipient")           .= _fc_vault_recipient
   <*> Toml.dioptional (Toml.text "vault_identity")            .= _fc_vault_identity

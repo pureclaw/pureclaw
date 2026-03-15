@@ -7,6 +7,8 @@ module PureClaw.CLI.Commands
     -- * Enums (exported for testing)
   , ProviderType (..)
   , MemoryBackend (..)
+    -- * Policy (exported for testing)
+  , buildPolicy
   ) where
 
 import Control.Exception (bracket_)
@@ -81,6 +83,7 @@ data ChatOptions = ChatOptions
   , _co_system        :: Maybe String
   , _co_provider      :: Maybe ProviderType
   , _co_allowCommands :: [String]
+  , _co_autonomy      :: Maybe String
   , _co_memory        :: Maybe MemoryBackend
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
@@ -115,6 +118,10 @@ chatOptionsParser = ChatOptions
       ( long "allow"
      <> short 'a'
      <> help "Allow a shell command (repeatable, e.g. --allow git --allow ls)"
+      ))
+  <*> optional (strOption
+      ( long "autonomy"
+     <> help "Autonomy level: full, supervised, deny (default: deny with no --allow, full with --allow)"
       ))
   <*> optional (option parseMemoryBackend
       ( long "memory"
@@ -197,6 +204,8 @@ runChat opts = do
       effectiveApiKey   = _co_apiKey opts <|> fmap T.unpack (_fc_apiKey fileCfg)
       effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
       effectiveAllow    = _co_allowCommands opts <> maybe [] (map T.unpack) (_fc_allow fileCfg)
+      effectiveAutonomy = parseAutonomyMaybe (_co_autonomy opts)
+                      <|> parseAutonomyMaybe (fmap T.unpack (_fc_autonomy fileCfg))
 
   -- Vault (opened before provider so API keys can be fetched from vault)
   vaultOpt <- resolveVault fileCfg (_co_noVault opts) logger
@@ -221,7 +230,7 @@ runChat opts = do
         else pure (Just (identitySystemPrompt ident))
 
   -- Security policy
-  let policy = buildPolicy effectiveAllow
+  let policy = buildPolicy effectiveAutonomy effectiveAllow
 
   -- Handles
   let channel   = mkCLIChannelHandle
@@ -241,9 +250,17 @@ runChat opts = do
       "No providers configured \x2014 use /provider to get started"
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
-  case effectiveAllow of
-    [] -> _lh_logInfo logger "Commands: none (deny all)"
-    cmds -> _lh_logInfo logger $ "Commands: " <> T.intercalate ", " (map T.pack cmds)
+  case (_sp_allowedCommands policy, _sp_autonomy policy) of
+    (AllowAll, Full) -> do
+      _lh_logInfo logger "Commands: allow all (unrestricted mode)"
+      _lh_logInfo logger
+        "\x26a0\xfe0f  Running in unrestricted mode \x2014 the agent can execute any command without approval."
+    (_, Deny) ->
+      _lh_logInfo logger "Commands: none (deny all)"
+    (AllowList s, _) | Set.null s ->
+      _lh_logInfo logger "Commands: none (deny all)"
+    _ ->
+      _lh_logInfo logger $ "Commands: " <> T.intercalate ", " (map T.pack effectiveAllow)
   putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
   putStrLn "Type your message and press Enter. Ctrl-D to exit."
   putStrLn ""
@@ -271,6 +288,15 @@ parseProviderMaybe (Just t) = case T.unpack t of
   "ollama"     -> Just Ollama
   _            -> Nothing
 
+-- | Parse an autonomy level from a string value (used for CLI flag and config file).
+parseAutonomyMaybe :: Maybe String -> Maybe AutonomyLevel
+parseAutonomyMaybe Nothing  = Nothing
+parseAutonomyMaybe (Just s) = case s of
+  "full"       -> Just Full
+  "supervised" -> Just Supervised
+  "deny"       -> Just Deny
+  _            -> Nothing
+
 -- | Parse a memory backend from a text value (used for config file).
 parseMemoryMaybe :: Maybe T.Text -> Maybe MemoryBackend
 parseMemoryMaybe Nothing  = Nothing
@@ -293,12 +319,31 @@ buildRegistry policy sh workspace fh mh nh =
    $ reg (httpRequestTool AllowAll nh)
      emptyRegistry
 
--- | Build a security policy from the list of allowed commands.
-buildPolicy :: [String] -> SecurityPolicy
-buildPolicy [] = defaultPolicy
-buildPolicy cmds =
+-- | Build a security policy from optional autonomy level and allowed commands.
+--
+-- Behavior:
+--   * @Just Full@ + empty allow list → 'AllowAll' + 'Full' (unrestricted mode)
+--   * @Just Full@ + allow list → 'AllowList' of those commands + 'Full'
+--   * @Just Supervised@ + allow list → 'AllowList' + 'Supervised'
+--   * @Just Deny@ → 'defaultPolicy' ('Deny', empty 'AllowList')
+--   * @Nothing@ + empty allow list → 'defaultPolicy' (backward compat)
+--   * @Nothing@ + allow list → 'Full' + 'AllowList' (backward compat)
+buildPolicy :: Maybe AutonomyLevel -> [String] -> SecurityPolicy
+buildPolicy (Just Deny) _ = defaultPolicy
+buildPolicy (Just level) [] = SecurityPolicy
+  { _sp_allowedCommands = AllowAll
+  , _sp_autonomy = level
+  }
+buildPolicy (Just level) cmds =
   let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
-  in defaultPolicy
+  in SecurityPolicy
+    { _sp_allowedCommands = AllowList cmdNames
+    , _sp_autonomy = level
+    }
+buildPolicy Nothing [] = defaultPolicy
+buildPolicy Nothing cmds =
+  let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
+  in SecurityPolicy
     { _sp_allowedCommands = AllowList cmdNames
     , _sp_autonomy = Full
     }

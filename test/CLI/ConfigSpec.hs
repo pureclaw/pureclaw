@@ -99,6 +99,20 @@ spec = do
         cfg <- loadFileConfig path
         _fc_vault_unlock cfg `shouldBe` Just "startup"
 
+    it "parses autonomy" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "autonomy = \"full\"\n"
+        cfg <- loadFileConfig path
+        _fc_autonomy cfg `shouldBe` Just "full"
+
+    it "parses autonomy supervised" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "autonomy = \"supervised\"\n"
+        cfg <- loadFileConfig path
+        _fc_autonomy cfg `shouldBe` Just "supervised"
+
     it "parses all fields together" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
@@ -109,6 +123,7 @@ spec = do
           , "system           = \"Be helpful.\"\n"
           , "memory           = \"markdown\"\n"
           , "allow            = [\"git\", \"curl\"]\n"
+          , "autonomy         = \"full\"\n"
           , "vault_recipient  = \"age1xyz\"\n"
           , "vault_identity   = \"~/.age/key.txt\"\n"
           , "vault_path       = \".pureclaw/vault.age\"\n"
@@ -121,6 +136,7 @@ spec = do
         _fc_system          cfg `shouldBe` Just "Be helpful."
         _fc_memory          cfg `shouldBe` Just "markdown"
         _fc_allow           cfg `shouldBe` Just ["git", "curl"]
+        _fc_autonomy        cfg `shouldBe` Just "full"
         _fc_vault_recipient cfg `shouldBe` Just "age1xyz"
         _fc_vault_identity  cfg `shouldBe` Just "~/.age/key.txt"
         _fc_vault_path      cfg `shouldBe` Just ".pureclaw/vault.age"
@@ -136,6 +152,7 @@ spec = do
         _fc_system          cfg `shouldBe` Nothing
         _fc_memory          cfg `shouldBe` Nothing
         _fc_allow           cfg `shouldBe` Nothing
+        _fc_autonomy        cfg `shouldBe` Nothing
         _fc_vault_recipient cfg `shouldBe` Nothing
         _fc_vault_identity  cfg `shouldBe` Nothing
         _fc_vault_path      cfg `shouldBe` Nothing
@@ -162,6 +179,7 @@ spec = do
       _fc_system          emptyFileConfig `shouldBe` Nothing
       _fc_memory          emptyFileConfig `shouldBe` Nothing
       _fc_allow           emptyFileConfig `shouldBe` Nothing
+      _fc_autonomy        emptyFileConfig `shouldBe` Nothing
       _fc_vault_recipient emptyFileConfig `shouldBe` Nothing
       _fc_vault_identity  emptyFileConfig `shouldBe` Nothing
       _fc_vault_path      emptyFileConfig `shouldBe` Nothing
