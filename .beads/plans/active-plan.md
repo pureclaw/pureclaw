@@ -1,174 +1,402 @@
-# Vault Setup + YubiKey/Plugin Support
+# MVP OpenClaw Feature Parity
 
-**Status**: in-progress
-**Branch**: age-lib
-**Scope**: Vault setup wizard, age plugin detection, rekey, config writer
-**Gate iteration**: 3 of 3
+**Status**: draft
+**Branch**: TBD (per-epic branches off main)
+**Priority**: P1
 
 ## Overview
 
-Replace `/vault init` with `/vault setup` — an interactive wizard that lets users choose their vault encryption mechanism (passphrase or any detected age plugin like YubiKey). Support rekeying existing vaults to change mechanism without losing secrets. Auto-generate plugin identities when needed. Update config file automatically.
+Bring PureClaw to MVP feature parity with OpenClaw across three areas: messaging channels (Signal + Telegram), unrestricted shell execution, and OpenClaw config import (channels + agent definitions).
 
-## Design Decisions
+---
 
-- **Generic plugin support**: Design around `age-plugin-*` protocol, not YubiKey specifically
-- **Vault directory**: All vault files live in `~/.pureclaw/vault/` (vault.age, identity files)
-- **No backward compat**: `/vault init` is removed from the slash command registry, replaced entirely by `/vault setup`. The low-level `_vh_init` field on `VaultHandle` remains — it creates an empty vault on disk and is used internally by `/vault setup` and by `unlockAndPutVault`
-- **Swappable encryptor**: `VaultState._vst_encryptor` becomes `IORef VaultEncryptor` to support rekey. `VaultState` is internal (not exported) so this is safe
-- **Mutable key type in VaultState**: `VaultConfig` stays pure (no IORef). A new `_vst_keyType :: IORef Text` field is added to `VaultState` (internal), initialized from `_vc_keyType` at vault open time. `vaultStatus` reads from the IORef. Rekey updates the IORef
-- **Config auto-update**: `/vault setup` writes vault settings to `~/.pureclaw/config.toml` using tomland's bidirectional codec (load → modify → encode → write). Note: this is a full serialize — TOML comments and unknown keys not in `FileConfig` will not be preserved. This is acceptable for a programmatic config file
-- **Mutable vault handle in AgentEnv**: `_env_vault` changes from `Maybe VaultHandle` to `IORef (Maybe VaultHandle)` so that `/vault setup` can install a new vault handle at runtime (first-time setup when no vault was configured at startup)
-- **Safe rekey protocol**: Rekey writes the new vault file alongside the old one (e.g. `vault.age.new`), verifies both decrypt to identical data, then prompts the user for confirmation before replacing the old file. On cancellation, the new file is deleted and the old encryptor is restored in the IORef
+## Epic 1: Unrestricted Shell Execution
 
-## Dependency Order
+**Goal**: Power users on dedicated hardware can run with zero command restrictions.
+
+### Current State
+
+- `SecurityPolicy` has `AllowList CommandName` + `AutonomyLevel`
+- `AllowList` already has an `AllowAll` constructor
+- `authorize` checks both allow-list and autonomy level
+- Shell tool has basic foreground execution only
+
+### Design
+
+**No new security types needed.** `SecurityPolicy { _sp_allowedCommands = AllowAll, _sp_autonomy = Full }` already represents unrestricted execution — `authorize` succeeds for any command. We just need to:
+
+1. Wire up config: `autonomy = "full"` in TOML. When `full` + no explicit `allow` list → `AllowAll`
+2. Add CLI flag: `--autonomy full|supervised|deny`
+3. Print startup warning when autonomy is `full`
+4. Enhance the shell tool with:
+   - **Background execution**: `background :: Bool` param → returns process ID, delivers results async
+   - **Timeout**: `exec_timeout_sec` config (default 300s), kill after timeout
+   - **Working directory**: `cwd` param on shell tool
+   - **Environment variables**: `env` param (Map Text Text)
+   - **Streaming output**: forward stdout/stderr chunks via `_ch_sendChunk`
+
+**Key insight**: Type safety is preserved — `AuthorizedCommand` is still required to call `ShellHandle`. Unrestricted mode just means `authorize` always succeeds.
+
+### Config
+
+```toml
+autonomy = "full"    # full | supervised | deny (default: supervised)
+
+[exec]
+timeout_sec = 300
+background_ms = 10000
+```
+
+### File Scope
+
+- `src/PureClaw/Security/Policy.hs` — verify AllowAll path
+- `src/PureClaw/Security/Command.hs` — verify authorize handles AllowAll
+- `src/PureClaw/Tools/Shell.hs` — background exec, timeout, cwd, env params
+- `src/PureClaw/Handles/Shell.hs` — extend for background + streaming
+- `src/PureClaw/Handles/Process.hs` — process tracking for background jobs
+- `src/PureClaw/CLI/Config.hs` — autonomy + exec config fields, TOML codec
+- `src/PureClaw/CLI/Commands.hs` — `--autonomy` flag, startup warning
+- `src/PureClaw/Core/Types.hs` — exec config types
+- `test/Security/PolicySpec.hs` — unrestricted policy tests
+- `test/Security/CommandSpec.hs` — AllowAll authorize tests
+- `test/Tools/ShellSpec.hs` — background exec, timeout tests
+
+---
+
+## Epic 2: Signal Channel (Full Integration)
+
+**Goal**: Signal as a first-class chat interface via signal-cli JSON-RPC.
+
+### Current State
+
+Skeleton in `PureClaw.Channels.Signal` — parses `SignalEnvelope` from JSON, has `TQueue`-based inbox, but `sendSignalMessage` only logs. No signal-cli process management.
+
+### Design
+
+**Transport**: Spawn `signal-cli --output=json jsonRpc` as a child process (stdio JSON-RPC). Same approach as OpenClaw. Process stays running for session lifetime.
+
+**SignalHandle** (new):
+```haskell
+data SignalHandle = SignalHandle
+  { _sh_process :: Process Handle Handle ()  -- signal-cli child
+  , _sh_inbox   :: TQueue SignalEnvelope
+  , _sh_account :: Text                      -- E.164 phone number
+  }
+```
+
+**Receive loop**: Background thread reads stdout line-by-line, parses JSON envelopes, filters for `dataMessage`, pushes to inbox queue.
+
+**Send**: JSON-RPC `send` method written to stdin. Chunking at 6000 chars on paragraph boundaries.
+
+**DM policy**: Reuse `AllowList UserId`. Map E.164 numbers and UUIDs to `UserId`.
+
+**Group support**: Parse `groupInfo` from envelopes. Mention-gating via bot's phone number in message text.
+
+**Lifecycle**: `withSignalChannel :: SignalConfig -> (ChannelHandle -> IO a) -> IO a` — starts signal-cli, spawns reader thread, cleans up on exit.
+
+**ChannelHandle mapping**: `_ch_readSecret`/`_ch_promptSecret` throw IOError (same as current). `_ch_prompt` sends message, waits for next from same sender.
+
+### Config
+
+```toml
+channel = "signal"
+
+[signal]
+account = "+15555550123"
+dm_policy = "allowlist"
+allow_from = ["+15551234567"]
+text_chunk_limit = 6000
+```
+
+### File Scope
+
+- `src/PureClaw/Channels/Signal.hs` — complete rewrite (signal-cli JSON-RPC)
+- `src/PureClaw/Channels/Class.hs` — Signal in SomeChannel
+- `src/PureClaw/CLI/Config.hs` — signal config fields + TOML codec
+- `src/PureClaw/CLI/Commands.hs` — `--channel` flag, signal startup path
+- `src/PureClaw/Core/Types.hs` — ChannelType enum, signal types
+- `test/Channels/SignalSpec.hs` — new module
+- `test/CLI/ConfigSpec.hs` — signal config parsing tests
+
+---
+
+## Epic 3: Telegram Channel (Complete Integration)
+
+**Goal**: Telegram as a fully working chat interface via Bot API long polling.
+
+### Current State
+
+Skeleton in `PureClaw.Channels.Telegram` — parses `TelegramUpdate`, has `TQueue`, sends via `sendMessage` Bot API. Missing: polling loop, lifecycle management.
+
+### Design
+
+**Transport**: Long polling via `getUpdates` (simpler than webhooks, no TLS/domain needed for MVP). Configurable timeout (default 30s).
+
+**TelegramHandle** (extend existing):
+```haskell
+data TelegramHandle = TelegramHandle
+  { _th_config  :: TelegramConfig
+  , _th_inbox   :: TQueue TelegramUpdate
+  , _th_network :: NetworkHandle
+  , _th_lastId  :: IORef Int     -- last update_id for offset
+  , _th_chatId  :: IORef (Maybe Int)
+  }
+```
+
+**Receive loop**: Background thread polls `getUpdates?offset=N&timeout=30`, parses updates, pushes text messages to inbox.
+
+**Send**: Existing `sendMessage`. Add chunking at 4096 chars. Add `parse_mode=Markdown`.
+
+**DM policy**: `AllowList UserId` with `tg:123456789` format.
+
+**Group support**: Parse `chat.type`. Mention-gating via `@botusername` or reply-to-bot.
+
+**Bot commands**: Register via `setMyCommands` API at startup (`/help`, `/status`, `/new`).
+
+**Lifecycle**: `withTelegramChannel :: TelegramConfig -> NetworkHandle -> (ChannelHandle -> IO a) -> IO a`
+
+### Config
+
+```toml
+channel = "telegram"
+
+[telegram]
+bot_token = "123456:ABC-DEF..."
+dm_policy = "pairing"
+allow_from = ["tg:123456789"]
+require_mention = true
+text_chunk_limit = 4096
+```
+
+### File Scope
+
+- `src/PureClaw/Channels/Telegram.hs` — complete implementation
+- `src/PureClaw/CLI/Config.hs` — telegram config fields + TOML codec
+- `src/PureClaw/CLI/Commands.hs` — telegram startup path
+- `test/Channels/TelegramSpec.hs` — new module
+- `test/CLI/ConfigSpec.hs` — telegram config parsing tests
+
+---
+
+## Epic 4: OpenClaw Config Import (Channels + Agents)
+
+**Goal**: `pureclaw import <path>` reads an OpenClaw config and generates PureClaw config, covering channels and agent definitions.
+
+### Current State
+
+Provider import (API key, model) already works. No channel or agent definition import.
+
+### Design
+
+**CLI subcommand**: `pureclaw import <path>` (runs before agent loop, not a slash command).
+
+**JSON5 parsing**: Lightweight preprocessor to strip `//` comments and trailing commas, then parse with `aeson`. OpenClaw configs rarely use advanced JSON5 features (no hex literals, multiline strings, etc.).
+
+**Import scope (MVP)**:
+
+| OpenClaw field | PureClaw equivalent |
+|---|---|
+| `channels.signal.account` | `[signal] account` |
+| `channels.signal.dmPolicy` | `[signal] dm_policy` |
+| `channels.signal.allowFrom` | `[signal] allow_from` |
+| `channels.telegram.botToken` | `[telegram] bot_token` |
+| `channels.telegram.dmPolicy` | `[telegram] dm_policy` |
+| `channels.telegram.allowFrom` | `[telegram] allow_from` |
+| `channels.telegram.groups` | `[telegram] groups` (simplified) |
+| `agents.defaults.model` | `model` (already working) |
+| `agents.defaults.workspace` | `workspace` (new field) |
+| `agents.list[].name` | `[[agents]] name` |
+| `agents.list[].systemPrompt` | `[[agents]] system` |
+| `agents.list[].model` | `[[agents]] model` |
+| `agents.list[].tools.profile` | `[[agents]] tool_profile` |
+| API keys in config | Prompt to store in vault |
+
+**Agent definitions as files on disk**:
+
+OpenClaw's `agents.list[]` entries become individual files under `~/.pureclaw/agents/`:
+```
+~/.pureclaw/agents/coder.toml
+~/.pureclaw/agents/research.toml
+```
+
+Each agent file:
+```toml
+name = "coder"
+system = "You are a coding assistant..."
+model = "anthropic/claude-sonnet-4-6"
+tool_profile = "coding"    # minimal | coding | full
+workspace = "~/Projects"
+```
+
+**AgentDef type** (new):
+```haskell
+data AgentDef = AgentDef
+  { _ad_name        :: Text
+  , _ad_system      :: Maybe Text
+  , _ad_model       :: Maybe Text
+  , _ad_toolProfile :: Maybe Text
+  , _ad_workspace   :: Maybe Text
+  }
+```
+
+The importer writes one `.toml` file per OpenClaw agent definition into `~/.pureclaw/agents/`.
+
+**Output**: Write config to `~/.pureclaw/` (prompt before overwrite). Print summary of imported vs. skipped fields.
+
+**$include handling**: Follow `$include` directives (single file or array) up to 3 levels deep, resolve relative paths from including file's directory.
+
+### File Scope
+
+- `src/PureClaw/CLI/Import.hs` — new module: JSON5 preprocessor, field mapping, $include resolution
+- `src/PureClaw/CLI/Commands.hs` — `import` subcommand
+- `src/PureClaw/CLI/Config.hs` — AgentDef type, extended FileConfig with agents
+- `test/CLI/ImportSpec.hs` — new module with fixture OpenClaw configs
+- `test/fixtures/openclaw/` — sample openclaw.json files for testing
+
+---
+
+## Directory Structure: Config vs. State
+
+**Principle**: All user-editable configuration lives under `~/.pureclaw/` (version-controllable with git). All mutable runtime state lives under a separate directory (not version-controlled).
+
+### Config directory (`~/.pureclaw/`) — git-friendly
 
 ```
-WU-1: Plugin detection module (no deps)
-WU-2: Swappable encryptor + rekey (no deps, parallel with WU-1)
-WU-3: Config writer (no deps, parallel with WU-1 and WU-2)
-WU-4: /vault setup command (depends on WU-1, WU-2, WU-3)
-WU-5: Nix flake + integration test (depends on WU-4)
+~/.pureclaw/
+├── config.toml              # main config (provider, model, channel, autonomy, etc.)
+├── agents/                  # agent definitions (one .toml per agent)
+│   ├── coder.toml
+│   └── research.toml
+└── system.md                # default system prompt (optional)
 ```
 
-## Work Units
+Everything here is user-authored or imported. Plain text, deterministic, suitable for `git init && git add .`.
 
-### WU-1: Age Plugin Detection Module
+### State directory (`~/.pureclaw/state/` or XDG `~/.local/share/pureclaw/`) — mutable
 
-**DoD**:
-1. New module `PureClaw.Security.Vault.Plugin` with `AgePlugin` type and `PluginHandle` record
-2. `PluginHandle` contains: `_ph_detect :: IO [AgePlugin]` and `_ph_generate :: AgePlugin -> FilePath -> IO (Either VaultError (AgeRecipient, FilePath))`
-3. `mkPluginHandle :: IO PluginHandle` — real implementation scanning PATH for `age-plugin-*` binaries and invoking `--generate`
-4. `mkMockPluginHandle :: [AgePlugin] -> (AgePlugin -> Either VaultError (AgeRecipient, FilePath)) -> PluginHandle` — mock for tests
-5. Known plugin registry with human-readable labels (YubiKey PIV, etc.)
-6. Unit tests with mock PluginHandle: detection returns expected plugins, generation returns recipient + identity file path, generation error handling
+```
+~/.local/share/pureclaw/     # or ~/.pureclaw/state/
+├── vault/                   # encrypted secrets (vault.age, identity files)
+│   ├── vault.age
+│   └── age-plugin-yubikey-identity.txt
+├── memory/                  # memory backend data (sqlite, markdown files)
+├── sessions/                # conversation history / session state
+├── pairing/                 # pairing codes and paired device state
+└── logs/                    # runtime logs
+```
 
-**File scope**:
-- NEW: `src/PureClaw/Security/Vault/Plugin.hs`
-- NEW: `test/Security/VaultPluginSpec.hs`
-- MODIFY: `pureclaw.cabal` (add `PureClaw.Security.Vault.Plugin` to exposed-modules, `Security.VaultPluginSpec` to test other-modules)
+Everything here is written by PureClaw at runtime. Excluded from version control.
 
-**Key details**:
-- `age-plugin-yubikey --generate` outputs lines to stderr with `# public key: age1yubikey1...` and identity string `AGE-PLUGIN-YUBIKEY-1...`
-- Parse recipient from `# public key:` comment line
-- Identity is all non-comment, non-blank lines
-- Write identity to `<dir>/<plugin-name>-identity.txt`
-- Plugin detection: split PATH on `:`, list each directory, filter for `age-plugin-*` executables
-- `AgePlugin` record: `{ _ap_name :: Text, _ap_binary :: FilePath, _ap_label :: Text }`
-- Label lookup from known registry; fallback to binary name for unknown plugins
+**Migration**: Existing `~/.pureclaw/vault/` paths continue to work. We add a config field `state_dir` with a sensible default and migrate gracefully.
 
-### WU-2: Swappable Encryptor + Rekey
+**Design decision**: We use `~/.local/share/pureclaw/` (XDG data dir) as the default on Linux/macOS. The config field `state_dir` allows override. The vault path fields in existing configs are respected as-is for backward compatibility.
 
-**DoD**:
-1. `VaultState._vst_encryptor` changed from `VaultEncryptor` to `IORef VaultEncryptor`
-2. New `_vst_keyType :: IORef Text` field added to `VaultState`, initialized from `_vc_keyType` in `openVault`
-3. All 4 direct encryptor access sites updated to use `readIORef`: `vaultInit` (line ~95), `vaultUnlock` (line ~110), `readAndDecryptMap` (line ~230), `encryptAndWrite` (line ~245). (`vaultGet`, `vaultPut`, `vaultDelete` access encryptor indirectly through these helpers)
-4. `vaultStatus` reads key type from `_vst_keyType` IORef instead of `_vc_keyType` config field
-5. New `_vh_rekey :: VaultEncryptor -> Text -> (Text -> IO Bool) -> IO (Either VaultError ())` added to `VaultHandle`. Args: new encryptor, new key type label, confirmation callback (receives a description string, returns True to proceed)
-6. Safe rekey implementation:
-   a. Acquire `_vst_writeLock`
-   b. Read current encryptor from IORef, decrypt all secrets into plaintext map
-   c. Re-encrypt plaintext map with new encryptor, write to `vault.age.new`
-   d. Verify: decrypt `vault.age.new` with new encryptor, compare result byte-for-byte with plaintext map. If mismatch → delete `vault.age.new`, return `VaultCorrupted "rekey verification failed"`
-   e. Call confirmation callback: "Replace vault? Old: <oldKeyType>, New: <newKeyType>, <N> secrets verified identical"
-   f. If confirmed: rename `vault.age.new` → `vault.age` (atomic), update encryptor IORef, update keyType IORef, update TVar cache
-   g. If cancelled: delete `vault.age.new`, return `Left (VaultCorrupted "rekey cancelled by user")`
-7. Default vault path changed to `~/.pureclaw/vault/vault.age` in `resolveAgeVault` and `resolvePassphraseVault` in `Commands.hs`
-8. `VaultConfig` remains pure with `deriving stock (Show, Eq)` — no IORef fields
-9. Unit tests: (a) rekey from mock encryptor A to mock encryptor B preserves all secrets, (b) rekey updates key type in status, (c) rekey verification catches mismatch (mock encryptor that produces different output on second encrypt), (d) rekey cancelled by user leaves old vault intact, (e) all existing vault tests still pass with IORef refactor
+---
 
-**File scope**:
-- MODIFY: `src/PureClaw/Security/Vault.hs` (IORef encryptor, IORef keyType, rekey with verification + confirmation, openVault, vaultStatus, 4 direct encryptor access sites)
-- MODIFY: `src/PureClaw/Agent/Env.hs` (`_env_vault` changes from `Maybe VaultHandle` to `IORef (Maybe VaultHandle)`)
-- MODIFY: `src/PureClaw/CLI/Commands.hs` (update default vault path in `resolveAgeVault` line ~574, `resolvePassphraseVault` line ~599, `ensureVaultForOAuth` line ~496; wrap vault in IORef at construction)
-- MODIFY: `src/PureClaw/Agent/SlashCommands.hs` (read vault from IORef instead of pattern matching on Maybe directly)
-- MODIFY: `test/Security/VaultSpec.hs` (rekey tests including verification and cancellation, verify existing tests pass)
-- MODIFY: `test/Agent/SlashCommandsSpec.hs` (add `_vh_rekey` to mock VaultHandle construction, update for IORef vault access)
+## Channel Selection at Startup
 
-### WU-3: Config Writer
+Shared infrastructure for Epics 2 & 3:
 
-**DoD**:
-1. New function `updateVaultConfig :: FilePath -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> IO ()` that updates vault_path, vault_recipient, vault_identity, vault_unlock fields in config file. `Nothing` means "clear this field" / leave unchanged. First `Maybe Text` is vault_path
-2. Implementation: load existing `FileConfig` (or `emptyFileConfig` if file missing), update vault fields, `Toml.encode fileConfigCodec`, write to file
-3. Note: full serialize via tomland — TOML comments and keys not in `FileConfig` are not preserved
-4. Creates config file if it doesn't exist
-5. Unit tests in temp directory: (a) round-trip write then read back, (b) preserves non-vault fields (model, system, providers), (c) creates file from scratch, (d) clears fields with `Nothing`
+- New CLI flag: `--channel <cli|signal|telegram>` (default: `cli`)
+- Config field: `channel = "cli"`
+- CLI flag overrides config
+- Channel-specific config sections only read when that channel is selected
+- Future: multi-channel gateway mode (not MVP — single channel per process)
 
-**File scope**:
-- MODIFY: `src/PureClaw/CLI/Config.hs` (add `updateVaultConfig`, add to export list)
-- MODIFY: `test/CLI/ConfigSpec.hs` (config writer tests)
+---
 
-### WU-4: /vault setup Command
+## Dependency Graph
 
-**DoD**:
-1. `VaultSubCommand`: `VaultInit` renamed to `VaultSetup`
-2. `/vault setup` replaces `/vault init` in `vaultCommandSpecs` — new description: "Set up or reconfigure the vault encryption mechanism"
-3. Interactive flow in `executeVaultCommand`:
-   - Call `PluginHandle._ph_detect` to find available plugins
-   - Display numbered choices: `1. Passphrase (built-in)`, then one entry per detected plugin with label
-   - Read user selection
-   - **Passphrase path**: prompt for passphrase, call `_vh_init` (if no vault) or `_vh_rekey` (if vault exists)
-   - **Plugin path**: check for existing identity file in vault dir → call `_ph_generate` if missing → call `_vh_init` or `_vh_rekey`
-4. Auto-update config via `updateVaultConfig` after successful setup
-5. Update `ensureVaultForOAuth` in `Commands.hs` (line ~500): change message from `/vault init` to `/vault setup`
-6. Update any other user-facing messages referencing `/vault init` (search for "vault init" across codebase)
-7. `_vh_init` field in `VaultHandle` remains unchanged — `/vault setup` calls it internally for new vaults
-8. `unlockAndPutVault` remains unchanged — its `_vh_init` fallback still works
-9. Vault directory `~/.pureclaw/vault/` created automatically (via `createDirectoryIfMissing True`) before init/setup
-10. Unit tests for setup flow with mock PluginHandle and mock VaultHandle
+```
+Epic 1 (Exec)     ─── independent, smallest scope
+Epic 2 (Signal)   ─── independent, highest priority
+Epic 3 (Telegram) ─── shares patterns with Epic 2
+Epic 4 (Import)   ─── depends on channel config schema from 2+3
+```
 
-**File scope**:
-- MODIFY: `src/PureClaw/Agent/SlashCommands.hs` (VaultSetup command, remove VaultInit from specs, setup handler with first-time-setup support, IORef vault access)
-- MODIFY: `src/PureClaw/CLI/Commands.hs` (ensureVaultForOAuth message + default path at line ~496, vault dir creation, IORef vault reads)
-- MODIFY: `test/Agent/SlashCommandsSpec.hs` (rename VaultInit → VaultSetup in 4 test references, IORef vault in test setup)
-- NEW: `test/Security/VaultSetupSpec.hs` (setup flow tests: first-time passphrase, first-time plugin, rekey with confirmation, rekey cancelled)
-- MODIFY: `pureclaw.cabal` (add `Security.VaultSetupSpec` to test other-modules)
+Recommended execution order: **1 → 2 → 3 → 4**
 
-**Key details**:
-- Setup needs: `ChannelHandle` (for prompts/display), `IORef (Maybe VaultHandle)` (for init/rekey/install), `PluginHandle` (for detection/generation), config file path
-- `PluginHandle` constructed ad-hoc in the setup handler via `mkPluginHandle`
-- **Encryptor construction**: The setup handler imports and calls:
-  - `mkAgeEncryptor` + `ageVaultEncryptor` from `PureClaw.Security.Vault.Age` (for plugin/age key path)
-  - `mkPassphraseVaultEncryptor` from `PureClaw.Security.Vault.Passphrase` (for passphrase path)
-- **First-time setup** (no vault at startup, `_env_vault` IORef contains `Nothing`):
-  1. The `VaultSetup` case in `executeSlashCommand` reads the IORef — if `Nothing`, proceeds to setup flow directly (no early return)
-  2. After user picks mechanism, construct `VaultEncryptor` and `VaultConfig`
-  3. Call `openVault` to create `VaultHandle`, then `_vh_init` to create empty vault on disk
-  4. Write new `VaultHandle` into the `_env_vault` IORef
-  5. Update config file
-- **Rekey flow** (vault already exists):
-  1. Read `VaultHandle` from IORef
-  2. Read current status via `_vh_status`
-  3. "Vault exists (encrypted with <keyType>). Choose new mechanism:"
-  4. Display choices, user picks
-  5. Construct new `VaultEncryptor`
-  6. Call `_vh_rekey` with new encryptor + confirmation callback (prompts user via ChannelHandle)
-  7. Update config file
-- **New vault flow** (IORef is `Nothing` or vault file doesn't exist):
-  1. "Choose encryption mechanism:"
-  2. Display choices, user picks
-  3. Construct `VaultEncryptor` and `VaultConfig`, call `openVault` + `_vh_init`
-  4. Write new handle into IORef
-  5. Update config file
-
-### WU-5: Nix Flake + Integration Test
-
-**DoD**:
-1. `age-plugin-yubikey` added to nix flake dev shell `buildInputs` / `nativeBuildInputs`
-2. Verify `age-plugin-yubikey` is on PATH in `nix develop .` shell
-3. Manual integration test with real YubiKey:
-   - Run pureclaw in dev shell
-   - Execute `/vault setup`
-   - Select YubiKey option
-   - Verify identity generation (touch YubiKey when prompted)
-   - Store a secret with `/vault add test-key`
-   - Retrieve and verify with `/vault list`
-   - Verify config file was updated
-4. Document any issues or edge cases discovered
-
-**File scope**:
-- MODIFY: `flake.nix` (add `age-plugin-yubikey` to shell inputs)
+Epics 1 and 2 can be parallelized. Epic 3 reuses channel abstractions from Epic 2. Epic 4 must come last (needs finalized config schema).
 
 ## Human Checkpoints
 
-- After WU-2 (rekey): Review the IORef approach and rekey semantics before building on top
-- After WU-4 (setup command): Review the interactive flow UX before integration testing
+- [ ] After Epic 1: Review security model for unrestricted exec before merging
+- [ ] After Epic 2: Test with real signal-cli installation
+- [ ] After Epic 3: Test with real Telegram bot
+- [ ] After Epic 4: Test with real OpenClaw config file
+
+## Resolved Questions
+
+1. **signal-cli installation**: Require pre-installed. Print helpful error with install instructions if missing. No auto-install for MVP.
+2. **Agent definitions**: Stored as individual `.toml` files under `~/.pureclaw/agents/`. Runtime selection (`/agent <name>`) is a fast follow-up, not MVP.
+3. **$include depth**: 3 levels for MVP.
+4. **Config vs. state separation**: All config under `~/.pureclaw/` (git-friendly), all mutable state under `~/.local/share/pureclaw/` (not version-controlled).
+
+## Open Questions
+
+1. **State dir default**: `~/.local/share/pureclaw/` (XDG) vs `~/.pureclaw/state/` — XDG is more standard but splits the pureclaw footprint across two locations.
+2. **Agent loading at startup**: Should all agent defs be loaded eagerly, or lazily when referenced? (Recommend: eagerly, they're tiny files)
+
+---
+
+## Design Review Gate — Iteration 1 Results
+
+**Date**: 2026-03-15
+**Overall**: NEEDS_REVISION (4 of 5 agents flagged blockers)
+
+### Blocker Summary (deduplicated, prioritized)
+
+#### CRITICAL: Security
+
+1. **User allow-list never enforced** (Security B1): `_cfg_allowedUsers` exists in `Config` but the agent loop (`Loop.hs`) never checks `_im_userId` against it. With `autonomy = "full"` + Signal/Telegram, ANY user who messages the bot gets unrestricted shell execution. **Must add userId authorization check in agent loop immediately after `_ch_receive`, before any message processing. Mandatory for all non-CLI channels.**
+
+2. **Shell `env` parameter enables injection** (Security B2): The proposed `env :: Map Text Text` on the shell tool is controlled by the LLM. A prompt injection via Signal/Telegram could set `LD_PRELOAD`, `PATH`, etc., bypassing `safeEnv`. **Must specify: env vars merge UNDER safeEnv (safeEnv wins), or restrict to an allowlist, or limit to `autonomy = "full"` + CLI only.**
+
+3. **Shell `cwd` parameter enables workspace escape** (Security B3): No containment validation. `cwd = "/etc"` would work. **Must validate through `mkSafePath` or equivalent workspace check. Relax only when `autonomy = "full"`.**
+
+#### HIGH: Design Gaps
+
+4. **Bot token in plaintext config** (Designer B2, CTO B5, Security S1): Telegram `bot_token` is a secret but shown in `config.toml`. Must be vault-stored. **Define `bot_token_vault = "telegram_bot_token"` convention that resolves from vault at startup. Import command should prompt to store in vault.**
+
+5. **Agent selection mechanism missing** (Designer B3): Agent def files are written to `~/.pureclaw/agents/` but no config field or CLI flag selects which one to use. **Must add `agent = "coder"` config field and `--agent` CLI flag.**
+
+6. **`dm_policy` enum undefined** (Designer B4): Different values shown for Signal vs Telegram with no type definition. **Must define `DmPolicy = Pairing | AllowList | Open | Disabled` ADT and document it.**
+
+7. **`channel` → `default_channel`** (Designer B1): Current naming is ambiguous. **Rename to `default_channel` to clarify it's a selector, not a channel object.**
+
+#### MEDIUM: Scope & Process
+
+8. **Epic 1 scope creep** (CTO B1): Bundles unrestricted mode (trivial) with 5 shell enhancements (complex). **Split: Epic 1a = wire autonomy config + AllowAll (small). Epic 1b = background exec, timeout, cwd, env, streaming (separate epic or fast follow).**
+
+9. **No TDD breakdown per epic** (CTO B3): File scopes listed but no red/green/refactor sequence. **Add "TDD Sequence" subsection to each epic with first failing test.**
+
+10. **Missing testability seams** (CTO B2): No mock strategy for signal-cli process or Telegram API. **Specify handle boundaries: Signal gets a process abstraction (replaceable with in-memory queues in tests), Telegram uses mock `NetworkHandle`.**
+
+11. **Channel failure modes unspecified** (CTO B4, Architect S3): What happens when signal-cli crashes or Telegram polling drops? **For MVP: propagate exception, let process die with clear error. No reconnection. Must be stated explicitly.**
+
+#### LOW: Product Completeness
+
+12. **No use cases in WHO/WANTS/SO THAT format** (PM B1): Design describes WHAT, not WHO or WHY.
+
+13. **No success metrics** (PM B2): No measurable criteria for "feature parity."
+
+14. **Import error UX missing** (PM B3): Epic 4 doesn't specify what users see when fields can't be mapped.
+
+15. **Migration path vague** (PM B4): Discovery, side-by-side operation, and explicit exclusions absent.
+
+### Non-Blocking Suggestions (consolidated)
+
+- Architect S1: `ShellHandle` becomes multi-field record (not newtype) — state this explicitly
+- Architect S2: Keep `SignalChannel` name for internal state, reserve `*Handle` for capability records
+- Architect S5: JSON5 preprocessor limitations (comments in strings) — document as known limitation
+- Architect S7: `AgentEnv` may need `SecurityPolicy` field for startup warning
+- Designer S1: Rename `background_ms` → `background_check_interval_ms`
+- Designer S3: `text_chunk_limit` should be platform constants, not user config
+- Designer S5: Add `pureclaw import --dry-run`
+- CTO S3: JSON5 preprocessor — consider a state machine for outside-string comment stripping
+- CTO S4: `$include` cycle detection (visited-set check)
+- CTO S5: Telegram `chat_id` should be `Int64` not `Int`
+- Security S2: Curate signal-cli child process environment (don't inherit full parent env)
+- Security S4: Per-user rate limiting for remote channels
+- Security S5: Bound max concurrent background processes
+- Security S6: Require explicit flag for `autonomy=full` + remote channel combination
