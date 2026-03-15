@@ -200,6 +200,75 @@ spec = do
         _fc_vault_path      cfg `shouldBe` Just "/v.age"
         _fc_vault_recipient cfg `shouldBe` Just "age1x"
 
+    it "preserves api_key and provider during passphrase vault setup" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        -- Simulate a typical user config before /vault setup
+        TIO.writeFile path $ mconcat
+          [ "api_key  = \"sk-ant-test123\"\n"
+          , "provider = \"anthropic\"\n"
+          , "model    = \"claude-sonnet-4-20250514\"\n"
+          ]
+        -- Simulate what updateConfigAfterSetup does for passphrase setup:
+        -- vaultPath=Just, recipient=Nothing, identity=Nothing, unlock=Just "on_demand"
+        updateVaultConfig path
+          (Just "/home/user/.pureclaw/vault/vault.age")
+          Nothing Nothing (Just "on_demand")
+        cfg <- loadFileConfig path
+        -- All original fields must survive the round-trip
+        _fc_apiKey          cfg `shouldBe` Just "sk-ant-test123"
+        _fc_provider        cfg `shouldBe` Just "anthropic"
+        _fc_model           cfg `shouldBe` Just "claude-sonnet-4-20250514"
+        -- Vault fields should be set
+        _fc_vault_path      cfg `shouldBe` Just "/home/user/.pureclaw/vault/vault.age"
+        _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
+        -- Recipient and identity should remain absent
+        _fc_vault_recipient cfg `shouldBe` Nothing
+        _fc_vault_identity  cfg `shouldBe` Nothing
+
+    it "preserves allow list during vault setup round-trip" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path $ mconcat
+          [ "api_key  = \"sk-ant-test\"\n"
+          , "provider = \"anthropic\"\n"
+          , "allow    = [\"git\", \"ls\", \"curl\"]\n"
+          ]
+        updateVaultConfig path
+          (Just "/v.age") Nothing Nothing (Just "on_demand")
+        cfg <- loadFileConfig path
+        _fc_apiKey   cfg `shouldBe` Just "sk-ant-test"
+        _fc_provider cfg `shouldBe` Just "anthropic"
+        _fc_allow    cfg `shouldBe` Just ["git", "ls", "curl"]
+
+    it "clears stale age credentials when switching to passphrase" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        -- Simulate an existing age-based vault config
+        TIO.writeFile path $ mconcat
+          [ "api_key          = \"sk-ant-test\"\n"
+          , "provider         = \"anthropic\"\n"
+          , "vault_path       = \"/home/user/.pureclaw/vault/vault.age\"\n"
+          , "vault_recipient  = \"age1yubikey-old\"\n"
+          , "vault_identity   = \"/home/user/.pureclaw/vault/yubikey-identity.txt\"\n"
+          , "vault_unlock     = \"startup\"\n"
+          ]
+        -- Simulate passphrase /vault setup: recipient=Nothing, identity=Nothing
+        updateVaultConfig path
+          (Just "/home/user/.pureclaw/vault/vault.age")
+          Nothing Nothing (Just "on_demand")
+        cfg <- loadFileConfig path
+        -- api_key and provider must survive
+        _fc_apiKey          cfg `shouldBe` Just "sk-ant-test"
+        _fc_provider        cfg `shouldBe` Just "anthropic"
+        -- Stale age credentials MUST be cleared — otherwise startup
+        -- will call resolveAgeVault instead of resolvePassphraseVault
+        _fc_vault_recipient cfg `shouldBe` Nothing
+        _fc_vault_identity  cfg `shouldBe` Nothing
+        -- Vault path and unlock mode should be updated
+        _fc_vault_path      cfg `shouldBe` Just "/home/user/.pureclaw/vault/vault.age"
+        _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
+
     it "creates file from scratch on non-existent path" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"

@@ -103,8 +103,8 @@ updateVaultConfig path vaultPath vaultRecipient vaultIdentity vaultUnlock = do
   existing <- loadFileConfig path
   let updated = existing
         { _fc_vault_path      = vaultPath      <|> _fc_vault_path existing
-        , _fc_vault_recipient = vaultRecipient  <|> _fc_vault_recipient existing
-        , _fc_vault_identity  = vaultIdentity   <|> _fc_vault_identity existing
+        , _fc_vault_recipient = vaultRecipient  -- Direct: Nothing clears stale age creds
+        , _fc_vault_identity  = vaultIdentity   -- Direct: Nothing clears stale age creds
         , _fc_vault_unlock    = vaultUnlock     <|> _fc_vault_unlock existing
         }
   TIO.writeFile path (Toml.encode fileConfigCodec updated)
