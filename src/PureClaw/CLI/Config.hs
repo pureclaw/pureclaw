@@ -6,12 +6,12 @@ module PureClaw.CLI.Config
   , loadFileConfig
   , loadConfig
     -- * Writing
+  , FieldUpdate (..)
   , updateVaultConfig
     -- * Directory helpers
   , getPureclawDir
   ) where
 
-import Control.Applicative ((<|>))
 import Control.Exception
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
@@ -88,23 +88,37 @@ loadConfig = do
         then pure homeCfg
         else loadFileConfig (h </> ".config" </> "pureclaw" </> "config.toml")
 
+-- | Three-valued update: set a new value, clear the field, or keep the existing value.
+data FieldUpdate a
+  = Set a    -- ^ Replace with this value
+  | Clear    -- ^ Remove the field (set to Nothing)
+  | Keep     -- ^ Leave the existing value unchanged
+  deriving stock (Show, Eq)
+
+-- | Apply a 'FieldUpdate' to an existing 'Maybe' value.
+applyUpdate :: FieldUpdate a -> Maybe a -> Maybe a
+applyUpdate (Set x) _ = Just x
+applyUpdate Clear   _ = Nothing
+applyUpdate Keep    v = v
+
 -- | Update vault-related fields in a config file, preserving all other settings.
--- 'Nothing' means "leave this field unchanged". If all four arguments are
--- 'Nothing', this is a no-op (no file write occurs).
+-- 'Keep' means "leave this field unchanged", 'Clear' means "remove the field",
+-- 'Set' means "replace with this value".
+-- If all four arguments are 'Keep', this is a no-op (no file write occurs).
 updateVaultConfig
-  :: FilePath    -- ^ Config file path
-  -> Maybe Text  -- ^ vault_path
-  -> Maybe Text  -- ^ vault_recipient
-  -> Maybe Text  -- ^ vault_identity
-  -> Maybe Text  -- ^ vault_unlock
+  :: FilePath             -- ^ Config file path
+  -> FieldUpdate Text     -- ^ vault_path
+  -> FieldUpdate Text     -- ^ vault_recipient
+  -> FieldUpdate Text     -- ^ vault_identity
+  -> FieldUpdate Text     -- ^ vault_unlock
   -> IO ()
-updateVaultConfig _ Nothing Nothing Nothing Nothing = pure ()
+updateVaultConfig _ Keep Keep Keep Keep = pure ()
 updateVaultConfig path vaultPath vaultRecipient vaultIdentity vaultUnlock = do
   existing <- loadFileConfig path
   let updated = existing
-        { _fc_vault_path      = vaultPath      <|> _fc_vault_path existing
-        , _fc_vault_recipient = vaultRecipient  -- Direct: Nothing clears stale age creds
-        , _fc_vault_identity  = vaultIdentity   -- Direct: Nothing clears stale age creds
-        , _fc_vault_unlock    = vaultUnlock     <|> _fc_vault_unlock existing
+        { _fc_vault_path      = applyUpdate vaultPath      (_fc_vault_path existing)
+        , _fc_vault_recipient = applyUpdate vaultRecipient  (_fc_vault_recipient existing)
+        , _fc_vault_identity  = applyUpdate vaultIdentity   (_fc_vault_identity existing)
+        , _fc_vault_unlock    = applyUpdate vaultUnlock     (_fc_vault_unlock existing)
         }
   TIO.writeFile path (Toml.encode fileConfigCodec updated)

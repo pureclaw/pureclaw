@@ -643,10 +643,12 @@ updateConfigAfterSetup :: Maybe Text -> Maybe Text -> Text -> IO ()
 updateConfigAfterSetup mRecipient mIdentity _keyLabel = do
   pureclawDir <- getPureclawDir
   Dir.createDirectoryIfMissing True pureclawDir
-  let configPath = pureclawDir </> "config.toml"
-      vaultPath  = Just (T.pack (pureclawDir </> "vault" </> "vault.age"))
-      unlockMode = Just "on_demand"
-  updateVaultConfig configPath vaultPath mRecipient mIdentity unlockMode
+  let configPath   = pureclawDir </> "config.toml"
+      vaultPath    = Set (T.pack (pureclawDir </> "vault" </> "vault.age"))
+      unlockMode   = Set "on_demand"
+      recipientUpd = maybe Clear Set mRecipient
+      identityUpd  = maybe Clear Set mIdentity
+  updateVaultConfig configPath vaultPath recipientUpd identityUpd unlockMode
 
 -- ---------------------------------------------------------------------------
 -- Help rendering — derived from allCommandSpecs
