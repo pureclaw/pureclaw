@@ -83,7 +83,7 @@ data ChatOptions = ChatOptions
   , _co_system        :: Maybe String
   , _co_provider      :: Maybe ProviderType
   , _co_allowCommands :: [String]
-  , _co_autonomy      :: Maybe String
+  , _co_autonomy      :: Maybe AutonomyLevel
   , _co_memory        :: Maybe MemoryBackend
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
@@ -119,7 +119,7 @@ chatOptionsParser = ChatOptions
      <> short 'a'
      <> help "Allow a shell command (repeatable, e.g. --allow git --allow ls)"
       ))
-  <*> optional (strOption
+  <*> optional (option parseAutonomyLevel
       ( long "autonomy"
      <> help "Autonomy level: full, supervised, deny (default: deny with no --allow, full with --allow)"
       ))
@@ -204,8 +204,8 @@ runChat opts = do
       effectiveApiKey   = _co_apiKey opts <|> fmap T.unpack (_fc_apiKey fileCfg)
       effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
       effectiveAllow    = _co_allowCommands opts <> maybe [] (map T.unpack) (_fc_allow fileCfg)
-      effectiveAutonomy = parseAutonomyMaybe (_co_autonomy opts)
-                      <|> parseAutonomyMaybe (fmap T.unpack (_fc_autonomy fileCfg))
+      effectiveAutonomy = _co_autonomy opts
+                      <|> parseAutonomyMaybe (_fc_autonomy fileCfg)
 
   -- Vault (opened before provider so API keys can be fetched from vault)
   vaultOpt <- resolveVault fileCfg (_co_noVault opts) logger
@@ -288,10 +288,18 @@ parseProviderMaybe (Just t) = case T.unpack t of
   "ollama"     -> Just Ollama
   _            -> Nothing
 
--- | Parse an autonomy level from a string value (used for CLI flag and config file).
-parseAutonomyMaybe :: Maybe String -> Maybe AutonomyLevel
+-- | Parse an autonomy level from a CLI string.
+parseAutonomyLevel :: ReadM AutonomyLevel
+parseAutonomyLevel = eitherReader $ \s -> case s of
+  "full"       -> Right Full
+  "supervised" -> Right Supervised
+  "deny"       -> Right Deny
+  _            -> Left $ "Unknown autonomy level: " <> s <> ". Choose: full, supervised, deny"
+
+-- | Parse an autonomy level from a text value (used for config file).
+parseAutonomyMaybe :: Maybe T.Text -> Maybe AutonomyLevel
 parseAutonomyMaybe Nothing  = Nothing
-parseAutonomyMaybe (Just s) = case s of
+parseAutonomyMaybe (Just t) = case t of
   "full"       -> Just Full
   "supervised" -> Just Supervised
   "deny"       -> Just Deny

@@ -171,18 +171,21 @@ spec = do
   describe "--autonomy flag" $ do
     it "parses --autonomy full" $ do
       case parseArgs ["--autonomy", "full"] of
-        Just opts -> _co_autonomy opts `shouldBe` Just "full"
+        Just opts -> _co_autonomy opts `shouldBe` Just Full
         Nothing -> expectationFailure "parse failed"
 
     it "parses --autonomy supervised" $ do
       case parseArgs ["--autonomy", "supervised"] of
-        Just opts -> _co_autonomy opts `shouldBe` Just "supervised"
+        Just opts -> _co_autonomy opts `shouldBe` Just Supervised
         Nothing -> expectationFailure "parse failed"
 
     it "parses --autonomy deny" $ do
       case parseArgs ["--autonomy", "deny"] of
-        Just opts -> _co_autonomy opts `shouldBe` Just "deny"
+        Just opts -> _co_autonomy opts `shouldBe` Just Deny
         Nothing -> expectationFailure "parse failed"
+
+    it "rejects invalid autonomy level" $
+      parseArgs ["--autonomy", "invalid"] `shouldBe` Nothing
 
     it "defaults to Nothing" $ do
       case parseArgs [] of
