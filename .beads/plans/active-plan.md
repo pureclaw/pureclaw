@@ -310,20 +310,20 @@ Shared infrastructure for Epics 2 & 3:
 ```
 Epic 1 (Exec)     ─── independent, smallest scope
 Epic 2 (Signal)   ─── independent, highest priority
-Epic 3 (Telegram) ─── shares patterns with Epic 2
-Epic 4 (Import)   ─── depends on channel config schema from 2+3
+Epic 4 (Import)   ─── depends on Signal config schema; defines Telegram schema ahead of impl
+Epic 3 (Telegram) ─── uses config schema established by Epic 4
 ```
 
-Recommended execution order: **1 → 2 → 3 → 4**
+Recommended execution order: **1 → 2 → 4 → 3**
 
-Epics 1 and 2 can be parallelized. Epic 3 reuses channel abstractions from Epic 2. Epic 4 must come last (needs finalized config schema).
+Epics 1 and 2 can be parallelized. Epic 4 comes before Telegram so the import defines the Telegram config schema before we implement the channel — this way Telegram implementation consumes an already-settled config format rather than the import having to reverse-engineer it. Epic 3 comes last, building on both the channel patterns from Epic 2 and the config schema from Epic 4.
 
 ## Human Checkpoints
 
 - [ ] After Epic 1: Review security model for unrestricted exec before merging
 - [ ] After Epic 2: Test with real signal-cli installation
-- [ ] After Epic 3: Test with real Telegram bot
 - [ ] After Epic 4: Test with real OpenClaw config file
+- [ ] After Epic 3: Test with real Telegram bot
 
 ## Resolved Questions
 
