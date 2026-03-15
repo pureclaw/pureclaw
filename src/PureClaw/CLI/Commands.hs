@@ -188,7 +188,21 @@ runChat opts = do
   let logger = mkStderrLogHandle
 
   -- Load config file: --config flag overrides default search locations
-  fileCfg <- maybe loadConfig loadFileConfig (_co_config opts)
+  configResult <- maybe loadConfigDiag loadFileConfigDiag (_co_config opts)
+  let fileCfg = configFileConfig configResult
+
+  -- Log config loading result
+  case configResult of
+    ConfigLoaded path _ ->
+      _lh_logInfo logger $ "Config: " <> T.pack path
+    ConfigParseError path err -> do
+      _lh_logWarn logger $ "Config file has errors: " <> T.pack path
+      _lh_logWarn logger err
+      _lh_logWarn logger "Using default configuration."
+    ConfigFileNotFound path ->
+      _lh_logWarn logger $ "Config file not found: " <> T.pack path
+    ConfigNotFound _paths ->
+      _lh_logInfo logger "No config file found"
 
   -- Resolve effective values: CLI flag > config file > default
   let effectiveProvider = fromMaybe Anthropic  (_co_provider opts <|> parseProviderMaybe (_fc_provider fileCfg))
