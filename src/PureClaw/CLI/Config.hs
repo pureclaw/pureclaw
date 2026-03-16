@@ -5,6 +5,11 @@ module PureClaw.CLI.Config
     -- * Loading
   , loadFileConfig
   , loadConfig
+    -- * Diagnostic loading
+  , ConfigLoadResult (..)
+  , loadFileConfigDiag
+  , loadConfigDiag
+  , configFileConfig
     -- * Writing
   , updateVaultConfig
     -- * Directory helpers
@@ -78,15 +83,52 @@ getPureclawDir = do
 --
 -- Returns the first config found, or 'emptyFileConfig' if none exists.
 loadConfig :: IO FileConfig
-loadConfig = do
+loadConfig = configFileConfig <$> loadConfigDiag
+
+-- | Result of attempting to load a config file.
+data ConfigLoadResult
+  = ConfigLoaded FilePath FileConfig     -- ^ File found and parsed successfully
+  | ConfigParseError FilePath Text       -- ^ File exists but contains invalid TOML
+  | ConfigFileNotFound FilePath          -- ^ Specific file was not found
+  | ConfigNotFound [FilePath]            -- ^ No config found at any default location
+  deriving stock (Show, Eq)
+
+-- | Extract the 'FileConfig' from a result, defaulting to 'emptyFileConfig' on error.
+configFileConfig :: ConfigLoadResult -> FileConfig
+configFileConfig (ConfigLoaded _ fc)    = fc
+configFileConfig (ConfigParseError _ _) = emptyFileConfig
+configFileConfig (ConfigFileNotFound _) = emptyFileConfig
+configFileConfig (ConfigNotFound _)     = emptyFileConfig
+
+-- | Load config from a single file, returning diagnostic information.
+-- Unlike 'loadFileConfig', parse errors are not silently discarded.
+loadFileConfigDiag :: FilePath -> IO ConfigLoadResult
+loadFileConfigDiag path = do
+  text <- try @IOError (TIO.readFile path)
+  pure $ case text of
+    Left  _ -> ConfigFileNotFound path
+    Right toml -> case Toml.decode fileConfigCodec toml of
+      Left errs -> ConfigParseError path (Toml.prettyTomlDecodeErrors errs)
+      Right c   -> ConfigLoaded path c
+
+-- | Load config from default locations with diagnostics.
+-- Stops at the first file that exists (even if it has errors).
+loadConfigDiag :: IO ConfigLoadResult
+loadConfigDiag = do
   home <- try @IOError getHomeDirectory
   case home of
-    Left  _ -> pure emptyFileConfig
+    Left _ -> pure (ConfigNotFound [])
     Right h -> do
-      homeCfg <- loadFileConfig (h </> ".pureclaw" </> "config.toml")
-      if homeCfg /= emptyFileConfig
-        then pure homeCfg
-        else loadFileConfig (h </> ".config" </> "pureclaw" </> "config.toml")
+      let homePath = h </> ".pureclaw" </> "config.toml"
+          xdgPath  = h </> ".config" </> "pureclaw" </> "config.toml"
+      homeResult <- loadFileConfigDiag homePath
+      case homeResult of
+        ConfigFileNotFound _ -> do
+          xdgResult <- loadFileConfigDiag xdgPath
+          case xdgResult of
+            ConfigFileNotFound _ -> pure (ConfigNotFound [homePath, xdgPath])
+            _                    -> pure xdgResult
+        _ -> pure homeResult
 
 -- | Update vault-related fields in a config file, preserving all other settings.
 -- 'Nothing' means "leave this field unchanged". If all four arguments are
