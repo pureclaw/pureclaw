@@ -1,6 +1,7 @@
 module CLI.ConfigSpec (spec) where
 
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.Directory (getHomeDirectory)
 import System.FilePath ((</>))
@@ -396,3 +397,75 @@ spec = do
         _fc_vault_recipient cfg `shouldBe` Just "age1new"
         _fc_vault_identity  cfg `shouldBe` Just "~/.age/new"
         _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
+
+  describe "loadFileConfigDiag" $ do
+    it "returns ConfigFileNotFound for a nonexistent file" $ do
+      result <- loadFileConfigDiag "/nonexistent/path/config.toml"
+      result `shouldBe` ConfigFileNotFound "/nonexistent/path/config.toml"
+
+    it "returns ConfigParseError with error details for invalid TOML" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "this is not = valid toml !!!\n"
+        result <- loadFileConfigDiag path
+        case result of
+          ConfigParseError p err -> do
+            p `shouldBe` path
+            T.length err `shouldSatisfy` (> 0)
+          other -> expectationFailure $ "Expected ConfigParseError, got: " <> show other
+
+    it "returns ConfigParseError for TOML syntax error (unclosed string)" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "model = \"unclosed\n"
+        result <- loadFileConfigDiag path
+        case result of
+          ConfigParseError p _ -> p `shouldBe` path
+          other -> expectationFailure $ "Expected ConfigParseError, got: " <> show other
+
+    -- Note: dioptional silently ignores type mismatches (e.g. model = 42),
+    -- treating the field as absent. Only syntax errors produce ConfigParseError.
+    it "silently ignores type mismatches with dioptional (field becomes Nothing)" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "model = 42\n"
+        result <- loadFileConfigDiag path
+        case result of
+          ConfigLoaded _ cfg -> _fc_model cfg `shouldBe` Nothing
+          other -> expectationFailure $ "Expected ConfigLoaded, got: " <> show other
+
+    it "returns ConfigLoaded with parsed config for valid TOML" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "model = \"claude-opus-4-20250514\"\n"
+        result <- loadFileConfigDiag path
+        case result of
+          ConfigLoaded p cfg -> do
+            p `shouldBe` path
+            _fc_model cfg `shouldBe` Just "claude-opus-4-20250514"
+          other -> expectationFailure $ "Expected ConfigLoaded, got: " <> show other
+
+    it "returns ConfigLoaded for an empty file (all defaults)" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path ""
+        result <- loadFileConfigDiag path
+        case result of
+          ConfigLoaded p cfg -> do
+            p `shouldBe` path
+            cfg `shouldBe` emptyFileConfig
+          other -> expectationFailure $ "Expected ConfigLoaded, got: " <> show other
+
+  describe "configFileConfig" $ do
+    it "extracts FileConfig from ConfigLoaded" $ do
+      let cfg = emptyFileConfig { _fc_model = Just "test" }
+      configFileConfig (ConfigLoaded "/x" cfg) `shouldBe` cfg
+
+    it "returns emptyFileConfig from ConfigParseError" $
+      configFileConfig (ConfigParseError "/x" "err") `shouldBe` emptyFileConfig
+
+    it "returns emptyFileConfig from ConfigFileNotFound" $
+      configFileConfig (ConfigFileNotFound "/x") `shouldBe` emptyFileConfig
+
+    it "returns emptyFileConfig from ConfigNotFound" $
+      configFileConfig (ConfigNotFound ["/a", "/b"]) `shouldBe` emptyFileConfig
