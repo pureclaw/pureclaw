@@ -30,6 +30,7 @@ import System.FilePath ((</>))
 
 import Data.ByteString.Lazy qualified as BL
 import System.Exit
+import System.IO (Handle, hGetLine)
 import System.Process.Typed qualified as P
 
 import PureClaw.Agent.Compaction
@@ -802,6 +803,8 @@ executeSignalSetup env ctx = do
           pure ctx
 
 -- | Link to an existing Signal account by scanning a QR code.
+-- signal-cli link outputs the sgnl:// URI, then blocks until the user
+-- scans it. We need to stream the output to show the URI immediately.
 signalLinkFlow :: AgentEnv -> Context -> IO Context
 signalLinkFlow env ctx = do
   let ch   = _env_channel env
@@ -809,43 +812,71 @@ signalLinkFlow env ctx = do
 
   send "Generating link... (this may take a moment)"
 
-  linkResult <- try @IOException $
-    P.readProcess (P.proc "signal-cli" ["link", "-n", "PureClaw"])
-  case linkResult of
+  let procConfig = P.setStdout P.createPipe
+                 $ P.setStderr P.createPipe
+                 $ P.proc "signal-cli" ["link", "-n", "PureClaw"]
+  startResult <- try @IOException $ P.startProcess procConfig
+  case startResult of
     Left err -> do
-      send $ "Failed to generate link: " <> T.pack (show err)
+      send $ "Failed to start signal-cli: " <> T.pack (show err)
       pure ctx
-    Right (exitCode, out, err) -> do
-      let outText = T.strip (TE.decodeUtf8 (BL.toStrict out))
-          errText = T.strip (TE.decodeUtf8 (BL.toStrict err))
-          -- signal-cli link outputs the URI to stdout or stderr depending on version
-          linkUri
-            | "sgnl://" `T.isInfixOf` outText = outText
-            | "sgnl://" `T.isInfixOf` errText = errText
-            | otherwise = ""
-      case exitCode of
-        ExitSuccess | not (T.null linkUri) -> do
+    Right process -> do
+      let stdoutH = P.getStdout process
+          stderrH = P.getStderr process
+      -- signal-cli outputs the URI to stderr, then blocks waiting for scan.
+      -- Read stderr lines until we find the sgnl:// URI.
+      linkUri <- readUntilLink stderrH stdoutH
+      case linkUri of
+        Nothing -> do
+          -- Process may have exited with error
+          exitCode <- P.waitExitCode process
+          send $ "signal-cli link failed (exit " <> T.pack (show exitCode) <> ")"
+          pure ctx
+        Just uri -> do
           send $ T.intercalate "\n"
             [ "Open Signal on your phone:"
             , "  Settings \x2192 Linked Devices \x2192 Link New Device"
             , ""
-            , "Then scan this link or paste it into a QR code generator:"
+            , "Scan this link (or paste into a QR code generator):"
             , ""
-            , "  " <> linkUri
+            , "  " <> uri
             , ""
-            , "Waiting for you to scan..."
+            , "Waiting for you to scan... (this will complete automatically)"
             ]
-          -- signal-cli link blocks until the QR is scanned, then outputs the phone number
-          -- Since we already called readProcess, the link was completed if exitCode is Success
-          completeSignalSetup env linkUri ctx
-        ExitSuccess -> do
-          -- Linked successfully but no URI visible (interactive mode completed)
-          send "Signal linked successfully!"
-          -- Try to detect the account
-          detectAndWriteSignalConfig env ctx
-        _ -> do
-          send $ "signal-cli link failed:\n" <> errText
-          pure ctx
+          -- Now wait for signal-cli to finish (user scans the code)
+          exitCode <- P.waitExitCode process
+          case exitCode of
+            ExitSuccess -> do
+              send "Linked successfully!"
+              detectAndWriteSignalConfig env ctx
+            _ -> do
+              send "Link failed or was cancelled."
+              pure ctx
+  where
+    -- Read lines from both handles looking for a sgnl:// URI.
+    -- signal-cli typically puts it on stderr.
+    readUntilLink :: Handle -> Handle -> IO (Maybe Text)
+    readUntilLink stderrH stdoutH = go (50 :: Int)  -- max 50 lines to prevent infinite loop
+      where
+        go 0 = pure Nothing
+        go n = do
+          lineResult <- try @IOException (hGetLine stderrH)
+          case lineResult of
+            Left _ -> do
+              -- stderr closed, try stdout
+              outResult <- try @IOException (hGetLine stdoutH)
+              case outResult of
+                Left _    -> pure Nothing
+                Right line ->
+                  let t = T.pack line
+                  in if "sgnl://" `T.isInfixOf` t
+                     then pure (Just (T.strip t))
+                     else go (n - 1)
+            Right line ->
+              let t = T.pack line
+              in if "sgnl://" `T.isInfixOf` t
+                 then pure (Just (T.strip t))
+                 else go (n - 1)
 
 -- | Register a new phone number.
 signalRegisterFlow :: AgentEnv -> Context -> IO Context
@@ -887,10 +918,6 @@ signalRegisterFlow env ctx = do
           _ -> do
             send $ "Registration failed: " <> T.strip (TE.decodeUtf8 (BL.toStrict errOut))
             pure ctx
-
--- | After successful link, extract account and write config.
-completeSignalSetup :: AgentEnv -> Text -> Context -> IO Context
-completeSignalSetup env _linkUri = detectAndWriteSignalConfig env
 
 -- | Detect the linked account number and write Signal config.
 detectAndWriteSignalConfig :: AgentEnv -> Context -> IO Context
