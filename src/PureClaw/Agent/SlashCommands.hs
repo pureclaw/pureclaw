@@ -788,8 +788,10 @@ executeSignalSetup env ctx = do
       send $ T.intercalate "\n"
         [ ""
         , "How would you like to connect?"
-        , "  [1] Link to your existing Signal account (recommended)"
-        , "  [2] Register a new phone number"
+        , "  [1] Link to an existing Signal account (adds PureClaw as secondary device)"
+        , "  [2] Register with a phone number (becomes primary device for that number)"
+        , ""
+        , "Note: Option 2 will take over the number from any existing Signal registration."
         ]
 
       choice <- T.strip <$> _ch_prompt ch "Choice [1]: "
