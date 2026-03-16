@@ -3,6 +3,7 @@ module PureClaw.Agent.SlashCommands
     SlashCommand (..)
   , VaultSubCommand (..)
   , ProviderSubCommand (..)
+  , ChannelSubCommand (..)
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)
@@ -27,6 +28,10 @@ import Network.HTTP.Client.TLS qualified as HTTP
 import System.Directory qualified as Dir
 import System.FilePath ((</>))
 
+import Data.ByteString.Lazy qualified as BL
+import System.Exit
+import System.Process.Typed qualified as P
+
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
 import PureClaw.Agent.Env
@@ -46,6 +51,7 @@ import PureClaw.Security.Vault.Plugin
 data CommandGroup
   = GroupSession   -- ^ Session and context management
   | GroupProvider  -- ^ Model provider configuration
+  | GroupChannel   -- ^ Chat channel configuration
   | GroupVault     -- ^ Encrypted secrets vault
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
@@ -53,6 +59,7 @@ data CommandGroup
 groupHeading :: CommandGroup -> Text
 groupHeading GroupSession  = "Session"
 groupHeading GroupProvider = "Provider"
+groupHeading GroupChannel  = "Channel"
 groupHeading GroupVault    = "Vault"
 
 -- | Specification for a single slash command.
@@ -90,6 +97,13 @@ data ProviderSubCommand
   | ProviderConfigure Text   -- ^ Configure a specific provider
   deriving stock (Show, Eq)
 
+-- | Subcommands of the '/channel' family.
+data ChannelSubCommand
+  = ChannelList               -- ^ Show current channel + available options
+  | ChannelSetup Text         -- ^ Interactive setup for a specific channel
+  | ChannelUnknown Text       -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
@@ -103,6 +117,7 @@ data SlashCommand
   | CmdCompact                      -- ^ Summarise conversation to save context
   | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
   | CmdVault VaultSubCommand        -- ^ Vault command family
+  | CmdChannel ChannelSubCommand    -- ^ Channel configuration
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -115,7 +130,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ vaultCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -129,6 +144,13 @@ sessionCommandSpecs =
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
+  ]
+
+channelCommandSpecs :: [CommandSpec]
+channelCommandSpecs =
+  [ CommandSpec "/channel"              "Show current channel and available options" GroupChannel (channelArgP ChannelList ChannelSetup)
+  , CommandSpec "/channel signal"       "Set up Signal messenger integration"       GroupChannel (channelExactP "signal" (ChannelSetup "signal"))
+  , CommandSpec "/channel telegram"     "Set up Telegram bot integration"           GroupChannel (channelExactP "telegram" (ChannelSetup "telegram"))
   ]
 
 vaultCommandSpecs :: [CommandSpec]
@@ -155,6 +177,7 @@ parseSlashCommand input =
   let stripped = T.strip input
   in if "/" `T.isPrefixOf` stripped
      then asum (map (`_cs_parse` stripped) allCommandSpecs)
+            <|> channelUnknownFallback stripped
             <|> vaultUnknownFallback stripped
      else Nothing
 
@@ -192,6 +215,35 @@ providerArgP listCmd mkCfgCmd t =
                   then Just (CmdProvider listCmd)
                   else Just (CmdProvider (mkCfgCmd arg))
           else Nothing
+
+-- | Case-insensitive match for "/channel" with optional argument.
+channelArgP :: ChannelSubCommand -> (Text -> ChannelSubCommand) -> Text -> Maybe SlashCommand
+channelArgP listCmd mkSetupCmd t =
+  let pfx   = "/channel"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdChannel listCmd)
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdChannel listCmd)
+                  else Just (CmdChannel (mkSetupCmd (T.toLower arg)))
+          else Nothing
+
+-- | Case-insensitive exact match for "/channel <sub>".
+channelExactP :: Text -> ChannelSubCommand -> Text -> Maybe SlashCommand
+channelExactP sub cmd t =
+  if T.toLower t == "/channel " <> sub then Just (CmdChannel cmd) else Nothing
+
+-- | Catch-all for any "/channel <X>" not matched by 'allCommandSpecs'.
+channelUnknownFallback :: Text -> Maybe SlashCommand
+channelUnknownFallback t =
+  let lower = T.toLower t
+  in if "/channel" `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/channel") lower)
+              sub  = fst (T.break (== ' ') rest)
+          in Just (CmdChannel (ChannelUnknown sub))
+     else Nothing
 
 -- | Catch-all for any "/vault <X>" not matched by 'allCommandSpecs'.
 -- Not included in the spec list so it does not appear in '/help'.
@@ -264,6 +316,9 @@ executeSlashCommand env (CmdProvider sub) ctx = do
       pure ctx
     Just vault ->
       executeProviderCommand env vault sub ctx
+
+executeSlashCommand env (CmdChannel sub) ctx = do
+  executeChannelCommand env sub ctx
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
@@ -649,6 +704,252 @@ updateConfigAfterSetup mRecipient mIdentity _keyLabel = do
       recipientUpd = maybe Clear Set mRecipient
       identityUpd  = maybe Clear Set mIdentity
   updateVaultConfig configPath vaultPath recipientUpd identityUpd unlockMode
+
+-- ---------------------------------------------------------------------------
+-- Channel subcommand execution
+-- ---------------------------------------------------------------------------
+
+executeChannelCommand :: AgentEnv -> ChannelSubCommand -> Context -> IO Context
+executeChannelCommand env ChannelList ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  -- Read current config to show status
+  fileCfg <- loadConfig
+  let currentChannel = maybe "cli" T.unpack (_fc_defaultChannel fileCfg)
+      signalConfigured = case _fc_signal fileCfg of
+        Just sig -> case _fsc_account sig of
+          Just acct -> " (account: " <> acct <> ")"
+          Nothing   -> " (not configured)"
+        Nothing -> " (not configured)"
+  send $ T.intercalate "\n"
+    [ "Chat channels:"
+    , ""
+    , "  cli       \x2014 Terminal stdin/stdout" <> if currentChannel == "cli" then " [active]" else ""
+    , "  signal    \x2014 Signal messenger" <> signalConfigured <> if currentChannel == "signal" then " [active]" else ""
+    , "  telegram  \x2014 Telegram bot (coming soon)"
+    , ""
+    , "Set up a channel:  /channel signal"
+    , "Switch channel:    Set default_channel in config, then restart"
+    ]
+  pure ctx
+
+executeChannelCommand env (ChannelSetup channelName) ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  case channelName of
+    "signal"   -> executeSignalSetup env ctx
+    "telegram" -> do
+      send "Telegram setup is not yet implemented. Coming soon!"
+      pure ctx
+    other -> do
+      send $ "Unknown channel: " <> other <> ". Available: signal, telegram"
+      pure ctx
+
+executeChannelCommand env (ChannelUnknown sub) ctx = do
+  _ch_send (_env_channel env) (OutgoingMessage
+    ("Unknown channel command: " <> sub <> ". Type /channel for available options."))
+  pure ctx
+
+-- ---------------------------------------------------------------------------
+-- Signal setup wizard
+-- ---------------------------------------------------------------------------
+
+-- | Interactive Signal setup. Checks signal-cli, offers link or register,
+-- walks through the flow, writes config.
+executeSignalSetup :: AgentEnv -> Context -> IO Context
+executeSignalSetup env ctx = do
+  let ch   = _env_channel env
+      send = _ch_send ch . OutgoingMessage
+
+  -- Step 1: Check signal-cli is installed
+  signalCliCheck <- try @IOException $
+    P.readProcess (P.proc "signal-cli" ["--version"])
+  case signalCliCheck of
+    Left _ -> do
+      send $ T.intercalate "\n"
+        [ "signal-cli is not installed."
+        , ""
+        , "Install it first:"
+        , "  macOS:  brew install signal-cli"
+        , "  Nix:    nix-env -i signal-cli"
+        , "  Other:  https://github.com/AsamK/signal-cli"
+        , ""
+        , "Then run /channel signal again."
+        ]
+      pure ctx
+    Right (exitCode, versionOut, _) -> do
+      let version = T.strip (TE.decodeUtf8 (BL.toStrict versionOut))
+      case exitCode of
+        ExitSuccess ->
+          send $ "Found signal-cli " <> version
+        _ ->
+          send "Found signal-cli (version unknown)"
+
+      -- Step 2: Offer link or register
+      send $ T.intercalate "\n"
+        [ ""
+        , "How would you like to connect?"
+        , "  [1] Link to your existing Signal account (recommended)"
+        , "  [2] Register a new phone number"
+        ]
+
+      choice <- T.strip <$> _ch_prompt ch "Choice [1]: "
+      let effectiveChoice = if T.null choice then "1" else choice
+
+      case effectiveChoice of
+        "1" -> signalLinkFlow env ctx
+        "2" -> signalRegisterFlow env ctx
+        _   -> do
+          send "Invalid choice. Setup cancelled."
+          pure ctx
+
+-- | Link to an existing Signal account by scanning a QR code.
+signalLinkFlow :: AgentEnv -> Context -> IO Context
+signalLinkFlow env ctx = do
+  let ch   = _env_channel env
+      send = _ch_send ch . OutgoingMessage
+
+  send "Generating link... (this may take a moment)"
+
+  linkResult <- try @IOException $
+    P.readProcess (P.proc "signal-cli" ["link", "-n", "PureClaw"])
+  case linkResult of
+    Left err -> do
+      send $ "Failed to generate link: " <> T.pack (show err)
+      pure ctx
+    Right (exitCode, out, err) -> do
+      let outText = T.strip (TE.decodeUtf8 (BL.toStrict out))
+          errText = T.strip (TE.decodeUtf8 (BL.toStrict err))
+          -- signal-cli link outputs the URI to stdout or stderr depending on version
+          linkUri
+            | "sgnl://" `T.isInfixOf` outText = outText
+            | "sgnl://" `T.isInfixOf` errText = errText
+            | otherwise = ""
+      case exitCode of
+        ExitSuccess | not (T.null linkUri) -> do
+          send $ T.intercalate "\n"
+            [ "Open Signal on your phone:"
+            , "  Settings \x2192 Linked Devices \x2192 Link New Device"
+            , ""
+            , "Then scan this link or paste it into a QR code generator:"
+            , ""
+            , "  " <> linkUri
+            , ""
+            , "Waiting for you to scan..."
+            ]
+          -- signal-cli link blocks until the QR is scanned, then outputs the phone number
+          -- Since we already called readProcess, the link was completed if exitCode is Success
+          completeSignalSetup env linkUri ctx
+        ExitSuccess -> do
+          -- Linked successfully but no URI visible (interactive mode completed)
+          send "Signal linked successfully!"
+          -- Try to detect the account
+          detectAndWriteSignalConfig env ctx
+        _ -> do
+          send $ "signal-cli link failed:\n" <> errText
+          pure ctx
+
+-- | Register a new phone number.
+signalRegisterFlow :: AgentEnv -> Context -> IO Context
+signalRegisterFlow env ctx = do
+  let ch   = _env_channel env
+      send = _ch_send ch . OutgoingMessage
+
+  phoneNumber <- T.strip <$> _ch_prompt ch "Phone number (E.164 format, e.g. +15555550123): "
+  if T.null phoneNumber || not ("+" `T.isPrefixOf` phoneNumber)
+    then do
+      send "Invalid phone number. Must start with + (E.164 format)."
+      pure ctx
+    else do
+      send $ "Sending verification SMS to " <> phoneNumber <> "..."
+      regResult <- try @IOException $
+        P.readProcess (P.proc "signal-cli" ["-u", T.unpack phoneNumber, "register"])
+      case regResult of
+        Left err -> do
+          send $ "Registration failed: " <> T.pack (show err)
+          pure ctx
+        Right (exitCode, _, errOut) -> case exitCode of
+          ExitSuccess -> do
+            send "Verification code sent! Check your SMS."
+            code <- T.strip <$> _ch_prompt ch "Verification code: "
+            verifyResult <- try @IOException $
+              P.readProcess (P.proc "signal-cli"
+                ["-u", T.unpack phoneNumber, "verify", T.unpack code])
+            case verifyResult of
+              Left err -> do
+                send $ "Verification failed: " <> T.pack (show err)
+                pure ctx
+              Right (verifyExit, _, verifyErr) -> case verifyExit of
+                ExitSuccess -> do
+                  send "Phone number verified!"
+                  writeSignalConfig env phoneNumber ctx
+                _ -> do
+                  send $ "Verification failed: " <> T.strip (TE.decodeUtf8 (BL.toStrict verifyErr))
+                  pure ctx
+          _ -> do
+            send $ "Registration failed: " <> T.strip (TE.decodeUtf8 (BL.toStrict errOut))
+            pure ctx
+
+-- | After successful link, extract account and write config.
+completeSignalSetup :: AgentEnv -> Text -> Context -> IO Context
+completeSignalSetup env _linkUri = detectAndWriteSignalConfig env
+
+-- | Detect the linked account number and write Signal config.
+detectAndWriteSignalConfig :: AgentEnv -> Context -> IO Context
+detectAndWriteSignalConfig env ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  -- signal-cli stores account info; try to list accounts
+  acctResult <- try @IOException $
+    P.readProcess (P.proc "signal-cli" ["listAccounts"])
+  case acctResult of
+    Left _ -> do
+      -- Can't detect — ask user
+      phoneNumber <- T.strip <$> _ch_prompt (_env_channel env)
+        "What phone number was linked? (E.164 format): "
+      writeSignalConfig env phoneNumber ctx
+    Right (_, out, _) -> do
+      let outText = T.strip (TE.decodeUtf8 (BL.toStrict out))
+          -- Look for a line starting with + (phone number)
+          phones = filter ("+" `T.isPrefixOf`) (map T.strip (T.lines outText))
+      case phones of
+        (phone:_) -> do
+          send $ "Detected account: " <> phone
+          writeSignalConfig env phone ctx
+        [] -> do
+          phoneNumber <- T.strip <$> _ch_prompt (_env_channel env)
+            "Could not detect account. Phone number (E.164 format): "
+          writeSignalConfig env phoneNumber ctx
+
+-- | Write Signal config to config.toml and confirm.
+writeSignalConfig :: AgentEnv -> Text -> Context -> IO Context
+writeSignalConfig env phoneNumber ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  pureclawDir <- getPureclawDir
+  Dir.createDirectoryIfMissing True pureclawDir
+  let configPath = pureclawDir </> "config.toml"
+
+  -- Load existing config, add signal settings
+  existing <- loadFileConfig configPath
+  let updated = existing
+        { _fc_defaultChannel = Just "signal"
+        , _fc_signal = Just FileSignalConfig
+            { _fsc_account        = Just phoneNumber
+            , _fsc_dmPolicy       = Just "allowlist"
+            , _fsc_allowFrom      = Just [phoneNumber]
+            , _fsc_textChunkLimit = Nothing  -- use default 6000
+            }
+        }
+  writeFileConfig configPath updated
+
+  send $ T.intercalate "\n"
+    [ ""
+    , "Signal configured!"
+    , "  Account: " <> phoneNumber
+    , "  DM policy: allowlist (only you)"
+    , "  Default channel: signal"
+    , ""
+    , "Restart PureClaw to use Signal as your chat interface."
+    , "Or run with: pureclaw --channel signal"
+    ]
+  pure ctx
 
 -- ---------------------------------------------------------------------------
 -- Help rendering — derived from allCommandSpecs

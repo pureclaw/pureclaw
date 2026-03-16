@@ -13,6 +13,7 @@ module PureClaw.CLI.Config
   , loadConfigDiag
   , configFileConfig
     -- * Writing
+  , writeFileConfig
   , FieldUpdate (..)
   , updateVaultConfig
     -- * Directory helpers
@@ -155,6 +156,11 @@ loadConfigDiag = do
             ConfigFileNotFound _ -> pure (ConfigNotFound [homePath, xdgPath])
             _                    -> pure xdgResult
         _ -> pure homeResult
+
+-- | Write a complete 'FileConfig' to a TOML file.
+-- Overwrites the file entirely. Creates the file if it does not exist.
+writeFileConfig :: FilePath -> FileConfig -> IO ()
+writeFileConfig path cfg = TIO.writeFile path (Toml.encode fileConfigCodec cfg)
 
 -- | Three-valued update: set a new value, clear the field, or keep the existing value.
 data FieldUpdate a
