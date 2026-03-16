@@ -11,7 +11,7 @@ module PureClaw.CLI.Commands
   , buildPolicy
   ) where
 
-import Control.Exception (bracket_)
+import Control.Exception (IOException, bracket_, try)
 import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Maybe
@@ -25,6 +25,7 @@ import Options.Applicative
 import System.Directory (doesFileExist)
 
 import System.IO
+import System.Process.Typed qualified as P
 
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
@@ -311,9 +312,21 @@ runChat opts = do
   case effectiveChannel of
     "signal" -> do
       let sigCfg = resolveSignalConfig fileCfg
-      _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
-      transport <- mkSignalCliTransport (_sc_account sigCfg) logger
-      withSignalChannel sigCfg transport logger startWithChannel
+      -- Check that signal-cli is installed
+      signalCliResult <- try @IOException $
+        P.readProcess (P.proc "signal-cli" ["--version"])
+      case signalCliResult of
+        Left _ -> do
+          _lh_logWarn logger "signal-cli is not installed or not in PATH."
+          _lh_logWarn logger "Install it from: https://github.com/AsamK/signal-cli"
+          _lh_logWarn logger "  brew install signal-cli    (macOS)"
+          _lh_logWarn logger "  nix-env -i signal-cli      (NixOS)"
+          _lh_logWarn logger "Falling back to CLI channel."
+          startWithChannel mkCLIChannelHandle
+        Right _ -> do
+          _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
+          transport <- mkSignalCliTransport (_sc_account sigCfg) logger
+          withSignalChannel sigCfg transport logger startWithChannel
     "cli" ->
       startWithChannel mkCLIChannelHandle
     other -> do
@@ -605,7 +618,12 @@ parseUnlockMode (Just t) = case t of
 resolveSignalConfig :: FileConfig -> SignalConfig
 resolveSignalConfig fileCfg =
   let sigCfg = _fc_signal fileCfg
+      allowFrom = case sigCfg >>= _fsc_allowFrom of
+        Nothing    -> AllowAll
+        Just []    -> AllowAll
+        Just users -> AllowList (Set.fromList (map UserId users))
   in SignalConfig
     { _sc_account        = fromMaybe "+0000000000" (sigCfg >>= _fsc_account)
     , _sc_textChunkLimit = fromMaybe 6000 (sigCfg >>= _fsc_textChunkLimit)
+    , _sc_allowFrom      = allowFrom
     }

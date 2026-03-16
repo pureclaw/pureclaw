@@ -206,5 +206,5 @@ mkTestSignalChannelForFlow = do
   inQ  <- newTQueueIO
   outQ <- newTQueueIO
   let transport = mkMockSignalTransport inQ outQ
-      config = SignalConfig { _sc_account = "+1234567890", _sc_textChunkLimit = 6000 }
+      config = SignalConfig { _sc_account = "+1234567890", _sc_textChunkLimit = 6000, _sc_allowFrom = AllowAll }
   mkSignalChannel config transport mkNoOpLogHandle

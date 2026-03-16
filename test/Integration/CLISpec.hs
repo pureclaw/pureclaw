@@ -120,3 +120,12 @@ spec = do
       (exitCode, _out, err) <- runPureclawWithArgs bin ["--autonomy", "full", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       err `shouldContain` "allow all"
+
+    it "falls back to CLI when --channel signal and signal-cli is not installed" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclawWithArgs bin ["--channel", "signal", "--no-vault"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      -- Should warn about signal-cli not being installed
+      err `shouldContain` "signal-cli"
+      -- Should still start and show the banner
+      out `shouldContain` "PureClaw"

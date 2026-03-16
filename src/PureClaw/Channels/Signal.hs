@@ -4,6 +4,7 @@ module PureClaw.Channels.Signal
   , SignalConfig (..)
   , mkSignalChannel
   , withSignalChannel
+  , readerLoop
     -- * Message parsing
   , parseSignalEnvelope
   , SignalEnvelope (..)
@@ -29,6 +30,7 @@ import PureClaw.Handles.Log
 data SignalConfig = SignalConfig
   { _sc_account        :: Text
   , _sc_textChunkLimit :: Int
+  , _sc_allowFrom      :: AllowList UserId
   }
   deriving stock (Show, Eq)
 
@@ -88,7 +90,13 @@ readerLoop sc = go
             Right envelope ->
               case _se_dataMessage envelope of
                 Nothing -> pure ()  -- Skip non-data envelopes (receipts, typing, etc.)
-                Just _  -> atomically $ writeTQueue (_sch_inbox sc) envelope
+                Just _ ->
+                  let sender = UserId (_se_source envelope)
+                      allowed = isAllowed (_sc_allowFrom (_sch_config sc)) sender
+                  in if allowed
+                    then atomically $ writeTQueue (_sch_inbox sc) envelope
+                    else _lh_logWarn (_sch_log sc) $
+                      "Blocked message from unauthorized sender: " <> _se_source envelope
           go
 
 instance Channel SignalChannel where
