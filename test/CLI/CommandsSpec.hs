@@ -168,6 +168,27 @@ spec = do
       let allVariants = [NoMemory, SQLiteMemory, MarkdownMemory]
       length allVariants `shouldBe` 3
 
+  describe "--channel flag" $ do
+    it "parses --channel signal" $ do
+      case parseArgs ["--channel", "signal"] of
+        Just opts -> _co_channel opts `shouldBe` Just "signal"
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses --channel cli" $ do
+      case parseArgs ["--channel", "cli"] of
+        Just opts -> _co_channel opts `shouldBe` Just "cli"
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses --channel telegram" $ do
+      case parseArgs ["--channel", "telegram"] of
+        Just opts -> _co_channel opts `shouldBe` Just "telegram"
+        Nothing -> expectationFailure "parse failed"
+
+    it "defaults to Nothing" $ do
+      case parseArgs [] of
+        Just opts -> _co_channel opts `shouldBe` Nothing
+        Nothing -> expectationFailure "parse failed"
+
   describe "--autonomy flag" $ do
     it "parses --autonomy full" $ do
       case parseArgs ["--autonomy", "full"] of

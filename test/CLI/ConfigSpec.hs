@@ -113,6 +113,58 @@ spec = do
         cfg <- loadFileConfig path
         _fc_autonomy cfg `shouldBe` Just "supervised"
 
+    it "parses default_channel" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "default_channel = \"signal\"\n"
+        cfg <- loadFileConfig path
+        _fc_defaultChannel cfg `shouldBe` Just "signal"
+
+    it "parses signal section" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path $ mconcat
+          [ "[signal]\n"
+          , "account = \"+15555550123\"\n"
+          , "dm_policy = \"allowlist\"\n"
+          , "allow_from = [\"+15551234567\", \"+15559876543\"]\n"
+          , "text_chunk_limit = 5000\n"
+          ]
+        cfg <- loadFileConfig path
+        case _fc_signal cfg of
+          Nothing -> expectationFailure "expected signal section"
+          Just sig -> do
+            _fsc_account sig `shouldBe` Just "+15555550123"
+            _fsc_dmPolicy sig `shouldBe` Just "allowlist"
+            _fsc_allowFrom sig `shouldBe` Just ["+15551234567", "+15559876543"]
+            _fsc_textChunkLimit sig `shouldBe` Just 5000
+
+    it "parses config with signal section and top-level fields" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path $ mconcat
+          [ "provider = \"anthropic\"\n"
+          , "model = \"claude-sonnet-4-20250514\"\n"
+          , "default_channel = \"signal\"\n"
+          , "\n"
+          , "[signal]\n"
+          , "account = \"+15555550123\"\n"
+          ]
+        cfg <- loadFileConfig path
+        _fc_provider cfg `shouldBe` Just "anthropic"
+        _fc_model cfg `shouldBe` Just "claude-sonnet-4-20250514"
+        _fc_defaultChannel cfg `shouldBe` Just "signal"
+        case _fc_signal cfg of
+          Nothing -> expectationFailure "expected signal section"
+          Just sig -> _fsc_account sig `shouldBe` Just "+15555550123"
+
+    it "returns Nothing for signal section when absent" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "provider = \"anthropic\"\n"
+        cfg <- loadFileConfig path
+        _fc_signal cfg `shouldBe` Nothing
+
     it "parses all fields together" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"

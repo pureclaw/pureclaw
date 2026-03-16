@@ -84,6 +84,7 @@ data ChatOptions = ChatOptions
   , _co_provider      :: Maybe ProviderType
   , _co_allowCommands :: [String]
   , _co_autonomy      :: Maybe AutonomyLevel
+  , _co_channel       :: Maybe String
   , _co_memory        :: Maybe MemoryBackend
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
@@ -122,6 +123,10 @@ chatOptionsParser = ChatOptions
   <*> optional (option parseAutonomyLevel
       ( long "autonomy"
      <> help "Autonomy level: full, supervised, deny (default: deny with no --allow, full with --allow)"
+      ))
+  <*> optional (strOption
+      ( long "channel"
+     <> help "Chat channel: cli, signal, telegram (default: cli)"
       ))
   <*> optional (option parseMemoryBackend
       ( long "memory"
