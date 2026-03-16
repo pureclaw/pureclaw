@@ -17,7 +17,10 @@ module PureClaw.CLI.Import
   ) where
 
 import Control.Exception (IOException, try)
+import Control.Monad ((>=>))
 import Data.Aeson
+import Data.Char qualified as Char
+import Data.Maybe (fromMaybe)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, parseEither, parseMaybe)
@@ -107,8 +110,8 @@ parseOC = withObject "OpenClawConfig" $ \o -> do
   defaults <- maybe (pure emptyDefaults) parseDefaults mAgents
   agents <- maybe (pure []) parseAgentList mAgents
   mChannels <- o .:? "channels"
-  signal <- maybe (pure Nothing) (\c -> withObject "channels" (.:? "signal") c >>= traverse parseSignalCfg) mChannels
-  telegram <- maybe (pure Nothing) (\c -> withObject "channels" (.:? "telegram") c >>= traverse parseTelegramCfg) mChannels
+  signal <- maybe (pure Nothing) (withObject "channels" (.:? "signal") >=> traverse parseSignalCfg) mChannels
+  telegram <- maybe (pure Nothing) (withObject "channels" (.:? "telegram") >=> traverse parseTelegramCfg) mChannels
   pure OpenClawConfig
     { _oc_defaultModel = fst defaults
     , _oc_workspace    = snd defaults
@@ -277,7 +280,7 @@ writeImportedConfig configDir ocConfig = do
     })
 
 buildConfigToml :: OpenClawConfig -> Text
-buildConfigToml oc = T.unlines $ filter (not . T.null) $ concat
+buildConfigToml oc = T.unlines $ concatMap (filter (not . T.null))
   [ maybe [] (\m -> ["model = " <> quoted m]) (_oc_defaultModel oc)
   , case _oc_signal oc of
       Nothing -> []
@@ -316,7 +319,7 @@ writeAgentFile agentsDir agent = do
       header = if hasFrontmatter
         then ["---"] ++ frontmatterLines ++ ["---", ""]
         else []
-      body = maybe "" id (_oca_systemPrompt agent)
+      body = fromMaybe "" (_oca_systemPrompt agent)
   TIO.writeFile (agentDir </> "AGENTS.md") (T.unlines (header ++ [body]))
   pure (_oca_id agent)
 
@@ -328,6 +331,6 @@ fmtList xs = "[" <> T.intercalate ", " (map quoted xs) <> "]"
 
 camelToSnake :: Text -> Text
 camelToSnake = T.concatMap $ \c ->
-  if c >= 'A' && c <= 'Z'
-    then T.pack ['_', toEnum (fromEnum c + 32)]
+  if Char.isAsciiUpper c
+    then T.pack ['_', Char.toLower c]
     else T.singleton c
