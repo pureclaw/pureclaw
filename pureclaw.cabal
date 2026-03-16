@@ -107,6 +107,7 @@ library
     PureClaw.Scheduler.Heartbeat
     -- CLI
     PureClaw.CLI.Config
+    PureClaw.CLI.Import
     PureClaw.CLI.Commands
   build-depends:
     base              >= 4.20,
@@ -185,6 +186,7 @@ test-suite pureclaw-test
     Channels.CLISpec
     CLI.CommandsSpec
     CLI.ConfigSpec
+    CLI.ImportSpec
     Tools.RegistrySpec
     Tools.ShellSpec
     Tools.FileReadSpec
