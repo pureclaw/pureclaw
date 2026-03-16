@@ -22,7 +22,11 @@ findPureclaw = do
 -- in a temp directory, feeding it stdin and capturing stdout/stderr.
 -- Returns (exit code, stdout, stderr).
 runPureclaw :: FilePath -> String -> Int -> IO (ExitCode, String, String)
-runPureclaw bin stdinContent timeoutUs = do
+runPureclaw bin = runPureclawWithArgs bin ["--no-vault"]
+
+-- | Run the pureclaw binary with custom arguments.
+runPureclawWithArgs :: FilePath -> [String] -> String -> Int -> IO (ExitCode, String, String)
+runPureclawWithArgs bin args stdinContent timeoutUs = do
   withSystemTempDirectory "pureclaw-cli-test" $ \tmpDir -> do
     let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 (T.pack stdinContent))))
            $ setStdout byteStringOutput
@@ -34,7 +38,7 @@ runPureclaw bin stdinContent timeoutUs = do
                , ("TERM", "dumb")
                , ("LANG", "C.UTF-8")          -- GHC needs UTF-8 locale for em-dashes etc.
                ]
-           $ proc bin ["--no-vault"]
+           $ proc bin args
     result <- race' (threadDelay timeoutUs) (readProcess pc)
     case result of
       Left ()               -> fail "pureclaw timed out"
@@ -104,3 +108,24 @@ spec = do
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       -- Should mention how to configure credentials
       out `shouldContain` "provider"
+
+    it "shows a warning when --autonomy full is set" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithArgs bin ["--autonomy", "full", "--no-vault"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      err `shouldContain` "unrestricted"
+
+    it "shows allowed commands as allow-all when --autonomy full with no --allow" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithArgs bin ["--autonomy", "full", "--no-vault"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      err `shouldContain` "allow all"
+
+    it "falls back to CLI when --channel signal and signal-cli is not installed" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclawWithArgs bin ["gateway", "run", "--channel", "signal", "--no-vault"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      -- Should warn about signal-cli not being installed
+      err `shouldContain` "signal-cli"
+      -- Should still start and show the banner
+      out `shouldContain` "PureClaw"

@@ -100,6 +100,72 @@ spec = do
         cfg <- loadFileConfig path
         _fc_vault_unlock cfg `shouldBe` Just "startup"
 
+    it "parses autonomy" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "autonomy = \"full\"\n"
+        cfg <- loadFileConfig path
+        _fc_autonomy cfg `shouldBe` Just "full"
+
+    it "parses autonomy supervised" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "autonomy = \"supervised\"\n"
+        cfg <- loadFileConfig path
+        _fc_autonomy cfg `shouldBe` Just "supervised"
+
+    it "parses default_channel" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "default_channel = \"signal\"\n"
+        cfg <- loadFileConfig path
+        _fc_defaultChannel cfg `shouldBe` Just "signal"
+
+    it "parses signal section" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path $ mconcat
+          [ "[signal]\n"
+          , "account = \"+15555550123\"\n"
+          , "dm_policy = \"allowlist\"\n"
+          , "allow_from = [\"+15551234567\", \"+15559876543\"]\n"
+          , "text_chunk_limit = 5000\n"
+          ]
+        cfg <- loadFileConfig path
+        case _fc_signal cfg of
+          Nothing -> expectationFailure "expected signal section"
+          Just sig -> do
+            _fsc_account sig `shouldBe` Just "+15555550123"
+            _fsc_dmPolicy sig `shouldBe` Just "allowlist"
+            _fsc_allowFrom sig `shouldBe` Just ["+15551234567", "+15559876543"]
+            _fsc_textChunkLimit sig `shouldBe` Just 5000
+
+    it "parses config with signal section and top-level fields" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path $ mconcat
+          [ "provider = \"anthropic\"\n"
+          , "model = \"claude-sonnet-4-20250514\"\n"
+          , "default_channel = \"signal\"\n"
+          , "\n"
+          , "[signal]\n"
+          , "account = \"+15555550123\"\n"
+          ]
+        cfg <- loadFileConfig path
+        _fc_provider cfg `shouldBe` Just "anthropic"
+        _fc_model cfg `shouldBe` Just "claude-sonnet-4-20250514"
+        _fc_defaultChannel cfg `shouldBe` Just "signal"
+        case _fc_signal cfg of
+          Nothing -> expectationFailure "expected signal section"
+          Just sig -> _fsc_account sig `shouldBe` Just "+15555550123"
+
+    it "returns Nothing for signal section when absent" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "provider = \"anthropic\"\n"
+        cfg <- loadFileConfig path
+        _fc_signal cfg `shouldBe` Nothing
+
     it "parses all fields together" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
@@ -110,6 +176,7 @@ spec = do
           , "system           = \"Be helpful.\"\n"
           , "memory           = \"markdown\"\n"
           , "allow            = [\"git\", \"curl\"]\n"
+          , "autonomy         = \"full\"\n"
           , "vault_recipient  = \"age1xyz\"\n"
           , "vault_identity   = \"~/.age/key.txt\"\n"
           , "vault_path       = \".pureclaw/vault.age\"\n"
@@ -122,6 +189,7 @@ spec = do
         _fc_system          cfg `shouldBe` Just "Be helpful."
         _fc_memory          cfg `shouldBe` Just "markdown"
         _fc_allow           cfg `shouldBe` Just ["git", "curl"]
+        _fc_autonomy        cfg `shouldBe` Just "full"
         _fc_vault_recipient cfg `shouldBe` Just "age1xyz"
         _fc_vault_identity  cfg `shouldBe` Just "~/.age/key.txt"
         _fc_vault_path      cfg `shouldBe` Just ".pureclaw/vault.age"
@@ -137,6 +205,7 @@ spec = do
         _fc_system          cfg `shouldBe` Nothing
         _fc_memory          cfg `shouldBe` Nothing
         _fc_allow           cfg `shouldBe` Nothing
+        _fc_autonomy        cfg `shouldBe` Nothing
         _fc_vault_recipient cfg `shouldBe` Nothing
         _fc_vault_identity  cfg `shouldBe` Nothing
         _fc_vault_path      cfg `shouldBe` Nothing
@@ -163,6 +232,7 @@ spec = do
       _fc_system          emptyFileConfig `shouldBe` Nothing
       _fc_memory          emptyFileConfig `shouldBe` Nothing
       _fc_allow           emptyFileConfig `shouldBe` Nothing
+      _fc_autonomy        emptyFileConfig `shouldBe` Nothing
       _fc_vault_recipient emptyFileConfig `shouldBe` Nothing
       _fc_vault_identity  emptyFileConfig `shouldBe` Nothing
       _fc_vault_path      emptyFileConfig `shouldBe` Nothing

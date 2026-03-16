@@ -1,15 +1,18 @@
 module PureClaw.CLI.Commands
   ( -- * Entry point
     runCLI
-    -- * Options (exported for testing)
+    -- * Command types (exported for testing)
+  , Command (..)
   , ChatOptions (..)
   , chatOptionsParser
     -- * Enums (exported for testing)
   , ProviderType (..)
   , MemoryBackend (..)
+    -- * Policy (exported for testing)
+  , buildPolicy
   ) where
 
-import Control.Exception (bracket_)
+import Control.Exception (IOException, bracket_, try)
 import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Maybe
@@ -23,6 +26,7 @@ import Options.Applicative
 import System.Directory (doesFileExist)
 
 import System.IO
+import System.Process.Typed qualified as P
 
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
@@ -31,7 +35,10 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Channels.CLI
+import PureClaw.Channels.Signal
+import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
+import PureClaw.Handles.Channel
 import PureClaw.Handles.File
 import PureClaw.Handles.Log
 import PureClaw.Handles.Memory
@@ -81,6 +88,8 @@ data ChatOptions = ChatOptions
   , _co_system        :: Maybe String
   , _co_provider      :: Maybe ProviderType
   , _co_allowCommands :: [String]
+  , _co_autonomy      :: Maybe AutonomyLevel
+  , _co_channel       :: Maybe String
   , _co_memory        :: Maybe MemoryBackend
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
@@ -115,6 +124,14 @@ chatOptionsParser = ChatOptions
       ( long "allow"
      <> short 'a'
      <> help "Allow a shell command (repeatable, e.g. --allow git --allow ls)"
+      ))
+  <*> optional (option parseAutonomyLevel
+      ( long "autonomy"
+     <> help "Autonomy level: full, supervised, deny (default: deny with no --allow, full with --allow)"
+      ))
+  <*> optional (strOption
+      ( long "channel"
+     <> help "Chat channel: cli, signal, telegram (default: cli)"
       ))
   <*> optional (option parseMemoryBackend
       ( long "memory"
@@ -168,19 +185,42 @@ memoryToText NoMemory       = "none"
 memoryToText SQLiteMemory   = "sqlite"
 memoryToText MarkdownMemory = "markdown"
 
--- | Full CLI parser with help and version.
-cliParserInfo :: ParserInfo ChatOptions
-cliParserInfo = info (chatOptionsParser <**> helper)
+-- | Top-level CLI command.
+data Command
+  = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
+  | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
+  deriving stock (Show, Eq)
+
+-- | Full CLI parser with subcommands.
+cliParserInfo :: ParserInfo Command
+cliParserInfo = info (commandParser <**> helper)
   ( fullDesc
- <> progDesc "Interactive AI chat with tool use"
+ <> progDesc "Haskell-native AI agent runtime"
  <> header "pureclaw — Haskell-native AI agent runtime"
   )
+
+-- | Parser for the top-level command.
+-- @pureclaw tui@ — interactive terminal
+-- @pureclaw gateway run@ — channel-aware agent
+-- No subcommand defaults to @tui@ for backward compatibility.
+commandParser :: Parser Command
+commandParser = subparser
+    ( command "tui" (info (CmdTui <$> chatOptionsParser <**> helper)
+        (progDesc "Interactive terminal chat UI"))
+   <> command "gateway" (info (subparser
+        (command "run" (info (CmdGateway <$> chatOptionsParser <**> helper)
+          (progDesc "Run the agent with channel from config (Signal, Telegram, CLI)"))))
+        (progDesc "Gateway — channel-aware agent"))
+    )
+  <|> (CmdTui <$> chatOptionsParser)  -- default to tui when no subcommand
 
 -- | Main CLI entry point.
 runCLI :: IO ()
 runCLI = do
-  opts <- execParser cliParserInfo
-  runChat opts
+  cmd <- execParser cliParserInfo
+  case cmd of
+    CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
+    CmdGateway opts -> runChat opts
 
 -- | Run an interactive chat session.
 runChat :: ChatOptions -> IO ()
@@ -211,6 +251,8 @@ runChat opts = do
       effectiveApiKey   = _co_apiKey opts <|> fmap T.unpack (_fc_apiKey fileCfg)
       effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
       effectiveAllow    = _co_allowCommands opts <> maybe [] (map T.unpack) (_fc_allow fileCfg)
+      effectiveAutonomy = _co_autonomy opts
+                      <|> parseAutonomyMaybe (_fc_autonomy fileCfg)
 
   -- Vault (opened before provider so API keys can be fetched from vault)
   vaultOpt <- resolveVault fileCfg (_co_noVault opts) logger
@@ -235,11 +277,10 @@ runChat opts = do
         else pure (Just (identitySystemPrompt ident))
 
   -- Security policy
-  let policy = buildPolicy effectiveAllow
+  let policy = buildPolicy effectiveAutonomy effectiveAllow
 
   -- Handles
-  let channel   = mkCLIChannelHandle
-      workspace = WorkspaceRoot "."
+  let workspace = WorkspaceRoot "."
       sh        = mkShellHandle logger
       fh        = mkFileHandle workspace
       nh        = mkNetworkHandle manager
@@ -255,25 +296,66 @@ runChat opts = do
       "No providers configured \x2014 use /provider to get started"
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
-  case effectiveAllow of
-    [] -> _lh_logInfo logger "Commands: none (deny all)"
-    cmds -> _lh_logInfo logger $ "Commands: " <> T.intercalate ", " (map T.pack cmds)
-  putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
-  putStrLn "Type your message and press Enter. Ctrl-D to exit."
-  putStrLn ""
-  vaultRef    <- newIORef vaultOpt
-  providerRef <- newIORef mProvider
-  let env = AgentEnv
-        { _env_provider     = providerRef
-        , _env_model        = model
-        , _env_channel      = channel
-        , _env_logger       = logger
-        , _env_systemPrompt = sysPrompt
-        , _env_registry     = registry
-        , _env_vault        = vaultRef
-        , _env_pluginHandle = mkPluginHandle
-        }
-  runAgentLoop env
+  case (_sp_allowedCommands policy, _sp_autonomy policy) of
+    (AllowAll, Full) -> do
+      _lh_logInfo logger "Commands: allow all (unrestricted mode)"
+      _lh_logInfo logger
+        "\x26a0\xfe0f  Running in unrestricted mode \x2014 the agent can execute any command without approval."
+    (_, Deny) ->
+      _lh_logInfo logger "Commands: none (deny all)"
+    (AllowList s, _) | Set.null s ->
+      _lh_logInfo logger "Commands: none (deny all)"
+    _ ->
+      _lh_logInfo logger $ "Commands: " <> T.intercalate ", " (map T.pack effectiveAllow)
+
+  -- Channel selection: CLI flag > config file > default (cli)
+  let effectiveChannel = fromMaybe "cli"
+        (_co_channel opts <|> fmap T.unpack (_fc_defaultChannel fileCfg))
+
+  let startWithChannel :: ChannelHandle -> IO ()
+      startWithChannel channel = do
+        putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"
+        case effectiveChannel of
+          "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
+          _     -> putStrLn $ "Channel: " <> effectiveChannel
+        putStrLn ""
+        vaultRef    <- newIORef vaultOpt
+        providerRef <- newIORef mProvider
+        let env = AgentEnv
+              { _env_provider     = providerRef
+              , _env_model        = model
+              , _env_channel      = channel
+              , _env_logger       = logger
+              , _env_systemPrompt = sysPrompt
+              , _env_registry     = registry
+              , _env_vault        = vaultRef
+              , _env_pluginHandle = mkPluginHandle
+              }
+        runAgentLoop env
+
+  case effectiveChannel of
+    "signal" -> do
+      let sigCfg = resolveSignalConfig fileCfg
+      -- Check that signal-cli is installed
+      signalCliResult <- try @IOException $
+        P.readProcess (P.proc "signal-cli" ["--version"])
+      case signalCliResult of
+        Left _ -> do
+          _lh_logWarn logger "signal-cli is not installed or not in PATH."
+          _lh_logWarn logger "Install it from: https://github.com/AsamK/signal-cli"
+          _lh_logWarn logger "  brew install signal-cli    (macOS)"
+          _lh_logWarn logger "  nix-env -i signal-cli      (NixOS)"
+          _lh_logWarn logger "Falling back to CLI channel."
+          startWithChannel mkCLIChannelHandle
+        Right _ -> do
+          _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
+          transport <- mkSignalCliTransport (_sc_account sigCfg) logger
+          withSignalChannel sigCfg transport logger startWithChannel
+    "cli" ->
+      startWithChannel mkCLIChannelHandle
+    other -> do
+      _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
+      startWithChannel mkCLIChannelHandle
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType
@@ -283,6 +365,23 @@ parseProviderMaybe (Just t) = case T.unpack t of
   "openai"     -> Just OpenAI
   "openrouter" -> Just OpenRouter
   "ollama"     -> Just Ollama
+  _            -> Nothing
+
+-- | Parse an autonomy level from a CLI string.
+parseAutonomyLevel :: ReadM AutonomyLevel
+parseAutonomyLevel = eitherReader $ \s -> case s of
+  "full"       -> Right Full
+  "supervised" -> Right Supervised
+  "deny"       -> Right Deny
+  _            -> Left $ "Unknown autonomy level: " <> s <> ". Choose: full, supervised, deny"
+
+-- | Parse an autonomy level from a text value (used for config file).
+parseAutonomyMaybe :: Maybe T.Text -> Maybe AutonomyLevel
+parseAutonomyMaybe Nothing  = Nothing
+parseAutonomyMaybe (Just t) = case t of
+  "full"       -> Just Full
+  "supervised" -> Just Supervised
+  "deny"       -> Just Deny
   _            -> Nothing
 
 -- | Parse a memory backend from a text value (used for config file).
@@ -307,12 +406,31 @@ buildRegistry policy sh workspace fh mh nh =
    $ reg (httpRequestTool AllowAll nh)
      emptyRegistry
 
--- | Build a security policy from the list of allowed commands.
-buildPolicy :: [String] -> SecurityPolicy
-buildPolicy [] = defaultPolicy
-buildPolicy cmds =
+-- | Build a security policy from optional autonomy level and allowed commands.
+--
+-- Behavior:
+--   * @Just Full@ + empty allow list → 'AllowAll' + 'Full' (unrestricted mode)
+--   * @Just Full@ + allow list → 'AllowList' of those commands + 'Full'
+--   * @Just Supervised@ + allow list → 'AllowList' + 'Supervised'
+--   * @Just Deny@ → 'defaultPolicy' ('Deny', empty 'AllowList')
+--   * @Nothing@ + empty allow list → 'defaultPolicy' (backward compat)
+--   * @Nothing@ + allow list → 'Full' + 'AllowList' (backward compat)
+buildPolicy :: Maybe AutonomyLevel -> [String] -> SecurityPolicy
+buildPolicy (Just Deny) _ = defaultPolicy
+buildPolicy (Just level) [] = SecurityPolicy
+  { _sp_allowedCommands = AllowAll
+  , _sp_autonomy = level
+  }
+buildPolicy (Just level) cmds =
   let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
-  in defaultPolicy
+  in SecurityPolicy
+    { _sp_allowedCommands = AllowList cmdNames
+    , _sp_autonomy = level
+    }
+buildPolicy Nothing [] = defaultPolicy
+buildPolicy Nothing cmds =
+  let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
+  in SecurityPolicy
     { _sp_allowedCommands = AllowList cmdNames
     , _sp_autonomy = Full
     }
@@ -519,3 +637,20 @@ parseUnlockMode (Just t) = case t of
   "on_demand"  -> UnlockOnDemand
   "per_access" -> UnlockPerAccess
   _            -> UnlockOnDemand
+
+-- | Resolve Signal channel config from the file config.
+resolveSignalConfig :: FileConfig -> SignalConfig
+resolveSignalConfig fileCfg =
+  let sigCfg = _fc_signal fileCfg
+      dmPolicy = sigCfg >>= _fsc_dmPolicy
+      allowFrom = case dmPolicy of
+        Just "open" -> AllowAll
+        _ -> case sigCfg >>= _fsc_allowFrom of
+          Nothing    -> AllowAll
+          Just []    -> AllowAll
+          Just users -> AllowList (Set.fromList (map UserId users))
+  in SignalConfig
+    { _sc_account        = fromMaybe "+0000000000" (sigCfg >>= _fsc_account)
+    , _sc_textChunkLimit = fromMaybe 6000 (sigCfg >>= _fsc_textChunkLimit)
+    , _sc_allowFrom      = allowFrom
+    }

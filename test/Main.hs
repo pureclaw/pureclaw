@@ -56,6 +56,7 @@ import qualified Gateway.ServerSpec
 import qualified Channels.ClassSpec
 import qualified Channels.TelegramSpec
 import qualified Channels.SignalSpec
+import qualified Channels.SignalTransportSpec
 import qualified Agent.IdentitySpec
 import qualified Scheduler.CronSpec
 import qualified Scheduler.HeartbeatSpec
@@ -118,6 +119,7 @@ main = hspec $ do
   describe "Channels.Class" Channels.ClassSpec.spec
   describe "Channels.Telegram" Channels.TelegramSpec.spec
   describe "Channels.Signal" Channels.SignalSpec.spec
+  describe "Channels.Signal.Transport" Channels.SignalTransportSpec.spec
   describe "Agent.Identity" Agent.IdentitySpec.spec
   describe "Scheduler.Cron" Scheduler.CronSpec.spec
   describe "Scheduler.Heartbeat" Scheduler.HeartbeatSpec.spec

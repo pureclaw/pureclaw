@@ -303,7 +303,12 @@ processSSELine blocksRef modelRef usageRef callback line =
       Right evt -> case evt of
         SSEContentText t -> do
           callback (StreamText t)
-          modifyIORef blocksRef (TextBlock t :)
+          -- Accumulate streamed text into a single TextBlock rather than
+          -- creating one per chunk (which would insert spurious newlines
+          -- when responseText joins them with "\n").
+          modifyIORef blocksRef $ \blocks -> case blocks of
+            (TextBlock prev : rest) -> TextBlock (prev <> t) : rest
+            _                       -> TextBlock t : blocks
         SSEToolStart callId name ->
           callback (StreamToolUse callId name)
         SSEToolDelta t ->

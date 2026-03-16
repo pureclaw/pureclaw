@@ -1,7 +1,9 @@
 module PureClaw.CLI.Config
   ( -- * File config
     FileConfig (..)
+  , FileSignalConfig (..)
   , emptyFileConfig
+  , emptyFileSignalConfig
     -- * Loading
   , loadFileConfig
   , loadConfig
@@ -11,6 +13,7 @@ module PureClaw.CLI.Config
   , loadConfigDiag
   , configFileConfig
     -- * Writing
+  , writeFileConfig
   , FieldUpdate (..)
   , updateVaultConfig
     -- * Directory helpers
@@ -34,16 +37,30 @@ data FileConfig = FileConfig
   , _fc_system         :: Maybe Text
   , _fc_memory         :: Maybe Text
   , _fc_allow          :: Maybe [Text]
+  , _fc_autonomy       :: Maybe Text  -- ^ "full", "supervised", or "deny"
+  , _fc_defaultChannel :: Maybe Text  -- ^ "cli", "signal", or "telegram"
+  , _fc_signal         :: Maybe FileSignalConfig  -- ^ [signal] TOML table
   , _fc_vault_path      :: Maybe Text  -- ^ vault file path (default: ~/.pureclaw/vault.age)
   , _fc_vault_recipient :: Maybe Text  -- ^ age recipient string (required to enable vault)
   , _fc_vault_identity  :: Maybe Text  -- ^ age identity path or plugin string
   , _fc_vault_unlock    :: Maybe Text  -- ^ "startup", "on_demand", or "per_access"
   } deriving stock (Show, Eq)
 
+-- | Signal channel configuration from the @[signal]@ TOML table.
+data FileSignalConfig = FileSignalConfig
+  { _fsc_account        :: Maybe Text    -- ^ E.164 phone number
+  , _fsc_dmPolicy       :: Maybe Text    -- ^ "pairing", "allowlist", "open", "disabled"
+  , _fsc_allowFrom      :: Maybe [Text]  -- ^ E.164 numbers or UUIDs
+  , _fsc_textChunkLimit :: Maybe Int     -- ^ Max chars per message (default: 6000)
+  } deriving stock (Show, Eq)
+
 emptyFileConfig :: FileConfig
 emptyFileConfig =
   FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
-             Nothing Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+
+emptyFileSignalConfig :: FileSignalConfig
+emptyFileSignalConfig = FileSignalConfig Nothing Nothing Nothing Nothing
 
 fileConfigCodec :: TomlCodec FileConfig
 fileConfigCodec = FileConfig
@@ -53,10 +70,20 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.text "system")                    .= _fc_system
   <*> Toml.dioptional (Toml.text "memory")                    .= _fc_memory
   <*> Toml.dioptional (Toml.arrayOf Toml._Text "allow")       .= _fc_allow
+  <*> Toml.dioptional (Toml.text "autonomy")                  .= _fc_autonomy
+  <*> Toml.dioptional (Toml.text "default_channel")           .= _fc_defaultChannel
+  <*> Toml.dioptional (Toml.table fileSignalConfigCodec "signal") .= _fc_signal
   <*> Toml.dioptional (Toml.text "vault_path")                .= _fc_vault_path
   <*> Toml.dioptional (Toml.text "vault_recipient")           .= _fc_vault_recipient
   <*> Toml.dioptional (Toml.text "vault_identity")            .= _fc_vault_identity
   <*> Toml.dioptional (Toml.text "vault_unlock")              .= _fc_vault_unlock
+
+fileSignalConfigCodec :: TomlCodec FileSignalConfig
+fileSignalConfigCodec = FileSignalConfig
+  <$> Toml.dioptional (Toml.text "account")                   .= _fsc_account
+  <*> Toml.dioptional (Toml.text "dm_policy")                 .= _fsc_dmPolicy
+  <*> Toml.dioptional (Toml.arrayOf Toml._Text "allow_from")  .= _fsc_allowFrom
+  <*> Toml.dioptional (Toml.int "text_chunk_limit")           .= _fsc_textChunkLimit
 
 -- | Load config from a single file path.
 -- Returns 'emptyFileConfig' if the file does not exist or cannot be parsed.
@@ -129,6 +156,11 @@ loadConfigDiag = do
             ConfigFileNotFound _ -> pure (ConfigNotFound [homePath, xdgPath])
             _                    -> pure xdgResult
         _ -> pure homeResult
+
+-- | Write a complete 'FileConfig' to a TOML file.
+-- Overwrites the file entirely. Creates the file if it does not exist.
+writeFileConfig :: FilePath -> FileConfig -> IO ()
+writeFileConfig path cfg = TIO.writeFile path (Toml.encode fileConfigCodec cfg)
 
 -- | Three-valued update: set a new value, clear the field, or keep the existing value.
 data FieldUpdate a

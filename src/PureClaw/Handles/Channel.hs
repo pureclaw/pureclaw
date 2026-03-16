@@ -45,6 +45,11 @@ data ChannelHandle = ChannelHandle
   , _ch_send         :: OutgoingMessage -> IO ()
   , _ch_sendError    :: PublicError -> IO ()
   , _ch_sendChunk    :: StreamChunk -> IO ()
+  , _ch_streaming    :: Bool
+    -- ^ Whether this channel supports streaming output. When 'True',
+    -- the agent loop sends text via '_ch_sendChunk' during generation
+    -- and skips the full '_ch_send'. When 'False', only '_ch_send'
+    -- is used for the final complete response.
   , _ch_readSecret   :: IO Text    -- ^ Read a line without echo (CLI only)
   , _ch_prompt       :: Text -> IO Text
     -- ^ Display a prompt and read input on the same line (no trailing
@@ -63,6 +68,7 @@ mkNoOpChannelHandle = ChannelHandle
   , _ch_send         = \_ -> pure ()
   , _ch_sendError    = \_ -> pure ()
   , _ch_sendChunk    = \_ -> pure ()
+  , _ch_streaming    = False
   , _ch_readSecret   = pure ""
   , _ch_prompt       = \_ -> pure ""
   , _ch_promptSecret = \_ -> pure ""

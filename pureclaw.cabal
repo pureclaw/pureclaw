@@ -93,6 +93,7 @@ library
     PureClaw.Channels.CLI
     PureClaw.Channels.Telegram
     PureClaw.Channels.Signal
+    PureClaw.Channels.Signal.Transport
     -- Memory backends
     PureClaw.Memory.SQLite
     PureClaw.Memory.Markdown
@@ -217,6 +218,7 @@ test-suite pureclaw-test
     Channels.ClassSpec
     Channels.TelegramSpec
     Channels.SignalSpec
+    Channels.SignalTransportSpec
     Agent.IdentitySpec
     Scheduler.CronSpec
     Scheduler.HeartbeatSpec

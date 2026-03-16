@@ -112,8 +112,9 @@ runAgentLoop env = do
                   text = responseText response
                   ctx' = recordUsage (_crsp_usage response)
                        $ addMessage (Message Assistant (_crsp_content response)) ctx
-              -- If not streamed, send the full text
-              unless (wasStreaming || T.null (T.strip text)) $
+              -- Send the full text. For streaming channels, the text was already
+              -- displayed chunk-by-chunk so we skip the full send to avoid duplicates.
+              unless (wasStreaming && _ch_streaming channel || T.null (T.strip text)) $
                 _ch_send channel (OutgoingMessage text)
               -- If there are tool calls, execute them and continue
               if null calls

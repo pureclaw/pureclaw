@@ -13,6 +13,7 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Loop
 import PureClaw.Channels.Class
 import PureClaw.Channels.Signal
+import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
@@ -56,7 +57,7 @@ spec = do
   describe "Signal end-to-end flow" $ do
     it "receives a Signal message, processes via agent, and produces a response" $ do
       -- Set up Signal channel
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -68,8 +69,9 @@ spec = do
 
       -- Push a Signal envelope into the inbox
       let envelope = SignalEnvelope
-            { _se_source    = "+9876543210"
-            , _se_timestamp = 1000
+            { _se_sourceUuid = Nothing
+            , _se_source    = "+9876543210"
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage
                 { _sdm_message = "Hello from Signal!"
                 , _sdm_timestamp = 1000
@@ -93,7 +95,7 @@ spec = do
         _ -> expectationFailure "expected at least one message"
 
     it "handles multiple Signal messages in sequence" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -104,7 +106,8 @@ spec = do
       -- Push two messages
       let mkEnvelope txt ts = SignalEnvelope
             { _se_source = "+111"
-            , _se_timestamp = ts
+            , _se_sourceUuid = Nothing
+            , _se_timestamp = Just ts
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = txt, _sdm_timestamp = ts }
             }
       atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "First" 1000)
@@ -119,7 +122,7 @@ spec = do
       length sent `shouldBe` 2
 
     it "uses slash commands through Signal" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -130,7 +133,8 @@ spec = do
       -- Send /status slash command
       let statusEnvelope = SignalEnvelope
             { _se_source = "+111"
-            , _se_timestamp = 1000
+            , _se_sourceUuid = Nothing
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "/status", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) statusEnvelope
@@ -146,7 +150,7 @@ spec = do
         _ -> expectationFailure "expected at least one message"
 
     it "executes tool calls end-to-end" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -162,7 +166,8 @@ spec = do
 
       let envelope = SignalEnvelope
             { _se_source = "+111"
-            , _se_timestamp = 1000
+            , _se_sourceUuid = Nothing
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "do it", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) envelope
@@ -198,3 +203,12 @@ instance Provider ToolCallThenTextProvider where
     where
       isResult (ToolResultBlock {}) = True
       isResult _ = False
+
+-- | Create a test SignalChannel with mock transport.
+mkTestSignalChannelForFlow :: IO SignalChannel
+mkTestSignalChannelForFlow = do
+  inQ  <- newTQueueIO
+  outQ <- newTQueueIO
+  let transport = mkMockSignalTransport inQ outQ
+      config = SignalConfig { _sc_account = "+1234567890", _sc_textChunkLimit = 6000, _sc_allowFrom = AllowAll }
+  mkSignalChannel config transport mkNoOpLogHandle

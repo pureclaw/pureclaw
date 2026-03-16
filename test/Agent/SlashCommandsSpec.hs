@@ -6,6 +6,8 @@ import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import System.Environment (setEnv, getEnv)
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import PureClaw.Agent.Context
@@ -113,6 +115,17 @@ mkMockChannelAll allSentRef msgsRef = mkNoOpChannelHandle
   , _ch_prompt       = \_ -> popMsg msgsRef
   , _ch_promptSecret = \_ -> popMsg msgsRef
   }
+
+-- | Run an IO action with HOME set to a temporary directory.
+-- Prevents tests that call getPureclawDir from writing to the real config.
+withTempHome :: IO a -> IO a
+withTempHome action =
+  withSystemTempDirectory "pureclaw-test-home" $ \tmpDir -> do
+    origHome <- getEnv "HOME"
+    bracket_
+      (setEnv "HOME" tmpDir)
+      (setEnv "HOME" origHome)
+      action
 
 spec :: Spec
 spec = do
@@ -381,7 +394,7 @@ spec = do
         Just t -> T.unpack t `shouldContain` "No vault configured"
         Nothing -> expectationFailure "Expected message"
 
-    it "/vault setup with no vault and invalid choice → cancelled" $ do
+    it "/vault setup with no vault and invalid choice → cancelled" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       msgsRef <- newIORef ["bad"]
       vaultRef    <- newIORef Nothing
@@ -403,7 +416,7 @@ spec = do
         Just t -> T.unpack t `shouldContain` "Invalid choice"
         Nothing -> expectationFailure "Expected message"
 
-    it "/vault setup from fresh install with uninitialized vault handle succeeds" $ do
+    it "/vault setup from fresh install with uninitialized vault handle succeeds" $ withTempHome $ do
       -- Reproduces the bug: resolvePassphraseVault returns Just vault even
       -- when the vault file doesn't exist. When the user then runs
       -- /vault setup, executeVaultSetup sees Just vault and tries to rekey
@@ -454,7 +467,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             }
 
-    it "/vault setup presents menu with passphrase option" $ do
+    it "/vault setup presents menu with passphrase option" $ withTempHome $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
       vaultRef    <- newIORef Nothing
@@ -476,7 +489,7 @@ spec = do
       T.unpack menuMsg `shouldContain` "Passphrase"
       T.unpack menuMsg `shouldContain` "Choose your vault"
 
-    it "/vault setup shows detected plugins in menu" $ do
+    it "/vault setup shows detected plugins in menu" $ withTempHome $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
       vaultRef    <- newIORef Nothing
@@ -503,7 +516,7 @@ spec = do
       T.unpack menuMsg `shouldContain` "YubiKey PIV"
       T.unpack menuMsg `shouldContain` "2."  -- yubikey should be option 2
 
-    it "/vault setup rekeys existing vault with passphrase" $ do
+    it "/vault setup rekeys existing vault with passphrase" $ withTempHome $ do
       allSentRef <- newIORef ([] :: [Text])
       -- User picks "1" (passphrase), then enters passphrase, then confirms rekey
       msgsRef <- newIORef ["1", "test-passphrase", "y"]
@@ -538,7 +551,7 @@ spec = do
         (lastMsg:_) -> T.unpack lastMsg `shouldContain` "rekeyed"
         []          -> expectationFailure "Expected messages"
 
-    it "/vault setup rekey cancelled by user" $ do
+    it "/vault setup rekey cancelled by user" $ withTempHome $ do
       allSentRef <- newIORef ([] :: [Text])
       -- User picks "1" (passphrase), then enters passphrase, then refuses rekey
       msgsRef <- newIORef ["1", "test-passphrase", "n"]
@@ -571,7 +584,7 @@ spec = do
         (lastMsg:_) -> T.unpack lastMsg `shouldContain` "cancelled"
         []          -> expectationFailure "Expected messages"
 
-    it "/vault setup passphrase read error" $ do
+    it "/vault setup passphrase read error" $ withTempHome $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ["1"]  -- pick passphrase
       vaultRef    <- newIORef Nothing

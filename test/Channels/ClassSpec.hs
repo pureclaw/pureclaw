@@ -15,6 +15,7 @@ instance Channel TestChannel where
     , _ch_send         = \_ -> pure ()
     , _ch_sendError    = \_ -> pure ()
     , _ch_sendChunk    = \_ -> pure ()
+    , _ch_streaming    = False
     , _ch_readSecret   = pure ""
     , _ch_prompt       = \_ -> pure ""
     , _ch_promptSecret = \_ -> pure ""
