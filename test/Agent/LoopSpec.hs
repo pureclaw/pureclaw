@@ -232,6 +232,7 @@ mkMockChannel messages = do
             modifyIORef sentRef (<> [_om_content msg])
         , _ch_sendError    = \_ -> pure ()
         , _ch_sendChunk    = \_ -> pure ()
+        , _ch_streaming    = True
         , _ch_readSecret   = pure ""
         , _ch_prompt       = \_ -> pure ""
         , _ch_promptSecret = \_ -> pure ""

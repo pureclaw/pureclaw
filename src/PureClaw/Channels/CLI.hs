@@ -37,6 +37,7 @@ mkCLIChannelHandle = ChannelHandle
         TIO.putStr t
         hFlush stdout
       ChunkDone -> TIO.putStrLn ""
+  , _ch_streaming = True
   , _ch_readSecret = bracket_
       (hSetEcho stdin False)
       (hSetEcho stdin True)

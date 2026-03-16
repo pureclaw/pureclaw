@@ -112,6 +112,7 @@ instance Channel SignalChannel where
     , _ch_send         = sendSignalMessage sc
     , _ch_sendError    = sendSignalError sc
     , _ch_sendChunk    = \_ -> pure ()  -- Signal doesn't support streaming
+    , _ch_streaming    = False
     , _ch_readSecret   = ioError (userError "Vault management requires the CLI interface")
     , _ch_prompt       = \promptText -> do
         sendSignalMessage sc (OutgoingMessage promptText)

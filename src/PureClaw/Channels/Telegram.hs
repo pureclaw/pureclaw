@@ -65,6 +65,7 @@ instance Channel TelegramChannel where
     , _ch_send         = sendMessage tc
     , _ch_sendError    = sendTelegramError tc
     , _ch_sendChunk    = \_ -> pure ()  -- Telegram doesn't support streaming
+    , _ch_streaming    = False
     , _ch_readSecret   = ioError (userError "Vault management requires the CLI interface")
     , _ch_prompt       = \promptText -> do
         sendMessage tc (OutgoingMessage promptText)
