@@ -13,6 +13,7 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Loop
 import PureClaw.Channels.Class
 import PureClaw.Channels.Signal
+import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
@@ -56,7 +57,7 @@ spec = do
   describe "Signal end-to-end flow" $ do
     it "receives a Signal message, processes via agent, and produces a response" $ do
       -- Set up Signal channel
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -93,7 +94,7 @@ spec = do
         _ -> expectationFailure "expected at least one message"
 
     it "handles multiple Signal messages in sequence" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -119,7 +120,7 @@ spec = do
       length sent `shouldBe` 2
 
     it "uses slash commands through Signal" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -146,7 +147,7 @@ spec = do
         _ -> expectationFailure "expected at least one message"
 
     it "executes tool calls end-to-end" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -198,3 +199,12 @@ instance Provider ToolCallThenTextProvider where
     where
       isResult (ToolResultBlock {}) = True
       isResult _ = False
+
+-- | Create a test SignalChannel with mock transport.
+mkTestSignalChannelForFlow :: IO SignalChannel
+mkTestSignalChannelForFlow = do
+  inQ  <- newTQueueIO
+  outQ <- newTQueueIO
+  let transport = mkMockSignalTransport inQ outQ
+      config = SignalConfig { _sc_account = "+1234567890", _sc_textChunkLimit = 6000 }
+  mkSignalChannel config transport mkNoOpLogHandle

@@ -33,7 +33,10 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Channels.CLI
+import PureClaw.Channels.Signal
+import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
+import PureClaw.Handles.Channel
 import PureClaw.Handles.File
 import PureClaw.Handles.Log
 import PureClaw.Handles.Memory
@@ -252,8 +255,7 @@ runChat opts = do
   let policy = buildPolicy effectiveAutonomy effectiveAllow
 
   -- Handles
-  let channel   = mkCLIChannelHandle
-      workspace = WorkspaceRoot "."
+  let workspace = WorkspaceRoot "."
       sh        = mkShellHandle logger
       fh        = mkFileHandle workspace
       nh        = mkNetworkHandle manager
@@ -280,22 +282,43 @@ runChat opts = do
       _lh_logInfo logger "Commands: none (deny all)"
     _ ->
       _lh_logInfo logger $ "Commands: " <> T.intercalate ", " (map T.pack effectiveAllow)
-  putStrLn "PureClaw 0.1.0 — Haskell-native AI agent runtime"
-  putStrLn "Type your message and press Enter. Ctrl-D to exit."
-  putStrLn ""
-  vaultRef    <- newIORef vaultOpt
-  providerRef <- newIORef mProvider
-  let env = AgentEnv
-        { _env_provider     = providerRef
-        , _env_model        = model
-        , _env_channel      = channel
-        , _env_logger       = logger
-        , _env_systemPrompt = sysPrompt
-        , _env_registry     = registry
-        , _env_vault        = vaultRef
-        , _env_pluginHandle = mkPluginHandle
-        }
-  runAgentLoop env
+
+  -- Channel selection: CLI flag > config file > default (cli)
+  let effectiveChannel = fromMaybe "cli"
+        (_co_channel opts <|> fmap T.unpack (_fc_defaultChannel fileCfg))
+
+  let startWithChannel :: ChannelHandle -> IO ()
+      startWithChannel channel = do
+        putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"
+        case effectiveChannel of
+          "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
+          _     -> putStrLn $ "Channel: " <> effectiveChannel
+        putStrLn ""
+        vaultRef    <- newIORef vaultOpt
+        providerRef <- newIORef mProvider
+        let env = AgentEnv
+              { _env_provider     = providerRef
+              , _env_model        = model
+              , _env_channel      = channel
+              , _env_logger       = logger
+              , _env_systemPrompt = sysPrompt
+              , _env_registry     = registry
+              , _env_vault        = vaultRef
+              , _env_pluginHandle = mkPluginHandle
+              }
+        runAgentLoop env
+
+  case effectiveChannel of
+    "signal" -> do
+      let sigCfg = resolveSignalConfig fileCfg
+      _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
+      transport <- mkSignalCliTransport (_sc_account sigCfg) logger
+      withSignalChannel sigCfg transport logger startWithChannel
+    "cli" ->
+      startWithChannel mkCLIChannelHandle
+    other -> do
+      _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
+      startWithChannel mkCLIChannelHandle
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType
@@ -577,3 +600,12 @@ parseUnlockMode (Just t) = case t of
   "on_demand"  -> UnlockOnDemand
   "per_access" -> UnlockPerAccess
   _            -> UnlockOnDemand
+
+-- | Resolve Signal channel config from the file config.
+resolveSignalConfig :: FileConfig -> SignalConfig
+resolveSignalConfig fileCfg =
+  let sigCfg = _fc_signal fileCfg
+  in SignalConfig
+    { _sc_account        = maybe "+0000000000" id (sigCfg >>= _fsc_account)
+    , _sc_textChunkLimit = maybe 6000 id (sigCfg >>= _fsc_textChunkLimit)
+    }

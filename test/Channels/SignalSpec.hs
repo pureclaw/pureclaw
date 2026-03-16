@@ -5,10 +5,12 @@ import Control.Exception
 import Data.Aeson
 import Data.Either (isLeft)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Test.Hspec
 
 import PureClaw.Channels.Class
 import PureClaw.Channels.Signal
+import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Errors
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
@@ -18,7 +20,7 @@ spec :: Spec
 spec = do
   describe "SignalConfig" $ do
     it "has Show and Eq instances" $ do
-      let cfg = SignalConfig "+1234567890"
+      let cfg = SignalConfig { _sc_account = "+1234567890", _sc_textChunkLimit = 6000 }
       show cfg `shouldContain` "SignalConfig"
       cfg `shouldBe` cfg
 
@@ -90,15 +92,52 @@ spec = do
       dm `shouldBe` dm
 
   describe "send and sendError" $ do
-    it "send completes without error" $ do
-      sc <- mkTestSignalChannel
+    it "sends via transport to the last sender" $ do
+      inQ  <- newTQueueIO
+      outQ <- newTQueueIO
+      let transport = mkMockSignalTransport inQ outQ
+          config = SignalConfig { _sc_account = "+0000000000", _sc_textChunkLimit = 6000 }
+      sc <- mkSignalChannel config transport mkNoOpLogHandle
+      -- Push a message from a specific sender
+      let env = mkTestEnvelope "+9876543210" 1000 "Hello"
+      atomically $ writeTQueue (_sch_inbox sc) env
       let h = toHandle sc
-      _ch_send h (OutgoingMessage "test") `shouldReturn` ()
+      _ <- _ch_receive h
+      -- Now send a response — it should go to the last sender
+      _ch_send h (OutgoingMessage "Reply")
+      (recipient, body) <- atomically $ readTQueue outQ
+      recipient `shouldBe` "+9876543210"
+      body `shouldBe` "Reply"
 
-    it "sendError completes without error" $ do
-      sc <- mkTestSignalChannel
-      let h = toHandle sc
-      _ch_sendError h (TemporaryError "oops") `shouldReturn` ()
+    it "chunks long messages" $ do
+      inQ  <- newTQueueIO
+      outQ <- newTQueueIO
+      let transport = mkMockSignalTransport inQ outQ
+          config = SignalConfig { _sc_account = "+0000000000", _sc_textChunkLimit = 20 }
+      sc <- mkSignalChannel config transport mkNoOpLogHandle
+      -- Set up a sender
+      let env = mkTestEnvelope "+111" 1000 "Hi"
+      atomically $ writeTQueue (_sch_inbox sc) env
+      _ <- _ch_receive (toHandle sc)
+      -- Send a long message
+      _ch_send (toHandle sc) (OutgoingMessage "This is a message that exceeds the chunk limit")
+      -- Should receive multiple chunks
+      chunks <- drainQueue outQ
+      length chunks `shouldSatisfy` (> 1)
+      all (\(_, body) -> T.length body <= 20) chunks `shouldBe` True
+
+    it "sendError sends via transport" $ do
+      inQ  <- newTQueueIO
+      outQ <- newTQueueIO
+      let transport = mkMockSignalTransport inQ outQ
+          config = SignalConfig { _sc_account = "+0000000000", _sc_textChunkLimit = 6000 }
+      sc <- mkSignalChannel config transport mkNoOpLogHandle
+      let env = mkTestEnvelope "+111" 1000 "Hi"
+      atomically $ writeTQueue (_sch_inbox sc) env
+      _ <- _ch_receive (toHandle sc)
+      _ch_sendError (toHandle sc) (TemporaryError "oops")
+      (_, body) <- atomically $ readTQueue outQ
+      body `shouldSatisfy` T.isInfixOf "oops"
 
     it "readSecret throws IOError (vault requires CLI)" $ do
       sc <- mkTestSignalChannel
@@ -109,8 +148,23 @@ spec = do
 -- Helpers
 
 mkTestSignalChannel :: IO SignalChannel
-mkTestSignalChannel = mkSignalChannel (SignalConfig "+0000000000") mkNoOpLogHandle
+mkTestSignalChannel = do
+  inQ  <- newTQueueIO
+  outQ <- newTQueueIO
+  let transport = mkMockSignalTransport inQ outQ
+      config = SignalConfig { _sc_account = "+0000000000", _sc_textChunkLimit = 6000 }
+  mkSignalChannel config transport mkNoOpLogHandle
 
 mkTestEnvelope :: Text -> Int -> Text -> SignalEnvelope
 mkTestEnvelope source ts msg =
   SignalEnvelope source ts (Just (SignalDataMessage msg ts))
+
+-- | Drain all available items from a TQueue (non-blocking).
+drainQueue :: TQueue a -> IO [a]
+drainQueue q = atomically $ do
+  let go acc = do
+        mVal <- tryReadTQueue q
+        case mVal of
+          Nothing  -> pure (reverse acc)
+          Just val -> go (val : acc)
+  go []
