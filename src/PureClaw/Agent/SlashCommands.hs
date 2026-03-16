@@ -892,34 +892,67 @@ signalRegisterFlow env ctx = do
       send "Invalid phone number. Must start with + (E.164 format)."
       pure ctx
     else do
-      send $ "Sending verification SMS to " <> phoneNumber <> "..."
-      regResult <- try @IOException $
-        P.readProcess (P.proc "signal-cli" ["-u", T.unpack phoneNumber, "register"])
-      case regResult of
-        Left err -> do
-          send $ "Registration failed: " <> T.pack (show err)
-          pure ctx
-        Right (exitCode, _, errOut) -> case exitCode of
-          ExitSuccess -> do
-            send "Verification code sent! Check your SMS."
-            code <- T.strip <$> _ch_prompt ch "Verification code: "
-            verifyResult <- try @IOException $
-              P.readProcess (P.proc "signal-cli"
-                ["-u", T.unpack phoneNumber, "verify", T.unpack code])
-            case verifyResult of
-              Left err -> do
-                send $ "Verification failed: " <> T.pack (show err)
-                pure ctx
-              Right (verifyExit, _, verifyErr) -> case verifyExit of
-                ExitSuccess -> do
-                  send "Phone number verified!"
-                  writeSignalConfig env phoneNumber ctx
-                _ -> do
-                  send $ "Verification failed: " <> T.strip (TE.decodeUtf8 (BL.toStrict verifyErr))
+      -- Try register without captcha first, handle captcha if required
+      signalRegister env ch phoneNumber Nothing ctx
+
+-- | Attempt signal-cli register, handling captcha if required.
+signalRegister :: AgentEnv -> ChannelHandle -> Text -> Maybe Text -> Context -> IO Context
+signalRegister env ch phoneNumber mCaptcha ctx = do
+  let send = _ch_send ch . OutgoingMessage
+      args = ["-u", T.unpack phoneNumber, "register"]
+          ++ maybe [] (\c -> ["--captcha", T.unpack c]) mCaptcha
+  send $ "Sending verification SMS to " <> phoneNumber <> "..."
+  regResult <- try @IOException $
+    P.readProcess (P.proc "signal-cli" args)
+  case regResult of
+    Left err -> do
+      send $ "Registration failed: " <> T.pack (show err)
+      pure ctx
+    Right (exitCode, _, errOut) -> do
+      let errText = T.strip (TE.decodeUtf8 (BL.toStrict errOut))
+      case exitCode of
+        ExitSuccess -> signalVerify env ch phoneNumber ctx
+        _ | "captcha" `T.isInfixOf` T.toLower errText -> do
+              send $ T.intercalate "\n"
+                [ "Signal requires a captcha before sending the SMS."
+                , ""
+                , "1. Open this URL in a browser:"
+                , "   https://signalcaptchas.org/registration/generate.html"
+                , "2. Solve the captcha"
+                , "3. Right-click the \"Open Signal\" link and copy the link address"
+                , "4. Paste it here (it starts with signalcaptcha://)"
+                ]
+              captchaInput <- T.strip <$> _ch_prompt ch "Captcha token: "
+              let token = T.replace "signalcaptcha://" "" captchaInput
+              if T.null token
+                then do
+                  send "No captcha provided. Setup cancelled."
                   pure ctx
-          _ -> do
-            send $ "Registration failed: " <> T.strip (TE.decodeUtf8 (BL.toStrict errOut))
-            pure ctx
+                else signalRegister env ch phoneNumber (Just token) ctx
+        _ -> do
+          send $ "Registration failed: " <> errText
+          pure ctx
+
+-- | Verify a phone number after registration SMS was sent.
+signalVerify :: AgentEnv -> ChannelHandle -> Text -> Context -> IO Context
+signalVerify env ch phoneNumber ctx = do
+  let send = _ch_send ch . OutgoingMessage
+  send "Verification code sent! Check your SMS."
+  code <- T.strip <$> _ch_prompt ch "Verification code: "
+  verifyResult <- try @IOException $
+    P.readProcess (P.proc "signal-cli"
+      ["-u", T.unpack phoneNumber, "verify", T.unpack code])
+  case verifyResult of
+    Left err -> do
+      send $ "Verification failed: " <> T.pack (show err)
+      pure ctx
+    Right (verifyExit, _, verifyErr) -> case verifyExit of
+      ExitSuccess -> do
+        send "Phone number verified!"
+        writeSignalConfig env phoneNumber ctx
+      _ -> do
+        send $ "Verification failed: " <> T.strip (TE.decodeUtf8 (BL.toStrict verifyErr))
+        pure ctx
 
 -- | Detect the linked account number and write Signal config.
 detectAndWriteSignalConfig :: AgentEnv -> Context -> IO Context
