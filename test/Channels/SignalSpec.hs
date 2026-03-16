@@ -44,7 +44,7 @@ spec = do
 
     it "handles envelope with no dataMessage" $ do
       sc <- mkTestSignalChannel
-      let env = SignalEnvelope "+1111111111" Nothing 3000 Nothing
+      let env = SignalEnvelope "+1111111111" Nothing (Just 3000) Nothing
       atomically $ writeTQueue (_sch_inbox sc) env
       msg <- _ch_receive (toHandle sc)
       _im_content msg `shouldBe` ""
@@ -63,7 +63,7 @@ spec = do
         Left err -> expectationFailure err
         Right env -> do
           _se_source env `shouldBe` "+1234567890"
-          _se_timestamp env `shouldBe` 1000
+          _se_timestamp env `shouldBe` Just 1000
           case _se_dataMessage env of
             Nothing -> expectationFailure "expected dataMessage"
             Just dm -> _sdm_message dm `shouldBe` "hello"
@@ -97,7 +97,7 @@ spec = do
         Left err -> expectationFailure err
         Right env -> do
           _se_source env `shouldBe` "+1234567890"
-          _se_timestamp env `shouldBe` 3000
+          _se_timestamp env `shouldBe` Just 3000
           case _se_dataMessage env of
             Nothing -> expectationFailure "expected dataMessage"
             Just dm -> _sdm_message dm `shouldBe` "wrapped hello"
@@ -111,9 +111,13 @@ spec = do
         Left err -> expectationFailure err
         Right env -> _se_source env `shouldBe` "+9999"
 
-    it "rejects invalid JSON" $ do
+    it "parses envelope with no known fields as empty" $ do
       let json = object ["wrong" .= ("field" :: String)]
-      parseSignalEnvelope json `shouldSatisfy` isLeft
+      case parseSignalEnvelope json of
+        Left _    -> expectationFailure "should parse (all fields optional)"
+        Right env -> do
+          _se_source env `shouldBe` ""
+          _se_dataMessage env `shouldBe` Nothing
 
   describe "SignalEnvelope" $ do
     it "has Show and Eq instances" $ do
@@ -246,7 +250,7 @@ mkTestSignalChannel = do
 
 mkTestEnvelope :: Text -> Int -> Text -> SignalEnvelope
 mkTestEnvelope source ts msg =
-  SignalEnvelope source Nothing ts (Just (SignalDataMessage msg ts))
+  SignalEnvelope source Nothing (Just ts) (Just (SignalDataMessage msg ts))
 
 -- | Drain all available items from a TQueue (non-blocking).
 drainQueue :: TQueue a -> IO [a]

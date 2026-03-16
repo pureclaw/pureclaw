@@ -151,7 +151,7 @@ sendSignalError sc err = do
 data SignalEnvelope = SignalEnvelope
   { _se_source      :: Text         -- ^ Phone number or UUID (best available)
   , _se_sourceUuid  :: Maybe Text   -- ^ UUID if available
-  , _se_timestamp   :: Int
+  , _se_timestamp   :: Maybe Int    -- ^ Not all envelope types have a timestamp
   , _se_dataMessage :: Maybe SignalDataMessage
   }
   deriving stock (Show, Eq)
@@ -174,7 +174,7 @@ instance FromJSON SignalEnvelope where
           Nothing -> case mSource of
             Just s  -> s
             Nothing -> fromMaybe "" mSourceUuid
-    SignalEnvelope source mSourceUuid <$> o .: "timestamp" <*> o .:? "dataMessage"
+    SignalEnvelope source mSourceUuid <$> o .:? "timestamp" <*> o .:? "dataMessage"
 
 instance FromJSON SignalDataMessage where
   parseJSON = withObject "SignalDataMessage" $ \o ->

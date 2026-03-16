@@ -71,7 +71,7 @@ spec = do
       let envelope = SignalEnvelope
             { _se_sourceUuid = Nothing
             , _se_source    = "+9876543210"
-            , _se_timestamp = 1000
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage
                 { _sdm_message = "Hello from Signal!"
                 , _sdm_timestamp = 1000
@@ -107,7 +107,7 @@ spec = do
       let mkEnvelope txt ts = SignalEnvelope
             { _se_source = "+111"
             , _se_sourceUuid = Nothing
-            , _se_timestamp = ts
+            , _se_timestamp = Just ts
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = txt, _sdm_timestamp = ts }
             }
       atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "First" 1000)
@@ -134,7 +134,7 @@ spec = do
       let statusEnvelope = SignalEnvelope
             { _se_source = "+111"
             , _se_sourceUuid = Nothing
-            , _se_timestamp = 1000
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "/status", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) statusEnvelope
@@ -167,7 +167,7 @@ spec = do
       let envelope = SignalEnvelope
             { _se_source = "+111"
             , _se_sourceUuid = Nothing
-            , _se_timestamp = 1000
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "do it", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) envelope
