@@ -913,8 +913,6 @@ signalRegister env ch phoneNumber mCaptcha ctx = do
       case exitCode of
         ExitSuccess -> signalVerify env ch phoneNumber ctx
         _ | "captcha" `T.isInfixOf` T.toLower errText -> do
-              pureclawDir <- getPureclawDir
-              let captchaFile = pureclawDir </> "captcha.txt"
               send $ T.intercalate "\n"
                 [ "Signal requires a captcha before sending the SMS."
                 , ""
@@ -923,33 +921,15 @@ signalRegister env ch phoneNumber mCaptcha ctx = do
                 , "2. Solve the captcha"
                 , "3. Open DevTools (F12), go to Network tab"
                 , "4. Click \"Open Signal\" \x2014 find the signalcaptcha:// URL in the Network tab"
-                , "5. Save the full URL (starting with signalcaptcha://) to:"
-                , "   " <> T.pack captchaFile
-                , ""
-                , "Press Enter when the file is ready (or 'q' to cancel)."
+                , "5. Copy and paste the full URL here (starts with signalcaptcha://)"
                 ]
-              answer <- T.strip <$> _ch_prompt ch ""
-              if answer == "q" || answer == "Q"
+              captchaInput <- T.strip <$> _ch_prompt ch "Captcha token: "
+              let token = T.strip (T.replace "signalcaptcha://" "" captchaInput)
+              if T.null token
                 then do
-                  send "Setup cancelled."
+                  send "No captcha provided. Setup cancelled."
                   pure ctx
-                else do
-                  captchaResult <- try @IOException (TIO.readFile captchaFile)
-                  case captchaResult of
-                    Left _ -> do
-                      send $ "Could not read " <> T.pack captchaFile
-                      send "Setup cancelled."
-                      pure ctx
-                    Right contents -> do
-                      let token = T.strip (T.replace "signalcaptcha://" "" (T.strip contents))
-                      if T.null token
-                        then do
-                          send "Empty captcha token. Setup cancelled."
-                          pure ctx
-                        else do
-                          -- Clean up the file
-                          _ <- try @IOException (Dir.removeFile captchaFile)
-                          signalRegister env ch phoneNumber (Just token) ctx
+                else signalRegister env ch phoneNumber (Just token) ctx
         _ -> do
           send $ "Registration failed: " <> errText
           pure ctx

@@ -3,7 +3,9 @@ module PureClaw.Channels.CLI
     mkCLIChannelHandle
   ) where
 
-import Control.Exception (bracket_)
+import Control.Exception (bracket, bracket_)
+import Data.IORef
+import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.IO
@@ -19,7 +21,7 @@ mkCLIChannelHandle = ChannelHandle
   { _ch_receive = do
       putStr "> "
       hFlush stdout
-      line <- TIO.getLine
+      line <- readUnbufferedLine
       pure IncomingMessage
         { _im_userId  = UserId "cli-user"
         , _im_content = line
@@ -38,16 +40,37 @@ mkCLIChannelHandle = ChannelHandle
   , _ch_readSecret = bracket_
       (hSetEcho stdin False)
       (hSetEcho stdin True)
-      TIO.getLine
+      readUnbufferedLine
   , _ch_prompt = \promptText -> do
       TIO.putStr promptText
       hFlush stdout
-      TIO.getLine
+      readUnbufferedLine
   , _ch_promptSecret = \promptText -> do
       TIO.putStr promptText
       hFlush stdout
       bracket_ (hSetEcho stdin False) (hSetEcho stdin True) $ do
-        line <- TIO.getLine
+        line <- readUnbufferedLine
         TIO.putStrLn ""  -- newline after hidden input
         pure line
   }
+
+-- | Read a line from stdin bypassing the terminal's canonical mode line
+-- buffer (which is limited to ~1024 bytes on macOS). Temporarily switches
+-- stdin to 'NoBuffering' and reads character-by-character until newline.
+readUnbufferedLine :: IO Text
+readUnbufferedLine = do
+  origBuf <- hGetBuffering stdin
+  bracket
+    (hSetBuffering stdin NoBuffering)
+    (\_ -> hSetBuffering stdin origBuf)
+    (\_ -> do
+      ref <- newIORef []
+      let go = do
+            c <- getChar
+            if c == '\n'
+              then pure ()
+              else modifyIORef ref (c :) >> go
+      go
+      chars <- readIORef ref
+      pure (T.pack (reverse chars))
+    )
