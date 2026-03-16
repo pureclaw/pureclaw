@@ -11,7 +11,7 @@ import Test.Hspec
 import PureClaw.CLI.Config
 
 -- | Helper: update vault config and read it back
-updateAndRead :: FilePath -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> IO FileConfig
+updateAndRead :: FilePath -> FieldUpdate Text -> FieldUpdate Text -> FieldUpdate Text -> FieldUpdate Text -> IO FileConfig
 updateAndRead path vp vr vi vu = do
   updateVaultConfig path vp vr vi vu
   loadFileConfig path
@@ -173,10 +173,10 @@ spec = do
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
         cfg <- updateAndRead path
-          (Just "/my/vault.age")
-          (Just "age1recipient")
-          (Just "~/.age/key.txt")
-          (Just "startup")
+          (Set "/my/vault.age")
+          (Set "age1recipient")
+          (Set "~/.age/key.txt")
+          (Set "startup")
         _fc_vault_path      cfg `shouldBe` Just "/my/vault.age"
         _fc_vault_recipient cfg `shouldBe` Just "age1recipient"
         _fc_vault_identity  cfg `shouldBe` Just "~/.age/key.txt"
@@ -192,7 +192,7 @@ spec = do
           ]
         -- Update vault fields only
         updateVaultConfig path
-          (Just "/v.age") (Just "age1x") Nothing Nothing
+          (Set "/v.age") (Set "age1x") Keep Keep
         cfg <- loadFileConfig path
         -- Non-vault fields must be preserved
         _fc_model           cfg `shouldBe` Just "claude-opus-4-20250514"
@@ -210,11 +210,10 @@ spec = do
           , "provider = \"anthropic\"\n"
           , "model    = \"claude-sonnet-4-20250514\"\n"
           ]
-        -- Simulate what updateConfigAfterSetup does for passphrase setup:
-        -- vaultPath=Just, recipient=Nothing, identity=Nothing, unlock=Just "on_demand"
+        -- Simulate passphrase /vault setup: explicitly Clear recipient/identity
         updateVaultConfig path
-          (Just "/home/user/.pureclaw/vault/vault.age")
-          Nothing Nothing (Just "on_demand")
+          (Set "/home/user/.pureclaw/vault/vault.age")
+          Clear Clear (Set "on_demand")
         cfg <- loadFileConfig path
         -- All original fields must survive the round-trip
         _fc_apiKey          cfg `shouldBe` Just "sk-ant-test123"
@@ -223,7 +222,7 @@ spec = do
         -- Vault fields should be set
         _fc_vault_path      cfg `shouldBe` Just "/home/user/.pureclaw/vault/vault.age"
         _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
-        -- Recipient and identity should remain absent
+        -- Recipient and identity should be cleared
         _fc_vault_recipient cfg `shouldBe` Nothing
         _fc_vault_identity  cfg `shouldBe` Nothing
 
@@ -236,13 +235,36 @@ spec = do
           , "allow    = [\"git\", \"ls\", \"curl\"]\n"
           ]
         updateVaultConfig path
-          (Just "/v.age") Nothing Nothing (Just "on_demand")
+          (Set "/v.age") Keep Keep (Set "on_demand")
         cfg <- loadFileConfig path
         _fc_apiKey   cfg `shouldBe` Just "sk-ant-test"
         _fc_provider cfg `shouldBe` Just "anthropic"
         _fc_allow    cfg `shouldBe` Just ["git", "ls", "curl"]
 
-    it "clears stale age credentials when switching to passphrase" $
+    it "preserves age credentials when only updating vault_path" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        -- Simulate an existing age-based vault config
+        TIO.writeFile path $ mconcat
+          [ "api_key          = \"sk-ant-test\"\n"
+          , "provider         = \"anthropic\"\n"
+          , "vault_path       = \"/old/vault.age\"\n"
+          , "vault_recipient  = \"age1yubikey-old\"\n"
+          , "vault_identity   = \"/home/user/.pureclaw/vault/yubikey-identity.txt\"\n"
+          , "vault_unlock     = \"startup\"\n"
+          ]
+        -- Update only vault_path — recipient and identity must survive
+        updateVaultConfig path
+          (Set "/new/vault.age") Keep Keep (Set "on_demand")
+        cfg <- loadFileConfig path
+        _fc_apiKey          cfg `shouldBe` Just "sk-ant-test"
+        _fc_provider        cfg `shouldBe` Just "anthropic"
+        _fc_vault_path      cfg `shouldBe` Just "/new/vault.age"
+        _fc_vault_recipient cfg `shouldBe` Just "age1yubikey-old"
+        _fc_vault_identity  cfg `shouldBe` Just "/home/user/.pureclaw/vault/yubikey-identity.txt"
+        _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
+
+    it "clears stale age credentials when explicitly told to" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
         -- Simulate an existing age-based vault config
@@ -254,19 +276,15 @@ spec = do
           , "vault_identity   = \"/home/user/.pureclaw/vault/yubikey-identity.txt\"\n"
           , "vault_unlock     = \"startup\"\n"
           ]
-        -- Simulate passphrase /vault setup: recipient=Nothing, identity=Nothing
+        -- Simulate passphrase /vault setup: explicitly Clear recipient/identity
         updateVaultConfig path
-          (Just "/home/user/.pureclaw/vault/vault.age")
-          Nothing Nothing (Just "on_demand")
+          (Set "/home/user/.pureclaw/vault/vault.age")
+          Clear Clear (Set "on_demand")
         cfg <- loadFileConfig path
-        -- api_key and provider must survive
         _fc_apiKey          cfg `shouldBe` Just "sk-ant-test"
         _fc_provider        cfg `shouldBe` Just "anthropic"
-        -- Stale age credentials MUST be cleared — otherwise startup
-        -- will call resolveAgeVault instead of resolvePassphraseVault
         _fc_vault_recipient cfg `shouldBe` Nothing
         _fc_vault_identity  cfg `shouldBe` Nothing
-        -- Vault path and unlock mode should be updated
         _fc_vault_path      cfg `shouldBe` Just "/home/user/.pureclaw/vault/vault.age"
         _fc_vault_unlock    cfg `shouldBe` Just "on_demand"
 
@@ -275,20 +293,20 @@ spec = do
         let path = dir </> "config.toml"
         -- File does not exist yet — updateVaultConfig should create it
         cfg <- updateAndRead path
-          (Just "/new/vault.age") (Just "age1new") Nothing Nothing
+          (Set "/new/vault.age") (Set "age1new") Keep Keep
         _fc_vault_path      cfg `shouldBe` Just "/new/vault.age"
         _fc_vault_recipient cfg `shouldBe` Just "age1new"
         _fc_vault_identity  cfg `shouldBe` Nothing
         _fc_vault_unlock    cfg `shouldBe` Nothing
 
-    it "leaves fields unchanged when given Nothing" $
+    it "leaves fields unchanged when given Keep" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"
         -- Set all vault fields
         updateVaultConfig path
-          (Just "/v.age") (Just "age1r") (Just "~/.age/k") (Just "startup")
-        -- Update with all Nothing — should be a no-op
-        updateVaultConfig path Nothing Nothing Nothing Nothing
+          (Set "/v.age") (Set "age1r") (Set "~/.age/k") (Set "startup")
+        -- Update with all Keep — should be a no-op
+        updateVaultConfig path Keep Keep Keep Keep
         cfg <- loadFileConfig path
         _fc_vault_path      cfg `shouldBe` Just "/v.age"
         _fc_vault_recipient cfg `shouldBe` Just "age1r"
@@ -300,10 +318,10 @@ spec = do
         let path = dir </> "config.toml"
         -- Set initial values
         updateVaultConfig path
-          (Just "/old.age") (Just "age1old") (Just "~/.age/old") (Just "startup")
+          (Set "/old.age") (Set "age1old") (Set "~/.age/old") (Set "startup")
         -- Update with new values
         updateVaultConfig path
-          (Just "/new.age") (Just "age1new") (Just "~/.age/new") (Just "on_demand")
+          (Set "/new.age") (Set "age1new") (Set "~/.age/new") (Set "on_demand")
         cfg <- loadFileConfig path
         _fc_vault_path      cfg `shouldBe` Just "/new.age"
         _fc_vault_recipient cfg `shouldBe` Just "age1new"
