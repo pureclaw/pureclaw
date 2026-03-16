@@ -77,6 +77,40 @@ spec = do
         Left err -> expectationFailure err
         Right env -> _se_dataMessage env `shouldBe` Nothing
 
+    it "parses JSON-RPC wrapped envelope from signal-cli" $ do
+      let json = object
+            [ "jsonrpc" .= ("2.0" :: String)
+            , "method"  .= ("receive" :: String)
+            , "params"  .= object
+                [ "envelope" .= object
+                    [ "sourceNumber" .= ("+1234567890" :: String)
+                    , "timestamp" .= (3000 :: Int)
+                    , "dataMessage" .= object
+                        [ "message" .= ("wrapped hello" :: String)
+                        , "timestamp" .= (3000 :: Int)
+                        ]
+                    ]
+                , "account" .= ("+0000000000" :: String)
+                ]
+            ]
+      case parseSignalEnvelope json of
+        Left err -> expectationFailure err
+        Right env -> do
+          _se_source env `shouldBe` "+1234567890"
+          _se_timestamp env `shouldBe` 3000
+          case _se_dataMessage env of
+            Nothing -> expectationFailure "expected dataMessage"
+            Just dm -> _sdm_message dm `shouldBe` "wrapped hello"
+
+    it "parses JSON-RPC envelope with sourceNumber field" $ do
+      let json = object
+            [ "sourceNumber" .= ("+9999" :: String)
+            , "timestamp" .= (4000 :: Int)
+            ]
+      case parseSignalEnvelope json of
+        Left err -> expectationFailure err
+        Right env -> _se_source env `shouldBe` "+9999"
+
     it "rejects invalid JSON" $ do
       let json = object ["wrong" .= ("field" :: String)]
       parseSignalEnvelope json `shouldSatisfy` isLeft

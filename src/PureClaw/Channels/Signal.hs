@@ -15,6 +15,7 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Exception
 import Data.Aeson
+import Data.Aeson.Types (parseEither)
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -155,15 +156,32 @@ data SignalDataMessage = SignalDataMessage
   deriving stock (Show, Eq)
 
 instance FromJSON SignalEnvelope where
-  parseJSON = withObject "SignalEnvelope" $ \o ->
-    SignalEnvelope <$> o .: "source" <*> o .: "timestamp" <*> o .:? "dataMessage"
+  parseJSON = withObject "SignalEnvelope" $ \o -> do
+    -- signal-cli uses "source" in older versions, "sourceNumber" in newer
+    source <- o .:? "sourceNumber" >>= \case
+      Just s  -> pure s
+      Nothing -> o .: "source"
+    SignalEnvelope source <$> o .: "timestamp" <*> o .:? "dataMessage"
 
 instance FromJSON SignalDataMessage where
   parseJSON = withObject "SignalDataMessage" $ \o ->
     SignalDataMessage <$> o .: "message" <*> o .: "timestamp"
 
 -- | Parse a JSON value as a Signal envelope.
+-- Handles both raw envelopes and JSON-RPC wrapped messages from signal-cli.
+-- JSON-RPC format: @{"jsonrpc":"2.0","method":"receive","params":{"envelope":{...}}}@
 parseSignalEnvelope :: Value -> Either String SignalEnvelope
-parseSignalEnvelope v = case fromJSON v of
-  Error err -> Left err
-  Success e -> Right e
+parseSignalEnvelope v = case parseEither unwrap v of
+  Left err -> Left err
+  Right env -> Right env
+  where
+    unwrap = withObject "SignalMessage" $ \o -> do
+      -- Try JSON-RPC wrapper first: params.envelope
+      mParams <- o .:? "params"
+      case mParams of
+        Just params -> do
+          mEnvelope <- params .:? "envelope"
+          case mEnvelope of
+            Just envelope -> parseJSON envelope
+            Nothing       -> fail "JSON-RPC message has no 'envelope' in 'params'"
+        Nothing -> parseJSON (Object o)  -- Try raw envelope
