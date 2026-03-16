@@ -606,6 +606,6 @@ resolveSignalConfig :: FileConfig -> SignalConfig
 resolveSignalConfig fileCfg =
   let sigCfg = _fc_signal fileCfg
   in SignalConfig
-    { _sc_account        = maybe "+0000000000" id (sigCfg >>= _fsc_account)
-    , _sc_textChunkLimit = maybe 6000 id (sigCfg >>= _fsc_textChunkLimit)
+    { _sc_account        = fromMaybe "+0000000000" (sigCfg >>= _fsc_account)
+    , _sc_textChunkLimit = fromMaybe 6000 (sigCfg >>= _fsc_textChunkLimit)
     }

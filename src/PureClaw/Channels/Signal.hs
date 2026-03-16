@@ -67,7 +67,7 @@ withSignalChannel config transport lh action = do
   let cleanup = do
         killThread readerTid
         _st_close transport
-  (action (toHandle sc)) `finally` cleanup
+  action (toHandle sc) `finally` cleanup
 
 -- | Background thread that reads from the transport and pushes
 -- parsed envelopes into the inbox queue.
