@@ -995,8 +995,8 @@ writeSignalConfig env phoneNumber ctx = do
         { _fc_defaultChannel = Just "signal"
         , _fc_signal = Just FileSignalConfig
             { _fsc_account        = Just phoneNumber
-            , _fsc_dmPolicy       = Just "allowlist"
-            , _fsc_allowFrom      = Just [phoneNumber]
+            , _fsc_dmPolicy       = Just "open"
+            , _fsc_allowFrom      = Nothing
             , _fsc_textChunkLimit = Nothing  -- use default 6000
             }
         }
@@ -1006,11 +1006,20 @@ writeSignalConfig env phoneNumber ctx = do
     [ ""
     , "Signal configured!"
     , "  Account: " <> phoneNumber
-    , "  DM policy: allowlist (only you)"
+    , "  DM policy: open (accepts messages from anyone)"
     , "  Default channel: signal"
     , ""
-    , "Restart PureClaw to use Signal as your chat interface."
-    , "Or run with: pureclaw --channel signal"
+    , "To start chatting:"
+    , "  1. Restart PureClaw (or run: pureclaw --channel signal)"
+    , "  2. Open Signal on your phone"
+    , "  3. Send a message to " <> phoneNumber
+    , ""
+    , "To restrict access later, edit ~/.pureclaw/config.toml:"
+    , "  [signal]"
+    , "  dm_policy = \"allowlist\""
+    , "  allow_from = [\"<your-uuid>\"]"
+    , ""
+    , "Your UUID will appear in the logs on first message."
     ]
   pure ctx
 

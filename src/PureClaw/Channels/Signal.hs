@@ -16,6 +16,7 @@ import Control.Concurrent.STM
 import Control.Exception
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
+import Data.Maybe (fromMaybe)
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -92,12 +93,17 @@ readerLoop sc = go
               case _se_dataMessage envelope of
                 Nothing -> pure ()  -- Skip non-data envelopes (receipts, typing, etc.)
                 Just _ ->
-                  let sender = UserId (_se_source envelope)
-                      allowed = isAllowed (_sc_allowFrom (_sch_config sc)) sender
-                  in if allowed
+                  let policy = _sc_allowFrom (_sch_config sc)
+                      -- Check both phone number and UUID against the allow list
+                      sourceAllowed = isAllowed policy (UserId (_se_source envelope))
+                      uuidAllowed = case _se_sourceUuid envelope of
+                        Just uuid -> isAllowed policy (UserId uuid)
+                        Nothing   -> False
+                  in if sourceAllowed || uuidAllowed
                     then atomically $ writeTQueue (_sch_inbox sc) envelope
                     else _lh_logWarn (_sch_log sc) $
                       "Blocked message from unauthorized sender: " <> _se_source envelope
+                      <> maybe "" (\u -> " (uuid: " <> u <> ")") (_se_sourceUuid envelope)
           go
 
 instance Channel SignalChannel where
@@ -142,7 +148,8 @@ sendSignalError sc err = do
 
 -- | A Signal envelope (simplified JSON-RPC format from signal-cli).
 data SignalEnvelope = SignalEnvelope
-  { _se_source      :: Text
+  { _se_source      :: Text         -- ^ Phone number or UUID (best available)
+  , _se_sourceUuid  :: Maybe Text   -- ^ UUID if available
   , _se_timestamp   :: Int
   , _se_dataMessage :: Maybe SignalDataMessage
   }
@@ -157,11 +164,16 @@ data SignalDataMessage = SignalDataMessage
 
 instance FromJSON SignalEnvelope where
   parseJSON = withObject "SignalEnvelope" $ \o -> do
-    -- signal-cli uses "source" in older versions, "sourceNumber" in newer
-    source <- o .:? "sourceNumber" >>= \case
-      Just s  -> pure s
-      Nothing -> o .: "source"
-    SignalEnvelope source <$> o .: "timestamp" <*> o .:? "dataMessage"
+    mSourceNumber <- o .:? "sourceNumber"
+    mSourceUuid   <- o .:? "sourceUuid"
+    mSource       <- o .:? "source"
+    -- Prefer phone number as primary identifier, fall back to UUID, then "source"
+    let source = case mSourceNumber of
+          Just s  -> s
+          Nothing -> case mSource of
+            Just s  -> s
+            Nothing -> fromMaybe "" mSourceUuid
+    SignalEnvelope source mSourceUuid <$> o .: "timestamp" <*> o .:? "dataMessage"
 
 instance FromJSON SignalDataMessage where
   parseJSON = withObject "SignalDataMessage" $ \o ->

@@ -69,7 +69,8 @@ spec = do
 
       -- Push a Signal envelope into the inbox
       let envelope = SignalEnvelope
-            { _se_source    = "+9876543210"
+            { _se_sourceUuid = Nothing
+            , _se_source    = "+9876543210"
             , _se_timestamp = 1000
             , _se_dataMessage = Just SignalDataMessage
                 { _sdm_message = "Hello from Signal!"
@@ -105,6 +106,7 @@ spec = do
       -- Push two messages
       let mkEnvelope txt ts = SignalEnvelope
             { _se_source = "+111"
+            , _se_sourceUuid = Nothing
             , _se_timestamp = ts
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = txt, _sdm_timestamp = ts }
             }
@@ -131,6 +133,7 @@ spec = do
       -- Send /status slash command
       let statusEnvelope = SignalEnvelope
             { _se_source = "+111"
+            , _se_sourceUuid = Nothing
             , _se_timestamp = 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "/status", _sdm_timestamp = 1000 }
             }
@@ -163,6 +166,7 @@ spec = do
 
       let envelope = SignalEnvelope
             { _se_source = "+111"
+            , _se_sourceUuid = Nothing
             , _se_timestamp = 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "do it", _sdm_timestamp = 1000 }
             }

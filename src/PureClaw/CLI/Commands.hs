@@ -618,10 +618,13 @@ parseUnlockMode (Just t) = case t of
 resolveSignalConfig :: FileConfig -> SignalConfig
 resolveSignalConfig fileCfg =
   let sigCfg = _fc_signal fileCfg
-      allowFrom = case sigCfg >>= _fsc_allowFrom of
-        Nothing    -> AllowAll
-        Just []    -> AllowAll
-        Just users -> AllowList (Set.fromList (map UserId users))
+      dmPolicy = sigCfg >>= _fsc_dmPolicy
+      allowFrom = case dmPolicy of
+        Just "open" -> AllowAll
+        _ -> case sigCfg >>= _fsc_allowFrom of
+          Nothing    -> AllowAll
+          Just []    -> AllowAll
+          Just users -> AllowList (Set.fromList (map UserId users))
   in SignalConfig
     { _sc_account        = fromMaybe "+0000000000" (sigCfg >>= _fsc_account)
     , _sc_textChunkLimit = fromMaybe 6000 (sigCfg >>= _fsc_textChunkLimit)

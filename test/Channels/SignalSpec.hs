@@ -44,7 +44,7 @@ spec = do
 
     it "handles envelope with no dataMessage" $ do
       sc <- mkTestSignalChannel
-      let env = SignalEnvelope "+1111111111" 3000 Nothing
+      let env = SignalEnvelope "+1111111111" Nothing 3000 Nothing
       atomically $ writeTQueue (_sch_inbox sc) env
       msg <- _ch_receive (toHandle sc)
       _im_content msg `shouldBe` ""
@@ -246,7 +246,7 @@ mkTestSignalChannel = do
 
 mkTestEnvelope :: Text -> Int -> Text -> SignalEnvelope
 mkTestEnvelope source ts msg =
-  SignalEnvelope source ts (Just (SignalDataMessage msg ts))
+  SignalEnvelope source Nothing ts (Just (SignalDataMessage msg ts))
 
 -- | Drain all available items from a TQueue (non-blocking).
 drainQueue :: TQueue a -> IO [a]
