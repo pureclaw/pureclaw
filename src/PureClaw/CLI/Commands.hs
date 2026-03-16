@@ -1,7 +1,8 @@
 module PureClaw.CLI.Commands
   ( -- * Entry point
     runCLI
-    -- * Options (exported for testing)
+    -- * Command types (exported for testing)
+  , Command (..)
   , ChatOptions (..)
   , chatOptionsParser
     -- * Enums (exported for testing)
@@ -184,19 +185,42 @@ memoryToText NoMemory       = "none"
 memoryToText SQLiteMemory   = "sqlite"
 memoryToText MarkdownMemory = "markdown"
 
--- | Full CLI parser with help and version.
-cliParserInfo :: ParserInfo ChatOptions
-cliParserInfo = info (chatOptionsParser <**> helper)
+-- | Top-level CLI command.
+data Command
+  = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
+  | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
+  deriving stock (Show, Eq)
+
+-- | Full CLI parser with subcommands.
+cliParserInfo :: ParserInfo Command
+cliParserInfo = info (commandParser <**> helper)
   ( fullDesc
- <> progDesc "Interactive AI chat with tool use"
+ <> progDesc "Haskell-native AI agent runtime"
  <> header "pureclaw — Haskell-native AI agent runtime"
   )
+
+-- | Parser for the top-level command.
+-- @pureclaw tui@ — interactive terminal
+-- @pureclaw gateway run@ — channel-aware agent
+-- No subcommand defaults to @tui@ for backward compatibility.
+commandParser :: Parser Command
+commandParser = subparser
+    ( command "tui" (info (CmdTui <$> chatOptionsParser <**> helper)
+        (progDesc "Interactive terminal chat UI"))
+   <> command "gateway" (info (subparser
+        (command "run" (info (CmdGateway <$> chatOptionsParser <**> helper)
+          (progDesc "Run the agent with channel from config (Signal, Telegram, CLI)"))))
+        (progDesc "Gateway — channel-aware agent"))
+    )
+  <|> (CmdTui <$> chatOptionsParser)  -- default to tui when no subcommand
 
 -- | Main CLI entry point.
 runCLI :: IO ()
 runCLI = do
-  opts <- execParser cliParserInfo
-  runChat opts
+  cmd <- execParser cliParserInfo
+  case cmd of
+    CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
+    CmdGateway opts -> runChat opts
 
 -- | Run an interactive chat session.
 runChat :: ChatOptions -> IO ()

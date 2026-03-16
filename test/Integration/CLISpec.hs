@@ -123,7 +123,7 @@ spec = do
 
     it "falls back to CLI when --channel signal and signal-cli is not installed" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclawWithArgs bin ["--channel", "signal", "--no-vault"] "" 5000000
+      (exitCode, out, err) <- runPureclawWithArgs bin ["gateway", "run", "--channel", "signal", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       -- Should warn about signal-cli not being installed
       err `shouldContain` "signal-cli"
