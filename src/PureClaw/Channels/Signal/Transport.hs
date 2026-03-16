@@ -13,6 +13,7 @@ import Control.Concurrent.STM
 import Data.Aeson
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
+import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import System.IO
@@ -51,6 +52,7 @@ mkSignalCliTransport account logger = do
   hSetBuffering stdinH LineBuffering
   hSetBuffering stdoutH LineBuffering
   _lh_logInfo logger $ "signal-cli started for account " <> account
+  reqIdRef <- newIORef (0 :: Int)
   let recvLoop = do
         line <- BS8.hGetLine stdoutH
         case eitherDecode (BL.fromStrict line) of
@@ -61,14 +63,17 @@ mkSignalCliTransport account logger = do
   pure SignalTransport
     { _st_receive = recvLoop
     , _st_send = \recipient body -> do
+        reqId <- atomicModifyIORef' reqIdRef (\n -> (n + 1, n + 1))
         let rpcMsg = object
               [ "jsonrpc" .= ("2.0" :: Text)
               , "method"  .= ("send" :: Text)
+              , "id"      .= show reqId
               , "params"  .= object
                   [ "recipient" .= [recipient]
                   , "message"   .= body
                   ]
               ]
+        _lh_logInfo logger $ "Signal send to " <> recipient <> " (" <> T.pack (show (T.length body)) <> " chars)"
         BL.hPut stdinH (encode rpcMsg <> "\n")
         hFlush stdinH
     , _st_close = do
