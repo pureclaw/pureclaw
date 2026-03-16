@@ -169,19 +169,6 @@ applyUpdate (Set x) _ = Just x
 applyUpdate Clear   _ = Nothing
 applyUpdate Keep    v = v
 
--- | Three-valued update: set a new value, clear the field, or keep the existing value.
-data FieldUpdate a
-  = Set a    -- ^ Replace with this value
-  | Clear    -- ^ Remove the field (set to Nothing)
-  | Keep     -- ^ Leave the existing value unchanged
-  deriving stock (Show, Eq)
-
--- | Apply a 'FieldUpdate' to an existing 'Maybe' value.
-applyUpdate :: FieldUpdate a -> Maybe a -> Maybe a
-applyUpdate (Set x) _ = Just x
-applyUpdate Clear   _ = Nothing
-applyUpdate Keep    v = v
-
 -- | Update vault-related fields in a config file, preserving all other settings.
 -- 'Keep' means "leave this field unchanged", 'Clear' means "remove the field",
 -- 'Set' means "replace with this value".
