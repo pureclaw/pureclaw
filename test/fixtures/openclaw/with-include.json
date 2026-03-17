@@ -1,0 +1,12 @@
+// Config that uses $include directives
+{
+  "agents": {
+    "$include": "./agents.json5"
+  },
+  "channels": {
+    "signal": {
+      "enabled": true,
+      "account": "+15555550123",
+    },
+  },
+}

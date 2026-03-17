@@ -1,0 +1,44 @@
+// Basic OpenClaw config with comments and trailing commas
+{
+  // Model configuration
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-6",
+      },
+      "workspace": "~/Projects",
+    },
+    "list": [
+      {
+        "id": "coder",
+        "systemPrompt": "You are a coding assistant. Write clean, tested code.",
+        "model": { "primary": "anthropic/claude-sonnet-4-6" },
+        "tools": { "profile": "coding" },
+        "workspace": "~/Projects/code",
+      },
+      {
+        "id": "research",
+        "systemPrompt": "You are a research assistant.",
+        "model": { "primary": "anthropic/claude-opus-4-6" },
+        "tools": { "profile": "full" },
+      },
+    ],
+  },
+  "channels": {
+    "signal": {
+      "enabled": true,
+      "account": "+15555550123",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["+15551234567", "+15559876543"],
+    },
+    "telegram": {
+      "enabled": true,
+      "botToken": "123456:ABC-DEF-GHI",
+      "dmPolicy": "pairing",
+      "allowFrom": ["tg:123456789"],
+      "groups": {
+        "*": { "requireMention": true },
+      },
+    },
+  },
+}

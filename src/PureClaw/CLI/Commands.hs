@@ -25,6 +25,8 @@ import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
 import System.Directory (doesFileExist)
 
+import System.Exit (exitFailure)
+import System.FilePath ((</>))
 import System.IO
 import System.Process.Typed qualified as P
 
@@ -36,6 +38,7 @@ import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
+import PureClaw.CLI.Import
 import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
@@ -189,6 +192,7 @@ memoryToText MarkdownMemory = "markdown"
 data Command
   = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
   | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
+  | CmdImport FilePath        -- ^ Import an OpenClaw config
   deriving stock (Show, Eq)
 
 -- | Full CLI parser with subcommands.
@@ -211,6 +215,8 @@ commandParser = subparser
         (command "run" (info (CmdGateway <$> chatOptionsParser <**> helper)
           (progDesc "Run the agent with channel from config (Signal, Telegram, CLI)"))))
         (progDesc "Gateway — channel-aware agent"))
+   <> command "import" (info (CmdImport <$> argument str (metavar "PATH" <> help "Path to OpenClaw config file (openclaw.json)") <**> helper)
+        (progDesc "Import an OpenClaw configuration"))
     )
   <|> (CmdTui <$> chatOptionsParser)  -- default to tui when no subcommand
 
@@ -221,6 +227,36 @@ runCLI = do
   case cmd of
     CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
     CmdGateway opts -> runChat opts
+    CmdImport path  -> runImport path
+
+-- | Import an OpenClaw config file.
+runImport :: FilePath -> IO ()
+runImport path = do
+  pureclawDir <- getPureclawDir
+  let configDir = pureclawDir </> "config"
+  putStrLn $ "Importing OpenClaw config from: " <> path
+  putStrLn $ "Writing to: " <> configDir
+  result <- importOpenClawConfig path configDir
+  case result of
+    Left err -> do
+      putStrLn $ "Error: " <> T.unpack err
+      exitFailure
+    Right ir -> do
+      putStrLn ""
+      putStrLn "Import complete!"
+      putStrLn $ "  Config written: " <> configDir </> "config.toml"
+      case _ir_agentsWritten ir of
+        [] -> pure ()
+        agents -> do
+          putStrLn $ "  Agents written: " <> T.unpack (T.intercalate ", " agents)
+          mapM_ (\a -> putStrLn $ "    " <> configDir </> "agents" </> T.unpack a </> "AGENTS.md") agents
+      case _ir_warnings ir of
+        [] -> pure ()
+        ws -> mapM_ (\w -> putStrLn $ "  Warning: " <> T.unpack w) ws
+      putStrLn ""
+      putStrLn "Next steps:"
+      putStrLn "  1. Review the imported config and agent files"
+      putStrLn "  2. Run: pureclaw tui"
 
 -- | Run an interactive chat session.
 runChat :: ChatOptions -> IO ()

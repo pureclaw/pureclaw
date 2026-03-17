@@ -23,6 +23,7 @@ import qualified Agent.LoopSpec
 import qualified Channels.CLISpec
 import qualified CLI.CommandsSpec
 import qualified CLI.ConfigSpec
+import qualified CLI.ImportSpec
 import qualified Tools.RegistrySpec
 import qualified Tools.ShellSpec
 import qualified Tools.FileReadSpec
@@ -86,6 +87,7 @@ main = hspec $ do
   describe "Channels.CLI" Channels.CLISpec.spec
   describe "CLI.Commands" CLI.CommandsSpec.spec
   describe "CLI.Config" CLI.ConfigSpec.spec
+  describe "CLI.Import" CLI.ImportSpec.spec
   describe "Tools.Registry" Tools.RegistrySpec.spec
   describe "Tools.Shell" Tools.ShellSpec.spec
   describe "Tools.FileRead" Tools.FileReadSpec.spec
