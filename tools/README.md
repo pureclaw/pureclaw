@@ -125,6 +125,8 @@ python3 tools/compare-requests.py \
 
 **Output fields**: `system` (unified diff), `messages` (structural diff),
 `tools` (set diff — missing/extra tools + schema diffs), `other` (model, max_tokens, etc.)
+
+
 ## Test Fixtures
 
 Workspace fixtures for behavioral test scenarios live in `test/fixtures/`:
