@@ -73,13 +73,58 @@ export ANTHROPIC_BASE_URL=http://localhost:9999
 # run OpenClaw scenario...
 ```
 
-**Compare** — diff the two capture files (Phase 4 will add `tools/compare-requests.py`):
+**Compare** — diff the two capture files:
 
 ```bash
-# For now, manual inspection:
-cat openclaw-capture.jsonl | python3 -m json.tool
-cat pureclaw-capture.jsonl | python3 -m json.tool
+python3 tools/compare-requests.py \
+    --openclaw openclaw-capture.jsonl \
+    --pureclaw pureclaw-capture.jsonl \
+    --scenario cold-start
 ```
+
+## compare-requests.py — Normalization + Structured Diff
+
+Compares captured Anthropic API requests between OpenClaw and PureClaw.
+Applies normalization rules (timestamps, tool IDs, UUIDs, paths, tokens)
+then produces a structured diff with pass/fail per field.
+
+```bash
+# Cross-comparison
+python3 tools/compare-requests.py \
+    --openclaw test/captures/openclaw/scenario-cold-start.jsonl \
+    --pureclaw test/captures/pureclaw/scenario-cold-start.jsonl \
+    --scenario cold-start
+
+# Self-comparison (sanity check — omit --pureclaw)
+python3 tools/compare-requests.py \
+    --openclaw test/captures/openclaw/scenario-cold-start.jsonl \
+    --scenario cold-start
+
+# Compare only a specific turn (1-indexed)
+python3 tools/compare-requests.py \
+    --openclaw test/captures/openclaw/scenario-multi-turn-no-tools.jsonl \
+    --pureclaw test/captures/pureclaw/scenario-multi-turn-no-tools.jsonl \
+    --turn 3 --scenario multi-turn
+
+# Machine-readable JSON output
+python3 tools/compare-requests.py \
+    --openclaw openclaw.jsonl --pureclaw pureclaw.jsonl \
+    --scenario cold-start --json
+```
+
+**Normalization rules applied** (Section 4 of the behavioral test plan):
+- `tool_use_id` → `TOOL_ID_<N>`
+- UUIDs → `SESSION_UUID`
+- Message IDs → `MSG_ID_<N>`
+- ISO timestamps → `TIMESTAMP_PLACEHOLDER`
+- `## Current Date & Time` block → `DATE_TIME_PLACEHOLDER`
+- `## Runtime` line → `RUNTIME_PLACEHOLDER`
+- API tokens → `REDACTED_TOKEN`
+- Workspace paths → `WORKSPACE_ROOT`
+- Trailing whitespace stripped, newlines normalized
+
+**Output fields**: `system` (unified diff), `messages` (structural diff),
+`tools` (set diff — missing/extra tools + schema diffs), `other` (model, max_tokens, etc.)
 
 ## Test Fixtures
 
