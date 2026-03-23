@@ -1,0 +1,506 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.CLI.Commands
+<span class="lineno">    2 </span>  ( -- * Entry point
+<span class="lineno">    3 </span>    runCLI
+<span class="lineno">    4 </span>    -- * Options (exported for testing)
+<span class="lineno">    5 </span>  , ChatOptions (..)
+<span class="lineno">    6 </span>  , chatOptionsParser
+<span class="lineno">    7 </span>    -- * Enums (exported for testing)
+<span class="lineno">    8 </span>  , ProviderType (..)
+<span class="lineno">    9 </span>  , MemoryBackend (..)
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Control.Exception (bracket_)
+<span class="lineno">   13 </span>import Data.ByteString (ByteString)
+<span class="lineno">   14 </span>import Data.Maybe
+<span class="lineno">   15 </span>import Data.Set qualified as Set
+<span class="lineno">   16 </span>import Data.Text qualified as T
+<span class="lineno">   17 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   18 </span>import Data.Time.Clock (getCurrentTime)
+<span class="lineno">   19 </span>import Network.HTTP.Client qualified as HTTP
+<span class="lineno">   20 </span>import Network.HTTP.Client.TLS qualified as HTTP
+<span class="lineno">   21 </span>import Options.Applicative
+<span class="lineno">   22 </span>import System.Directory (doesFileExist)
+<span class="lineno">   23 </span>import System.Environment
+<span class="lineno">   24 </span>import System.Exit
+<span class="lineno">   25 </span>import System.IO
+<span class="lineno">   26 </span>
+<span class="lineno">   27 </span>import PureClaw.Auth.AnthropicOAuth
+<span class="lineno">   28 </span>import PureClaw.CLI.Config
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>import PureClaw.Agent.Env
+<span class="lineno">   31 </span>import PureClaw.Agent.Identity
+<span class="lineno">   32 </span>import PureClaw.Agent.Loop
+<span class="lineno">   33 </span>import PureClaw.Channels.CLI
+<span class="lineno">   34 </span>import PureClaw.Core.Types
+<span class="lineno">   35 </span>import PureClaw.Handles.File
+<span class="lineno">   36 </span>import PureClaw.Handles.Log
+<span class="lineno">   37 </span>import PureClaw.Handles.Memory
+<span class="lineno">   38 </span>import PureClaw.Handles.Network
+<span class="lineno">   39 </span>import PureClaw.Handles.Shell
+<span class="lineno">   40 </span>import PureClaw.Memory.Markdown
+<span class="lineno">   41 </span>import PureClaw.Memory.SQLite
+<span class="lineno">   42 </span>import PureClaw.Providers.Anthropic
+<span class="lineno">   43 </span>import PureClaw.Providers.Class
+<span class="lineno">   44 </span>import PureClaw.Providers.Ollama
+<span class="lineno">   45 </span>import PureClaw.Providers.OpenAI
+<span class="lineno">   46 </span>import PureClaw.Providers.OpenRouter
+<span class="lineno">   47 </span>import PureClaw.Security.Policy
+<span class="lineno">   48 </span>import PureClaw.Security.Secrets
+<span class="lineno">   49 </span>import PureClaw.Security.Vault
+<span class="lineno">   50 </span>import PureClaw.Security.Vault.Age
+<span class="lineno">   51 </span>import PureClaw.Security.Vault.Passphrase
+<span class="lineno">   52 </span>import PureClaw.Tools.FileRead
+<span class="lineno">   53 </span>import PureClaw.Tools.FileWrite
+<span class="lineno">   54 </span>import PureClaw.Tools.Git
+<span class="lineno">   55 </span>import PureClaw.Tools.HttpRequest
+<span class="lineno">   56 </span>import PureClaw.Tools.Memory
+<span class="lineno">   57 </span>import PureClaw.Tools.Registry
+<span class="lineno">   58 </span>import PureClaw.Tools.Shell
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | Supported LLM providers.
+<span class="lineno">   61 </span>data ProviderType
+<span class="lineno">   62 </span>  = Anthropic
+<span class="lineno">   63 </span>  | OpenAI
+<span class="lineno">   64 </span>  | OpenRouter
+<span class="lineno">   65 </span>  | Ollama
+<span class="lineno">   66 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Bounded</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Enum</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>-- | Supported memory backends.
+<span class="lineno">   69 </span>data MemoryBackend
+<span class="lineno">   70 </span>  = NoMemory
+<span class="lineno">   71 </span>  | SQLiteMemory
+<span class="lineno">   72 </span>  | MarkdownMemory
+<span class="lineno">   73 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Bounded</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Enum</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>-- | CLI chat options.
+<span class="lineno">   76 </span>-- Fields with defaults use 'Maybe' so config file values can fill in omitted flags.
+<span class="lineno">   77 </span>data ChatOptions = ChatOptions
+<span class="lineno">   78 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_model</span></span></span>         :: Maybe String
+<span class="lineno">   79 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_apiKey</span></span></span>        :: Maybe String
+<span class="lineno">   80 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_system</span></span></span>        :: Maybe String
+<span class="lineno">   81 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_provider</span></span></span>      :: Maybe ProviderType
+<span class="lineno">   82 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_allowCommands</span></span></span> :: [String]
+<span class="lineno">   83 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_memory</span></span></span>        :: Maybe MemoryBackend
+<span class="lineno">   84 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_soul</span></span></span>          :: Maybe String
+<span class="lineno">   85 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_config</span></span></span>        :: Maybe FilePath
+<span class="lineno">   86 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_noVault</span></span></span>       :: Bool
+<span class="lineno">   87 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_oauth</span></span></span>         :: Bool
+<span class="lineno">   88 </span>  }
+<span class="lineno">   89 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>-- | Parser for chat options.
+<span class="lineno">   92 </span>chatOptionsParser :: Parser ChatOptions
+<span class="lineno">   93 </span><span class="decl"><span class="istickedoff">chatOptionsParser = ChatOptions</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">&lt;$&gt; optional (strOption</span>
+<span class="lineno">   95 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;model&quot;</span>
+<span class="lineno">   96 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; short 'm'</span>
+<span class="lineno">   97 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;Model to use (default: claude-sonnet-4-20250514)&quot;</span></span>
+<span class="lineno">   98 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">   99 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; optional (strOption</span>
+<span class="lineno">  100 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;api-key&quot;</span>
+<span class="lineno">  101 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;API key (default: from config file or env var for chosen provider)&quot;</span></span>
+<span class="lineno">  102 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; optional (strOption</span>
+<span class="lineno">  104 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;system&quot;</span>
+<span class="lineno">  105 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; short 's'</span>
+<span class="lineno">  106 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;System prompt (overrides SOUL.md)&quot;</span></span>
+<span class="lineno">  107 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">  108 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; optional (option parseProviderType</span>
+<span class="lineno">  109 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;provider&quot;</span>
+<span class="lineno">  110 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; short 'p'</span>
+<span class="lineno">  111 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;LLM provider: anthropic, openai, openrouter, ollama (default: anthropic)&quot;</span></span>
+<span class="lineno">  112 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">  113 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; many (strOption</span>
+<span class="lineno">  114 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;allow&quot;</span>
+<span class="lineno">  115 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; short 'a'</span>
+<span class="lineno">  116 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;Allow a shell command (repeatable, e.g. --allow git --allow ls)&quot;</span></span>
+<span class="lineno">  117 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">  118 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; optional (option parseMemoryBackend</span>
+<span class="lineno">  119 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;memory&quot;</span>
+<span class="lineno">  120 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;Memory backend: none, sqlite, markdown (default: none)&quot;</span></span>
+<span class="lineno">  121 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; optional (strOption</span>
+<span class="lineno">  123 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;soul&quot;</span>
+<span class="lineno">  124 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;Path to SOUL.md identity file (default: ./SOUL.md if it exists)&quot;</span></span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">  126 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; optional (strOption</span>
+<span class="lineno">  127 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;config&quot;</span>
+<span class="lineno">  128 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; short 'c'</span>
+<span class="lineno">  129 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;Path to config file (default: ~/.pureclaw/config.toml or ~/.config/pureclaw/config.toml)&quot;</span></span>
+<span class="lineno">  130 </span><span class="spaces">      </span><span class="istickedoff">))</span>
+<span class="lineno">  131 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; switch</span>
+<span class="lineno">  132 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;no-vault&quot;</span>
+<span class="lineno">  133 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;Disable vault even if configured in config file&quot;</span></span>
+<span class="lineno">  134 </span><span class="spaces">      </span><span class="istickedoff">)</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; switch</span>
+<span class="lineno">  136 </span><span class="spaces">      </span><span class="istickedoff">( long &quot;oauth&quot;</span>
+<span class="lineno">  137 </span><span class="spaces">     </span><span class="istickedoff">&lt;&gt; help <span class="nottickedoff">&quot;Authenticate with Anthropic via OAuth (opens browser). Tokens are cached in the vault.&quot;</span></span>
+<span class="lineno">  138 </span><span class="spaces">      </span><span class="istickedoff">)</span></span>
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | Parse a provider type from a CLI string.
+<span class="lineno">  141 </span>parseProviderType :: ReadM ProviderType
+<span class="lineno">  142 </span><span class="decl"><span class="istickedoff">parseProviderType = eitherReader $ \s -&gt; case s of</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="istickedoff">&quot;anthropic&quot;  -&gt; <span class="nottickedoff">Right Anthropic</span></span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">&quot;openai&quot;     -&gt; Right OpenAI</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">&quot;openrouter&quot; -&gt; Right OpenRouter</span>
+<span class="lineno">  146 </span><span class="spaces">  </span><span class="istickedoff">&quot;ollama&quot;     -&gt; Right Ollama</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">_            -&gt; Left $ <span class="nottickedoff">&quot;Unknown provider: &quot; &lt;&gt; s &lt;&gt; &quot;. Choose: anthropic, openai, openrouter, ollama&quot;</span></span></span>
+<span class="lineno">  148 </span>
+<span class="lineno">  149 </span>-- | Display a provider type as a CLI string.
+<span class="lineno">  150 </span>providerToText :: ProviderType -&gt; String
+<span class="lineno">  151 </span><span class="decl"><span class="nottickedoff">providerToText Anthropic  = &quot;anthropic&quot;</span>
+<span class="lineno">  152 </span><span class="spaces"></span><span class="nottickedoff">providerToText OpenAI     = &quot;openai&quot;</span>
+<span class="lineno">  153 </span><span class="spaces"></span><span class="nottickedoff">providerToText OpenRouter = &quot;openrouter&quot;</span>
+<span class="lineno">  154 </span><span class="spaces"></span><span class="nottickedoff">providerToText Ollama     = &quot;ollama&quot;</span></span>
+<span class="lineno">  155 </span>
+<span class="lineno">  156 </span>-- | Parse a memory backend from a CLI string.
+<span class="lineno">  157 </span>parseMemoryBackend :: ReadM MemoryBackend
+<span class="lineno">  158 </span><span class="decl"><span class="istickedoff">parseMemoryBackend = eitherReader $ \s -&gt; case s of</span>
+<span class="lineno">  159 </span><span class="spaces">  </span><span class="istickedoff">&quot;none&quot;     -&gt; <span class="nottickedoff">Right NoMemory</span></span>
+<span class="lineno">  160 </span><span class="spaces">  </span><span class="istickedoff">&quot;sqlite&quot;   -&gt; Right SQLiteMemory</span>
+<span class="lineno">  161 </span><span class="spaces">  </span><span class="istickedoff">&quot;markdown&quot; -&gt; Right MarkdownMemory</span>
+<span class="lineno">  162 </span><span class="spaces">  </span><span class="istickedoff">_          -&gt; Left $ <span class="nottickedoff">&quot;Unknown memory backend: &quot; &lt;&gt; s &lt;&gt; &quot;. Choose: none, sqlite, markdown&quot;</span></span></span>
+<span class="lineno">  163 </span>
+<span class="lineno">  164 </span>-- | Display a memory backend as a CLI string.
+<span class="lineno">  165 </span>memoryToText :: MemoryBackend -&gt; String
+<span class="lineno">  166 </span><span class="decl"><span class="nottickedoff">memoryToText NoMemory       = &quot;none&quot;</span>
+<span class="lineno">  167 </span><span class="spaces"></span><span class="nottickedoff">memoryToText SQLiteMemory   = &quot;sqlite&quot;</span>
+<span class="lineno">  168 </span><span class="spaces"></span><span class="nottickedoff">memoryToText MarkdownMemory = &quot;markdown&quot;</span></span>
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- | Full CLI parser with help and version.
+<span class="lineno">  171 </span>cliParserInfo :: ParserInfo ChatOptions
+<span class="lineno">  172 </span><span class="decl"><span class="nottickedoff">cliParserInfo = info (chatOptionsParser &lt;**&gt; helper)</span>
+<span class="lineno">  173 </span><span class="spaces">  </span><span class="nottickedoff">( fullDesc</span>
+<span class="lineno">  174 </span><span class="spaces"> </span><span class="nottickedoff">&lt;&gt; progDesc &quot;Interactive AI chat with tool use&quot;</span>
+<span class="lineno">  175 </span><span class="spaces"> </span><span class="nottickedoff">&lt;&gt; header &quot;pureclaw — Haskell-native AI agent runtime&quot;</span>
+<span class="lineno">  176 </span><span class="spaces">  </span><span class="nottickedoff">)</span></span>
+<span class="lineno">  177 </span>
+<span class="lineno">  178 </span>-- | Main CLI entry point.
+<span class="lineno">  179 </span>runCLI :: IO ()
+<span class="lineno">  180 </span><span class="decl"><span class="nottickedoff">runCLI = do</span>
+<span class="lineno">  181 </span><span class="spaces">  </span><span class="nottickedoff">opts &lt;- execParser cliParserInfo</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="nottickedoff">runChat opts</span></span>
+<span class="lineno">  183 </span>
+<span class="lineno">  184 </span>-- | Run an interactive chat session.
+<span class="lineno">  185 </span>runChat :: ChatOptions -&gt; IO ()
+<span class="lineno">  186 </span><span class="decl"><span class="nottickedoff">runChat opts = do</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="nottickedoff">let logger = mkStderrLogHandle</span>
+<span class="lineno">  188 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="nottickedoff">-- Load config file: --config flag overrides default search locations</span>
+<span class="lineno">  190 </span><span class="spaces">  </span><span class="nottickedoff">fileCfg &lt;- maybe loadConfig loadFileConfig (_co_config opts)</span>
+<span class="lineno">  191 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="nottickedoff">-- Resolve effective values: CLI flag &gt; config file &gt; default</span>
+<span class="lineno">  193 </span><span class="spaces">  </span><span class="nottickedoff">let effectiveProvider = fromMaybe Anthropic  (_co_provider opts &lt;|&gt; parseProviderMaybe (_fc_provider fileCfg))</span>
+<span class="lineno">  194 </span><span class="spaces">      </span><span class="nottickedoff">effectiveModel    = fromMaybe &quot;claude-sonnet-4-20250514&quot; (_co_model opts &lt;|&gt; fmap T.unpack (_fc_model fileCfg))</span>
+<span class="lineno">  195 </span><span class="spaces">      </span><span class="nottickedoff">effectiveMemory   = fromMaybe NoMemory    (_co_memory opts &lt;|&gt; parseMemoryMaybe (_fc_memory fileCfg))</span>
+<span class="lineno">  196 </span><span class="spaces">      </span><span class="nottickedoff">effectiveApiKey   = _co_apiKey opts &lt;|&gt; fmap T.unpack (_fc_apiKey fileCfg)</span>
+<span class="lineno">  197 </span><span class="spaces">      </span><span class="nottickedoff">effectiveSystem   = _co_system opts &lt;|&gt; fmap T.unpack (_fc_system fileCfg)</span>
+<span class="lineno">  198 </span><span class="spaces">      </span><span class="nottickedoff">effectiveAllow    = _co_allowCommands opts &lt;&gt; maybe [] (map T.unpack) (_fc_allow fileCfg)</span>
+<span class="lineno">  199 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="nottickedoff">-- Vault (opened before provider so API keys can be fetched from vault)</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="nottickedoff">vaultOpt &lt;- resolveVault fileCfg (_co_noVault opts) logger</span>
+<span class="lineno">  202 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="nottickedoff">-- Provider</span>
+<span class="lineno">  204 </span><span class="spaces">  </span><span class="nottickedoff">manager &lt;- HTTP.newTlsManager</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="nottickedoff">provider &lt;- if effectiveProvider == Anthropic &amp;&amp; _co_oauth opts</span>
+<span class="lineno">  206 </span><span class="spaces">    </span><span class="nottickedoff">then resolveAnthropicOAuth vaultOpt manager</span>
+<span class="lineno">  207 </span><span class="spaces">    </span><span class="nottickedoff">else resolveProvider effectiveProvider effectiveApiKey vaultOpt manager</span>
+<span class="lineno">  208 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  209 </span><span class="spaces">  </span><span class="nottickedoff">-- Model</span>
+<span class="lineno">  210 </span><span class="spaces">  </span><span class="nottickedoff">let model = ModelId (T.pack effectiveModel)</span>
+<span class="lineno">  211 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="nottickedoff">-- System prompt: effective --system flag &gt; SOUL.md &gt; nothing</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="nottickedoff">sysPrompt &lt;- case effectiveSystem of</span>
+<span class="lineno">  214 </span><span class="spaces">    </span><span class="nottickedoff">Just s  -&gt; pure (Just (T.pack s))</span>
+<span class="lineno">  215 </span><span class="spaces">    </span><span class="nottickedoff">Nothing -&gt; do</span>
+<span class="lineno">  216 </span><span class="spaces">      </span><span class="nottickedoff">let soulPath = fromMaybe &quot;SOUL.md&quot; (_co_soul opts)</span>
+<span class="lineno">  217 </span><span class="spaces">      </span><span class="nottickedoff">ident &lt;- loadIdentity soulPath</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="nottickedoff">if ident == defaultIdentity</span>
+<span class="lineno">  219 </span><span class="spaces">        </span><span class="nottickedoff">then pure Nothing</span>
+<span class="lineno">  220 </span><span class="spaces">        </span><span class="nottickedoff">else pure (Just (identitySystemPrompt ident))</span>
+<span class="lineno">  221 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  222 </span><span class="spaces">  </span><span class="nottickedoff">-- Security policy</span>
+<span class="lineno">  223 </span><span class="spaces">  </span><span class="nottickedoff">let policy = buildPolicy effectiveAllow</span>
+<span class="lineno">  224 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  225 </span><span class="spaces">  </span><span class="nottickedoff">-- Handles</span>
+<span class="lineno">  226 </span><span class="spaces">  </span><span class="nottickedoff">let channel   = mkCLIChannelHandle</span>
+<span class="lineno">  227 </span><span class="spaces">      </span><span class="nottickedoff">workspace = WorkspaceRoot &quot;.&quot;</span>
+<span class="lineno">  228 </span><span class="spaces">      </span><span class="nottickedoff">sh        = mkShellHandle logger</span>
+<span class="lineno">  229 </span><span class="spaces">      </span><span class="nottickedoff">fh        = mkFileHandle workspace</span>
+<span class="lineno">  230 </span><span class="spaces">      </span><span class="nottickedoff">nh        = mkNetworkHandle manager</span>
+<span class="lineno">  231 </span><span class="spaces">  </span><span class="nottickedoff">mh &lt;- resolveMemory effectiveMemory</span>
+<span class="lineno">  232 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  233 </span><span class="spaces">  </span><span class="nottickedoff">-- Tool registry</span>
+<span class="lineno">  234 </span><span class="spaces">  </span><span class="nottickedoff">let registry = buildRegistry policy sh workspace fh mh nh</span>
+<span class="lineno">  235 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  236 </span><span class="spaces">  </span><span class="nottickedoff">hSetBuffering stdout LineBuffering</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="nottickedoff">_lh_logInfo logger $ &quot;Provider: &quot; &lt;&gt; T.pack (providerToText effectiveProvider)</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="nottickedoff">_lh_logInfo logger $ &quot;Model: &quot; &lt;&gt; T.pack effectiveModel</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="nottickedoff">_lh_logInfo logger $ &quot;Memory: &quot; &lt;&gt; T.pack (memoryToText effectiveMemory)</span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="nottickedoff">case effectiveAllow of</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="nottickedoff">[] -&gt; _lh_logInfo logger &quot;Commands: none (deny all)&quot;</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="nottickedoff">cmds -&gt; _lh_logInfo logger $ &quot;Commands: &quot; &lt;&gt; T.intercalate &quot;, &quot; (map T.pack cmds)</span>
+<span class="lineno">  243 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn &quot;PureClaw 0.1.0 — Haskell-native AI agent runtime&quot;</span>
+<span class="lineno">  244 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn &quot;Type your message and press Enter. Ctrl-D to exit.&quot;</span>
+<span class="lineno">  245 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn &quot;&quot;</span>
+<span class="lineno">  246 </span><span class="spaces">  </span><span class="nottickedoff">let env = AgentEnv</span>
+<span class="lineno">  247 </span><span class="spaces">        </span><span class="nottickedoff">{ _env_provider     = provider</span>
+<span class="lineno">  248 </span><span class="spaces">        </span><span class="nottickedoff">, _env_model        = model</span>
+<span class="lineno">  249 </span><span class="spaces">        </span><span class="nottickedoff">, _env_channel      = channel</span>
+<span class="lineno">  250 </span><span class="spaces">        </span><span class="nottickedoff">, _env_logger       = logger</span>
+<span class="lineno">  251 </span><span class="spaces">        </span><span class="nottickedoff">, _env_systemPrompt = sysPrompt</span>
+<span class="lineno">  252 </span><span class="spaces">        </span><span class="nottickedoff">, _env_registry     = registry</span>
+<span class="lineno">  253 </span><span class="spaces">        </span><span class="nottickedoff">, _env_vault        = vaultOpt</span>
+<span class="lineno">  254 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  255 </span><span class="spaces">  </span><span class="nottickedoff">runAgentLoop env</span></span>
+<span class="lineno">  256 </span>
+<span class="lineno">  257 </span>-- | Parse a provider type from a text value (used for config file).
+<span class="lineno">  258 </span>parseProviderMaybe :: Maybe T.Text -&gt; Maybe ProviderType
+<span class="lineno">  259 </span><span class="decl"><span class="nottickedoff">parseProviderMaybe Nothing  = Nothing</span>
+<span class="lineno">  260 </span><span class="spaces"></span><span class="nottickedoff">parseProviderMaybe (Just t) = case T.unpack t of</span>
+<span class="lineno">  261 </span><span class="spaces">  </span><span class="nottickedoff">&quot;anthropic&quot;  -&gt; Just Anthropic</span>
+<span class="lineno">  262 </span><span class="spaces">  </span><span class="nottickedoff">&quot;openai&quot;     -&gt; Just OpenAI</span>
+<span class="lineno">  263 </span><span class="spaces">  </span><span class="nottickedoff">&quot;openrouter&quot; -&gt; Just OpenRouter</span>
+<span class="lineno">  264 </span><span class="spaces">  </span><span class="nottickedoff">&quot;ollama&quot;     -&gt; Just Ollama</span>
+<span class="lineno">  265 </span><span class="spaces">  </span><span class="nottickedoff">_            -&gt; Nothing</span></span>
+<span class="lineno">  266 </span>
+<span class="lineno">  267 </span>-- | Parse a memory backend from a text value (used for config file).
+<span class="lineno">  268 </span>parseMemoryMaybe :: Maybe T.Text -&gt; Maybe MemoryBackend
+<span class="lineno">  269 </span><span class="decl"><span class="nottickedoff">parseMemoryMaybe Nothing  = Nothing</span>
+<span class="lineno">  270 </span><span class="spaces"></span><span class="nottickedoff">parseMemoryMaybe (Just t) = case T.unpack t of</span>
+<span class="lineno">  271 </span><span class="spaces">  </span><span class="nottickedoff">&quot;none&quot;     -&gt; Just NoMemory</span>
+<span class="lineno">  272 </span><span class="spaces">  </span><span class="nottickedoff">&quot;sqlite&quot;   -&gt; Just SQLiteMemory</span>
+<span class="lineno">  273 </span><span class="spaces">  </span><span class="nottickedoff">&quot;markdown&quot; -&gt; Just MarkdownMemory</span>
+<span class="lineno">  274 </span><span class="spaces">  </span><span class="nottickedoff">_          -&gt; Nothing</span></span>
+<span class="lineno">  275 </span>
+<span class="lineno">  276 </span>-- | Build the tool registry with all available tools.
+<span class="lineno">  277 </span>buildRegistry :: SecurityPolicy -&gt; ShellHandle -&gt; WorkspaceRoot -&gt; FileHandle -&gt; MemoryHandle -&gt; NetworkHandle -&gt; ToolRegistry
+<span class="lineno">  278 </span><span class="decl"><span class="nottickedoff">buildRegistry policy sh workspace fh mh nh =</span>
+<span class="lineno">  279 </span><span class="spaces">  </span><span class="nottickedoff">let reg = uncurry registerTool</span>
+<span class="lineno">  280 </span><span class="spaces">  </span><span class="nottickedoff">in reg (shellTool policy sh)</span>
+<span class="lineno">  281 </span><span class="spaces">   </span><span class="nottickedoff">$ reg (fileReadTool workspace fh)</span>
+<span class="lineno">  282 </span><span class="spaces">   </span><span class="nottickedoff">$ reg (fileWriteTool workspace fh)</span>
+<span class="lineno">  283 </span><span class="spaces">   </span><span class="nottickedoff">$ reg (gitTool policy sh)</span>
+<span class="lineno">  284 </span><span class="spaces">   </span><span class="nottickedoff">$ reg (memoryStoreTool mh)</span>
+<span class="lineno">  285 </span><span class="spaces">   </span><span class="nottickedoff">$ reg (memoryRecallTool mh)</span>
+<span class="lineno">  286 </span><span class="spaces">   </span><span class="nottickedoff">$ reg (httpRequestTool AllowAll nh)</span>
+<span class="lineno">  287 </span><span class="spaces">     </span><span class="nottickedoff">emptyRegistry</span></span>
+<span class="lineno">  288 </span>
+<span class="lineno">  289 </span>-- | Build a security policy from the list of allowed commands.
+<span class="lineno">  290 </span>buildPolicy :: [String] -&gt; SecurityPolicy
+<span class="lineno">  291 </span><span class="decl"><span class="nottickedoff">buildPolicy [] = defaultPolicy</span>
+<span class="lineno">  292 </span><span class="spaces"></span><span class="nottickedoff">buildPolicy cmds =</span>
+<span class="lineno">  293 </span><span class="spaces">  </span><span class="nottickedoff">let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)</span>
+<span class="lineno">  294 </span><span class="spaces">  </span><span class="nottickedoff">in defaultPolicy</span>
+<span class="lineno">  295 </span><span class="spaces">    </span><span class="nottickedoff">{ _sp_allowedCommands = AllowList cmdNames</span>
+<span class="lineno">  296 </span><span class="spaces">    </span><span class="nottickedoff">, _sp_autonomy = Full</span>
+<span class="lineno">  297 </span><span class="spaces">    </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  298 </span>
+<span class="lineno">  299 </span>-- | Resolve the LLM provider from the provider type.
+<span class="lineno">  300 </span>-- Checks the vault for the API key (using the env var name as the vault key)
+<span class="lineno">  301 </span>-- before falling back to CLI flag or environment variable.
+<span class="lineno">  302 </span>resolveProvider :: ProviderType -&gt; Maybe String -&gt; Maybe VaultHandle -&gt; HTTP.Manager -&gt; IO SomeProvider
+<span class="lineno">  303 </span><span class="decl"><span class="nottickedoff">resolveProvider Anthropic keyOpt vaultOpt manager = do</span>
+<span class="lineno">  304 </span><span class="spaces">  </span><span class="nottickedoff">apiKey &lt;- resolveApiKey keyOpt &quot;ANTHROPIC_API_KEY&quot; vaultOpt</span>
+<span class="lineno">  305 </span><span class="spaces">  </span><span class="nottickedoff">pure (MkProvider (mkAnthropicProvider manager apiKey))</span>
+<span class="lineno">  306 </span><span class="spaces"></span><span class="nottickedoff">resolveProvider OpenAI keyOpt vaultOpt manager = do</span>
+<span class="lineno">  307 </span><span class="spaces">  </span><span class="nottickedoff">apiKey &lt;- resolveApiKey keyOpt &quot;OPENAI_API_KEY&quot; vaultOpt</span>
+<span class="lineno">  308 </span><span class="spaces">  </span><span class="nottickedoff">pure (MkProvider (mkOpenAIProvider manager apiKey))</span>
+<span class="lineno">  309 </span><span class="spaces"></span><span class="nottickedoff">resolveProvider OpenRouter keyOpt vaultOpt manager = do</span>
+<span class="lineno">  310 </span><span class="spaces">  </span><span class="nottickedoff">apiKey &lt;- resolveApiKey keyOpt &quot;OPENROUTER_API_KEY&quot; vaultOpt</span>
+<span class="lineno">  311 </span><span class="spaces">  </span><span class="nottickedoff">pure (MkProvider (mkOpenRouterProvider manager apiKey))</span>
+<span class="lineno">  312 </span><span class="spaces"></span><span class="nottickedoff">resolveProvider Ollama _ _ manager =</span>
+<span class="lineno">  313 </span><span class="spaces">  </span><span class="nottickedoff">pure (MkProvider (mkOllamaProvider manager))</span></span>
+<span class="lineno">  314 </span>
+<span class="lineno">  315 </span>-- | Vault key used to cache OAuth tokens between sessions.
+<span class="lineno">  316 </span>oauthVaultKey :: T.Text
+<span class="lineno">  317 </span><span class="decl"><span class="nottickedoff">oauthVaultKey = &quot;ANTHROPIC_OAUTH_TOKENS&quot;</span></span>
+<span class="lineno">  318 </span>
+<span class="lineno">  319 </span>-- | Resolve an Anthropic provider via OAuth 2.0 PKCE.
+<span class="lineno">  320 </span>-- Loads cached tokens from the vault if available; runs the full browser
+<span class="lineno">  321 </span>-- flow otherwise. Refreshes expired access tokens automatically.
+<span class="lineno">  322 </span>resolveAnthropicOAuth :: Maybe VaultHandle -&gt; HTTP.Manager -&gt; IO SomeProvider
+<span class="lineno">  323 </span><span class="decl"><span class="nottickedoff">resolveAnthropicOAuth vaultOpt manager = do</span>
+<span class="lineno">  324 </span><span class="spaces">  </span><span class="nottickedoff">let cfg = defaultOAuthConfig</span>
+<span class="lineno">  325 </span><span class="spaces">  </span><span class="nottickedoff">cachedBs &lt;- tryVaultLookup vaultOpt oauthVaultKey</span>
+<span class="lineno">  326 </span><span class="spaces">  </span><span class="nottickedoff">tokens &lt;- case cachedBs &gt;&gt;= eitherToMaybe . deserializeTokens of</span>
+<span class="lineno">  327 </span><span class="spaces">    </span><span class="nottickedoff">Just t -&gt; do</span>
+<span class="lineno">  328 </span><span class="spaces">      </span><span class="nottickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  329 </span><span class="spaces">      </span><span class="nottickedoff">if _oat_expiresAt t &lt;= now</span>
+<span class="lineno">  330 </span><span class="spaces">        </span><span class="nottickedoff">then do</span>
+<span class="lineno">  331 </span><span class="spaces">          </span><span class="nottickedoff">putStrLn &quot;OAuth access token expired — refreshing...&quot;</span>
+<span class="lineno">  332 </span><span class="spaces">          </span><span class="nottickedoff">newT &lt;- refreshOAuthToken cfg manager (_oat_refreshToken t)</span>
+<span class="lineno">  333 </span><span class="spaces">          </span><span class="nottickedoff">saveOAuthTokens vaultOpt newT</span>
+<span class="lineno">  334 </span><span class="spaces">          </span><span class="nottickedoff">pure newT</span>
+<span class="lineno">  335 </span><span class="spaces">        </span><span class="nottickedoff">else pure t</span>
+<span class="lineno">  336 </span><span class="spaces">    </span><span class="nottickedoff">Nothing -&gt; do</span>
+<span class="lineno">  337 </span><span class="spaces">      </span><span class="nottickedoff">t &lt;- runOAuthFlow cfg manager</span>
+<span class="lineno">  338 </span><span class="spaces">      </span><span class="nottickedoff">saveOAuthTokens vaultOpt t</span>
+<span class="lineno">  339 </span><span class="spaces">      </span><span class="nottickedoff">pure t</span>
+<span class="lineno">  340 </span><span class="spaces">  </span><span class="nottickedoff">handle &lt;- mkOAuthHandle cfg manager tokens</span>
+<span class="lineno">  341 </span><span class="spaces">  </span><span class="nottickedoff">pure (MkProvider (mkAnthropicProviderOAuth manager handle))</span></span>
+<span class="lineno">  342 </span>
+<span class="lineno">  343 </span>-- | Save OAuth tokens to the vault (best-effort; logs on failure).
+<span class="lineno">  344 </span>saveOAuthTokens :: Maybe VaultHandle -&gt; OAuthTokens -&gt; IO ()
+<span class="lineno">  345 </span><span class="decl"><span class="nottickedoff">saveOAuthTokens Nothing      _      = pure ()</span>
+<span class="lineno">  346 </span><span class="spaces"></span><span class="nottickedoff">saveOAuthTokens (Just vh) tokens = do</span>
+<span class="lineno">  347 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- _vh_put vh oauthVaultKey (serializeTokens tokens)</span>
+<span class="lineno">  348 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  349 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; putStrLn $ &quot;Warning: could not cache OAuth tokens: &quot; &lt;&gt; show err</span>
+<span class="lineno">  350 </span><span class="spaces">    </span><span class="nottickedoff">Right () -&gt; pure ()</span></span>
+<span class="lineno">  351 </span>
+<span class="lineno">  352 </span>-- | Convert 'Either' to 'Maybe', discarding the error.
+<span class="lineno">  353 </span>eitherToMaybe :: Either e a -&gt; Maybe a
+<span class="lineno">  354 </span><span class="decl"><span class="nottickedoff">eitherToMaybe (Left  _) = Nothing</span>
+<span class="lineno">  355 </span><span class="spaces"></span><span class="nottickedoff">eitherToMaybe (Right a) = Just a</span></span>
+<span class="lineno">  356 </span>
+<span class="lineno">  357 </span>-- | Resolve an API key from: CLI flag → vault → environment variable.
+<span class="lineno">  358 </span>resolveApiKey :: Maybe String -&gt; String -&gt; Maybe VaultHandle -&gt; IO ApiKey
+<span class="lineno">  359 </span><span class="decl"><span class="nottickedoff">resolveApiKey (Just key) _ _ = pure (mkApiKey (TE.encodeUtf8 (T.pack key)))</span>
+<span class="lineno">  360 </span><span class="spaces"></span><span class="nottickedoff">resolveApiKey Nothing envVar vaultOpt = do</span>
+<span class="lineno">  361 </span><span class="spaces">  </span><span class="nottickedoff">vaultKey &lt;- tryVaultLookup vaultOpt (T.pack envVar)</span>
+<span class="lineno">  362 </span><span class="spaces">  </span><span class="nottickedoff">case vaultKey of</span>
+<span class="lineno">  363 </span><span class="spaces">    </span><span class="nottickedoff">Just bs -&gt; pure (mkApiKey bs)</span>
+<span class="lineno">  364 </span><span class="spaces">    </span><span class="nottickedoff">Nothing -&gt; do</span>
+<span class="lineno">  365 </span><span class="spaces">      </span><span class="nottickedoff">envKey &lt;- lookupEnv envVar</span>
+<span class="lineno">  366 </span><span class="spaces">      </span><span class="nottickedoff">case envKey of</span>
+<span class="lineno">  367 </span><span class="spaces">        </span><span class="nottickedoff">Just key -&gt; pure (mkApiKey (TE.encodeUtf8 (T.pack key)))</span>
+<span class="lineno">  368 </span><span class="spaces">        </span><span class="nottickedoff">Nothing  -&gt; die $</span>
+<span class="lineno">  369 </span><span class="spaces">          </span><span class="nottickedoff">&quot;No API key provided. Use --api-key, set &quot; &lt;&gt; envVar</span>
+<span class="lineno">  370 </span><span class="spaces">          </span><span class="nottickedoff">&lt;&gt; &quot;, or store in vault with /vault add &quot; &lt;&gt; envVar</span></span>
+<span class="lineno">  371 </span>
+<span class="lineno">  372 </span>-- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
+<span class="lineno">  373 </span>-- absent, locked, or does not contain the key.
+<span class="lineno">  374 </span>tryVaultLookup :: Maybe VaultHandle -&gt; T.Text -&gt; IO (Maybe ByteString)
+<span class="lineno">  375 </span><span class="decl"><span class="nottickedoff">tryVaultLookup Nothing   _   = pure Nothing</span>
+<span class="lineno">  376 </span><span class="spaces"></span><span class="nottickedoff">tryVaultLookup (Just vh) key = do</span>
+<span class="lineno">  377 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- _vh_get vh key</span>
+<span class="lineno">  378 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  379 </span><span class="spaces">    </span><span class="nottickedoff">Right bs -&gt; pure (Just bs)</span>
+<span class="lineno">  380 </span><span class="spaces">    </span><span class="nottickedoff">Left  _  -&gt; pure Nothing</span></span>
+<span class="lineno">  381 </span>
+<span class="lineno">  382 </span>-- | Resolve the memory backend.
+<span class="lineno">  383 </span>resolveMemory :: MemoryBackend -&gt; IO MemoryHandle
+<span class="lineno">  384 </span><span class="decl"><span class="nottickedoff">resolveMemory NoMemory       = pure mkNoOpMemoryHandle</span>
+<span class="lineno">  385 </span><span class="spaces"></span><span class="nottickedoff">resolveMemory SQLiteMemory   = do</span>
+<span class="lineno">  386 </span><span class="spaces">  </span><span class="nottickedoff">dir &lt;- getPureclawDir</span>
+<span class="lineno">  387 </span><span class="spaces">  </span><span class="nottickedoff">mkSQLiteMemoryHandle (dir ++ &quot;/memory.db&quot;)</span>
+<span class="lineno">  388 </span><span class="spaces"></span><span class="nottickedoff">resolveMemory MarkdownMemory = do</span>
+<span class="lineno">  389 </span><span class="spaces">  </span><span class="nottickedoff">dir &lt;- getPureclawDir</span>
+<span class="lineno">  390 </span><span class="spaces">  </span><span class="nottickedoff">mkMarkdownMemoryHandle (dir ++ &quot;/memory&quot;)</span></span>
+<span class="lineno">  391 </span>
+<span class="lineno">  392 </span>-- | Open the vault if configured. Returns 'Nothing' if @--no-vault@ is set.
+<span class="lineno">  393 </span>-- When age keys are configured, uses age public-key encryption.
+<span class="lineno">  394 </span>-- Otherwise, falls back to passphrase-based encryption (works out of the box).
+<span class="lineno">  395 </span>resolveVault :: FileConfig -&gt; Bool -&gt; LogHandle -&gt; IO (Maybe VaultHandle)
+<span class="lineno">  396 </span><span class="decl"><span class="nottickedoff">resolveVault _ True _ = pure Nothing</span>
+<span class="lineno">  397 </span><span class="spaces"></span><span class="nottickedoff">resolveVault fileCfg False logger =</span>
+<span class="lineno">  398 </span><span class="spaces">  </span><span class="nottickedoff">case (_fc_vault_recipient fileCfg, _fc_vault_identity fileCfg) of</span>
+<span class="lineno">  399 </span><span class="spaces">    </span><span class="nottickedoff">(Just recipient, Just identity) -&gt; resolveAgeVault fileCfg recipient identity logger</span>
+<span class="lineno">  400 </span><span class="spaces">    </span><span class="nottickedoff">_                               -&gt; resolvePassphraseVault fileCfg logger</span></span>
+<span class="lineno">  401 </span>
+<span class="lineno">  402 </span>-- | Resolve vault using age public-key encryption (existing behaviour).
+<span class="lineno">  403 </span>resolveAgeVault :: FileConfig -&gt; T.Text -&gt; T.Text -&gt; LogHandle -&gt; IO (Maybe VaultHandle)
+<span class="lineno">  404 </span><span class="decl"><span class="nottickedoff">resolveAgeVault fileCfg recipient identity logger = do</span>
+<span class="lineno">  405 </span><span class="spaces">  </span><span class="nottickedoff">encResult &lt;- mkAgeEncryptor</span>
+<span class="lineno">  406 </span><span class="spaces">  </span><span class="nottickedoff">case encResult of</span>
+<span class="lineno">  407 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; do</span>
+<span class="lineno">  408 </span><span class="spaces">      </span><span class="nottickedoff">_lh_logInfo logger $ &quot;Vault disabled (age not available): &quot; &lt;&gt; T.pack (show err)</span>
+<span class="lineno">  409 </span><span class="spaces">      </span><span class="nottickedoff">pure Nothing</span>
+<span class="lineno">  410 </span><span class="spaces">    </span><span class="nottickedoff">Right enc -&gt; do</span>
+<span class="lineno">  411 </span><span class="spaces">      </span><span class="nottickedoff">dir &lt;- getPureclawDir</span>
+<span class="lineno">  412 </span><span class="spaces">      </span><span class="nottickedoff">let path  = maybe (dir ++ &quot;/vault.age&quot;) T.unpack (_fc_vault_path fileCfg)</span>
+<span class="lineno">  413 </span><span class="spaces">          </span><span class="nottickedoff">mode  = parseUnlockMode (_fc_vault_unlock fileCfg)</span>
+<span class="lineno">  414 </span><span class="spaces">          </span><span class="nottickedoff">enc'  = ageVaultEncryptor enc recipient identity</span>
+<span class="lineno">  415 </span><span class="spaces">          </span><span class="nottickedoff">cfg   = VaultConfig</span>
+<span class="lineno">  416 </span><span class="spaces">            </span><span class="nottickedoff">{ _vc_path    = path</span>
+<span class="lineno">  417 </span><span class="spaces">            </span><span class="nottickedoff">, _vc_keyType = inferAgeKeyType recipient</span>
+<span class="lineno">  418 </span><span class="spaces">            </span><span class="nottickedoff">, _vc_unlock  = mode</span>
+<span class="lineno">  419 </span><span class="spaces">            </span><span class="nottickedoff">}</span>
+<span class="lineno">  420 </span><span class="spaces">      </span><span class="nottickedoff">vault &lt;- openVault cfg enc'</span>
+<span class="lineno">  421 </span><span class="spaces">      </span><span class="nottickedoff">case mode of</span>
+<span class="lineno">  422 </span><span class="spaces">        </span><span class="nottickedoff">UnlockStartup -&gt; do</span>
+<span class="lineno">  423 </span><span class="spaces">          </span><span class="nottickedoff">result &lt;- _vh_unlock vault</span>
+<span class="lineno">  424 </span><span class="spaces">          </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  425 </span><span class="spaces">            </span><span class="nottickedoff">Left err -&gt; _lh_logInfo logger $</span>
+<span class="lineno">  426 </span><span class="spaces">              </span><span class="nottickedoff">&quot;Vault startup unlock failed (vault will be locked): &quot; &lt;&gt; T.pack (show err)</span>
+<span class="lineno">  427 </span><span class="spaces">            </span><span class="nottickedoff">Right () -&gt; _lh_logInfo logger &quot;Vault unlocked.&quot;</span>
+<span class="lineno">  428 </span><span class="spaces">        </span><span class="nottickedoff">_ -&gt; pure ()</span>
+<span class="lineno">  429 </span><span class="spaces">      </span><span class="nottickedoff">pure (Just vault)</span></span>
+<span class="lineno">  430 </span>
+<span class="lineno">  431 </span>-- | Resolve vault using passphrase-based encryption (default when no age keys configured).
+<span class="lineno">  432 </span>-- Prompts for passphrase on stdin at startup (if vault file exists), or reads
+<span class="lineno">  433 </span>-- from the PURECLAW_VAULT_PASSPHRASE environment variable.
+<span class="lineno">  434 </span>resolvePassphraseVault :: FileConfig -&gt; LogHandle -&gt; IO (Maybe VaultHandle)
+<span class="lineno">  435 </span><span class="decl"><span class="nottickedoff">resolvePassphraseVault fileCfg logger = do</span>
+<span class="lineno">  436 </span><span class="spaces">  </span><span class="nottickedoff">dir &lt;- getPureclawDir</span>
+<span class="lineno">  437 </span><span class="spaces">  </span><span class="nottickedoff">let path = maybe (dir ++ &quot;/vault.age&quot;) T.unpack (_fc_vault_path fileCfg)</span>
+<span class="lineno">  438 </span><span class="spaces">      </span><span class="nottickedoff">cfg  = VaultConfig</span>
+<span class="lineno">  439 </span><span class="spaces">        </span><span class="nottickedoff">{ _vc_path    = path</span>
+<span class="lineno">  440 </span><span class="spaces">        </span><span class="nottickedoff">, _vc_keyType = &quot;AES-256 (passphrase)&quot;</span>
+<span class="lineno">  441 </span><span class="spaces">        </span><span class="nottickedoff">, _vc_unlock  = UnlockStartup</span>
+<span class="lineno">  442 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  443 </span><span class="spaces">  </span><span class="nottickedoff">let getPass = do</span>
+<span class="lineno">  444 </span><span class="spaces">        </span><span class="nottickedoff">envPass &lt;- lookupEnv &quot;PURECLAW_VAULT_PASSPHRASE&quot;</span>
+<span class="lineno">  445 </span><span class="spaces">        </span><span class="nottickedoff">case envPass of</span>
+<span class="lineno">  446 </span><span class="spaces">          </span><span class="nottickedoff">Just p  -&gt; pure (TE.encodeUtf8 (T.pack p))</span>
+<span class="lineno">  447 </span><span class="spaces">          </span><span class="nottickedoff">Nothing -&gt; do</span>
+<span class="lineno">  448 </span><span class="spaces">            </span><span class="nottickedoff">putStr &quot;Vault passphrase: &quot;</span>
+<span class="lineno">  449 </span><span class="spaces">            </span><span class="nottickedoff">hFlush stdout</span>
+<span class="lineno">  450 </span><span class="spaces">            </span><span class="nottickedoff">pass &lt;- bracket_</span>
+<span class="lineno">  451 </span><span class="spaces">              </span><span class="nottickedoff">(hSetEcho stdin False)</span>
+<span class="lineno">  452 </span><span class="spaces">              </span><span class="nottickedoff">(hSetEcho stdin True &gt;&gt; putStrLn &quot;&quot;)</span>
+<span class="lineno">  453 </span><span class="spaces">              </span><span class="nottickedoff">getLine</span>
+<span class="lineno">  454 </span><span class="spaces">            </span><span class="nottickedoff">pure (TE.encodeUtf8 (T.pack pass))</span>
+<span class="lineno">  455 </span><span class="spaces">  </span><span class="nottickedoff">enc &lt;- mkPassphraseVaultEncryptor getPass</span>
+<span class="lineno">  456 </span><span class="spaces">  </span><span class="nottickedoff">vault &lt;- openVault cfg enc</span>
+<span class="lineno">  457 </span><span class="spaces">  </span><span class="nottickedoff">exists &lt;- doesFileExist path</span>
+<span class="lineno">  458 </span><span class="spaces">  </span><span class="nottickedoff">if exists</span>
+<span class="lineno">  459 </span><span class="spaces">    </span><span class="nottickedoff">then do</span>
+<span class="lineno">  460 </span><span class="spaces">      </span><span class="nottickedoff">result &lt;- _vh_unlock vault</span>
+<span class="lineno">  461 </span><span class="spaces">      </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  462 </span><span class="spaces">        </span><span class="nottickedoff">Left err -&gt; _lh_logInfo logger $</span>
+<span class="lineno">  463 </span><span class="spaces">          </span><span class="nottickedoff">&quot;Vault unlock failed: &quot; &lt;&gt; T.pack (show err)</span>
+<span class="lineno">  464 </span><span class="spaces">        </span><span class="nottickedoff">Right () -&gt; _lh_logInfo logger &quot;Vault unlocked.&quot;</span>
+<span class="lineno">  465 </span><span class="spaces">    </span><span class="nottickedoff">else</span>
+<span class="lineno">  466 </span><span class="spaces">      </span><span class="nottickedoff">_lh_logInfo logger &quot;Vault ready (not yet initialized — use /vault init to set up).&quot;</span>
+<span class="lineno">  467 </span><span class="spaces">  </span><span class="nottickedoff">pure (Just vault)</span></span>
+<span class="lineno">  468 </span>
+<span class="lineno">  469 </span>-- | Infer a human-readable key type from the age recipient prefix.
+<span class="lineno">  470 </span>inferAgeKeyType :: T.Text -&gt; T.Text
+<span class="lineno">  471 </span><span class="decl"><span class="nottickedoff">inferAgeKeyType recipient</span>
+<span class="lineno">  472 </span><span class="spaces">  </span><span class="nottickedoff">| &quot;age-plugin-yubikey&quot; `T.isPrefixOf` recipient = &quot;YubiKey PIV&quot;</span>
+<span class="lineno">  473 </span><span class="spaces">  </span><span class="nottickedoff">| &quot;age1&quot;               `T.isPrefixOf` recipient = &quot;X25519&quot;</span>
+<span class="lineno">  474 </span><span class="spaces">  </span><span class="nottickedoff">| otherwise                                      = &quot;Unknown&quot;</span></span>
+<span class="lineno">  475 </span>
+<span class="lineno">  476 </span>-- | Parse vault unlock mode from config text.
+<span class="lineno">  477 </span>parseUnlockMode :: Maybe T.Text -&gt; UnlockMode
+<span class="lineno">  478 </span><span class="decl"><span class="nottickedoff">parseUnlockMode Nothing            = UnlockOnDemand</span>
+<span class="lineno">  479 </span><span class="spaces"></span><span class="nottickedoff">parseUnlockMode (Just t) = case t of</span>
+<span class="lineno">  480 </span><span class="spaces">  </span><span class="nottickedoff">&quot;startup&quot;    -&gt; UnlockStartup</span>
+<span class="lineno">  481 </span><span class="spaces">  </span><span class="nottickedoff">&quot;on_demand&quot;  -&gt; UnlockOnDemand</span>
+<span class="lineno">  482 </span><span class="spaces">  </span><span class="nottickedoff">&quot;per_access&quot; -&gt; UnlockPerAccess</span>
+<span class="lineno">  483 </span><span class="spaces">  </span><span class="nottickedoff">_            -&gt; UnlockOnDemand</span></span>
+
+</pre>
+</body>
+</html>

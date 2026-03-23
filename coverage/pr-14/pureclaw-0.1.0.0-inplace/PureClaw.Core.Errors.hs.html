@@ -1,0 +1,45 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Core.Errors
+<span class="lineno">    2 </span>  ( -- * Public errors (safe to send to channel users)
+<span class="lineno">    3 </span>    PublicError (..)
+<span class="lineno">    4 </span>    -- * Conversion typeclass
+<span class="lineno">    5 </span>  , ToPublicError (..)
+<span class="lineno">    6 </span>  ) where
+<span class="lineno">    7 </span>
+<span class="lineno">    8 </span>import Data.Text (Text)
+<span class="lineno">    9 </span>
+<span class="lineno">   10 </span>-- | Errors safe to send to external users via channels.
+<span class="lineno">   11 </span>-- Contains no internal detail — model names, URLs, stack traces, etc.
+<span class="lineno">   12 </span>-- are stripped by 'ToPublicError' instances on internal error types.
+<span class="lineno">   13 </span>data PublicError
+<span class="lineno">   14 </span>  = TemporaryError Text   -- ^ Generic temporary error with user-facing message
+<span class="lineno">   15 </span>  | RateLimitError        -- ^ Rate limit reached
+<span class="lineno">   16 </span>  | NotAllowedError       -- ^ User not authorized
+<span class="lineno">   17 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>-- | Convert internal errors to channel-safe public errors.
+<span class="lineno">   20 </span>-- Implementations must strip all internal detail.
+<span class="lineno">   21 </span>class ToPublicError e where
+<span class="lineno">   22 </span>  toPublicError :: e -&gt; PublicError
+
+</pre>
+</body>
+</html>

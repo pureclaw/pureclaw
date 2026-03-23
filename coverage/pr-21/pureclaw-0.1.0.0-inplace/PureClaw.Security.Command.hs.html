@@ -1,0 +1,78 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Command
+<span class="lineno">    2 </span>  ( -- * Authorized command type (constructor intentionally NOT exported)
+<span class="lineno">    3 </span>    AuthorizedCommand
+<span class="lineno">    4 </span>    -- * Command errors
+<span class="lineno">    5 </span>  , CommandError (..)
+<span class="lineno">    6 </span>    -- * Authorization (pure — no IO)
+<span class="lineno">    7 </span>  , authorize
+<span class="lineno">    8 </span>    -- * Read-only accessors
+<span class="lineno">    9 </span>  , getCommandProgram
+<span class="lineno">   10 </span>  , getCommandArgs
+<span class="lineno">   11 </span>  ) where
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import Data.Text (Text)
+<span class="lineno">   14 </span>import Data.Text qualified as T
+<span class="lineno">   15 </span>import System.FilePath
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import PureClaw.Core.Types
+<span class="lineno">   18 </span>import PureClaw.Security.Policy
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>-- | A command that has been authorized by the security policy.
+<span class="lineno">   21 </span>-- Constructor is intentionally NOT exported — the only way to obtain an
+<span class="lineno">   22 </span>-- 'AuthorizedCommand' is through 'authorize'.
+<span class="lineno">   23 </span>--
+<span class="lineno">   24 </span>-- Note for downstream: 'ShellHandle.execute' is responsible for stripping
+<span class="lineno">   25 </span>-- the subprocess environment (@setEnv (Just [])@) — environment isolation
+<span class="lineno">   26 </span>-- is an execution-time concern, not a policy concern.
+<span class="lineno">   27 </span>newtype AuthorizedCommand = AuthorizedCommand { <span class="istickedoff"><span class="decl"><span class="istickedoff">unAuthorizedCommand</span></span></span> :: (FilePath, [Text]) }
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | Errors from command authorization.
+<span class="lineno">   30 </span>data CommandError
+<span class="lineno">   31 </span>  = CommandNotAllowed Text    -- ^ The command is not in the policy's allowed set
+<span class="lineno">   32 </span>  | CommandInAutonomyDeny     -- ^ The policy's autonomy level is 'Deny'
+<span class="lineno">   33 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>-- | Authorize a command against a security policy. Pure — no IO.
+<span class="lineno">   36 </span>--
+<span class="lineno">   37 </span>-- Checks:
+<span class="lineno">   38 </span>-- 1. Autonomy level is not 'Deny'
+<span class="lineno">   39 </span>-- 2. Command basename is in the policy's allowed command set
+<span class="lineno">   40 </span>authorize :: SecurityPolicy -&gt; FilePath -&gt; [Text] -&gt; Either CommandError AuthorizedCommand
+<span class="lineno">   41 </span><span class="decl"><span class="istickedoff">authorize policy cmd args</span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="istickedoff">| _sp_autonomy policy == Deny =</span>
+<span class="lineno">   43 </span><span class="spaces">      </span><span class="istickedoff">Left CommandInAutonomyDeny</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="istickedoff">| not (isCommandAllowed policy (CommandName (T.pack (takeFileName cmd)))) =</span>
+<span class="lineno">   45 </span><span class="spaces">      </span><span class="istickedoff">Left (CommandNotAllowed (T.pack (takeFileName cmd)))</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">   47 </span><span class="spaces">      </span><span class="istickedoff">Right (AuthorizedCommand (cmd, args))</span></span>
+<span class="lineno">   48 </span>
+<span class="lineno">   49 </span>-- | Get the program path from an authorized command.
+<span class="lineno">   50 </span>getCommandProgram :: AuthorizedCommand -&gt; FilePath
+<span class="lineno">   51 </span><span class="decl"><span class="istickedoff">getCommandProgram = fst . unAuthorizedCommand</span></span>
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Get the arguments from an authorized command.
+<span class="lineno">   54 </span>getCommandArgs :: AuthorizedCommand -&gt; [Text]
+<span class="lineno">   55 </span><span class="decl"><span class="istickedoff">getCommandArgs = snd . unAuthorizedCommand</span></span>
+
+</pre>
+</body>
+</html>

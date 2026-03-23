@@ -1,0 +1,174 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.Cron
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    cronTool
+<span class="lineno">    4 </span>    -- * Scheduler handle
+<span class="lineno">    5 </span>  , CronHandle (..)
+<span class="lineno">    6 </span>  , mkCronHandle
+<span class="lineno">    7 </span>  , mkNoOpCronHandle
+<span class="lineno">    8 </span>  ) where
+<span class="lineno">    9 </span>
+<span class="lineno">   10 </span>import Control.Exception
+<span class="lineno">   11 </span>import Data.Aeson
+<span class="lineno">   12 </span>import Data.Aeson.Types
+<span class="lineno">   13 </span>import Data.IORef
+<span class="lineno">   14 </span>import Data.Text (Text)
+<span class="lineno">   15 </span>import Data.Text qualified as T
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import PureClaw.Handles.Channel
+<span class="lineno">   18 </span>import PureClaw.Providers.Class
+<span class="lineno">   19 </span>import PureClaw.Scheduler.Cron
+<span class="lineno">   20 </span>import PureClaw.Tools.Registry
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>-- | Handle for managing the cron scheduler. Wraps an IORef-based
+<span class="lineno">   23 </span>-- scheduler with operations the agent can call.
+<span class="lineno">   24 </span>data CronHandle = CronHandle
+<span class="lineno">   25 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_crh_add</span></span></span>    :: Text -&gt; CronExpr -&gt; IO () -&gt; IO Bool
+<span class="lineno">   26 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_crh_remove</span></span></span> :: Text -&gt; IO Bool
+<span class="lineno">   27 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_crh_list</span></span></span>   :: IO [(Text, Text)]  -- ^ (name, cron expression as text)
+<span class="lineno">   28 </span>  }
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>-- | Create a real cron handle backed by an IORef scheduler.
+<span class="lineno">   31 </span>mkCronHandle :: IORef CronScheduler -&gt; CronHandle
+<span class="lineno">   32 </span><span class="decl"><span class="istickedoff">mkCronHandle ref = CronHandle</span>
+<span class="lineno">   33 </span><span class="spaces">  </span><span class="istickedoff">{ _crh_add = \name expr action -&gt; do</span>
+<span class="lineno">   34 </span><span class="spaces">      </span><span class="istickedoff">let job = CronJob { _cj_name = name, _cj_expr = <span class="nottickedoff">expr</span>, _cj_action = <span class="nottickedoff">action</span> }</span>
+<span class="lineno">   35 </span><span class="spaces">      </span><span class="istickedoff">atomicModifyIORef' ref $ \sched -&gt; (addJob job sched, ())</span>
+<span class="lineno">   36 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">True</span></span>
+<span class="lineno">   37 </span><span class="spaces">  </span><span class="istickedoff">, _crh_remove = \name -&gt;</span>
+<span class="lineno">   38 </span><span class="spaces">      </span><span class="istickedoff">atomicModifyIORef' ref $ \sched -&gt;</span>
+<span class="lineno">   39 </span><span class="spaces">        </span><span class="istickedoff">let before = length (schedulerJobNames sched)</span>
+<span class="lineno">   40 </span><span class="spaces">            </span><span class="istickedoff">sched' = removeJob name sched</span>
+<span class="lineno">   41 </span><span class="spaces">            </span><span class="istickedoff">after = length (schedulerJobNames sched')</span>
+<span class="lineno">   42 </span><span class="spaces">        </span><span class="istickedoff">in (sched', before /= after)</span>
+<span class="lineno">   43 </span><span class="spaces">  </span><span class="istickedoff">, _crh_list = do</span>
+<span class="lineno">   44 </span><span class="spaces">      </span><span class="istickedoff">sched &lt;- readIORef ref</span>
+<span class="lineno">   45 </span><span class="spaces">      </span><span class="istickedoff">pure [(name, <span class="nottickedoff">formatCronExpr expr</span>)</span>
+<span class="lineno">   46 </span><span class="spaces">           </span><span class="istickedoff">| (name, expr) &lt;- schedulerJobNames sched]</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   48 </span>
+<span class="lineno">   49 </span>-- | No-op cron handle for testing.
+<span class="lineno">   50 </span>mkNoOpCronHandle :: CronHandle
+<span class="lineno">   51 </span><span class="decl"><span class="istickedoff">mkNoOpCronHandle = CronHandle</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="istickedoff">{ _crh_add    = \_ _ _ -&gt; pure True</span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="istickedoff">, _crh_remove = \_ -&gt; pure True</span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="istickedoff">, _crh_list   = pure []</span>
+<span class="lineno">   55 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>-- | Create a cron tool for agent-managed scheduled jobs.
+<span class="lineno">   58 </span>-- When the agent adds a cron job, the action sends a message to the
+<span class="lineno">   59 </span>-- channel with the job name (for cron result delivery).
+<span class="lineno">   60 </span>cronTool :: ChannelHandle -&gt; CronHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   61 </span><span class="decl"><span class="istickedoff">cronTool ch crh = (def, handler)</span>
+<span class="lineno">   62 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   63 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;cron&quot;</span>
+<span class="lineno">   65 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">&quot;Manage scheduled cron jobs. Actions: add (create a job), remove (delete a job), list (show all jobs).&quot;</span></span>
+<span class="lineno">   66 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   67 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   68 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   69 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;action&quot; .= object</span></span>
+<span class="lineno">   70 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   71 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;enum&quot; .= ([&quot;add&quot;, &quot;remove&quot;, &quot;list&quot;] :: [Text])</span></span>
+<span class="lineno">   72 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The action to perform&quot; :: Text)</span></span>
+<span class="lineno">   73 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   74 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;name&quot; .= object</span></span>
+<span class="lineno">   75 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   76 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Job name (for add, remove)&quot; :: Text)</span></span>
+<span class="lineno">   77 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   78 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;schedule&quot; .= object</span></span>
+<span class="lineno">   79 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   80 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Cron expression, e.g. '*/5 * * * *' (for add)&quot; :: Text)</span></span>
+<span class="lineno">   81 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   82 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;message&quot; .= object</span></span>
+<span class="lineno">   83 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   84 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Message to send when job fires (for add)&quot; :: Text)</span></span>
+<span class="lineno">   85 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   86 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   87 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;action&quot;] :: [Text])</span></span>
+<span class="lineno">   88 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   89 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   90 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   91 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   92 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseAction input of</span>
+<span class="lineno">   93 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (<span class="nottickedoff">T.pack err</span>, True)</span>
+<span class="lineno">   94 </span><span class="spaces">        </span><span class="istickedoff">Right action -&gt; dispatch action input</span>
+<span class="lineno">   95 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   96 </span><span class="spaces">    </span><span class="istickedoff">dispatch :: Text -&gt; Value -&gt; IO (Text, Bool)</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;add&quot; input =</span>
+<span class="lineno">   98 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseAdd input of</span>
+<span class="lineno">   99 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">  100 </span><span class="spaces">        </span><span class="istickedoff">Right (name, schedule, message) -&gt;</span>
+<span class="lineno">  101 </span><span class="spaces">          </span><span class="istickedoff">case parseCronExpr schedule of</span>
+<span class="lineno">  102 </span><span class="spaces">            </span><span class="istickedoff">Left err -&gt; pure (&quot;Invalid cron expression: &quot; &lt;&gt; T.pack err, True)</span>
+<span class="lineno">  103 </span><span class="spaces">            </span><span class="istickedoff">Right expr -&gt; do</span>
+<span class="lineno">  104 </span><span class="spaces">              </span><span class="istickedoff">let <span class="nottickedoff">action = _ch_send ch (OutgoingMessage (&quot;[cron:&quot; &lt;&gt; name &lt;&gt; &quot;] &quot; &lt;&gt; message))</span></span>
+<span class="lineno">  105 </span><span class="spaces">              </span><span class="istickedoff">result &lt;- try @SomeException (_crh_add crh <span class="nottickedoff">name</span> <span class="nottickedoff">expr</span> <span class="nottickedoff">action</span>)</span>
+<span class="lineno">  106 </span><span class="spaces">              </span><span class="istickedoff">case result of</span>
+<span class="lineno">  107 </span><span class="spaces">                </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">pure (T.pack (show e), True)</span></span>
+<span class="lineno">  108 </span><span class="spaces">                </span><span class="istickedoff">Right True -&gt; pure (&quot;Added cron job: &quot; &lt;&gt; name &lt;&gt; &quot; (&quot; &lt;&gt; schedule &lt;&gt; &quot;)&quot;, False)</span>
+<span class="lineno">  109 </span><span class="spaces">                </span><span class="istickedoff">Right False -&gt; <span class="nottickedoff">pure (&quot;Failed to add job: &quot; &lt;&gt; name, True)</span></span>
+<span class="lineno">  110 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;remove&quot; input =</span>
+<span class="lineno">  111 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseName input of</span>
+<span class="lineno">  112 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">  113 </span><span class="spaces">        </span><span class="istickedoff">Right name -&gt; do</span>
+<span class="lineno">  114 </span><span class="spaces">          </span><span class="istickedoff">result &lt;- _crh_remove crh <span class="nottickedoff">name</span></span>
+<span class="lineno">  115 </span><span class="spaces">          </span><span class="istickedoff">if result</span>
+<span class="lineno">  116 </span><span class="spaces">            </span><span class="istickedoff">then pure (&quot;Removed cron job: &quot; &lt;&gt; name, False)</span>
+<span class="lineno">  117 </span><span class="spaces">            </span><span class="istickedoff">else pure (&quot;Job not found: &quot; &lt;&gt; name, True)</span>
+<span class="lineno">  118 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;list&quot; _ = do</span>
+<span class="lineno">  119 </span><span class="spaces">      </span><span class="istickedoff">jobs &lt;- _crh_list crh</span>
+<span class="lineno">  120 </span><span class="spaces">      </span><span class="istickedoff">if null jobs</span>
+<span class="lineno">  121 </span><span class="spaces">        </span><span class="istickedoff">then pure (&quot;No cron jobs scheduled&quot;, False)</span>
+<span class="lineno">  122 </span><span class="spaces">        </span><span class="istickedoff">else pure (T.intercalate &quot;\n&quot; [name &lt;&gt; &quot; — &quot; &lt;&gt; expr | (name, expr) &lt;- jobs], False)</span>
+<span class="lineno">  123 </span><span class="spaces">    </span><span class="istickedoff">dispatch action _ = pure (&quot;Unknown action: &quot; &lt;&gt; action, True)</span>
+<span class="lineno">  124 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  125 </span><span class="spaces">    </span><span class="istickedoff">parseAction :: Value -&gt; Parser Text</span>
+<span class="lineno">  126 </span><span class="spaces">    </span><span class="istickedoff">parseAction = withObject <span class="nottickedoff">&quot;CronInput&quot;</span> $ \o -&gt; o .: &quot;action&quot;</span>
+<span class="lineno">  127 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  128 </span><span class="spaces">    </span><span class="istickedoff">parseAdd :: Value -&gt; Parser (Text, Text, Text)</span>
+<span class="lineno">  129 </span><span class="spaces">    </span><span class="istickedoff">parseAdd = withObject <span class="nottickedoff">&quot;CronAddInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  130 </span><span class="spaces">      </span><span class="istickedoff">(,,) &lt;$&gt; o .: &quot;name&quot; &lt;*&gt; o .: &quot;schedule&quot; &lt;*&gt; o .: &quot;message&quot;</span>
+<span class="lineno">  131 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  132 </span><span class="spaces">    </span><span class="istickedoff">parseName :: Value -&gt; Parser Text</span>
+<span class="lineno">  133 </span><span class="spaces">    </span><span class="istickedoff">parseName = withObject <span class="nottickedoff">&quot;CronNameInput&quot;</span> $ \o -&gt; o .: &quot;name&quot;</span></span>
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>-- | Format a CronExpr back to its text representation.
+<span class="lineno">  136 </span>formatCronExpr :: CronExpr -&gt; Text
+<span class="lineno">  137 </span><span class="decl"><span class="nottickedoff">formatCronExpr expr = T.intercalate &quot; &quot;</span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="nottickedoff">[ formatField (_ce_minute expr)</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="nottickedoff">, formatField (_ce_hour expr)</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="nottickedoff">, formatField (_ce_dayOfMonth expr)</span>
+<span class="lineno">  141 </span><span class="spaces">  </span><span class="nottickedoff">, formatField (_ce_month expr)</span>
+<span class="lineno">  142 </span><span class="spaces">  </span><span class="nottickedoff">, formatField (_ce_dayOfWeek expr)</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  144 </span>
+<span class="lineno">  145 </span>-- | Format a CronField to text.
+<span class="lineno">  146 </span>formatField :: CronField -&gt; Text
+<span class="lineno">  147 </span><span class="decl"><span class="nottickedoff">formatField Wildcard = &quot;*&quot;</span>
+<span class="lineno">  148 </span><span class="spaces"></span><span class="nottickedoff">formatField (Exact n) = T.pack (show n)</span>
+<span class="lineno">  149 </span><span class="spaces"></span><span class="nottickedoff">formatField (Range lo hi) = T.pack (show lo) &lt;&gt; &quot;-&quot; &lt;&gt; T.pack (show hi)</span>
+<span class="lineno">  150 </span><span class="spaces"></span><span class="nottickedoff">formatField (Step base n) = formatField base &lt;&gt; &quot;/&quot; &lt;&gt; T.pack (show n)</span>
+<span class="lineno">  151 </span><span class="spaces"></span><span class="nottickedoff">formatField (ListField fs) = T.intercalate &quot;,&quot; (map formatField fs)</span></span>
+
+</pre>
+</body>
+</html>
