@@ -13,6 +13,7 @@ module PureClaw.CLI.Commands
   ) where
 
 import Control.Exception (IOException, bracket_, try)
+import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Maybe
@@ -39,6 +40,12 @@ import PureClaw.Agent.Loop
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
+  ( ImportOptions (..)
+  , DirImportResult (..)
+  , ImportResult (..)
+  , importOpenClawDir
+  , resolveImportOptions
+  )
 import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
@@ -192,7 +199,7 @@ memoryToText MarkdownMemory = "markdown"
 data Command
   = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
   | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
-  | CmdImport FilePath        -- ^ Import an OpenClaw config
+  | CmdImport ImportOptions (Maybe FilePath)  -- ^ Import an OpenClaw state directory
   deriving stock (Show, Eq)
 
 -- | Full CLI parser with subcommands.
@@ -215,10 +222,24 @@ commandParser = subparser
         (command "run" (info (CmdGateway <$> chatOptionsParser <**> helper)
           (progDesc "Run the agent with channel from config (Signal, Telegram, CLI)"))))
         (progDesc "Gateway — channel-aware agent"))
-   <> command "import" (info (CmdImport <$> argument str (metavar "PATH" <> help "Path to OpenClaw config file (openclaw.json)") <**> helper)
-        (progDesc "Import an OpenClaw configuration"))
+   <> command "import" (info (importParser <**> helper)
+        (progDesc "Import an OpenClaw state directory"))
     )
   <|> (CmdTui <$> chatOptionsParser)  -- default to tui when no subcommand
+
+-- | Parser for the import subcommand.
+importParser :: Parser Command
+importParser = CmdImport
+  <$> (ImportOptions
+    <$> optional (strOption
+        ( long "from"
+       <> help "Source OpenClaw state directory (default: ~/.openclaw)"
+        ))
+    <*> optional (strOption
+        ( long "to"
+       <> help "Destination PureClaw state directory (default: ~/.pureclaw)"
+        )))
+  <*> optional (argument str (metavar "PATH" <> help "Path to OpenClaw dir or config file (backward compat)"))
 
 -- | Main CLI entry point.
 runCLI :: IO ()
@@ -227,36 +248,77 @@ runCLI = do
   case cmd of
     CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
     CmdGateway opts -> runChat opts
-    CmdImport path  -> runImport path
+    CmdImport opts mPos -> runImport opts mPos
 
--- | Import an OpenClaw config file.
-runImport :: FilePath -> IO ()
-runImport path = do
-  pureclawDir <- getPureclawDir
-  let configDir = pureclawDir </> "config"
-  putStrLn $ "Importing OpenClaw config from: " <> path
-  putStrLn $ "Writing to: " <> configDir
-  result <- importOpenClawConfig path configDir
+-- | Import an OpenClaw state directory.
+runImport :: ImportOptions -> Maybe FilePath -> IO ()
+runImport opts mPositional = do
+  (fromDir, toDir) <- resolveImportOptions opts mPositional
+  putStrLn $ "Importing OpenClaw state from: " <> fromDir
+  putStrLn $ "Writing to: " <> toDir
+  result <- importOpenClawDir fromDir toDir
   case result of
     Left err -> do
       putStrLn $ "Error: " <> T.unpack err
       exitFailure
-    Right ir -> do
+    Right dir -> do
+      let ir = _dir_configResult dir
+          configDir = toDir </> "config"
       putStrLn ""
       putStrLn "Import complete!"
-      putStrLn $ "  Config written: " <> configDir </> "config.toml"
+      putStrLn ""
+      putStrLn "  Imported:"
+      putStrLn $ "    Config:       " <> configDir </> "config.toml"
       case _ir_agentsWritten ir of
         [] -> pure ()
         agents -> do
-          putStrLn $ "  Agents written: " <> T.unpack (T.intercalate ", " agents)
-          mapM_ (\a -> putStrLn $ "    " <> configDir </> "agents" </> T.unpack a </> "AGENTS.md") agents
-      case _ir_warnings ir of
+          putStrLn $ "    Agents:       " <> T.unpack (T.intercalate ", " agents)
+          mapM_ (\a -> putStrLn $ "                  " <> configDir </> "agents" </> T.unpack a </> "AGENTS.md") agents
+      when (_dir_credentialsOk dir)
+        $ putStrLn $ "    Credentials:  " <> toDir </> "credentials.json"
+      case _dir_deviceId dir of
+        Just did -> putStrLn $ "    Device ID:    " <> T.unpack did
+        Nothing  -> pure ()
+      case _dir_workspacePath dir of
+        Just ws -> putStrLn $ "    Workspace:    " <> ws <> " (referenced in config)"
+        Nothing -> pure ()
+      when (_dir_modelsImported dir)
+        $ putStrLn $ "    Models:       " <> toDir </> "models.json"
+
+      -- Skipped items
+      let skipped =
+            [("Cron jobs", "PureClaw cron format not yet supported") | _dir_cronSkipped dir]
+      if null skipped
+        then pure ()
+        else do
+          putStrLn ""
+          putStrLn "  Skipped:"
+          mapM_ (\(item, reason) -> putStrLn $ "    " <> item <> ": " <> reason) skipped
+
+      -- Extra workspaces
+      case _dir_extraWorkspaces dir of
         [] -> pure ()
-        ws -> mapM_ (\w -> putStrLn $ "  Warning: " <> T.unpack w) ws
+        ws -> do
+          putStrLn ""
+          putStrLn "  Additional workspaces found (noted in config comments):"
+          mapM_ (\w -> putStrLn $ "    " <> w) ws
+
+      -- Warnings
+      let allWarnings = _ir_warnings ir <> _dir_warnings dir
+      case allWarnings of
+        [] -> pure ()
+        ws -> do
+          putStrLn ""
+          putStrLn "  Warnings:"
+          mapM_ (\w -> putStrLn $ "    " <> T.unpack w) ws
+
       putStrLn ""
       putStrLn "Next steps:"
       putStrLn "  1. Review the imported config and agent files"
-      putStrLn "  2. Run: pureclaw tui"
+      if _dir_credentialsOk dir
+        then putStrLn "  2. Move credentials.json secrets into the PureClaw vault: /vault setup"
+        else putStrLn "  2. Configure your API key: pureclaw tui --api-key <key>"
+      putStrLn "  3. Run: pureclaw tui"
 
 -- | Run an interactive chat session.
 runChat :: ChatOptions -> IO ()

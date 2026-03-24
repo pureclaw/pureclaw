@@ -1,6 +1,7 @@
 module CLI.ImportSpec (spec) where
 
 import Data.Aeson
+import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -223,3 +224,188 @@ spec = do
 
     it "handles leading uppercase" $
       camelToSnake "AllowAll" `shouldBe` "_allow_all"
+
+  describe "resolveImportOptions" $ do
+    it "uses positional directory arg as --from" $
+      withSystemTempDirectory "pureclaw-import-test" $ \tmpDir -> do
+        let posDir = tmpDir </> "myopenclaw"
+        createDirectory posDir
+        (fromDir, _toDir) <- resolveImportOptions (ImportOptions Nothing Nothing) (Just posDir)
+        fromDir `shouldBe` posDir
+
+    it "uses dirname of positional .json file as --from" $ do
+      (fromDir, _toDir) <- resolveImportOptions (ImportOptions Nothing Nothing) (Just "/home/user/.openclaw/openclaw.json")
+      fromDir `shouldBe` "/home/user/.openclaw"
+
+    it "prefers --from over positional arg" $ do
+      (fromDir, _toDir) <- resolveImportOptions (ImportOptions (Just "/custom/from") Nothing) Nothing
+      fromDir `shouldBe` "/custom/from"
+
+    it "uses --to when specified" $ do
+      (_fromDir, toDir) <- resolveImportOptions (ImportOptions Nothing (Just "/custom/to")) Nothing
+      toDir `shouldBe` "/custom/to"
+
+  describe "importOpenClawDir" $ do
+    it "imports a full OpenClaw state directory" $
+      withSystemTempDirectory "pureclaw-dir-import-test" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+        setupOpenClawDir fromDir
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> do
+            -- Config was written
+            _ir_configWritten (_dir_configResult dir) `shouldBe` True
+
+            -- Credentials were imported
+            _dir_credentialsOk dir `shouldBe` True
+            credsExists <- doesFileExist (toDir </> "credentials.json")
+            credsExists `shouldBe` True
+            credsContent <- LBS.readFile (toDir </> "credentials.json")
+            case decode @Value credsContent of
+              Just (Object _) -> pure ()
+              _ -> expectationFailure "credentials.json should be a valid JSON object"
+
+            -- Device ID was extracted
+            _dir_deviceId dir `shouldBe` Just "test-device-123"
+
+            -- Workspace path was found
+            _dir_workspacePath dir `shouldBe` Just (fromDir </> "workspace")
+
+            -- Config.toml has workspace and identity sections
+            let configDir = toDir </> "config"
+            configContent <- TIO.readFile (configDir </> "config.toml")
+            T.unpack configContent `shouldContain` "[workspace]"
+            T.unpack configContent `shouldContain` (fromDir </> "workspace")
+            T.unpack configContent `shouldContain` "[identity]"
+            T.unpack configContent `shouldContain` "test-device-123"
+
+    it "handles missing auth-profiles gracefully" $
+      withSystemTempDirectory "pureclaw-dir-import-test" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+        -- Only create the minimum required file
+        createDirectoryIfMissing True fromDir
+        TIO.writeFile (fromDir </> "openclaw.json") "{}"
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> do
+            _dir_credentialsOk dir `shouldBe` False
+            _dir_deviceId dir `shouldBe` Nothing
+            _dir_workspacePath dir `shouldBe` Nothing
+            length (_dir_warnings dir) `shouldSatisfy` (> 0)
+
+    it "fails when openclaw.json is missing" $
+      withSystemTempDirectory "pureclaw-dir-import-test" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+        createDirectoryIfMissing True fromDir
+        -- No openclaw.json
+        result <- importOpenClawDir fromDir (tmpDir </> "pureclaw")
+        case result of
+          Left err -> T.unpack err `shouldContain` "No openclaw.json"
+          Right _  -> expectationFailure "Should have failed without openclaw.json"
+
+    it "detects cron jobs without importing them" $
+      withSystemTempDirectory "pureclaw-dir-import-test" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+        setupOpenClawDir fromDir
+        -- Add cron jobs
+        createDirectoryIfMissing True (fromDir </> "cron")
+        TIO.writeFile (fromDir </> "cron" </> "jobs.json") "{\"jobs\":[]}"
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> _dir_cronSkipped dir `shouldBe` True
+
+    it "imports models.json" $
+      withSystemTempDirectory "pureclaw-dir-import-test" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+        setupOpenClawDir fromDir
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> do
+            _dir_modelsImported dir `shouldBe` True
+            modelsExists <- doesFileExist (toDir </> "models.json")
+            modelsExists `shouldBe` True
+
+    it "finds extra workspace-* directories" $
+      withSystemTempDirectory "pureclaw-dir-import-test" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+        setupOpenClawDir fromDir
+        -- Add extra workspaces
+        createDirectoryIfMissing True (fromDir </> "workspace-dev")
+        createDirectoryIfMissing True (fromDir </> "workspace-staging")
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> do
+            length (_dir_extraWorkspaces dir) `shouldBe` 2
+            -- Config should mention them as comments
+            configContent <- TIO.readFile (toDir </> "config" </> "config.toml")
+            T.unpack configContent `shouldContain` "workspace-"
+
+-- | Set up a realistic OpenClaw directory structure for testing.
+setupOpenClawDir :: FilePath -> IO ()
+setupOpenClawDir dir = do
+  createDirectoryIfMissing True dir
+
+  -- openclaw.json
+  TIO.writeFile (dir </> "openclaw.json") $ T.unlines
+    [ "{"
+    , "  \"agents\": {"
+    , "    \"defaults\": {"
+    , "      \"model\": { \"primary\": \"anthropic/claude-sonnet-4-6\" }"
+    , "    },"
+    , "    \"list\": ["
+    , "      { \"id\": \"main\", \"systemPrompt\": \"You are helpful.\" }"
+    , "    ]"
+    , "  }"
+    , "}"
+    ]
+
+  -- auth-profiles.json
+  let authDir = dir </> "agents" </> "main" </> "agent"
+  createDirectoryIfMissing True authDir
+  TIO.writeFile (authDir </> "auth-profiles.json") $ T.unlines
+    [ "{"
+    , "  \"version\": 1,"
+    , "  \"profiles\": {"
+    , "    \"anthropic:default\": {"
+    , "      \"type\": \"token\","
+    , "      \"provider\": \"anthropic\","
+    , "      \"token\": \"sk-ant-test-key-123\""
+    , "    }"
+    , "  },"
+    , "  \"lastGood\": { \"anthropic\": \"anthropic:default\" }"
+    , "}"
+    ]
+
+  -- models.json
+  TIO.writeFile (authDir </> "models.json") $ T.unlines
+    [ "{"
+    , "  \"overrides\": {"
+    , "    \"fast\": \"anthropic/claude-haiku-4-5\""
+    , "  }"
+    , "}"
+    ]
+
+  -- device.json
+  let identityDir = dir </> "identity"
+  createDirectoryIfMissing True identityDir
+  TIO.writeFile (identityDir </> "device.json") $ T.unlines
+    [ "{"
+    , "  \"deviceId\": \"test-device-123\","
+    , "  \"publicKeyPem\": \"-----BEGIN PUBLIC KEY-----\","
+    , "  \"privateKeyPem\": \"-----BEGIN PRIVATE KEY-----\""
+    , "}"
+    ]
+
+  -- workspace directory
+  let workspaceDir = dir </> "workspace"
+  createDirectoryIfMissing True workspaceDir

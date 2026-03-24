@@ -11,7 +11,12 @@ module PureClaw.CLI.Import
   , resolveIncludes
     -- * Import execution
   , importOpenClawConfig
+  , importOpenClawDir
   , ImportResult (..)
+  , DirImportResult (..)
+    -- * CLI options
+  , ImportOptions (..)
+  , resolveImportOptions
     -- * Utilities (exported for testing)
   , camelToSnake
   ) where
@@ -19,18 +24,20 @@ module PureClaw.CLI.Import
 import Control.Exception (IOException, try)
 import Control.Monad ((>=>))
 import Data.Aeson
-import Data.Char qualified as Char
-import Data.Maybe (fromMaybe)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, parseEither, parseMaybe)
+import Data.ByteString.Lazy qualified as LBS
+import Data.Char qualified as Char
+import Data.IORef
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
 import System.Directory qualified as Dir
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, takeExtension)
 
 -- ---------------------------------------------------------------------------
 -- JSON5 preprocessor
@@ -334,3 +341,231 @@ camelToSnake = T.concatMap $ \c ->
   if Char.isAsciiUpper c
     then T.pack ['_', Char.toLower c]
     else T.singleton c
+
+-- ---------------------------------------------------------------------------
+-- CLI options for import command
+-- ---------------------------------------------------------------------------
+
+-- | Options for the import command.
+data ImportOptions = ImportOptions
+  { _io_from :: Maybe FilePath
+  , _io_to   :: Maybe FilePath
+  }
+  deriving stock (Show, Eq)
+
+-- | Resolve import options: handle backward compat with a single positional arg.
+-- If a positional arg is given:
+--   - If it's a directory, use as --from
+--   - If it's a .json file, use dirname as --from
+-- Defaults: --from = ~/.openclaw, --to = ~/.pureclaw
+resolveImportOptions :: ImportOptions -> Maybe FilePath -> IO (FilePath, FilePath)
+resolveImportOptions opts mPositional = do
+  home <- Dir.getHomeDirectory
+  let defaultFrom = home </> ".openclaw"
+      defaultTo   = home </> ".pureclaw"
+  fromDir <- case mPositional of
+    Just pos -> do
+      isDir <- Dir.doesDirectoryExist pos
+      if isDir
+        then pure pos
+        else if takeExtension pos == ".json"
+          then pure (takeDirectory pos)
+          else pure pos  -- let it fail later with a clear error
+    Nothing -> pure (fromMaybe defaultFrom (_io_from opts))
+  let toDir = fromMaybe defaultTo (_io_to opts)
+  pure (fromDir, toDir)
+
+-- ---------------------------------------------------------------------------
+-- Full directory import
+-- ---------------------------------------------------------------------------
+
+-- | Result of a full OpenClaw directory import.
+data DirImportResult = DirImportResult
+  { _dir_configResult   :: ImportResult
+  , _dir_credentialsOk  :: Bool
+  , _dir_deviceId       :: Maybe Text
+  , _dir_workspacePath  :: Maybe FilePath
+  , _dir_extraWorkspaces :: [FilePath]
+  , _dir_cronSkipped    :: Bool
+  , _dir_modelsImported :: Bool
+  , _dir_warnings       :: [Text]
+  }
+  deriving stock (Show, Eq)
+
+-- | Import a full OpenClaw state directory into PureClaw.
+importOpenClawDir :: FilePath -> FilePath -> IO (Either Text DirImportResult)
+importOpenClawDir fromDir toDir = do
+  -- 1. Import openclaw.json → config.toml (existing logic)
+  let configPath = fromDir </> "openclaw.json"
+  configExists <- Dir.doesFileExist configPath
+  if not configExists
+    then pure (Left $ "No openclaw.json found in " <> T.pack fromDir)
+    else do
+      let configDir = toDir </> "config"
+      configResult <- importOpenClawConfig configPath configDir
+      case configResult of
+        Left err -> pure (Left err)
+        Right ir -> do
+          (addWarning, getWarnings) <- newWarnings
+
+          -- 2. Import auth-profiles.json → credentials.json
+          credOk <- importAuthProfiles fromDir toDir addWarning
+
+          -- 3. Import device.json → extract deviceId
+          mDeviceId <- importDeviceIdentity fromDir addWarning
+
+          -- 4. Find workspace path
+          let workspacePath = fromDir </> "workspace"
+          wsExists <- Dir.doesDirectoryExist workspacePath
+          let mWorkspace = if wsExists then Just workspacePath else Nothing
+
+          -- 5. Find extra workspace-* directories
+          extraWs <- findExtraWorkspaces fromDir
+
+          -- 6. Check for cron jobs
+          cronExists <- Dir.doesFileExist (fromDir </> "cron" </> "jobs.json")
+
+          -- 7. Import models.json
+          modelsOk <- importModels fromDir toDir addWarning
+
+          -- 8. Append workspace/identity sections to config.toml
+          appendConfigSections configDir mWorkspace mDeviceId extraWs
+
+          ws <- getWarnings
+
+          pure (Right DirImportResult
+            { _dir_configResult   = ir
+            , _dir_credentialsOk  = credOk
+            , _dir_deviceId       = mDeviceId
+            , _dir_workspacePath  = mWorkspace
+            , _dir_extraWorkspaces = extraWs
+            , _dir_cronSkipped    = cronExists
+            , _dir_modelsImported = modelsOk
+            , _dir_warnings       = ws
+            })
+
+newWarnings :: IO (Text -> IO (), IO [Text])
+newWarnings = do
+  ref <- newIORef []
+  let addW w = modifyIORef' ref (w :)
+      getW   = reverse <$> readIORef ref
+  pure (addW, getW)
+
+-- | Import auth-profiles.json → credentials.json
+importAuthProfiles :: FilePath -> FilePath -> (Text -> IO ()) -> IO Bool
+importAuthProfiles fromDir toDir addWarning = do
+  let authPath = fromDir </> "agents" </> "main" </> "agent" </> "auth-profiles.json"
+  loaded <- loadJson5File authPath
+  case loaded of
+    Left _ -> do
+      addWarning "auth-profiles.json not found — no credentials imported"
+      pure False
+    Right val -> do
+      let mProfiles = parseMaybe (withObject "auth" (.: "profiles")) val
+      case mProfiles of
+        Nothing -> do
+          addWarning "auth-profiles.json has no profiles field"
+          pure False
+        Just (Object profiles) -> do
+          let creds = KM.foldrWithKey extractCred [] profiles
+          if null creds
+            then do
+              addWarning "No API tokens found in auth-profiles.json"
+              pure False
+            else do
+              Dir.createDirectoryIfMissing True toDir
+              let credsJson = object (map (uncurry (.=)) creds)
+              LBS.writeFile (toDir </> "credentials.json") (encode credsJson)
+              pure True
+        _ -> do
+          addWarning "auth-profiles.json profiles field is not an object"
+          pure False
+  where
+    extractCred _key val acc =
+      case parseMaybe parseProfile val of
+        Just (provider, token) -> (Key.fromText provider, String token) : acc
+        Nothing -> acc
+
+    parseProfile = withObject "profile" $ \o -> do
+      provider <- o .: "provider"
+      token <- o .: "token"
+      pure (provider :: Text, token :: Text)
+
+-- | Import device.json → extract deviceId
+importDeviceIdentity :: FilePath -> (Text -> IO ()) -> IO (Maybe Text)
+importDeviceIdentity fromDir addWarning = do
+  let devicePath = fromDir </> "identity" </> "device.json"
+  loaded <- loadJson5File devicePath
+  case loaded of
+    Left _ -> do
+      addWarning "identity/device.json not found — no device ID imported"
+      pure Nothing
+    Right val ->
+      case parseMaybe (withObject "device" (.: "deviceId")) val of
+        Just did -> pure (Just did)
+        Nothing -> do
+          addWarning "identity/device.json has no deviceId field"
+          pure Nothing
+
+-- | Find extra workspace-* directories
+findExtraWorkspaces :: FilePath -> IO [FilePath]
+findExtraWorkspaces fromDir = do
+  entries <- try @IOException (Dir.listDirectory fromDir)
+  case entries of
+    Left _  -> pure []
+    Right es -> do
+      let candidates = filter ("workspace-" `T.isPrefixOf`) (map T.pack es)
+      dirs <- filterM (\e -> Dir.doesDirectoryExist (fromDir </> T.unpack e)) candidates
+      pure (map (\d -> fromDir </> T.unpack d) dirs)
+  where
+    filterM _ []     = pure []
+    filterM p (x:xs) = do
+      b <- p x
+      rest <- filterM p xs
+      if b then pure (x : rest) else pure rest
+
+-- | Import models.json → models.json in toDir
+importModels :: FilePath -> FilePath -> (Text -> IO ()) -> IO Bool
+importModels fromDir toDir addWarning = do
+  let modelsPath = fromDir </> "agents" </> "main" </> "agent" </> "models.json"
+  loaded <- loadJson5File modelsPath
+  case loaded of
+    Left _ -> do
+      addWarning "agents/main/agent/models.json not found — no model overrides imported"
+      pure False
+    Right val -> do
+      Dir.createDirectoryIfMissing True toDir
+      LBS.writeFile (toDir </> "models.json") (encode val)
+      pure True
+
+-- | Append workspace and identity sections to config.toml
+appendConfigSections :: FilePath -> Maybe FilePath -> Maybe Text -> [FilePath] -> IO ()
+appendConfigSections configDir mWorkspace mDeviceId extraWs = do
+  let configPath = configDir </> "config.toml"
+  exists <- Dir.doesFileExist configPath
+  if not exists
+    then pure ()
+    else do
+      existing <- TIO.readFile configPath
+      let sections = T.unlines $ concat
+            [ case mWorkspace of
+                Nothing -> []
+                Just ws ->
+                  [ ""
+                  , "[workspace]"
+                  , "path = " <> quoted (T.pack ws)
+                  ]
+            , case mDeviceId of
+                Nothing  -> []
+                Just did ->
+                  [ ""
+                  , "[identity]"
+                  , "device_id = " <> quoted did
+                  ]
+            , if null extraWs then []
+              else
+                [ ""
+                , "# Additional OpenClaw workspaces found:"
+                ] ++ map (\ws -> "# workspace: " <> T.pack ws) extraWs
+            ]
+      TIO.writeFile configPath (existing <> sections)
