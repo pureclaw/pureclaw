@@ -32,7 +32,9 @@ import argparse
 import atexit
 import json
 import os
+import select
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -42,6 +44,8 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+
+MITM_HOSTS = {"api.anthropic.com"}
 
 DEFAULT_PORT = 9999
 DEFAULT_LOG = "captures.jsonl"
@@ -96,11 +100,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
     _connect_host: str | None = None
 
     def do_CONNECT(self) -> None:  # noqa: N802
-        """Handle HTTPS CONNECT tunneling with MITM TLS termination."""
+        """Handle HTTPS CONNECT tunneling.
+
+        For Anthropic hosts: MITM with TLS termination to log requests.
+        For all other hosts: blind TCP passthrough (no interception).
+        """
         host, _, port = self.path.partition(":")
         port_num = int(port) if port else 443
 
-        _dbg(f">>> CONNECT {host}:{port_num}")
+        if host not in MITM_HOSTS:
+            _dbg(f">>> CONNECT {host}:{port_num} (passthrough)")
+            self._tunnel_passthrough(host, port_num)
+            return
+
+        _dbg(f">>> CONNECT {host}:{port_num} (MITM)")
 
         if not self.mitm_certfile:
             _dbg("    ERROR: no MITM cert available")
@@ -137,6 +150,38 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.handle_one_request()
             except (ConnectionError, OSError):
                 break
+
+    def _tunnel_passthrough(self, host: str, port: int) -> None:
+        """Blind TCP tunnel — no TLS termination, no logging."""
+        try:
+            upstream = socket.create_connection((host, port), timeout=10)
+        except OSError as e:
+            _dbg(f"    passthrough connect failed: {e}")
+            self._send_error(502, f"Cannot connect to {host}:{port}")
+            return
+
+        self.send_response(200, "Connection Established")
+        self.end_headers()
+
+        client = self.connection
+        sockets = [client, upstream]
+        try:
+            while True:
+                readable, _, errored = select.select(sockets, [], sockets, 30)
+                if errored:
+                    break
+                for sock in readable:
+                    data = sock.recv(65536)
+                    if not data:
+                        return
+                    if sock is client:
+                        upstream.sendall(data)
+                    else:
+                        client.sendall(data)
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            upstream.close()
 
     def do_POST(self) -> None:  # noqa: N802
         t0 = time.monotonic()
