@@ -23,6 +23,7 @@ import qualified Agent.LoopSpec
 import qualified Channels.CLISpec
 import qualified CLI.CommandsSpec
 import qualified CLI.ConfigSpec
+import qualified CLI.ImportSpec
 import qualified Tools.RegistrySpec
 import qualified Tools.ShellSpec
 import qualified Tools.FileReadSpec
@@ -40,6 +41,7 @@ import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
 import qualified Agent.MemorySpec
 import qualified Agent.CompactionSpec
+import qualified Agent.ContextTrackerSpec
 import qualified Agent.SlashCommandsSpec
 import qualified Providers.OpenAISpec
 import qualified Providers.OllamaSpec
@@ -86,6 +88,7 @@ main = hspec $ do
   describe "Channels.CLI" Channels.CLISpec.spec
   describe "CLI.Commands" CLI.CommandsSpec.spec
   describe "CLI.Config" CLI.ConfigSpec.spec
+  describe "CLI.Import" CLI.ImportSpec.spec
   describe "Tools.Registry" Tools.RegistrySpec.spec
   describe "Tools.Shell" Tools.ShellSpec.spec
   describe "Tools.FileRead" Tools.FileReadSpec.spec
@@ -103,6 +106,7 @@ main = hspec $ do
   describe "Memory.SQLite" Memory.SQLiteSpec.spec
   describe "Agent.Memory" Agent.MemorySpec.spec
   describe "Agent.Compaction" Agent.CompactionSpec.spec
+  describe "Agent.ContextTracker" Agent.ContextTrackerSpec.spec
   describe "Agent.SlashCommands" Agent.SlashCommandsSpec.spec
   describe "Providers.OpenAI" Providers.OpenAISpec.spec
   describe "Providers.Ollama" Providers.OllamaSpec.spec
