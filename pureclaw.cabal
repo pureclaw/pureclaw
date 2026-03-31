@@ -80,6 +80,7 @@ library
     PureClaw.Agent.Context
     PureClaw.Agent.Memory
     PureClaw.Agent.Compaction
+    PureClaw.Agent.ContextTracker
     PureClaw.Agent.Identity
     PureClaw.Agent.SlashCommands
     -- Providers
@@ -204,6 +205,7 @@ test-suite pureclaw-test
     Memory.NoneSpec
     Agent.MemorySpec
     Agent.CompactionSpec
+    Agent.ContextTrackerSpec
     Agent.SlashCommandsSpec
     Providers.OpenAISpec
     Providers.OllamaSpec
