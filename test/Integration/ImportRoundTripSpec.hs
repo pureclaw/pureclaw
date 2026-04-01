@@ -7,6 +7,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import PureClaw.Agent.Identity
 import PureClaw.CLI.Config
 import PureClaw.CLI.Import
 
@@ -67,3 +68,62 @@ spec = do
             -- Verify the agent frontmatter has the right model and tool profile
             agentContent `shouldContain` "model: anthropic/claude-sonnet-4-6"
             agentContent `shouldContain` "tool_profile: coding"
+
+    it "Test 2: SOUL.md identity survives import and produces correct system prompt" $
+      withSystemTempDirectory "pureclaw-e2e" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+
+        -- Create OpenClaw directory with SOUL.md in workspace
+        createDirectoryIfMissing True fromDir
+        TIO.writeFile (fromDir </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  \"agents\": {"
+          , "    \"defaults\": {"
+          , "      \"model\": \"anthropic/claude-opus-4-6\""
+          , "    }"
+          , "  }"
+          , "}"
+          ]
+        let workspaceDir = fromDir </> "workspace"
+        createDirectoryIfMissing True workspaceDir
+        TIO.writeFile (workspaceDir </> "SOUL.md") $ T.unlines
+          [ "# Name"
+          , "Atlas"
+          , ""
+          , "# Description"
+          , "A research assistant specializing in scientific literature."
+          , ""
+          , "# Instructions"
+          , "Always cite your sources. Prefer peer-reviewed papers."
+          , ""
+          , "# Constraints"
+          , "- Never fabricate citations"
+          , "- Always indicate uncertainty"
+          ]
+
+        -- Run the importer
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> do
+            -- The importer should record the workspace path
+            _dir_workspacePath dir `shouldBe` Just workspaceDir
+
+            -- Load SOUL.md through PureClaw's identity pipeline
+            let soulPath = workspaceDir </> "SOUL.md"
+            ident <- loadIdentity soulPath
+            ident `shouldNotBe` defaultIdentity
+
+            -- Verify structured fields
+            _ai_name ident `shouldBe` "Atlas"
+            _ai_description ident `shouldBe` "A research assistant specializing in scientific literature."
+            _ai_constraints ident `shouldBe` ["Never fabricate citations", "Always indicate uncertainty"]
+
+            -- Verify the system prompt that would be sent to the LLM
+            let sysPrompt = identitySystemPrompt ident
+            T.unpack sysPrompt `shouldContain` "You are Atlas."
+            T.unpack sysPrompt `shouldContain` "scientific literature"
+            T.unpack sysPrompt `shouldContain` "cite your sources"
+            T.unpack sysPrompt `shouldContain` "- Never fabricate citations"
+            T.unpack sysPrompt `shouldContain` "- Always indicate uncertainty"
