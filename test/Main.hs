@@ -41,6 +41,7 @@ import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
 import qualified Agent.MemorySpec
 import qualified Agent.CompactionSpec
+import qualified Agent.ContextTrackerSpec
 import qualified Agent.SlashCommandsSpec
 import qualified Providers.OpenAISpec
 import qualified Providers.OllamaSpec
@@ -105,6 +106,7 @@ main = hspec $ do
   describe "Memory.SQLite" Memory.SQLiteSpec.spec
   describe "Agent.Memory" Agent.MemorySpec.spec
   describe "Agent.Compaction" Agent.CompactionSpec.spec
+  describe "Agent.ContextTracker" Agent.ContextTrackerSpec.spec
   describe "Agent.SlashCommands" Agent.SlashCommandsSpec.spec
   describe "Providers.OpenAI" Providers.OpenAISpec.spec
   describe "Providers.Ollama" Providers.OllamaSpec.spec
