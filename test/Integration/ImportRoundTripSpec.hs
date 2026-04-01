@@ -266,3 +266,64 @@ spec = do
                 expectationFailure ("config.toml parse error: " <> T.unpack err)
               other ->
                 expectationFailure ("Unexpected config load result: " <> show other)
+
+    it "Test 5: multi-agent with different models produces distinct agent files" $
+      withSystemTempDirectory "pureclaw-e2e" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+
+        createDirectoryIfMissing True fromDir
+        TIO.writeFile (fromDir </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  \"agents\": {"
+          , "    \"defaults\": {"
+          , "      \"model\": \"anthropic/claude-sonnet-4-6\""
+          , "    },"
+          , "    \"list\": ["
+          , "      {"
+          , "        \"id\": \"fast\","
+          , "        \"systemPrompt\": \"Be brief and fast.\","
+          , "        \"model\": { \"primary\": \"anthropic/claude-haiku-4-5\" },"
+          , "        \"tools\": { \"profile\": \"minimal\" }"
+          , "      },"
+          , "      {"
+          , "        \"id\": \"deep\","
+          , "        \"systemPrompt\": \"Think carefully and thoroughly.\","
+          , "        \"model\": { \"primary\": \"anthropic/claude-opus-4-6\" },"
+          , "        \"tools\": { \"profile\": \"full\" }"
+          , "      }"
+          , "    ]"
+          , "  }"
+          , "}"
+          ]
+
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> do
+            -- Both agents should be listed in the result
+            _ir_agentsWritten (_dir_configResult dir) `shouldBe` ["fast", "deep"]
+
+            -- Load each agent's AGENTS.md and verify they are distinct
+            let agentsDir = toDir </> "config" </> "agents"
+            fastContent <- T.unpack <$> TIO.readFile (agentsDir </> "fast" </> "AGENTS.md")
+            deepContent <- T.unpack <$> TIO.readFile (agentsDir </> "deep" </> "AGENTS.md")
+
+            -- Agent files must be different
+            fastContent `shouldNotBe` deepContent
+
+            -- Fast agent: haiku model, minimal tools, brief prompt
+            fastContent `shouldContain` "model: anthropic/claude-haiku-4-5"
+            fastContent `shouldContain` "tool_profile: minimal"
+            fastContent `shouldContain` "Be brief and fast."
+
+            -- Deep agent: opus model, full tools, thorough prompt
+            deepContent `shouldContain` "model: anthropic/claude-opus-4-6"
+            deepContent `shouldContain` "tool_profile: full"
+            deepContent `shouldContain` "Think carefully and thoroughly."
+
+            -- Neither agent should contain the other's model or prompt
+            fastContent `shouldNotContain` "opus"
+            fastContent `shouldNotContain` "Think carefully and thoroughly."
+            deepContent `shouldNotContain` "haiku"
+            deepContent `shouldNotContain` "Be brief and fast."
