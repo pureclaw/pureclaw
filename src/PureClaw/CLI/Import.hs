@@ -22,7 +22,7 @@ module PureClaw.CLI.Import
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad ((>=>))
+import Control.Monad ((>=>), when)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
@@ -560,13 +560,11 @@ copyWorkspaceFiles srcDir destDir addWarning = do
       let src  = srcDir </> name
           dest = destDir </> name
       exists <- Dir.doesFileExist src
-      if exists
-        then do
-          result <- try @IOException (Dir.copyFile src dest)
-          case result of
-            Right () -> pure ()
-            Left err -> addWarning ("Failed to copy " <> T.pack name <> ": " <> T.pack (show err))
-        else pure ()
+      when exists $ do
+        result <- try @IOException (Dir.copyFile src dest)
+        case result of
+          Right () -> pure ()
+          Left err -> addWarning ("Failed to copy " <> T.pack name <> ": " <> T.pack (show err))
 
 -- | Append workspace and identity sections to config.toml
 appendConfigSections :: FilePath -> Maybe FilePath -> Maybe Text -> [FilePath] -> IO ()
