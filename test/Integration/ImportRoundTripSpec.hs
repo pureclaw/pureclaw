@@ -225,3 +225,44 @@ spec = do
                 expectationFailure ("JSON5 config.toml parse error: " <> T.unpack err)
               (a, b) ->
                 expectationFailure ("Unexpected results: " <> show a <> " / " <> show b)
+
+    it "Test 4: Signal channel config round-trips through TOML pipeline" $
+      withSystemTempDirectory "pureclaw-e2e" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+
+        -- OpenClaw config with signal channel (camelCase keys)
+        createDirectoryIfMissing True fromDir
+        TIO.writeFile (fromDir </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  \"channels\": {"
+          , "    \"signal\": {"
+          , "      \"account\": \"+15550009876\","
+          , "      \"dmPolicy\": \"allowlist\","
+          , "      \"allowFrom\": [\"+15551111111\", \"+15552222222\"]"
+          , "    }"
+          , "  }"
+          , "}"
+          ]
+
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right _ -> do
+            -- Load through PureClaw's TOML pipeline — the real config loader
+            diag <- loadFileConfigDiag (toDir </> "config" </> "config.toml")
+            case diag of
+              ConfigLoaded _ fc -> do
+                let sig = _fc_signal fc
+                sig `shouldNotBe` Nothing
+                case sig of
+                  Nothing -> expectationFailure "signal config missing"
+                  Just s -> do
+                    -- camelCase → snake_case applied by importer, then parsed by TOML codec
+                    _fsc_account s `shouldBe` Just "+15550009876"
+                    _fsc_dmPolicy s `shouldBe` Just "allowlist"
+                    _fsc_allowFrom s `shouldBe` Just ["+15551111111", "+15552222222"]
+              ConfigParseError _ err ->
+                expectationFailure ("config.toml parse error: " <> T.unpack err)
+              other ->
+                expectationFailure ("Unexpected config load result: " <> show other)
