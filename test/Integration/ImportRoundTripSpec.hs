@@ -107,11 +107,12 @@ spec = do
         case result of
           Left err -> expectationFailure (T.unpack err)
           Right dir -> do
-            -- The importer should record the workspace path
-            _dir_workspacePath dir `shouldBe` Just workspaceDir
+            -- The importer should record the PureClaw workspace path (copy, not original)
+            let expectedWs = toDir </> "workspace"
+            _dir_workspacePath dir `shouldBe` Just expectedWs
 
-            -- Load SOUL.md through PureClaw's identity pipeline
-            let soulPath = workspaceDir </> "SOUL.md"
+            -- Load SOUL.md through PureClaw's identity pipeline from the copied location
+            let soulPath = expectedWs </> "SOUL.md"
             ident <- loadIdentity soulPath
             ident `shouldNotBe` defaultIdentity
 
@@ -327,3 +328,65 @@ spec = do
             fastContent `shouldNotContain` "Think carefully and thoroughly."
             deepContent `shouldNotContain` "haiku"
             deepContent `shouldNotContain` "Be brief and fast."
+
+    it "Test 6: workspace files are copied and loadable from PureClaw directory" $
+      withSystemTempDirectory "pureclaw-e2e" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+
+        -- Create OpenClaw directory with workspace files
+        createDirectoryIfMissing True fromDir
+        TIO.writeFile (fromDir </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  \"agents\": {"
+          , "    \"defaults\": { \"model\": \"anthropic/claude-sonnet-4-6\" }"
+          , "  }"
+          , "}"
+          ]
+        let wsDir = fromDir </> "workspace"
+        createDirectoryIfMissing True wsDir
+        TIO.writeFile (wsDir </> "SOUL.md") $ T.unlines
+          [ "# Name"
+          , "Rover"
+          , ""
+          , "# Description"
+          , "A loyal coding companion."
+          ]
+        TIO.writeFile (wsDir </> "AGENTS.md") "Follow the project conventions.\n"
+        TIO.writeFile (wsDir </> "MEMORY.md") "The user prefers Haskell.\n"
+        TIO.writeFile (wsDir </> "USER.md") "Senior engineer, 10 years experience.\n"
+
+        -- Run the importer
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right dir -> do
+            -- Workspace path should point to the PureClaw copy, not the original
+            let expectedWs = toDir </> "workspace"
+            _dir_workspacePath dir `shouldBe` Just expectedWs
+
+            -- All four workspace files should exist in the PureClaw directory
+            soulExists <- doesFileExist (expectedWs </> "SOUL.md")
+            soulExists `shouldBe` True
+            agentsExists <- doesFileExist (expectedWs </> "AGENTS.md")
+            agentsExists `shouldBe` True
+            memoryExists <- doesFileExist (expectedWs </> "MEMORY.md")
+            memoryExists `shouldBe` True
+            userExists <- doesFileExist (expectedWs </> "USER.md")
+            userExists `shouldBe` True
+
+            -- SOUL.md should be loadable through the identity pipeline from the new location
+            ident <- loadIdentity (expectedWs </> "SOUL.md")
+            ident `shouldNotBe` defaultIdentity
+            _ai_name ident `shouldBe` "Rover"
+            _ai_description ident `shouldBe` "A loyal coding companion."
+
+            -- Other workspace files should have correct content
+            agentsContent <- TIO.readFile (expectedWs </> "AGENTS.md")
+            agentsContent `shouldBe` "Follow the project conventions.\n"
+            memoryContent <- TIO.readFile (expectedWs </> "MEMORY.md")
+            memoryContent `shouldBe` "The user prefers Haskell.\n"
+
+            -- config.toml should reference the PureClaw workspace path
+            configContent <- T.unpack <$> TIO.readFile (toDir </> "config" </> "config.toml")
+            configContent `shouldContain` expectedWs

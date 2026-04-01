@@ -414,10 +414,15 @@ importOpenClawDir fromDir toDir = do
           -- 3. Import device.json → extract deviceId
           mDeviceId <- importDeviceIdentity fromDir addWarning
 
-          -- 4. Find workspace path
-          let workspacePath = fromDir </> "workspace"
-          wsExists <- Dir.doesDirectoryExist workspacePath
-          let mWorkspace = if wsExists then Just workspacePath else Nothing
+          -- 4. Copy workspace files → toDir/workspace/
+          let srcWorkspace = fromDir </> "workspace"
+          wsExists <- Dir.doesDirectoryExist srcWorkspace
+          mWorkspace <- if wsExists
+            then do
+              let destWorkspace = toDir </> "workspace"
+              copyWorkspaceFiles srcWorkspace destWorkspace addWarning
+              pure (Just destWorkspace)
+            else pure Nothing
 
           -- 5. Find extra workspace-* directories
           extraWs <- findExtraWorkspaces fromDir
@@ -537,6 +542,31 @@ importModels fromDir toDir addWarning = do
       Dir.createDirectoryIfMissing True toDir
       LBS.writeFile (toDir </> "models.json") (encode val)
       pure True
+
+-- | The workspace files that are copied during import.
+-- These are the key files that define agent identity, context, and memory.
+workspaceFiles :: [FilePath]
+workspaceFiles = ["SOUL.md", "AGENTS.md", "MEMORY.md", "USER.md"]
+
+-- | Copy workspace files from the OpenClaw workspace to the PureClaw workspace.
+-- Only copies files that exist; missing files are silently skipped.
+-- IO failures on individual files are reported as warnings (not fatal).
+copyWorkspaceFiles :: FilePath -> FilePath -> (Text -> IO ()) -> IO ()
+copyWorkspaceFiles srcDir destDir addWarning = do
+  Dir.createDirectoryIfMissing True destDir
+  mapM_ copyIfExists workspaceFiles
+  where
+    copyIfExists name = do
+      let src  = srcDir </> name
+          dest = destDir </> name
+      exists <- Dir.doesFileExist src
+      if exists
+        then do
+          result <- try @IOException (Dir.copyFile src dest)
+          case result of
+            Right () -> pure ()
+            Left err -> addWarning ("Failed to copy " <> T.pack name <> ": " <> T.pack (show err))
+        else pure ()
 
 -- | Append workspace and identity sections to config.toml
 appendConfigSections :: FilePath -> Maybe FilePath -> Maybe Text -> [FilePath] -> IO ()

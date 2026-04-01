@@ -270,14 +270,14 @@ spec = do
             -- Device ID was extracted
             _dir_deviceId dir `shouldBe` Just "test-device-123"
 
-            -- Workspace path was found
-            _dir_workspacePath dir `shouldBe` Just (fromDir </> "workspace")
+            -- Workspace path points to PureClaw copy (not original)
+            _dir_workspacePath dir `shouldBe` Just (toDir </> "workspace")
 
             -- Config.toml has workspace and identity sections
             let configDir = toDir </> "config"
             configContent <- TIO.readFile (configDir </> "config.toml")
             T.unpack configContent `shouldContain` "[workspace]"
-            T.unpack configContent `shouldContain` (fromDir </> "workspace")
+            T.unpack configContent `shouldContain` (toDir </> "workspace")
             T.unpack configContent `shouldContain` "[identity]"
             T.unpack configContent `shouldContain` "test-device-123"
 
