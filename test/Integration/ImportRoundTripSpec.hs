@@ -127,3 +127,101 @@ spec = do
             T.unpack sysPrompt `shouldContain` "cite your sources"
             T.unpack sysPrompt `shouldContain` "- Never fabricate citations"
             T.unpack sysPrompt `shouldContain` "- Always indicate uncertainty"
+
+    it "Test 3: JSON5 + $include produces same LLM inputs as plain JSON" $
+      withSystemTempDirectory "pureclaw-e2e" $ \tmpDir -> do
+        -- Directory A: plain JSON (reference)
+        let fromA = tmpDir </> "openclaw-plain"
+            toA   = tmpDir </> "pureclaw-plain"
+        createDirectoryIfMissing True fromA
+        TIO.writeFile (fromA </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  \"agents\": {"
+          , "    \"defaults\": {"
+          , "      \"model\": \"anthropic/claude-sonnet-4-6\""
+          , "    },"
+          , "    \"list\": ["
+          , "      {"
+          , "        \"id\": \"helper\","
+          , "        \"systemPrompt\": \"You help with tasks.\","
+          , "        \"model\": { \"primary\": \"anthropic/claude-sonnet-4-6\" }"
+          , "      }"
+          , "    ]"
+          , "  },"
+          , "  \"channels\": {"
+          , "    \"signal\": {"
+          , "      \"account\": \"+15550001234\","
+          , "      \"dmPolicy\": \"allowlist\","
+          , "      \"allowFrom\": [\"+15559999999\"]"
+          , "    }"
+          , "  }"
+          , "}"
+          ]
+
+        -- Directory B: JSON5 with comments, trailing commas, and $include
+        let fromB = tmpDir </> "openclaw-json5"
+            toB   = tmpDir </> "pureclaw-json5"
+        createDirectoryIfMissing True fromB
+        TIO.writeFile (fromB </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  // Main OpenClaw config with JSON5 features"
+          , "  \"agents\": { \"$include\": \"./agents.json\" },"
+          , "  \"channels\": {"
+          , "    // Signal channel config"
+          , "    \"signal\": {"
+          , "      \"account\": \"+15550001234\","
+          , "      \"dmPolicy\": \"allowlist\","
+          , "      \"allowFrom\": [\"+15559999999\",]"
+          , "    }"
+          , "  }"
+          , "}"
+          ]
+        TIO.writeFile (fromB </> "agents.json") $ T.unlines
+          [ "{"
+          , "  // Agent definitions split into separate file"
+          , "  \"defaults\": {"
+          , "    \"model\": \"anthropic/claude-sonnet-4-6\","
+          , "  },"
+          , "  \"list\": ["
+          , "    {"
+          , "      \"id\": \"helper\","
+          , "      \"systemPrompt\": \"You help with tasks.\","
+          , "      \"model\": { \"primary\": \"anthropic/claude-sonnet-4-6\" },"
+          , "    },"
+          , "  ]"
+          , "}"
+          ]
+
+        -- Import both
+        resultA <- importOpenClawDir fromA toA
+        resultB <- importOpenClawDir fromB toB
+
+        case (resultA, resultB) of
+          (Left err, _) -> expectationFailure ("Plain import failed: " <> T.unpack err)
+          (_, Left err) -> expectationFailure ("JSON5 import failed: " <> T.unpack err)
+          (Right _, Right _) -> do
+            -- Load both configs through PureClaw's TOML pipeline
+            diagA <- loadFileConfigDiag (toA </> "config" </> "config.toml")
+            diagB <- loadFileConfigDiag (toB </> "config" </> "config.toml")
+            case (diagA, diagB) of
+              (ConfigLoaded _ fcA, ConfigLoaded _ fcB) -> do
+                -- Model must match
+                _fc_model fcA `shouldBe` Just "anthropic/claude-sonnet-4-6"
+                _fc_model fcB `shouldBe` _fc_model fcA
+
+                -- Signal config must match
+                let sigA = _fc_signal fcA
+                    sigB = _fc_signal fcB
+                sigA `shouldNotBe` Nothing
+                sigA `shouldBe` sigB
+
+                -- Agent files must match
+                agentA <- TIO.readFile (toA </> "config" </> "agents" </> "helper" </> "AGENTS.md")
+                agentB <- TIO.readFile (toB </> "config" </> "agents" </> "helper" </> "AGENTS.md")
+                agentA `shouldBe` agentB
+              (ConfigParseError _ err, _) ->
+                expectationFailure ("Plain config.toml parse error: " <> T.unpack err)
+              (_, ConfigParseError _ err) ->
+                expectationFailure ("JSON5 config.toml parse error: " <> T.unpack err)
+              (a, b) ->
+                expectationFailure ("Unexpected results: " <> show a <> " / " <> show b)
