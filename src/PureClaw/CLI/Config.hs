@@ -2,8 +2,10 @@ module PureClaw.CLI.Config
   ( -- * File config
     FileConfig (..)
   , FileSignalConfig (..)
+  , FileTelegramConfig (..)
   , emptyFileConfig
   , emptyFileSignalConfig
+  , emptyFileTelegramConfig
     -- * Loading
   , loadFileConfig
   , loadConfig
@@ -39,7 +41,8 @@ data FileConfig = FileConfig
   , _fc_allow          :: Maybe [Text]
   , _fc_autonomy       :: Maybe Text  -- ^ "full", "supervised", or "deny"
   , _fc_defaultChannel :: Maybe Text  -- ^ "cli", "signal", or "telegram"
-  , _fc_signal         :: Maybe FileSignalConfig  -- ^ [signal] TOML table
+  , _fc_signal         :: Maybe FileSignalConfig    -- ^ [signal] TOML table
+  , _fc_telegram       :: Maybe FileTelegramConfig  -- ^ [telegram] TOML table
   , _fc_vault_path      :: Maybe Text  -- ^ vault file path (default: ~/.pureclaw/vault.age)
   , _fc_vault_recipient :: Maybe Text  -- ^ age recipient string (required to enable vault)
   , _fc_vault_identity  :: Maybe Text  -- ^ age identity path or plugin string
@@ -57,10 +60,20 @@ data FileSignalConfig = FileSignalConfig
 emptyFileConfig :: FileConfig
 emptyFileConfig =
   FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
-             Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 emptyFileSignalConfig :: FileSignalConfig
 emptyFileSignalConfig = FileSignalConfig Nothing Nothing Nothing Nothing
+
+-- | Telegram channel configuration from the @[telegram]@ TOML table.
+data FileTelegramConfig = FileTelegramConfig
+  { _ftc_botToken  :: Maybe Text    -- ^ Bot API token
+  , _ftc_dmPolicy  :: Maybe Text    -- ^ "pairing", "allowlist", "open", "disabled"
+  , _ftc_allowFrom :: Maybe [Text]  -- ^ Allowed usernames or IDs
+  } deriving stock (Show, Eq)
+
+emptyFileTelegramConfig :: FileTelegramConfig
+emptyFileTelegramConfig = FileTelegramConfig Nothing Nothing Nothing
 
 fileConfigCodec :: TomlCodec FileConfig
 fileConfigCodec = FileConfig
@@ -73,6 +86,7 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.text "autonomy")                  .= _fc_autonomy
   <*> Toml.dioptional (Toml.text "default_channel")           .= _fc_defaultChannel
   <*> Toml.dioptional (Toml.table fileSignalConfigCodec "signal") .= _fc_signal
+  <*> Toml.dioptional (Toml.table fileTelegramConfigCodec "telegram") .= _fc_telegram
   <*> Toml.dioptional (Toml.text "vault_path")                .= _fc_vault_path
   <*> Toml.dioptional (Toml.text "vault_recipient")           .= _fc_vault_recipient
   <*> Toml.dioptional (Toml.text "vault_identity")            .= _fc_vault_identity
@@ -84,6 +98,12 @@ fileSignalConfigCodec = FileSignalConfig
   <*> Toml.dioptional (Toml.text "dm_policy")                 .= _fsc_dmPolicy
   <*> Toml.dioptional (Toml.arrayOf Toml._Text "allow_from")  .= _fsc_allowFrom
   <*> Toml.dioptional (Toml.int "text_chunk_limit")           .= _fsc_textChunkLimit
+
+fileTelegramConfigCodec :: TomlCodec FileTelegramConfig
+fileTelegramConfigCodec = FileTelegramConfig
+  <$> Toml.dioptional (Toml.text "bot_token")                 .= _ftc_botToken
+  <*> Toml.dioptional (Toml.text "dm_policy")                 .= _ftc_dmPolicy
+  <*> Toml.dioptional (Toml.arrayOf Toml._Text "allow_from")  .= _ftc_allowFrom
 
 -- | Load config from a single file path.
 -- Returns 'emptyFileConfig' if the file does not exist or cannot be parsed.

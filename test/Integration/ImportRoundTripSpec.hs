@@ -172,8 +172,8 @@ spec = do
           , "    \"signal\": {"
           , "      \"account\": \"+15550001234\","
           , "      \"dmPolicy\": \"allowlist\","
-          , "      \"allowFrom\": [\"+15559999999\",]"
-          , "    }"
+          , "      \"allowFrom\": [\"+15559999999\",], // trailing comma + comment"
+          , "    }, // trailing comma + comment"
           , "  }"
           , "}"
           ]
@@ -390,3 +390,41 @@ spec = do
             -- config.toml should reference the PureClaw workspace path
             configContent <- T.unpack <$> TIO.readFile (toDir </> "config" </> "config.toml")
             configContent `shouldContain` expectedWs
+
+    it "Test 7: Telegram config round-trips through TOML pipeline" $
+      withSystemTempDirectory "pureclaw-e2e" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+
+        createDirectoryIfMissing True fromDir
+        TIO.writeFile (fromDir </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  \"channels\": {"
+          , "    \"telegram\": {"
+          , "      \"botToken\": \"123456:ABC-DEF-GHI\","
+          , "      \"dmPolicy\": \"pairing\","
+          , "      \"allowFrom\": [\"alice\", \"bob\"]"
+          , "    }"
+          , "  }"
+          , "}"
+          ]
+
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right _ -> do
+            diag <- loadFileConfigDiag (toDir </> "config" </> "config.toml")
+            case diag of
+              ConfigLoaded _ fc -> do
+                let tg = _fc_telegram fc
+                tg `shouldNotBe` Nothing
+                case tg of
+                  Nothing -> expectationFailure "telegram config missing"
+                  Just t -> do
+                    _ftc_botToken t `shouldBe` Just "123456:ABC-DEF-GHI"
+                    _ftc_dmPolicy t `shouldBe` Just "pairing"
+                    _ftc_allowFrom t `shouldBe` Just ["alice", "bob"]
+              ConfigParseError _ err ->
+                expectationFailure ("config.toml parse error: " <> T.unpack err)
+              other ->
+                expectationFailure ("Unexpected config load result: " <> show other)
