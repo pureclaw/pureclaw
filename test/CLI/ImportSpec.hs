@@ -38,7 +38,7 @@ spec = do
 
     it "strips trailing commas with whitespace" $ do
       let input = "{\"a\": 1,\n  }"
-      stripJson5 input `shouldBe` "{\"a\": 1\n  }"
+      stripJson5 input `shouldBe` "{\"a\": 1}"
 
     it "does not strip commas before values" $ do
       let input = "{\"a\": 1, \"b\": 2}"
@@ -47,6 +47,14 @@ spec = do
     it "handles escaped quotes in strings" $ do
       let input = "{\"key\": \"value with \\\"quotes\\\"\"}"
       stripJson5 input `shouldBe` input
+
+    it "strips trailing commas followed by comments on the same line" $ do
+      let input = "{\"a\": 1, // comment\n}"
+      stripJson5 input `shouldBe` "{\"a\": 1}"
+
+    it "strips trailing commas in arrays followed by comments" $ do
+      let input = "[1, 2, // comment\n]"
+      stripJson5 input `shouldBe` "[1, 2]"
 
   describe "parseOpenClawConfig" $ do
     it "parses a basic config with model and agents" $ do

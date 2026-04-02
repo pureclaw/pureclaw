@@ -58,15 +58,19 @@ stripJson5 = T.pack . go False . T.unpack
     go False ('"' : rest) = '"' : go True rest
     go False ('/' : '/' : rest) = go False (dropWhile (/= '\n') rest)
     go False (',' : rest)
-      | trailingComma rest = go False rest
+      | Just rest' <- skipTrailingComma rest = go False rest'
     go False (c : rest) = c : go False rest
 
-    trailingComma :: String -> Bool
-    trailingComma [] = True
-    trailingComma (c : rest)
-      | c `elem` (" \t\n\r" :: String) = trailingComma rest
-      | c == ']' || c == '}' = True
-      | otherwise = False
+    -- | If this comma is trailing (only whitespace/comments before ] or }),
+    -- return the remaining string starting at the closing bracket.
+    skipTrailingComma :: String -> Maybe String
+    skipTrailingComma [] = Just []
+    skipTrailingComma ('/' : '/' : rest) =
+      skipTrailingComma (dropWhile (/= '\n') rest)
+    skipTrailingComma (c : rest)
+      | c `elem` (" \t\n\r" :: String) = skipTrailingComma rest
+      | c == ']' || c == '}' = Just (c : rest)
+      | otherwise = Nothing
 
 -- ---------------------------------------------------------------------------
 -- OpenClaw config types
