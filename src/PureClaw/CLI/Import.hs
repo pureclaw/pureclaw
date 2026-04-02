@@ -19,10 +19,12 @@ module PureClaw.CLI.Import
   , resolveImportOptions
     -- * Utilities (exported for testing)
   , camelToSnake
+  , mapThinkingDefault
+  , computeMaxTurns
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad ((>=>))
+import Control.Monad ((>=>), when)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
@@ -58,26 +60,33 @@ stripJson5 = T.pack . go False . T.unpack
     go False ('"' : rest) = '"' : go True rest
     go False ('/' : '/' : rest) = go False (dropWhile (/= '\n') rest)
     go False (',' : rest)
-      | trailingComma rest = go False rest
+      | Just rest' <- skipTrailingComma rest = go False rest'
     go False (c : rest) = c : go False rest
 
-    trailingComma :: String -> Bool
-    trailingComma [] = True
-    trailingComma (c : rest)
-      | c `elem` (" \t\n\r" :: String) = trailingComma rest
-      | c == ']' || c == '}' = True
-      | otherwise = False
+    -- | If this comma is trailing (only whitespace/comments before ] or }),
+    -- return the remaining string starting at the closing bracket.
+    skipTrailingComma :: String -> Maybe String
+    skipTrailingComma [] = Just []
+    skipTrailingComma ('/' : '/' : rest) =
+      skipTrailingComma (dropWhile (/= '\n') rest)
+    skipTrailingComma (c : rest)
+      | c `elem` (" \t\n\r" :: String) = skipTrailingComma rest
+      | c == ']' || c == '}' = Just (c : rest)
+      | otherwise = Nothing
 
 -- ---------------------------------------------------------------------------
 -- OpenClaw config types
 -- ---------------------------------------------------------------------------
 
 data OpenClawConfig = OpenClawConfig
-  { _oc_defaultModel :: Maybe Text
-  , _oc_workspace    :: Maybe Text
-  , _oc_agents       :: [OpenClawAgent]
-  , _oc_signal       :: Maybe OpenClawSignal
-  , _oc_telegram     :: Maybe OpenClawTelegram
+  { _oc_defaultModel    :: Maybe Text
+  , _oc_workspace       :: Maybe Text
+  , _oc_agents          :: [OpenClawAgent]
+  , _oc_signal          :: Maybe OpenClawSignal
+  , _oc_telegram        :: Maybe OpenClawTelegram
+  , _oc_thinkingDefault :: Maybe Text
+  , _oc_timeoutSeconds  :: Maybe Int
+  , _oc_userTimezone    :: Maybe Text
   }
   deriving stock (Show, Eq)
 
@@ -114,27 +123,38 @@ parseOpenClawConfig = parseEither parseOC
 parseOC :: Value -> Parser OpenClawConfig
 parseOC = withObject "OpenClawConfig" $ \o -> do
   mAgents <- o .:? "agents"
-  defaults <- maybe (pure emptyDefaults) parseDefaults mAgents
+  defaults <- maybe (pure emptyParsedDefaults) parseDefaults mAgents
   agents <- maybe (pure []) parseAgentList mAgents
   mChannels <- o .:? "channels"
   signal <- maybe (pure Nothing) (withObject "channels" (.:? "signal") >=> traverse parseSignalCfg) mChannels
   telegram <- maybe (pure Nothing) (withObject "channels" (.:? "telegram") >=> traverse parseTelegramCfg) mChannels
   pure OpenClawConfig
-    { _oc_defaultModel = fst defaults
-    , _oc_workspace    = snd defaults
-    , _oc_agents       = agents
-    , _oc_signal       = signal
-    , _oc_telegram     = telegram
+    { _oc_defaultModel    = _pd_model defaults
+    , _oc_workspace       = _pd_workspace defaults
+    , _oc_agents          = agents
+    , _oc_signal          = signal
+    , _oc_telegram        = telegram
+    , _oc_thinkingDefault = _pd_thinkingDefault defaults
+    , _oc_timeoutSeconds  = _pd_timeoutSeconds defaults
+    , _oc_userTimezone    = _pd_userTimezone defaults
     }
 
-emptyDefaults :: (Maybe Text, Maybe Text)
-emptyDefaults = (Nothing, Nothing)
+data ParsedDefaults = ParsedDefaults
+  { _pd_model           :: Maybe Text
+  , _pd_workspace       :: Maybe Text
+  , _pd_thinkingDefault :: Maybe Text
+  , _pd_timeoutSeconds  :: Maybe Int
+  , _pd_userTimezone    :: Maybe Text
+  }
 
-parseDefaults :: Value -> Parser (Maybe Text, Maybe Text)
+emptyParsedDefaults :: ParsedDefaults
+emptyParsedDefaults = ParsedDefaults Nothing Nothing Nothing Nothing Nothing
+
+parseDefaults :: Value -> Parser ParsedDefaults
 parseDefaults = withObject "agents" $ \o -> do
   mDefaults <- o .:? "defaults"
   case mDefaults of
-    Nothing -> pure emptyDefaults
+    Nothing -> pure emptyParsedDefaults
     Just defVal -> flip (withObject "defaults") defVal $ \d -> do
       mModelVal <- d .:? "model"
       model <- case mModelVal of
@@ -142,7 +162,16 @@ parseDefaults = withObject "agents" $ \o -> do
         Just (String s) -> pure (Just s)
         _               -> pure Nothing
       ws <- d .:? "workspace"
-      pure (model, ws)
+      thinking <- d .:? "thinkingDefault"
+      timeout <- d .:? "timeoutSeconds"
+      tz <- d .:? "userTimezone"
+      pure ParsedDefaults
+        { _pd_model           = model
+        , _pd_workspace       = ws
+        , _pd_thinkingDefault = thinking
+        , _pd_timeoutSeconds  = timeout
+        , _pd_userTimezone    = tz
+        }
 
 parseAgentList :: Value -> Parser [OpenClawAgent]
 parseAgentList = withObject "agents" $ \o -> do
@@ -289,6 +318,9 @@ writeImportedConfig configDir ocConfig = do
 buildConfigToml :: OpenClawConfig -> Text
 buildConfigToml oc = T.unlines $ concatMap (filter (not . T.null))
   [ maybe [] (\m -> ["model = " <> quoted m]) (_oc_defaultModel oc)
+  , maybe [] (\t -> ["reasoning_effort = " <> quoted (mapThinkingDefault t)]) (_oc_thinkingDefault oc)
+  , maybe [] (\s -> ["max_turns = " <> T.pack (show (computeMaxTurns s))]) (_oc_timeoutSeconds oc)
+  , maybe [] (\tz -> ["timezone = " <> quoted tz]) (_oc_userTimezone oc)
   , case _oc_signal oc of
       Nothing -> []
       Just sig ->
@@ -341,6 +373,20 @@ camelToSnake = T.concatMap $ \c ->
   if Char.isAsciiUpper c
     then T.pack ['_', Char.toLower c]
     else T.singleton c
+
+-- | Map OpenClaw thinkingDefault to PureClaw reasoning_effort.
+-- "always"/"high" → "high"; "auto"/"medium" → "medium"; everything else → "low"
+mapThinkingDefault :: Text -> Text
+mapThinkingDefault t = case T.toLower t of
+  "always" -> "high"
+  "high"   -> "high"
+  "auto"   -> "medium"
+  "medium" -> "medium"
+  _        -> "low"  -- off, low, none, minimal
+
+-- | Convert OpenClaw timeoutSeconds to max_turns (seconds / 10, clamped to [1, 200]).
+computeMaxTurns :: Int -> Int
+computeMaxTurns secs = min 200 (max 1 (secs `div` 10))
 
 -- ---------------------------------------------------------------------------
 -- CLI options for import command
@@ -414,10 +460,15 @@ importOpenClawDir fromDir toDir = do
           -- 3. Import device.json → extract deviceId
           mDeviceId <- importDeviceIdentity fromDir addWarning
 
-          -- 4. Find workspace path
-          let workspacePath = fromDir </> "workspace"
-          wsExists <- Dir.doesDirectoryExist workspacePath
-          let mWorkspace = if wsExists then Just workspacePath else Nothing
+          -- 4. Copy workspace files → toDir/workspace/
+          let srcWorkspace = fromDir </> "workspace"
+          wsExists <- Dir.doesDirectoryExist srcWorkspace
+          mWorkspace <- if wsExists
+            then do
+              let destWorkspace = toDir </> "workspace"
+              copyWorkspaceFiles srcWorkspace destWorkspace addWarning
+              pure (Just destWorkspace)
+            else pure Nothing
 
           -- 5. Find extra workspace-* directories
           extraWs <- findExtraWorkspaces fromDir
@@ -537,6 +588,29 @@ importModels fromDir toDir addWarning = do
       Dir.createDirectoryIfMissing True toDir
       LBS.writeFile (toDir </> "models.json") (encode val)
       pure True
+
+-- | The workspace files that are copied during import.
+-- These are the key files that define agent identity, context, and memory.
+workspaceFiles :: [FilePath]
+workspaceFiles = ["SOUL.md", "AGENTS.md", "MEMORY.md", "USER.md"]
+
+-- | Copy workspace files from the OpenClaw workspace to the PureClaw workspace.
+-- Only copies files that exist; missing files are silently skipped.
+-- IO failures on individual files are reported as warnings (not fatal).
+copyWorkspaceFiles :: FilePath -> FilePath -> (Text -> IO ()) -> IO ()
+copyWorkspaceFiles srcDir destDir addWarning = do
+  Dir.createDirectoryIfMissing True destDir
+  mapM_ copyIfExists workspaceFiles
+  where
+    copyIfExists name = do
+      let src  = srcDir </> name
+          dest = destDir </> name
+      exists <- Dir.doesFileExist src
+      when exists $ do
+        result <- try @IOException (Dir.copyFile src dest)
+        case result of
+          Right () -> pure ()
+          Left err -> addWarning ("Failed to copy " <> T.pack name <> ": " <> T.pack (show err))
 
 -- | Append workspace and identity sections to config.toml
 appendConfigSections :: FilePath -> Maybe FilePath -> Maybe Text -> [FilePath] -> IO ()

@@ -228,6 +228,7 @@ test-suite pureclaw-test
     Scheduler.HeartbeatSpec
     Integration.SignalFlowSpec
     Integration.CLISpec
+    Integration.ImportRoundTripSpec
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw

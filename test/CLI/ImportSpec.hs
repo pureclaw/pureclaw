@@ -38,7 +38,7 @@ spec = do
 
     it "strips trailing commas with whitespace" $ do
       let input = "{\"a\": 1,\n  }"
-      stripJson5 input `shouldBe` "{\"a\": 1\n  }"
+      stripJson5 input `shouldBe` "{\"a\": 1}"
 
     it "does not strip commas before values" $ do
       let input = "{\"a\": 1, \"b\": 2}"
@@ -47,6 +47,14 @@ spec = do
     it "handles escaped quotes in strings" $ do
       let input = "{\"key\": \"value with \\\"quotes\\\"\"}"
       stripJson5 input `shouldBe` input
+
+    it "strips trailing commas followed by comments on the same line" $ do
+      let input = "{\"a\": 1, // comment\n}"
+      stripJson5 input `shouldBe` "{\"a\": 1}"
+
+    it "strips trailing commas in arrays followed by comments" $ do
+      let input = "[1, 2, // comment\n]"
+      stripJson5 input `shouldBe` "[1, 2]"
 
   describe "parseOpenClawConfig" $ do
     it "parses a basic config with model and agents" $ do
@@ -225,6 +233,38 @@ spec = do
     it "handles leading uppercase" $
       camelToSnake "AllowAll" `shouldBe` "_allow_all"
 
+  describe "mapThinkingDefault" $ do
+    it "maps always/high to high" $ do
+      mapThinkingDefault "always" `shouldBe` "high"
+      mapThinkingDefault "high" `shouldBe` "high"
+
+    it "maps auto/medium to medium" $ do
+      mapThinkingDefault "auto" `shouldBe` "medium"
+      mapThinkingDefault "medium" `shouldBe` "medium"
+
+    it "maps off/low/none/minimal to low" $ do
+      mapThinkingDefault "off" `shouldBe` "low"
+      mapThinkingDefault "low" `shouldBe` "low"
+      mapThinkingDefault "none" `shouldBe` "low"
+      mapThinkingDefault "minimal" `shouldBe` "low"
+
+    it "is case-insensitive" $
+      mapThinkingDefault "Always" `shouldBe` "high"
+
+  describe "computeMaxTurns" $ do
+    it "divides by 10" $
+      computeMaxTurns 900 `shouldBe` 90
+
+    it "caps at 200" $
+      computeMaxTurns 5000 `shouldBe` 200
+
+    it "handles small values" $
+      computeMaxTurns 30 `shouldBe` 3
+
+    it "clamps to minimum of 1" $ do
+      computeMaxTurns 0 `shouldBe` 1
+      computeMaxTurns 5 `shouldBe` 1
+
   describe "resolveImportOptions" $ do
     it "uses positional directory arg as --from" $
       withSystemTempDirectory "pureclaw-import-test" $ \tmpDir -> do
@@ -270,14 +310,14 @@ spec = do
             -- Device ID was extracted
             _dir_deviceId dir `shouldBe` Just "test-device-123"
 
-            -- Workspace path was found
-            _dir_workspacePath dir `shouldBe` Just (fromDir </> "workspace")
+            -- Workspace path points to PureClaw copy (not original)
+            _dir_workspacePath dir `shouldBe` Just (toDir </> "workspace")
 
             -- Config.toml has workspace and identity sections
             let configDir = toDir </> "config"
             configContent <- TIO.readFile (configDir </> "config.toml")
             T.unpack configContent `shouldContain` "[workspace]"
-            T.unpack configContent `shouldContain` (fromDir </> "workspace")
+            T.unpack configContent `shouldContain` (toDir </> "workspace")
             T.unpack configContent `shouldContain` "[identity]"
             T.unpack configContent `shouldContain` "test-device-123"
 
