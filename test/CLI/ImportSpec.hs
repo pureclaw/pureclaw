@@ -261,6 +261,10 @@ spec = do
     it "handles small values" $
       computeMaxTurns 30 `shouldBe` 3
 
+    it "clamps to minimum of 1" $ do
+      computeMaxTurns 0 `shouldBe` 1
+      computeMaxTurns 5 `shouldBe` 1
+
   describe "resolveImportOptions" $ do
     it "uses positional directory arg as --from" $
       withSystemTempDirectory "pureclaw-import-test" $ \tmpDir -> do

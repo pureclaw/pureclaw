@@ -384,9 +384,9 @@ mapThinkingDefault t = case T.toLower t of
   "medium" -> "medium"
   _        -> "low"  -- off, low, none, minimal
 
--- | Convert OpenClaw timeoutSeconds to max_turns (seconds / 10, capped at 200).
+-- | Convert OpenClaw timeoutSeconds to max_turns (seconds / 10, clamped to [1, 200]).
 computeMaxTurns :: Int -> Int
-computeMaxTurns secs = min 200 (secs `div` 10)
+computeMaxTurns secs = min 200 (max 1 (secs `div` 10))
 
 -- ---------------------------------------------------------------------------
 -- CLI options for import command
