@@ -122,6 +122,7 @@ library
     crypton,
     directory,
     filepath,
+    haskeline,
     http-client,
     http-client-tls,
     http-types,

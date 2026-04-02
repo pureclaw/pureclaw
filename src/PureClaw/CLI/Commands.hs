@@ -445,16 +445,16 @@ runChat opts = do
           _lh_logWarn logger "  brew install signal-cli    (macOS)"
           _lh_logWarn logger "  nix-env -i signal-cli      (NixOS)"
           _lh_logWarn logger "Falling back to CLI channel."
-          startWithChannel mkCLIChannelHandle
+          mkCLIChannelHandle >>= startWithChannel
         Right _ -> do
           _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
           transport <- mkSignalCliTransport (_sc_account sigCfg) logger
           withSignalChannel sigCfg transport logger startWithChannel
     "cli" ->
-      startWithChannel mkCLIChannelHandle
+      mkCLIChannelHandle >>= startWithChannel
     other -> do
       _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
-      startWithChannel mkCLIChannelHandle
+      mkCLIChannelHandle >>= startWithChannel
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType
