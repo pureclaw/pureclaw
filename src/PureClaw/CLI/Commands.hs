@@ -220,7 +220,8 @@ commandParser = subparser
         (progDesc "Interactive terminal chat UI"))
    <> command "gateway" (info (subparser
         (command "run" (info (CmdGateway <$> chatOptionsParser <**> helper)
-          (progDesc "Run the agent with channel from config (Signal, Telegram, CLI)"))))
+          (progDesc "Run the agent with channel from config (Signal, Telegram, CLI)")))
+        <**> helper)
         (progDesc "Gateway — channel-aware agent"))
    <> command "import" (info (importParser <**> helper)
         (progDesc "Import an OpenClaw state directory"))
