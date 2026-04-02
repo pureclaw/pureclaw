@@ -43,6 +43,9 @@ data FileConfig = FileConfig
   , _fc_defaultChannel :: Maybe Text  -- ^ "cli", "signal", or "telegram"
   , _fc_signal         :: Maybe FileSignalConfig    -- ^ [signal] TOML table
   , _fc_telegram       :: Maybe FileTelegramConfig  -- ^ [telegram] TOML table
+  , _fc_reasoningEffort :: Maybe Text  -- ^ "high", "medium", or "low"
+  , _fc_maxTurns       :: Maybe Int    -- ^ Maximum tool-call iterations per turn
+  , _fc_timezone       :: Maybe Text   -- ^ IANA timezone (e.g. "America/New_York")
   , _fc_vault_path      :: Maybe Text  -- ^ vault file path (default: ~/.pureclaw/vault.age)
   , _fc_vault_recipient :: Maybe Text  -- ^ age recipient string (required to enable vault)
   , _fc_vault_identity  :: Maybe Text  -- ^ age identity path or plugin string
@@ -60,7 +63,8 @@ data FileSignalConfig = FileSignalConfig
 emptyFileConfig :: FileConfig
 emptyFileConfig =
   FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
-             Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing
 
 emptyFileSignalConfig :: FileSignalConfig
 emptyFileSignalConfig = FileSignalConfig Nothing Nothing Nothing Nothing
@@ -87,6 +91,9 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.text "default_channel")           .= _fc_defaultChannel
   <*> Toml.dioptional (Toml.table fileSignalConfigCodec "signal") .= _fc_signal
   <*> Toml.dioptional (Toml.table fileTelegramConfigCodec "telegram") .= _fc_telegram
+  <*> Toml.dioptional (Toml.text "reasoning_effort")           .= _fc_reasoningEffort
+  <*> Toml.dioptional (Toml.int "max_turns")                   .= _fc_maxTurns
+  <*> Toml.dioptional (Toml.text "timezone")                   .= _fc_timezone
   <*> Toml.dioptional (Toml.text "vault_path")                .= _fc_vault_path
   <*> Toml.dioptional (Toml.text "vault_recipient")           .= _fc_vault_recipient
   <*> Toml.dioptional (Toml.text "vault_identity")            .= _fc_vault_identity

@@ -233,6 +233,34 @@ spec = do
     it "handles leading uppercase" $
       camelToSnake "AllowAll" `shouldBe` "_allow_all"
 
+  describe "mapThinkingDefault" $ do
+    it "maps always/high to high" $ do
+      mapThinkingDefault "always" `shouldBe` "high"
+      mapThinkingDefault "high" `shouldBe` "high"
+
+    it "maps auto/medium to medium" $ do
+      mapThinkingDefault "auto" `shouldBe` "medium"
+      mapThinkingDefault "medium" `shouldBe` "medium"
+
+    it "maps off/low/none/minimal to low" $ do
+      mapThinkingDefault "off" `shouldBe` "low"
+      mapThinkingDefault "low" `shouldBe` "low"
+      mapThinkingDefault "none" `shouldBe` "low"
+      mapThinkingDefault "minimal" `shouldBe` "low"
+
+    it "is case-insensitive" $
+      mapThinkingDefault "Always" `shouldBe` "high"
+
+  describe "computeMaxTurns" $ do
+    it "divides by 10" $
+      computeMaxTurns 900 `shouldBe` 90
+
+    it "caps at 200" $
+      computeMaxTurns 5000 `shouldBe` 200
+
+    it "handles small values" $
+      computeMaxTurns 30 `shouldBe` 3
+
   describe "resolveImportOptions" $ do
     it "uses positional directory arg as --from" $
       withSystemTempDirectory "pureclaw-import-test" $ \tmpDir -> do

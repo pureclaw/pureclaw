@@ -19,6 +19,8 @@ module PureClaw.CLI.Import
   , resolveImportOptions
     -- * Utilities (exported for testing)
   , camelToSnake
+  , mapThinkingDefault
+  , computeMaxTurns
   ) where
 
 import Control.Exception (IOException, try)
@@ -77,11 +79,14 @@ stripJson5 = T.pack . go False . T.unpack
 -- ---------------------------------------------------------------------------
 
 data OpenClawConfig = OpenClawConfig
-  { _oc_defaultModel :: Maybe Text
-  , _oc_workspace    :: Maybe Text
-  , _oc_agents       :: [OpenClawAgent]
-  , _oc_signal       :: Maybe OpenClawSignal
-  , _oc_telegram     :: Maybe OpenClawTelegram
+  { _oc_defaultModel    :: Maybe Text
+  , _oc_workspace       :: Maybe Text
+  , _oc_agents          :: [OpenClawAgent]
+  , _oc_signal          :: Maybe OpenClawSignal
+  , _oc_telegram        :: Maybe OpenClawTelegram
+  , _oc_thinkingDefault :: Maybe Text
+  , _oc_timeoutSeconds  :: Maybe Int
+  , _oc_userTimezone    :: Maybe Text
   }
   deriving stock (Show, Eq)
 
@@ -118,27 +123,38 @@ parseOpenClawConfig = parseEither parseOC
 parseOC :: Value -> Parser OpenClawConfig
 parseOC = withObject "OpenClawConfig" $ \o -> do
   mAgents <- o .:? "agents"
-  defaults <- maybe (pure emptyDefaults) parseDefaults mAgents
+  defaults <- maybe (pure emptyParsedDefaults) parseDefaults mAgents
   agents <- maybe (pure []) parseAgentList mAgents
   mChannels <- o .:? "channels"
   signal <- maybe (pure Nothing) (withObject "channels" (.:? "signal") >=> traverse parseSignalCfg) mChannels
   telegram <- maybe (pure Nothing) (withObject "channels" (.:? "telegram") >=> traverse parseTelegramCfg) mChannels
   pure OpenClawConfig
-    { _oc_defaultModel = fst defaults
-    , _oc_workspace    = snd defaults
-    , _oc_agents       = agents
-    , _oc_signal       = signal
-    , _oc_telegram     = telegram
+    { _oc_defaultModel    = _pd_model defaults
+    , _oc_workspace       = _pd_workspace defaults
+    , _oc_agents          = agents
+    , _oc_signal          = signal
+    , _oc_telegram        = telegram
+    , _oc_thinkingDefault = _pd_thinkingDefault defaults
+    , _oc_timeoutSeconds  = _pd_timeoutSeconds defaults
+    , _oc_userTimezone    = _pd_userTimezone defaults
     }
 
-emptyDefaults :: (Maybe Text, Maybe Text)
-emptyDefaults = (Nothing, Nothing)
+data ParsedDefaults = ParsedDefaults
+  { _pd_model           :: Maybe Text
+  , _pd_workspace       :: Maybe Text
+  , _pd_thinkingDefault :: Maybe Text
+  , _pd_timeoutSeconds  :: Maybe Int
+  , _pd_userTimezone    :: Maybe Text
+  }
 
-parseDefaults :: Value -> Parser (Maybe Text, Maybe Text)
+emptyParsedDefaults :: ParsedDefaults
+emptyParsedDefaults = ParsedDefaults Nothing Nothing Nothing Nothing Nothing
+
+parseDefaults :: Value -> Parser ParsedDefaults
 parseDefaults = withObject "agents" $ \o -> do
   mDefaults <- o .:? "defaults"
   case mDefaults of
-    Nothing -> pure emptyDefaults
+    Nothing -> pure emptyParsedDefaults
     Just defVal -> flip (withObject "defaults") defVal $ \d -> do
       mModelVal <- d .:? "model"
       model <- case mModelVal of
@@ -146,7 +162,16 @@ parseDefaults = withObject "agents" $ \o -> do
         Just (String s) -> pure (Just s)
         _               -> pure Nothing
       ws <- d .:? "workspace"
-      pure (model, ws)
+      thinking <- d .:? "thinkingDefault"
+      timeout <- d .:? "timeoutSeconds"
+      tz <- d .:? "userTimezone"
+      pure ParsedDefaults
+        { _pd_model           = model
+        , _pd_workspace       = ws
+        , _pd_thinkingDefault = thinking
+        , _pd_timeoutSeconds  = timeout
+        , _pd_userTimezone    = tz
+        }
 
 parseAgentList :: Value -> Parser [OpenClawAgent]
 parseAgentList = withObject "agents" $ \o -> do
@@ -293,6 +318,9 @@ writeImportedConfig configDir ocConfig = do
 buildConfigToml :: OpenClawConfig -> Text
 buildConfigToml oc = T.unlines $ concatMap (filter (not . T.null))
   [ maybe [] (\m -> ["model = " <> quoted m]) (_oc_defaultModel oc)
+  , maybe [] (\t -> ["reasoning_effort = " <> quoted (mapThinkingDefault t)]) (_oc_thinkingDefault oc)
+  , maybe [] (\s -> ["max_turns = " <> T.pack (show (computeMaxTurns s))]) (_oc_timeoutSeconds oc)
+  , maybe [] (\tz -> ["timezone = " <> quoted tz]) (_oc_userTimezone oc)
   , case _oc_signal oc of
       Nothing -> []
       Just sig ->
@@ -345,6 +373,20 @@ camelToSnake = T.concatMap $ \c ->
   if Char.isAsciiUpper c
     then T.pack ['_', Char.toLower c]
     else T.singleton c
+
+-- | Map OpenClaw thinkingDefault to PureClaw reasoning_effort.
+-- "always"/"high" → "high"; "auto"/"medium" → "medium"; everything else → "low"
+mapThinkingDefault :: Text -> Text
+mapThinkingDefault t = case T.toLower t of
+  "always" -> "high"
+  "high"   -> "high"
+  "auto"   -> "medium"
+  "medium" -> "medium"
+  _        -> "low"  -- off, low, none, minimal
+
+-- | Convert OpenClaw timeoutSeconds to max_turns (seconds / 10, capped at 200).
+computeMaxTurns :: Int -> Int
+computeMaxTurns secs = min 200 (secs `div` 10)
 
 -- ---------------------------------------------------------------------------
 -- CLI options for import command

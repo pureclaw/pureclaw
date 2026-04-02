@@ -428,3 +428,40 @@ spec = do
                 expectationFailure ("config.toml parse error: " <> T.unpack err)
               other ->
                 expectationFailure ("Unexpected config load result: " <> show other)
+
+    it "Test 8: agent behavior fields (thinking, timeout, timezone) round-trip" $
+      withSystemTempDirectory "pureclaw-e2e" $ \tmpDir -> do
+        let fromDir = tmpDir </> "openclaw"
+            toDir   = tmpDir </> "pureclaw"
+
+        createDirectoryIfMissing True fromDir
+        TIO.writeFile (fromDir </> "openclaw.json") $ T.unlines
+          [ "{"
+          , "  \"agents\": {"
+          , "    \"defaults\": {"
+          , "      \"model\": \"anthropic/claude-opus-4-6\","
+          , "      \"thinkingDefault\": \"always\","
+          , "      \"timeoutSeconds\": 900,"
+          , "      \"userTimezone\": \"America/New_York\""
+          , "    }"
+          , "  }"
+          , "}"
+          ]
+
+        result <- importOpenClawDir fromDir toDir
+        case result of
+          Left err -> expectationFailure (T.unpack err)
+          Right _ -> do
+            diag <- loadFileConfigDiag (toDir </> "config" </> "config.toml")
+            case diag of
+              ConfigLoaded _ fc -> do
+                -- thinkingDefault "always" → reasoning_effort "high"
+                _fc_reasoningEffort fc `shouldBe` Just "high"
+                -- timeoutSeconds 900 → max_turns 90
+                _fc_maxTurns fc `shouldBe` Just 90
+                -- userTimezone → timezone (direct copy)
+                _fc_timezone fc `shouldBe` Just "America/New_York"
+              ConfigParseError _ err ->
+                expectationFailure ("config.toml parse error: " <> T.unpack err)
+              other' ->
+                expectationFailure ("Unexpected config load result: " <> show other')
