@@ -21,8 +21,9 @@ import PureClaw.Tools.Registry
 data AgentEnv = AgentEnv
   { _env_provider     :: IORef (Maybe SomeProvider)
     -- ^ The LLM provider. 'Nothing' when no credentials are configured yet.
-  , _env_model        :: ModelId
-    -- ^ The model to use for completions.
+  , _env_model        :: IORef ModelId
+    -- ^ The model to use for completions. Mutable so slash commands
+    -- like @\/provider@ and @\/model@ can hot-swap it.
   , _env_channel      :: ChannelHandle
     -- ^ The channel to read messages from and write responses to.
   , _env_logger       :: LogHandle

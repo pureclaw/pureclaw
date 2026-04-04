@@ -2,6 +2,7 @@ module PureClaw.Providers.Ollama
   ( -- * Provider type
     OllamaProvider
   , mkOllamaProvider
+  , mkOllamaProviderWithUrl
     -- * Errors
   , OllamaError (..)
     -- * Request/response encoding (exported for testing)
@@ -32,6 +33,14 @@ data OllamaProvider = OllamaProvider
 -- | Create an Ollama provider. Defaults to localhost:11434.
 mkOllamaProvider :: HTTP.Manager -> OllamaProvider
 mkOllamaProvider mgr = OllamaProvider mgr "http://localhost:11434/api/chat"
+
+-- | Create an Ollama provider with a custom base URL.
+-- The URL should be the base (e.g. @http://myhost:11434@); @/api/chat@
+-- is appended automatically.
+mkOllamaProviderWithUrl :: HTTP.Manager -> String -> OllamaProvider
+mkOllamaProviderWithUrl mgr url =
+  let trimmed = reverse (dropWhile (== '/') (reverse url))
+  in OllamaProvider mgr (trimmed ++ "/api/chat")
 
 instance Provider OllamaProvider where
   complete = ollamaComplete
