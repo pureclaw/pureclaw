@@ -64,6 +64,7 @@ library
     PureClaw.Handles.Harness
     -- Harness (tmux lifecycle)
     PureClaw.Harness
+    PureClaw.Harness.ClaudeCode
     PureClaw.Harness.Tmux
     -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
@@ -247,6 +248,7 @@ test-suite pureclaw-test
     Transcript.ProviderSpec
     Handles.TranscriptSpec
     Handles.HarnessSpec
+    Harness.ClaudeCodeSpec
     Harness.TmuxSpec
   hs-source-dirs:   test
   build-tool-depends:

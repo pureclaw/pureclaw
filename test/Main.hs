@@ -68,6 +68,7 @@ import qualified Integration.ImportRoundTripSpec
 import qualified Transcript.TypesSpec
 import qualified Handles.TranscriptSpec
 import qualified Handles.HarnessSpec
+import qualified Harness.ClaudeCodeSpec
 import qualified Harness.TmuxSpec
 import qualified Transcript.CombinatorSpec
 import qualified Transcript.ProviderSpec
@@ -140,6 +141,7 @@ main = hspec $ do
   describe "Transcript.Types" Transcript.TypesSpec.spec
   describe "Handles.Transcript" Handles.TranscriptSpec.spec
   describe "Handles.Harness" Handles.HarnessSpec.spec
+  describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec
   describe "Transcript.Combinator" Transcript.CombinatorSpec.spec
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
