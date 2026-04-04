@@ -4,6 +4,7 @@ module PureClaw.Agent.SlashCommands
   , VaultSubCommand (..)
   , ProviderSubCommand (..)
   , ChannelSubCommand (..)
+  , TranscriptSubCommand (..)
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)
@@ -42,10 +43,12 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Providers.Class
 import PureClaw.Providers.Ollama
+import PureClaw.Handles.Transcript
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Transcript.Types
 
 -- ---------------------------------------------------------------------------
 -- Command taxonomy
@@ -53,10 +56,11 @@ import PureClaw.Security.Vault.Plugin
 
 -- | Organisational group for display in '/help'.
 data CommandGroup
-  = GroupSession   -- ^ Session and context management
-  | GroupProvider  -- ^ Model provider configuration
-  | GroupChannel   -- ^ Chat channel configuration
-  | GroupVault     -- ^ Encrypted secrets vault
+  = GroupSession     -- ^ Session and context management
+  | GroupProvider    -- ^ Model provider configuration
+  | GroupChannel     -- ^ Chat channel configuration
+  | GroupVault       -- ^ Encrypted secrets vault
+  | GroupTranscript  -- ^ Transcript / permanent log
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 -- | Human-readable section heading for '/help' output.
@@ -64,7 +68,8 @@ groupHeading :: CommandGroup -> Text
 groupHeading GroupSession  = "Session"
 groupHeading GroupProvider = "Provider"
 groupHeading GroupChannel  = "Channel"
-groupHeading GroupVault    = "Vault"
+groupHeading GroupVault      = "Vault"
+groupHeading GroupTranscript = "Transcript"
 
 -- | Specification for a single slash command.
 -- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
@@ -108,6 +113,14 @@ data ChannelSubCommand
   | ChannelUnknown Text       -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
+-- | Subcommands of the '/transcript' family.
+data TranscriptSubCommand
+  = TranscriptRecent (Maybe Int)  -- ^ Show last N entries (default 20)
+  | TranscriptSearch Text         -- ^ Filter by source name
+  | TranscriptPath                -- ^ Show log file path
+  | TranscriptUnknown Text        -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
@@ -122,7 +135,8 @@ data SlashCommand
   | CmdModel (Maybe Text)            -- ^ Show or switch model
   | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
   | CmdVault VaultSubCommand        -- ^ Vault command family
-  | CmdChannel ChannelSubCommand    -- ^ Channel configuration
+  | CmdChannel ChannelSubCommand       -- ^ Channel configuration
+  | CmdTranscript TranscriptSubCommand -- ^ Transcript query commands
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -135,7 +149,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -170,6 +184,13 @@ vaultCommandSpecs =
   , CommandSpec "/vault status"          "Show vault state and key type"             GroupVault (vaultExactP "status" VaultStatus')
   ]
 
+transcriptCommandSpecs :: [CommandSpec]
+transcriptCommandSpecs =
+  [ CommandSpec "/transcript [N]"              "Show last N entries (default 20)"  GroupTranscript transcriptRecentP
+  , CommandSpec "/transcript search <source>"  "Filter by source name"             GroupTranscript (transcriptArgP "search" TranscriptSearch)
+  , CommandSpec "/transcript path"             "Show the JSONL file path"          GroupTranscript (transcriptExactP "path" TranscriptPath)
+  ]
+
 -- ---------------------------------------------------------------------------
 -- Parsing — derived from allCommandSpecs
 -- ---------------------------------------------------------------------------
@@ -185,6 +206,7 @@ parseSlashCommand input =
      then asum (map (`_cs_parse` stripped) allCommandSpecs)
             <|> channelUnknownFallback stripped
             <|> vaultUnknownFallback stripped
+            <|> transcriptUnknownFallback stripped
      else Nothing
 
 -- | Exact case-insensitive match.
@@ -274,6 +296,51 @@ vaultUnknownFallback t =
           in Just (CmdVault (VaultUnknown sub))
      else Nothing
 
+-- | Parse "/transcript" with optional numeric argument.
+-- "/transcript" -> TranscriptRecent Nothing
+-- "/transcript 50" -> TranscriptRecent (Just 50)
+transcriptRecentP :: Text -> Maybe SlashCommand
+transcriptRecentP t =
+  let pfx   = "/transcript"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdTranscript (TranscriptRecent Nothing))
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdTranscript (TranscriptRecent Nothing))
+                  else case reads (T.unpack arg) of
+                    [(n, "")] -> Just (CmdTranscript (TranscriptRecent (Just n)))
+                    _         -> Nothing
+          else Nothing
+
+-- | Case-insensitive exact match for "/transcript <sub>".
+transcriptExactP :: Text -> TranscriptSubCommand -> Text -> Maybe SlashCommand
+transcriptExactP sub cmd t =
+  if T.toLower t == "/transcript " <> sub then Just (CmdTranscript cmd) else Nothing
+
+-- | Case-insensitive prefix match for "/transcript <sub> <arg>".
+transcriptArgP :: Text -> (Text -> TranscriptSubCommand) -> Text -> Maybe SlashCommand
+transcriptArgP sub mkCmd t =
+  let pfx   = "/transcript " <> sub
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let arg = T.strip (T.drop (T.length pfx) t)
+          in if T.null arg
+             then Nothing
+             else Just (CmdTranscript (mkCmd arg))
+     else Nothing
+
+-- | Catch-all for any "/transcript <X>" not matched by 'allCommandSpecs'.
+transcriptUnknownFallback :: Text -> Maybe SlashCommand
+transcriptUnknownFallback t =
+  let lower = T.toLower t
+  in if "/transcript" `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/transcript") lower)
+              sub  = fst (T.break (== ' ') rest)
+          in Just (CmdTranscript (TranscriptUnknown sub))
+     else Nothing
+
 -- ---------------------------------------------------------------------------
 -- Execution
 -- ---------------------------------------------------------------------------
@@ -355,6 +422,9 @@ executeSlashCommand env (CmdProvider sub) ctx = do
 
 executeSlashCommand env (CmdChannel sub) ctx = do
   executeChannelCommand env sub ctx
+
+executeSlashCommand env (CmdTranscript sub) ctx = do
+  executeTranscriptCommand env sub ctx
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
@@ -825,6 +895,57 @@ executeChannelCommand env (ChannelUnknown sub) ctx = do
   _ch_send (_env_channel env) (OutgoingMessage
     ("Unknown channel command: " <> sub <> ". Type /channel for available options."))
   pure ctx
+
+-- ---------------------------------------------------------------------------
+-- Transcript subcommand execution
+-- ---------------------------------------------------------------------------
+
+executeTranscriptCommand :: AgentEnv -> TranscriptSubCommand -> Context -> IO Context
+executeTranscriptCommand env sub ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  mTh <- readIORef (_env_transcript env)
+  case mTh of
+    Nothing -> do
+      send "No transcript configured. Start with --transcript to enable logging."
+      pure ctx
+    Just th -> case sub of
+      TranscriptRecent mN -> do
+        let n = maybe 20 id mN
+            tf = emptyFilter { _tf_limit = Just n }
+        entries <- _th_query th tf
+        if null entries
+          then send "No entries found."
+          else send (T.intercalate "\n" (map formatEntry entries))
+        pure ctx
+
+      TranscriptSearch source -> do
+        let tf = emptyFilter { _tf_source = Just source }
+        entries <- _th_query th tf
+        if null entries
+          then send ("No entries found for source: " <> source)
+          else send (T.intercalate "\n" (map formatEntry entries))
+        pure ctx
+
+      TranscriptPath -> do
+        path <- _th_getPath th
+        send (T.pack path)
+        pure ctx
+
+      TranscriptUnknown subcmd -> do
+        send ("Unknown transcript command: " <> subcmd <> ". Try /help for available commands.")
+        pure ctx
+
+-- | Format a transcript entry as a one-line summary.
+-- Example: "[2026-04-04T15:30:00Z] ollama/llama3 Request (42ms)"
+formatEntry :: TranscriptEntry -> Text
+formatEntry entry =
+  let ts   = T.pack (show (_te_timestamp entry))
+      src  = _te_source entry
+      dir  = T.pack (show (_te_direction entry))
+      dur  = case _te_durationMs entry of
+               Just ms -> " (" <> T.pack (show ms) <> "ms)"
+               Nothing -> ""
+  in "[" <> ts <> "] " <> src <> " " <> dir <> dur
 
 -- ---------------------------------------------------------------------------
 -- Signal setup wizard
