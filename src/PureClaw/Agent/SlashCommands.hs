@@ -149,7 +149,7 @@ sessionCommandSpecs =
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
-  , CommandSpec "/model [name]"    "Show or switch the current model"   GroupProvider (modelArgP)
+  , CommandSpec "/model [name]"    "Show or switch the current model"   GroupProvider modelArgP
   ]
 
 channelCommandSpecs :: [CommandSpec]
