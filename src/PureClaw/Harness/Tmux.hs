@@ -194,7 +194,7 @@ stripAnsi = go
     skipCsi input
       | BC.null input = BC.empty
       | let c = BC.head input
-      , (c >= '@' && c <= '~') = go (BC.drop 1 input)
+      , c >= '@' && c <= '~' = go (BC.drop 1 input)
       | otherwise = skipCsi (BC.drop 1 input)
 
 -- | Display text in a harness window (for tee-style mirroring).

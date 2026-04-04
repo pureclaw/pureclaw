@@ -66,7 +66,7 @@ emptyFilter = TranscriptFilter
 -- | Pure predicate: does an entry match the non-limit filter criteria?
 -- '_tf_limit' is intentionally NOT checked here — it is applied by 'applyFilter'.
 matchesFilter :: TranscriptFilter -> TranscriptEntry -> Bool
-matchesFilter tf entry = all id
+matchesFilter tf entry = and
   [ maybe True (\s -> _te_source entry == s)    (_tf_source tf)
   , maybe True (\d -> _te_direction entry == d)  (_tf_direction tf)
   , maybe True (\(lo, hi) ->

@@ -8,6 +8,7 @@ module PureClaw.Handles.Transcript
 
 import Control.Exception
 import Control.Monad
+import Data.Foldable qualified
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
@@ -89,9 +90,7 @@ mkFileTranscriptHandle logger path = do
         closed <- readIORef closedRef
         unless closed $ do
           mfd <- readIORef fdRef
-          case mfd of
-            Nothing -> pure ()
-            Just wfd -> fdSync wfd
+          Data.Foldable.for_ mfd fdSync
 
     , _th_close = do
         closed <- readIORef closedRef

@@ -158,7 +158,7 @@ redactAnthropicKey t =
 -- | Replace @prefix<value>"@ with @replacement@ for each occurrence.
 -- The value is everything from after the prefix to the next unescaped @"@.
 foldParts :: Text -> Text -> Text -> Text
-foldParts prefix replacement input = go input
+foldParts prefix replacement = go
   where
     go t = case T.breakOn prefix t of
       (before, rest)

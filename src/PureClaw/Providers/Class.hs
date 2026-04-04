@@ -32,6 +32,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Types qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString.Base64 qualified as B64
+import Data.Maybe qualified
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -220,12 +221,12 @@ instance FromJSON ContentBlock where
     case tag of
       "text" -> TextBlock <$> o .: "text"
       "image" -> ImageBlock <$> o .: "media_type" <*> (o .: "data" >>= bsFromJSON)
-      "tool_use" -> ToolUseBlock
-        <$> (ToolCallId <$> o .: "id")
+      "tool_use" -> (ToolUseBlock . ToolCallId
+        <$> (o .: "id"))
         <*> o .: "name"
         <*> o .: "input"
-      "tool_result" -> ToolResultBlock
-        <$> (ToolCallId <$> o .: "tool_use_id")
+      "tool_result" -> (ToolResultBlock . ToolCallId
+        <$> (o .: "tool_use_id"))
         <*> o .: "content"
         <*> o .: "is_error"
       _ -> fail ("unknown ContentBlock type: " <> T.unpack tag)
@@ -280,12 +281,12 @@ instance ToJSON CompletionRequest where
 
 instance FromJSON CompletionRequest where
   parseJSON = Aeson.withObject "CompletionRequest" $ \o ->
-    CompletionRequest
-      <$> (ModelId <$> o .: "model")
+    (CompletionRequest . ModelId
+      <$> (o .: "model"))
       <*> o .: "messages"
       <*> o .:? "system_prompt"
       <*> o .:? "max_tokens"
-      <*> (o .:? "tools" >>= pure . maybe [] id)
+      <*> (Data.Maybe.fromMaybe [] <$> o .:? "tools")
       <*> o .:? "tool_choice"
 
 instance ToJSON CompletionResponse where
@@ -317,7 +318,7 @@ instance FromJSON StreamEvent where
     tag <- o .: "type" :: Aeson.Parser Text
     case tag of
       "text"       -> StreamText <$> o .: "text"
-      "tool_use"   -> StreamToolUse <$> (ToolCallId <$> o .: "id") <*> o .: "name"
+      "tool_use"   -> (StreamToolUse . ToolCallId <$> (o .: "id")) <*> o .: "name"
       "tool_input" -> StreamToolInput <$> o .: "input"
       "done"       -> StreamDone <$> o .: "response"
       _            -> fail ("unknown StreamEvent type: " <> T.unpack tag)

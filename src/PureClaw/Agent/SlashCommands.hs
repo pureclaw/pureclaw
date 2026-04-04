@@ -20,7 +20,7 @@ import Control.Exception
 import Data.Foldable (asum)
 import Data.IORef
 import Data.List qualified as L
-import Data.Maybe (listToMaybe)
+import Data.Maybe qualified
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -475,7 +475,7 @@ executeProviderCommand env vault (ProviderConfigure providerName) ctx = do
       send menu
 
       choice <- _ch_prompt ch "Choice: "
-      let selectedOption = listToMaybe [o | o <- options, T.pack (show (_ao_number o)) == T.strip choice]
+      let selectedOption = Data.Maybe.listToMaybe [o | o <- options, T.pack (show (_ao_number o)) == T.strip choice]
 
       case selectedOption of
         Just opt -> _ao_handler opt env vault ctx
@@ -910,7 +910,7 @@ executeTranscriptCommand env sub ctx = do
       pure ctx
     Just th -> case sub of
       TranscriptRecent mN -> do
-        let n = maybe 20 id mN
+        let n = Data.Maybe.fromMaybe 20 mN
             tf = emptyFilter { _tf_limit = Just n }
         entries <- _th_query th tf
         if null entries

@@ -92,13 +92,12 @@ spec = do
   ---------------------------------------------------------------------------
   describe "filter by source" $ do
     it "only matches entries with the given source" $ do
-      let entries =
-            [ mkEntry "a" t0 "ollama" Request
-            , mkEntry "b" t1 "claude" Response
-            , mkEntry "c" t2 "ollama" Response
-            ]
+      let eA = mkEntry "a" t0 "ollama" Request
+          eB = mkEntry "b" t1 "claude" Response
+          eC = mkEntry "c" t2 "ollama" Response
+          entries = [eA, eB, eC]
           f = emptyFilter { _tf_source = Just "ollama" }
-      applyFilter f entries `shouldBe` [entries !! 0, entries !! 2]
+      applyFilter f entries `shouldBe` [eA, eC]
 
   ---------------------------------------------------------------------------
   -- DoD 6: Filter by _tf_limit applied to 10 entries returns 5
@@ -116,37 +115,34 @@ spec = do
   ---------------------------------------------------------------------------
   describe "filter by direction" $ do
     it "only matches Request entries" $ do
-      let entries =
-            [ mkEntry "a" t0 "src" Request
-            , mkEntry "b" t1 "src" Response
-            , mkEntry "c" t2 "src" Request
-            ]
+      let eA = mkEntry "a" t0 "src" Request
+          eB = mkEntry "b" t1 "src" Response
+          eC = mkEntry "c" t2 "src" Request
+          entries = [eA, eB, eC]
           f = emptyFilter { _tf_direction = Just Request }
-      applyFilter f entries `shouldBe` [entries !! 0, entries !! 2]
+      applyFilter f entries `shouldBe` [eA, eC]
 
     it "only matches Response entries" $ do
-      let entries =
-            [ mkEntry "a" t0 "src" Request
-            , mkEntry "b" t1 "src" Response
-            , mkEntry "c" t2 "src" Response
-            ]
+      let eA = mkEntry "a" t0 "src" Request
+          eB = mkEntry "b" t1 "src" Response
+          eC = mkEntry "c" t2 "src" Response
+          entries = [eA, eB, eC]
           f = emptyFilter { _tf_direction = Just Response }
-      applyFilter f entries `shouldBe` [entries !! 1, entries !! 2]
+      applyFilter f entries `shouldBe` [eB, eC]
 
   ---------------------------------------------------------------------------
   -- DoD 8: Filter by _tf_timeRange returns only entries in that range
   ---------------------------------------------------------------------------
   describe "filter by timeRange" $ do
     it "returns only entries in the sub-range" $ do
-      let entries =
-            [ mkEntry "a" t0 "src" Request   -- 2025-01-01 00:00
-            , mkEntry "b" t1 "src" Response  -- 2025-01-01 01:00
-            , mkEntry "c" t2 "src" Request   -- 2025-01-01 02:00
-            , mkEntry "d" t3 "src" Response  -- 2025-01-02 00:00
-            ]
+      let eA = mkEntry "a" t0 "src" Request   -- 2025-01-01 00:00
+          eB = mkEntry "b" t1 "src" Response  -- 2025-01-01 01:00
+          eC = mkEntry "c" t2 "src" Request   -- 2025-01-01 02:00
+          eD = mkEntry "d" t3 "src" Response  -- 2025-01-02 00:00
+          entries = [eA, eB, eC, eD]
           -- range: [01:00, 02:00] inclusive
           f = emptyFilter { _tf_timeRange = Just (t1, t2) }
-      applyFilter f entries `shouldBe` [entries !! 1, entries !! 2]
+      applyFilter f entries `shouldBe` [eB, eC]
 
   ---------------------------------------------------------------------------
   -- DoD 9: matchesFilter is a pure, testable function
@@ -181,9 +177,10 @@ spec = do
             , mkEntry "c" t2 "ollama" Request
             , mkEntry "d" t3 "claude" Request
             ]
+          eA = mkEntry "a" t0 "ollama" Request
           f = emptyFilter
             { _tf_source    = Just "ollama"
             , _tf_direction = Just Request
             , _tf_limit     = Just 1
             }
-      applyFilter f entries `shouldBe` [entries !! 0]
+      applyFilter f entries `shouldBe` [eA]
