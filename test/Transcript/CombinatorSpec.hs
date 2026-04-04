@@ -35,7 +35,7 @@ spec = do
         let wrappedFn :: ByteString -> IO ByteString
             wrappedFn input = pure ("response:" <> input)
 
-        result <- withTranscript th "test-source" wrappedFn "hello"
+        result <- withTranscript th Nothing (Just "test-source") wrappedFn "hello"
         result `shouldBe` "response:hello"
 
         _th_flush th
@@ -51,7 +51,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
 
-        _ <- withTranscript th "test-source" (\_ -> pure "ok") "input"
+        _ <- withTranscript th Nothing (Just "test-source") (\_ -> pure "ok") "input"
         _th_flush th
         entries <- _th_query th emptyFilter
 
@@ -65,7 +65,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
 
-        _ <- withTranscript th "test-source" (\_ -> pure "ok") "input"
+        _ <- withTranscript th Nothing (Just "test-source") (\_ -> pure "ok") "input"
         _th_flush th
         entries <- _th_query th emptyFilter
 
@@ -82,13 +82,13 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
 
-        _ <- withTranscript th "my-provider" (\_ -> pure "ok") "input"
+        _ <- withTranscript th Nothing (Just "my-provider") (\_ -> pure "ok") "input"
         _th_flush th
         entries <- _th_query th emptyFilter
 
         (reqEntry, respEntry) <- getReqResp entries
-        _te_source reqEntry `shouldBe` "my-provider"
-        _te_source respEntry `shouldBe` "my-provider"
+        _te_model reqEntry `shouldBe` Just "my-provider"
+        _te_model respEntry `shouldBe` Just "my-provider"
 
     it "catches exceptions, logs error metadata, and re-throws" $
       withSystemTempDirectory "transcript-combinator" $ \tmpDir -> do
@@ -98,7 +98,7 @@ spec = do
         let failingFn :: ByteString -> IO ByteString
             failingFn _ = throwIO (userError "boom")
 
-        withTranscript th "test-source" failingFn "input"
+        withTranscript th Nothing (Just "test-source") failingFn "input"
           `shouldThrow` isUserError
 
         _th_flush th
@@ -127,7 +127,7 @@ spec = do
             }
 
       -- The wrapped function should still succeed even though recording fails
-      result <- withTranscript brokenHandle "test-source" (\_ -> pure "ok") "input"
+      result <- withTranscript brokenHandle Nothing (Just "test-source") (\_ -> pure "ok") "input"
       result `shouldBe` "ok"
 
       -- Verify that recording was attempted
@@ -140,7 +140,7 @@ spec = do
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inputBytes = "test-payload-bytes"
 
-        _ <- withTranscript th "test-source" (\_ -> pure "ok") inputBytes
+        _ <- withTranscript th Nothing (Just "test-source") (\_ -> pure "ok") inputBytes
         _th_flush th
         entries <- _th_query th emptyFilter
 
@@ -153,7 +153,7 @@ spec = do
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let outputBytes = "response-payload-bytes"
 
-        _ <- withTranscript th "test-source" (\_ -> pure outputBytes) "input"
+        _ <- withTranscript th Nothing (Just "test-source") (\_ -> pure outputBytes) "input"
         _th_flush th
         entries <- _th_query th emptyFilter
 

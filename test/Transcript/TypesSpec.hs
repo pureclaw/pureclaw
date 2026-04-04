@@ -30,7 +30,8 @@ mkEntry :: Text -> UTCTime -> Text -> Direction -> TranscriptEntry
 mkEntry eid ts src dir = TranscriptEntry
   { _te_id            = eid
   , _te_timestamp     = ts
-  , _te_source        = src
+  , _te_harness       = Nothing
+  , _te_model         = Just src
   , _te_direction     = dir
   , _te_payload       = encodePayload "hello"
   , _te_durationMs    = Nothing
@@ -49,7 +50,7 @@ spec = do
       Aeson.decode (Aeson.encode entry) `shouldBe` Just entry
 
     it "round-trips entry with all optional fields populated" $ do
-      let entry = (mkEntry "id-2" t1 "claude-code" Response)
+      let entry = (mkEntry "id-2" t1 "test-model" Response)
             { _te_durationMs = Just 42
             , _te_metadata   = Map.fromList [("key", Aeson.String "val")]
             }
@@ -91,7 +92,7 @@ spec = do
       applyFilter emptyFilter entries `shouldBe` entries
 
   ---------------------------------------------------------------------------
-  -- DoD 5: Filter by _tf_source only matches entries with that source
+  -- DoD 5: Filter by _tf_model only matches entries with that model
   ---------------------------------------------------------------------------
   describe "filter by source" $ do
     it "only matches entries with the given source" $ do
@@ -99,7 +100,7 @@ spec = do
           eB = mkEntry "b" t1 "claude" Response
           eC = mkEntry "c" t2 "ollama" Response
           entries = [eA, eB, eC]
-          f = emptyFilter { _tf_source = Just "ollama" }
+          f = emptyFilter { _tf_model = Just "ollama" }
       applyFilter f entries `shouldBe` [eA, eC]
 
   ---------------------------------------------------------------------------
@@ -157,13 +158,13 @@ spec = do
 
     it "returns False when source does not match" $ do
       let entry = mkEntry "x" t0 "ollama" Request
-          f = emptyFilter { _tf_source = Just "claude" }
+          f = emptyFilter { _tf_model = Just "claude" }
       matchesFilter f entry `shouldBe` False
 
     it "returns True when all criteria match" $ do
       let entry = mkEntry "x" t1 "ollama" Request
           f = emptyFilter
-            { _tf_source    = Just "ollama"
+            { _tf_model     = Just "ollama"
             , _tf_direction = Just Request
             , _tf_timeRange = Just (t0, t2)
             }
@@ -182,7 +183,7 @@ spec = do
             ]
           eA = mkEntry "a" t0 "ollama" Request
           f = emptyFilter
-            { _tf_source    = Just "ollama"
+            { _tf_model     = Just "ollama"
             , _tf_direction = Just Request
             , _tf_limit     = Just 1
             }

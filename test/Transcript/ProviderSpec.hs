@@ -130,7 +130,7 @@ spec = do
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
-        all (\e -> _te_source e == "my-source") entries `shouldBe` True
+        all (\e -> _te_model e == Just "my-source") entries `shouldBe` True
         _th_close th
 
   ---------------------------------------------------------------------------

@@ -35,7 +35,8 @@ instance Provider TranscriptProvider where
         reqEntry = TranscriptEntry
           { _te_id            = reqId
           , _te_timestamp     = now
-          , _te_source        = source
+          , _te_harness       = Nothing
+          , _te_model         = Just source
           , _te_direction     = Request
           , _te_payload       = encodePayload (encodeUtf8Strict redacted)
           , _te_durationMs    = Nothing
@@ -53,7 +54,8 @@ instance Provider TranscriptProvider where
         respEntry = TranscriptEntry
           { _te_id            = respId
           , _te_timestamp     = respNow
-          , _te_source        = source
+          , _te_harness       = Nothing
+          , _te_model         = Just source
           , _te_direction     = Response
           , _te_payload       = encodePayload respBytes
           , _te_durationMs    = Nothing
@@ -73,7 +75,8 @@ instance Provider TranscriptProvider where
         reqEntry = TranscriptEntry
           { _te_id            = reqId
           , _te_timestamp     = now
-          , _te_source        = source
+          , _te_harness       = Nothing
+          , _te_model         = Just source
           , _te_direction     = Request
           , _te_payload       = encodePayload (encodeUtf8Strict redacted)
           , _te_durationMs    = Nothing
@@ -98,7 +101,8 @@ instance Provider TranscriptProvider where
                 respEntry = TranscriptEntry
                   { _te_id            = respId
                   , _te_timestamp     = respNow
-                  , _te_source        = source
+                  , _te_harness       = Nothing
+                  , _te_model         = Just source
                   , _te_direction     = Response
                   , _te_payload       = encodePayload respBytes
                   , _te_durationMs    = Nothing

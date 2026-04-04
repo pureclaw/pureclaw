@@ -1243,7 +1243,8 @@ spec = do
       let entry = TranscriptEntry
             { _te_id            = "uuid-1"
             , _te_timestamp     = now
-            , _te_source        = "ollama/llama3"
+            , _te_harness       = Nothing
+            , _te_model         = Just "ollama/llama3"
             , _te_direction     = Request
             , _te_payload       = "base64data"
             , _te_durationMs    = Just 42
@@ -1311,11 +1312,31 @@ spec = do
 
     it "/transcript search queries with source filter" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      queriedFilterRef <- newIORef (Nothing :: Maybe TranscriptFilter)
-      let th = mkNoOpTranscriptHandle
-            { _th_query = \tf -> do
-                writeIORef queriedFilterRef (Just tf)
-                pure []
+      now <- getCurrentTime
+      let matchEntry = TranscriptEntry
+            { _te_id            = "uuid-m"
+            , _te_timestamp     = now
+            , _te_harness       = Nothing
+            , _te_model         = Just "ollama"
+            , _te_direction     = Request
+            , _te_payload       = "base64data"
+            , _te_durationMs    = Nothing
+            , _te_correlationId = "corr-m"
+            , _te_metadata      = Map.empty
+            }
+          noMatchEntry = TranscriptEntry
+            { _te_id            = "uuid-n"
+            , _te_timestamp     = now
+            , _te_harness       = Nothing
+            , _te_model         = Just "claude"
+            , _te_direction     = Request
+            , _te_payload       = "base64data"
+            , _te_durationMs    = Nothing
+            , _te_correlationId = "corr-n"
+            , _te_metadata      = Map.empty
+            }
+          th = mkNoOpTranscriptHandle
+            { _th_query = \_ -> pure [matchEntry, noMatchEntry]
             }
       transcriptRef <- newIORef (Just th)
       harnessRef    <- newIORef Map.empty
@@ -1338,10 +1359,12 @@ spec = do
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
-      qf <- readIORef queriedFilterRef
-      case qf of
-        Just tf -> _tf_source tf `shouldBe` Just "ollama"
-        Nothing -> expectationFailure "Expected query to be called"
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "ollama"
+          T.unpack t `shouldNotContain` "claude"
+        Nothing -> expectationFailure "Expected search results"
 
     it "/transcript unknown shows error message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
@@ -1436,7 +1459,8 @@ spec = do
       let entry = TranscriptEntry
             { _te_id            = "uuid-2"
             , _te_timestamp     = now
-            , _te_source        = "claude-code"
+            , _te_harness       = Just "claude-code"
+            , _te_model         = Nothing
             , _te_direction     = Response
             , _te_payload       = "base64data"
             , _te_durationMs    = Nothing

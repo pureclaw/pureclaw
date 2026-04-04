@@ -161,7 +161,7 @@ spec = do
           entries <- readIORef entriesRef
           case entries of
             [entry] -> do
-              _te_source entry `shouldBe` "claude-code"
+              _te_harness entry `shouldBe` Just "claude-code"
               _te_direction entry `shouldBe` Request
             _ -> expectationFailure ("expected exactly 1 entry, got " <> show (length entries))
         Left err -> expectationFailure ("expected Right, got: " <> show err)
@@ -187,6 +187,6 @@ spec = do
           -- withTranscript logs both a Request and a Response
           let responseEntries = filter (\e -> _te_direction e == Response) entries
           case responseEntries of
-            (entry : _) -> _te_source entry `shouldBe` "claude-code"
+            (entry : _) -> _te_harness entry `shouldBe` Just "claude-code"
             [] -> expectationFailure "expected at least one Response entry"
         Left err -> expectationFailure ("expected Right, got: " <> show err)

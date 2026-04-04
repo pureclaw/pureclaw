@@ -32,7 +32,8 @@ instance FromJSON Direction
 data TranscriptEntry = TranscriptEntry
   { _te_id            :: !Text          -- ^ UUID
   , _te_timestamp     :: !UTCTime
-  , _te_source        :: !Text          -- ^ e.g. "ollama/llama3", "claude-code"
+  , _te_harness       :: !(Maybe Text)  -- ^ e.g. Just "claude-code", Nothing if direct
+  , _te_model         :: !(Maybe Text)  -- ^ e.g. Just "llama3", Nothing if unknown
   , _te_direction     :: !Direction
   , _te_payload       :: !Text          -- ^ Raw text payload
   , _te_durationMs    :: !(Maybe Int)   -- ^ present on Response entries only
@@ -46,7 +47,8 @@ instance FromJSON TranscriptEntry
 
 -- | Record-of-Maybe filter; all fields AND together.
 data TranscriptFilter = TranscriptFilter
-  { _tf_source    :: !(Maybe Text)
+  { _tf_harness   :: !(Maybe Text)
+  , _tf_model     :: !(Maybe Text)
   , _tf_direction :: !(Maybe Direction)
   , _tf_timeRange :: !(Maybe (UTCTime, UTCTime))
   , _tf_limit     :: !(Maybe Int)
@@ -56,7 +58,8 @@ data TranscriptFilter = TranscriptFilter
 -- | A filter that matches all entries with no limit.
 emptyFilter :: TranscriptFilter
 emptyFilter = TranscriptFilter
-  { _tf_source    = Nothing
+  { _tf_harness   = Nothing
+  , _tf_model     = Nothing
   , _tf_direction = Nothing
   , _tf_timeRange = Nothing
   , _tf_limit     = Nothing
@@ -66,7 +69,8 @@ emptyFilter = TranscriptFilter
 -- '_tf_limit' is intentionally NOT checked here — it is applied by 'applyFilter'.
 matchesFilter :: TranscriptFilter -> TranscriptEntry -> Bool
 matchesFilter tf entry =
-  maybe True (\s -> _te_source entry == s) (_tf_source tf)
+  maybe True (\h -> _te_harness entry == Just h) (_tf_harness tf)
+    && maybe True (\m -> _te_model entry == Just m) (_tf_model tf)
     && maybe True (\d -> _te_direction entry == d) (_tf_direction tf)
     && maybe True (\(lo, hi) ->
          let ts = _te_timestamp entry in ts >= lo && ts <= hi) (_tf_timeRange tf)

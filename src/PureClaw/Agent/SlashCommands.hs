@@ -974,11 +974,13 @@ executeTranscriptCommand env sub ctx = do
           else send (T.intercalate "\n" (map formatEntry entries))
         pure ctx
 
-      TranscriptSearch source -> do
-        let tf = emptyFilter { _tf_source = Just source }
-        entries <- _th_query th tf
+      TranscriptSearch query -> do
+        -- Search matches either harness or model name
+        allEntries <- _th_query th emptyFilter
+        let matches e = _te_harness e == Just query || _te_model e == Just query
+            entries = filter matches allEntries
         if null entries
-          then send ("No entries found for source: " <> source)
+          then send ("No entries found matching: " <> query)
           else send (T.intercalate "\n" (map formatEntry entries))
         pure ctx
 
@@ -996,12 +998,16 @@ executeTranscriptCommand env sub ctx = do
 formatEntry :: TranscriptEntry -> Text
 formatEntry entry =
   let ts   = T.pack (show (_te_timestamp entry))
-      src  = _te_source entry
+      endpoint = case (_te_harness entry, _te_model entry) of
+        (Just h, Just m)  -> h <> "/" <> m
+        (Just h, Nothing) -> h
+        (Nothing, Just m) -> m
+        (Nothing, Nothing) -> "unknown"
       dir  = T.pack (show (_te_direction entry))
       dur  = case _te_durationMs entry of
                Just ms -> " (" <> T.pack (show ms) <> "ms)"
                Nothing -> ""
-  in "[" <> ts <> "] " <> src <> " " <> dir <> dur
+  in "[" <> ts <> "] " <> endpoint <> " " <> dir <> dur
 
 -- ---------------------------------------------------------------------------
 -- Harness commands

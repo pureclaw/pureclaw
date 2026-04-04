@@ -23,11 +23,12 @@ import PureClaw.Transcript.Types
 -- always takes priority over logging.
 withTranscript
   :: TranscriptHandle
-  -> Text                          -- ^ source name
+  -> Maybe Text                    -- ^ harness name (Nothing if direct)
+  -> Maybe Text                    -- ^ model name (Nothing if unknown)
   -> (ByteString -> IO ByteString) -- ^ raw call
   -> ByteString                    -- ^ input
   -> IO ByteString                 -- ^ output (also logged)
-withTranscript th source fn input = do
+withTranscript th harness model fn input = do
   correlationId <- UUID.toText <$> UUID.nextRandom
   entryId1 <- UUID.toText <$> UUID.nextRandom
   startTime <- getCurrentTime
@@ -35,7 +36,8 @@ withTranscript th source fn input = do
   let reqEntry = TranscriptEntry
         { _te_id            = entryId1
         , _te_timestamp     = startTime
-        , _te_source        = source
+        , _te_harness       = harness
+        , _te_model         = model
         , _te_direction     = Request
         , _te_payload       = encodePayload input
         , _te_durationMs    = Nothing
@@ -58,7 +60,8 @@ withTranscript th source fn input = do
       let respEntry = TranscriptEntry
             { _te_id            = entryId2
             , _te_timestamp     = endTime
-            , _te_source        = source
+            , _te_harness       = harness
+        , _te_model         = model
             , _te_direction     = Response
             , _te_payload       = encodePayload output
             , _te_durationMs    = Just durationMs
@@ -72,7 +75,8 @@ withTranscript th source fn input = do
       let respEntry = TranscriptEntry
             { _te_id            = entryId2
             , _te_timestamp     = endTime
-            , _te_source        = source
+            , _te_harness       = harness
+        , _te_model         = model
             , _te_direction     = Response
             , _te_payload       = encodePayload mempty
             , _te_durationMs    = Just durationMs

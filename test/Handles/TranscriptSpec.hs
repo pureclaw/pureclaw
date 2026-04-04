@@ -38,7 +38,8 @@ mkEntry :: Text -> UTCTime -> Text -> Direction -> TranscriptEntry
 mkEntry eid ts src dir = TranscriptEntry
   { _te_id            = eid
   , _te_timestamp     = ts
-  , _te_source        = src
+  , _te_harness       = Nothing
+  , _te_model         = Just src
   , _te_direction     = dir
   , _te_payload       = encodePayload "hello"
   , _te_durationMs    = Nothing
@@ -111,7 +112,7 @@ spec = do
         _th_record handle e2
         _th_record handle e3
         _th_flush handle
-        let f = emptyFilter { _tf_source = Just "ollama" }
+        let f = emptyFilter { _tf_model = Just "ollama" }
         result <- _th_query handle f
         result `shouldBe` [e1, e3]
         _th_close handle
