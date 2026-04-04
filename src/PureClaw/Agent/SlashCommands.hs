@@ -1072,8 +1072,9 @@ startHarnessByName
   -> TranscriptHandle
   -> Text
   -> IO (Either HarnessError HarnessHandle)
-startHarnessByName policy th "claude-code" = mkClaudeCodeHarness policy th
-startHarnessByName _ _ name = pure (Left (HarnessBinaryNotFound name))
+startHarnessByName policy th name
+  | name `elem` ["claude-code", "claude", "cc"] = mkClaudeCodeHarness policy th
+  | otherwise = pure (Left (HarnessBinaryNotFound name))
 
 -- ---------------------------------------------------------------------------
 -- Signal setup wizard
