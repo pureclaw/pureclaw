@@ -93,9 +93,10 @@ mkTestEnv :: Provider p => p -> ChannelHandle -> IO AgentEnv
 mkTestEnv p ch = do
   vaultRef    <- newIORef Nothing
   providerRef <- newIORef (Just (MkProvider p))
+  modelRef    <- newIORef (ModelId "mock")
   pure AgentEnv
     { _env_provider     = providerRef
-    , _env_model        = ModelId "mock"
+    , _env_model        = modelRef
     , _env_channel      = ch
     , _env_logger       = mkNoOpLogHandle
     , _env_systemPrompt = Nothing

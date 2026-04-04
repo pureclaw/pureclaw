@@ -420,9 +420,10 @@ runChat opts = do
         putStrLn ""
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
+        modelRef    <- newIORef model
         let env = AgentEnv
               { _env_provider     = providerRef
-              , _env_model        = model
+              , _env_model        = modelRef
               , _env_channel      = channel
               , _env_logger       = logger
               , _env_systemPrompt = sysPrompt

@@ -10,9 +10,12 @@ import System.Environment (setEnv, getEnv)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import System.FilePath ((</>))
+
 import PureClaw.Agent.Context
 import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
+import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
@@ -181,6 +184,15 @@ spec = do
     it "parses /provider case-insensitively but preserves arg case" $ do
       parseSlashCommand "/Provider Anthropic" `shouldBe` Just (CmdProvider (ProviderConfigure "Anthropic"))
 
+    it "parses /model with no arg as show" $ do
+      parseSlashCommand "/model" `shouldBe` Just (CmdModel Nothing)
+
+    it "parses /model with arg as switch" $ do
+      parseSlashCommand "/model llama3" `shouldBe` Just (CmdModel (Just "llama3"))
+
+    it "parses /model with trailing space as show" $ do
+      parseSlashCommand "/model " `shouldBe` Just (CmdModel Nothing)
+
     it "is case-insensitive" $ do
       parseSlashCommand "/NEW" `shouldBe` Just CmdNew
       parseSlashCommand "/Status" `shouldBe` Just CmdStatus
@@ -201,9 +213,10 @@ spec = do
     let mkEnv sentRef = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef    <- newIORef (ModelId "test")
           pure AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle
@@ -290,9 +303,10 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle
@@ -317,9 +331,10 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle
@@ -341,9 +356,10 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -358,13 +374,131 @@ spec = do
       combined `shouldContain` "Unknown provider"
       combined `shouldContain` "Supported providers"
 
+    it "/provider ollama with default URL stores provider and model in config.toml" $ withTempHome $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ["", "llama3"]  -- empty = accept default URL, then model name
+      vault <- mkMockVaultHandle
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
+      allSent <- readIORef allSentRef
+      let combined = T.unpack (T.intercalate " " allSent)
+      combined `shouldContain` "configured successfully"
+      -- Verify provider and model were hot-swapped in session
+      newModel <- readIORef modelRef
+      newModel `shouldBe` ModelId "llama3"
+      mProvider <- readIORef providerRef
+      case mProvider of
+        Just _  -> pure ()
+        Nothing -> expectationFailure "Expected provider to be set"
+      -- Verify config.toml has provider and model
+      pureclawDir <- getPureclawDir
+      cfg <- loadFileConfig (pureclawDir </> "config.toml")
+      _fc_provider cfg `shouldBe` Just "ollama"
+      _fc_model cfg `shouldBe` Just "llama3"
+      _fc_baseUrl cfg `shouldBe` Nothing  -- default URL not stored
+
+    it "/provider ollama with custom URL stores provider, model, and base_url in config.toml" $ withTempHome $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ["http://myhost:11434", "mistral"]
+      vault <- mkMockVaultHandle
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
+      -- Verify config.toml has all three fields
+      pureclawDir <- getPureclawDir
+      cfg <- loadFileConfig (pureclawDir </> "config.toml")
+      _fc_provider cfg `shouldBe` Just "ollama"
+      _fc_model cfg `shouldBe` Just "mistral"
+      _fc_baseUrl cfg `shouldBe` Just "http://myhost:11434"
+
+  describe "model commands" $ do
+    it "/model with no arg shows current model" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ([] :: [Text])
+      vault <- mkMockVaultHandle
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdModel Nothing) ctx
+      allSent <- readIORef allSentRef
+      let combined = T.unpack (T.intercalate " " allSent)
+      combined `shouldContain` "Current model: test"
+
+    it "/model <name> switches model in session and persists to config" $ withTempHome $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ([] :: [Text])
+      vault <- mkMockVaultHandle
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdModel (Just "llama3")) ctx
+      -- Verify IORef was updated
+      newModel <- readIORef modelRef
+      newModel `shouldBe` ModelId "llama3"
+      -- Verify config.toml was updated
+      pureclawDir <- getPureclawDir
+      cfg <- loadFileConfig (pureclawDir </> "config.toml")
+      _fc_model cfg `shouldBe` Just "llama3"
+      -- Verify success message
+      allSent <- readIORef allSentRef
+      let combined = T.unpack (T.intercalate " " allSent)
+      combined `shouldContain` "Model switched to: llama3"
+
   describe "vault commands — no vault configured" $ do
     let mkEnvNoVault sentRef = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef    <- newIORef (ModelId "test")
           pure AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle
@@ -399,9 +533,10 @@ spec = do
       msgsRef <- newIORef ["bad"]
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannel sentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -431,9 +566,10 @@ spec = do
             }
       vaultRef    <- newIORef (Just vaultWithRealisticRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -455,9 +591,10 @@ spec = do
     let mkEnvWithVault sentRef vault = do
           vaultRef    <- newIORef (Just vault)
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef    <- newIORef (ModelId "test")
           pure AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle
@@ -472,9 +609,10 @@ spec = do
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -494,6 +632,7 @@ spec = do
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let yubikey = AgePlugin
             { _ap_name   = "yubikey"
             , _ap_binary = "age-plugin-yubikey"
@@ -501,7 +640,7 @@ spec = do
             }
           env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -532,9 +671,10 @@ spec = do
             }
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -567,9 +707,10 @@ spec = do
             }
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannelAll allSentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -589,10 +730,11 @@ spec = do
       msgsRef <- newIORef ["1"]  -- pick passphrase
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let ch = mkMockChannelAll allSentRef msgsRef
           env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = ch
                 { _ch_promptSecret = \_ -> ioError (userError "readSecret not supported") }
             , _env_logger       = mkNoOpLogHandle
@@ -681,9 +823,10 @@ spec = do
       _ <- _vh_put vault "todelete" "val"
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannel sentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -708,9 +851,10 @@ spec = do
       _ <- _vh_put vault "keep" (TE.encodeUtf8 "val")
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkMockChannel sentRef msgsRef
             , _env_logger       = mkNoOpLogHandle
             , _env_systemPrompt = Nothing
@@ -733,9 +877,10 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send         = writeIORef sentRef . Just . _om_content
                 , _ch_promptSecret = \_ -> ioError (userError "readSecret not supported")
@@ -799,9 +944,10 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle
@@ -823,9 +969,10 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle
@@ -848,9 +995,10 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
       let env = AgentEnv
             { _env_provider     = providerRef
-            , _env_model        = ModelId "test"
+            , _env_model        = modelRef
             , _env_channel      = mkNoOpChannelHandle
                 { _ch_send = writeIORef sentRef . Just . _om_content }
             , _env_logger       = mkNoOpLogHandle

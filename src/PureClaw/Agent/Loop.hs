@@ -36,7 +36,6 @@ runAgentLoop env = do
   _lh_logInfo logger "Agent loop started"
   go (emptyContext (_env_systemPrompt env))
   where
-    model    = _env_model env
     channel  = _env_channel env
     logger   = _env_logger env
     registry = _env_registry env
@@ -78,6 +77,7 @@ runAgentLoop env = do
           where stripped = T.strip (_im_content msg)
 
     handleCompletion provider ctx = do
+      model <- readIORef (_env_model env)
       let req = CompletionRequest
             { _cr_model        = model
             , _cr_messages     = contextMessages ctx

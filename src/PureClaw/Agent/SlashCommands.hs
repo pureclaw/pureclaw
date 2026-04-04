@@ -38,7 +38,10 @@ import PureClaw.Agent.Context
 import PureClaw.Agent.Env
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
+import PureClaw.Core.Types
 import PureClaw.Handles.Channel
+import PureClaw.Providers.Class
+import PureClaw.Providers.Ollama
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
@@ -116,6 +119,7 @@ data SlashCommand
   | CmdReset                        -- ^ Full reset including usage counters
   | CmdStatus                       -- ^ Show session status
   | CmdCompact                      -- ^ Summarise conversation to save context
+  | CmdModel (Maybe Text)            -- ^ Show or switch model
   | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
   | CmdVault VaultSubCommand        -- ^ Vault command family
   | CmdChannel ChannelSubCommand    -- ^ Channel configuration
@@ -145,6 +149,7 @@ sessionCommandSpecs =
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
+  , CommandSpec "/model [name]"    "Show or switch the current model"   GroupProvider (modelArgP)
   ]
 
 channelCommandSpecs :: [CommandSpec]
@@ -217,6 +222,18 @@ providerArgP listCmd mkCfgCmd t =
                   else Just (CmdProvider (mkCfgCmd arg))
           else Nothing
 
+-- | Case-insensitive match for "/model" with optional argument.
+modelArgP :: Text -> Maybe SlashCommand
+modelArgP t =
+  let pfx   = "/model"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdModel Nothing)
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in Just (CmdModel (if T.null arg then Nothing else Just arg))
+          else Nothing
+
 -- | Case-insensitive match for "/channel" with optional argument.
 channelArgP :: ChannelSubCommand -> (Text -> ChannelSubCommand) -> Text -> Maybe SlashCommand
 channelArgP listCmd mkSetupCmd t =
@@ -287,6 +304,23 @@ executeSlashCommand env CmdStatus ctx = do
   _ch_send (_env_channel env) (OutgoingMessage status)
   pure ctx
 
+executeSlashCommand env (CmdModel Nothing) ctx = do
+  model <- readIORef (_env_model env)
+  _ch_send (_env_channel env) (OutgoingMessage ("Current model: " <> unModelId model))
+  pure ctx
+
+executeSlashCommand env (CmdModel (Just name)) ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  writeIORef (_env_model env) (ModelId name)
+  -- Persist to config.toml
+  pureclawDir <- getPureclawDir
+  let configPath = pureclawDir </> "config.toml"
+  existing <- loadFileConfig configPath
+  Dir.createDirectoryIfMissing True pureclawDir
+  writeFileConfig configPath (existing { _fc_model = Just name })
+  send $ "Model switched to: " <> name
+  pure ctx
+
 executeSlashCommand env CmdCompact ctx = do
   mProvider <- readIORef (_env_provider env)
   case mProvider of
@@ -294,9 +328,10 @@ executeSlashCommand env CmdCompact ctx = do
       _ch_send (_env_channel env) (OutgoingMessage "Cannot compact: no provider configured.")
       pure ctx
     Just provider -> do
+      model <- readIORef (_env_model env)
       (ctx', result) <- compactContext
         provider
-        (_env_model env)
+        model
         0
         defaultKeepRecent
         ctx
@@ -378,6 +413,8 @@ executeProviderCommand env vault (ProviderConfigure providerName) ctx = do
           send $ "Invalid choice. Please enter 1 to " <> T.pack (show (length options)) <> "."
           pure ctx
 
+    "ollama" -> handleOllamaConfigure env vault ctx
+
     _ -> do
       send $ "Unknown provider: " <> providerName
       send $ "Supported providers: " <> T.intercalate ", " (map fst supportedProviders)
@@ -430,6 +467,46 @@ handleAnthropicOAuth env vault ctx = do
     Right () -> do
       send "Anthropic OAuth configured successfully."
       send "Tokens cached in vault and will be auto-refreshed."
+      pure ctx
+
+-- | Handle Ollama provider configuration.
+-- Prompts for base URL (default: http://localhost:11434) and model name.
+-- Stores provider, model, and base_url in config.toml (not the vault,
+-- since none of these are sensitive credentials).
+handleOllamaConfigure :: AgentEnv -> VaultHandle -> Context -> IO Context
+handleOllamaConfigure env _vault ctx = do
+  let ch   = _env_channel env
+      send = _ch_send ch . OutgoingMessage
+  urlInput <- _ch_prompt ch "Ollama base URL (default: http://localhost:11434): "
+  let baseUrl = let stripped = T.strip urlInput
+                in if T.null stripped then "http://localhost:11434" else stripped
+  modelName <- _ch_prompt ch "Model name (e.g. llama3, mistral): "
+  let model = T.strip modelName
+  if T.null model
+    then do
+      send "Model name is required."
+      pure ctx
+    else do
+      pureclawDir <- getPureclawDir
+      let configPath = pureclawDir </> "config.toml"
+      existing <- loadFileConfig configPath
+      let updated = existing
+            { _fc_provider = Just "ollama"
+            , _fc_model    = Just model
+            , _fc_baseUrl  = if baseUrl == "http://localhost:11434"
+                             then Nothing  -- don't store the default
+                             else Just baseUrl
+            }
+      Dir.createDirectoryIfMissing True pureclawDir
+      writeFileConfig configPath updated
+      -- Hot-swap provider and model in the running session
+      manager <- HTTP.newTlsManager
+      let ollamaProvider = if baseUrl == "http://localhost:11434"
+            then mkOllamaProvider manager
+            else mkOllamaProviderWithUrl manager (T.unpack baseUrl)
+      writeIORef (_env_provider env) (Just (MkProvider ollamaProvider))
+      writeIORef (_env_model env) (ModelId model)
+      send $ "Ollama configured successfully. Model: " <> model <> ", URL: " <> baseUrl
       pure ctx
 
 -- ---------------------------------------------------------------------------
