@@ -426,7 +426,8 @@ runChat opts = do
         createDirectoryIfMissing True transcriptDir
         timestamp <- getCurrentTime
         let transcriptFile = transcriptDir
-              </> formatTime defaultTimeLocale "%Y%m%d-%H%M%S" timestamp <> ".jsonl"
+              </> formatTime defaultTimeLocale "%Y%m%d-%H%M%S" timestamp
+                  <> "-" <> effectiveChannel <> ".jsonl"
         th <- mkFileTranscriptHandle logger transcriptFile
         transcriptRef <- newIORef (Just th)
         vaultRef    <- newIORef vaultOpt

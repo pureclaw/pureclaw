@@ -8,14 +8,13 @@ module PureClaw.Transcript.Types
   , emptyFilter
   , matchesFilter
   , applyFilter
-    -- * Base64 payload helpers
+    -- * Payload helpers
   , encodePayload
   , decodePayload
   ) where
 
 import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.ByteString (ByteString)
-import Data.ByteString.Base64 qualified as B64
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
@@ -35,7 +34,7 @@ data TranscriptEntry = TranscriptEntry
   , _te_timestamp     :: !UTCTime
   , _te_source        :: !Text          -- ^ e.g. "ollama/llama3", "claude-code"
   , _te_direction     :: !Direction
-  , _te_payload       :: !Text          -- ^ Base64-encoded bytes
+  , _te_payload       :: !Text          -- ^ Raw text payload
   , _te_durationMs    :: !(Maybe Int)   -- ^ present on Response entries only
   , _te_correlationId :: !Text          -- ^ shared UUID linking Request to its Response
   , _te_metadata      :: !(Map Text Value) -- ^ extensible
@@ -79,12 +78,11 @@ applyFilter tf = applyLimit . filter (matchesFilter tf)
   where
     applyLimit = maybe id take (_tf_limit tf)
 
--- | Encode raw bytes to Base64 text for storage in '_te_payload'.
+-- | Encode raw bytes to text for storage in '_te_payload'.
+-- Uses UTF-8 decoding (lenient — replaces invalid bytes with U+FFFD).
 encodePayload :: ByteString -> Text
-encodePayload = TE.decodeUtf8 . B64.encode
+encodePayload = TE.decodeUtf8Lenient
 
--- | Decode Base64 text back to raw bytes. Returns 'Nothing' on invalid input.
+-- | Encode text payload back to raw bytes.
 decodePayload :: Text -> Maybe ByteString
-decodePayload t = case B64.decode (TE.encodeUtf8 t) of
-  Right bs -> Just bs
-  Left _   -> Nothing
+decodePayload = Just . TE.encodeUtf8
