@@ -66,6 +66,7 @@ import qualified Integration.SignalFlowSpec
 import qualified Integration.CLISpec
 import qualified Integration.ImportRoundTripSpec
 import qualified Transcript.TypesSpec
+import qualified Handles.TranscriptSpec
 
 main :: IO ()
 main = hspec $ do
@@ -133,3 +134,4 @@ main = hspec $ do
   describe "Integration.CLI" Integration.CLISpec.spec
   describe "Integration.ImportRoundTrip" Integration.ImportRoundTripSpec.spec
   describe "Transcript.Types" Transcript.TypesSpec.spec
+  describe "Handles.Transcript" Handles.TranscriptSpec.spec

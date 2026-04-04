@@ -60,6 +60,7 @@ library
     PureClaw.Handles.Channel
     PureClaw.Handles.Process
     PureClaw.Handles.Log
+    PureClaw.Handles.Transcript
     -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
     PureClaw.Tools.Shell
@@ -234,6 +235,7 @@ test-suite pureclaw-test
     Integration.CLISpec
     Integration.ImportRoundTripSpec
     Transcript.TypesSpec
+    Handles.TranscriptSpec
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw
@@ -260,6 +262,7 @@ test-suite pureclaw-test
     warp,
     hspec,
     typed-process,
+    unix,
     QuickCheck,
   default-language: GHC2021
   default-extensions:
