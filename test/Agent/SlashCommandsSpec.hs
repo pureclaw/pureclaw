@@ -214,6 +214,7 @@ spec = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
+          transcriptRef <- newIORef Nothing
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -224,6 +225,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -304,6 +306,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -314,6 +317,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -332,6 +336,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -342,6 +347,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -357,6 +363,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -366,6 +373,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -381,6 +389,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -390,6 +399,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -417,6 +427,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -426,6 +437,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -444,6 +456,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -453,6 +466,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdModel Nothing) ctx
@@ -467,6 +481,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -476,6 +491,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdModel (Just "llama3")) ctx
@@ -496,6 +512,7 @@ spec = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
+          transcriptRef <- newIORef Nothing
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -506,6 +523,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -534,6 +552,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -543,6 +562,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -567,6 +587,7 @@ spec = do
       vaultRef    <- newIORef (Just vaultWithRealisticRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -576,6 +597,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -592,6 +614,7 @@ spec = do
           vaultRef    <- newIORef (Just vault)
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
+          transcriptRef <- newIORef Nothing
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -602,6 +625,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -610,6 +634,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -619,6 +644,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -633,6 +659,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let yubikey = AgePlugin
             { _ap_name   = "yubikey"
             , _ap_binary = "age-plugin-yubikey"
@@ -647,6 +674,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [yubikey] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -672,6 +700,7 @@ spec = do
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -681,6 +710,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -708,6 +738,7 @@ spec = do
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -717,6 +748,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -731,6 +763,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let ch = mkMockChannelAll allSentRef msgsRef
           env = AgentEnv
             { _env_provider     = providerRef
@@ -742,6 +775,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -824,6 +858,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -833,6 +868,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -852,6 +888,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -861,6 +898,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -878,6 +916,7 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -890,6 +929,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -945,6 +985,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -955,6 +996,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -970,6 +1012,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -980,6 +1023,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -996,6 +1040,7 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1006,6 +1051,7 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx

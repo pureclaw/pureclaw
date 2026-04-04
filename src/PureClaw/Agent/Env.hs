@@ -9,6 +9,7 @@ import Data.Text (Text)
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
+import PureClaw.Handles.Transcript
 import PureClaw.Providers.Class
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Plugin
@@ -36,4 +37,7 @@ data AgentEnv = AgentEnv
     -- ^ Optional secrets vault. 'Nothing' if no vault is configured.
   , _env_pluginHandle :: PluginHandle
     -- ^ Handle for detecting and generating age plugin identities.
+  , _env_transcript :: IORef (Maybe TranscriptHandle)
+    -- ^ Optional transcript handle. When 'Just', the provider is wrapped
+    -- with 'mkTranscriptProvider' to log all completions.
   }

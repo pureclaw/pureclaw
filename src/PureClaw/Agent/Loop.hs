@@ -10,6 +10,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 import PureClaw.Agent.Context
+import PureClaw.Core.Types
 import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
 import PureClaw.Core.Errors
@@ -17,6 +18,7 @@ import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
 import PureClaw.Tools.Registry
+import PureClaw.Transcript.Provider
 
 -- | Run the main agent loop. Reads messages from the channel, sends
 -- them to the provider (with tool definitions), handles tool call/result
@@ -73,7 +75,13 @@ runAgentLoop env = do
                       ctx' = addMessage userMsg ctx
                   _lh_logDebug logger $
                     "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-                  handleCompletion provider ctx'
+                  -- Wrap provider with transcript logging if configured
+                  mTranscript <- readIORef (_env_transcript env)
+                  model <- readIORef (_env_model env)
+                  let provider' = case mTranscript of
+                        Just th -> mkTranscriptProvider th (unModelId model) provider
+                        Nothing -> provider
+                  handleCompletion provider' ctx'
           where stripped = T.strip (_im_content msg)
 
     handleCompletion provider ctx = do

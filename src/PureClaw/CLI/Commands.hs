@@ -21,10 +21,11 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
-import System.Directory (doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -37,6 +38,7 @@ import PureClaw.CLI.Config
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
+import PureClaw.Handles.Transcript
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -418,6 +420,15 @@ runChat opts = do
           "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
           _     -> putStrLn $ "Channel: " <> effectiveChannel
         putStrLn ""
+        -- Create transcript handle
+        pureclawDir <- getPureclawDir
+        let transcriptDir = pureclawDir </> "transcripts"
+        createDirectoryIfMissing True transcriptDir
+        timestamp <- getCurrentTime
+        let transcriptFile = transcriptDir
+              </> formatTime defaultTimeLocale "%Y%m%d-%H%M%S" timestamp <> ".jsonl"
+        th <- mkFileTranscriptHandle logger transcriptFile
+        transcriptRef <- newIORef (Just th)
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef model
@@ -430,6 +441,7 @@ runChat opts = do
               , _env_registry     = registry
               , _env_vault        = vaultRef
               , _env_pluginHandle = mkPluginHandle
+              , _env_transcript   = transcriptRef
               }
         runAgentLoop env
 
