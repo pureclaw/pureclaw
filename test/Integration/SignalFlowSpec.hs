@@ -18,9 +18,12 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
+
+import Data.Map.Strict qualified as Map
 
 -- | Mock provider that echoes user messages with a prefix.
 newtype EchoProvider = EchoProvider Text
@@ -43,6 +46,7 @@ mkTestEnv p ch = do
   providerRef   <- newIORef (Just (MkProvider p))
   modelRef      <- newIORef (ModelId "mock")
   transcriptRef <- newIORef Nothing
+  harnessRef    <- newIORef Map.empty
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -53,6 +57,8 @@ mkTestEnv p ch = do
     , _env_vault        = vaultRef
     , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
     , _env_transcript   = transcriptRef
+    , _env_policy       = defaultPolicy
+    , _env_harnesses    = harnessRef
     }
 
 spec :: Spec

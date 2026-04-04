@@ -16,6 +16,7 @@ import Control.Exception (IOException, bracket_, try)
 import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.IORef
+import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -430,6 +431,7 @@ runChat opts = do
                   <> "-" <> effectiveChannel <> ".jsonl"
         th <- mkFileTranscriptHandle logger transcriptFile
         transcriptRef <- newIORef (Just th)
+        harnessRef  <- newIORef Map.empty
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef model
@@ -443,6 +445,8 @@ runChat opts = do
               , _env_vault        = vaultRef
               , _env_pluginHandle = mkPluginHandle
               , _env_transcript   = transcriptRef
+              , _env_policy       = policy
+              , _env_harnesses    = harnessRef
               }
         runAgentLoop env
 

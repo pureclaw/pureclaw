@@ -5,6 +5,7 @@ module PureClaw.Agent.SlashCommands
   , ProviderSubCommand (..)
   , ChannelSubCommand (..)
   , TranscriptSubCommand (..)
+  , HarnessSubCommand (..)
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)
@@ -19,6 +20,7 @@ import Control.Applicative ((<|>))
 import Control.Exception
 import Data.Foldable (asum)
 import Data.IORef
+import Data.Map.Strict qualified as Map
 import Data.List qualified as L
 import Data.Maybe qualified
 import Data.Text (Text)
@@ -41,9 +43,12 @@ import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
+import PureClaw.Handles.Harness
+import PureClaw.Handles.Transcript
+import PureClaw.Harness.ClaudeCode
 import PureClaw.Providers.Class
 import PureClaw.Providers.Ollama
-import PureClaw.Handles.Transcript
+import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
@@ -61,6 +66,7 @@ data CommandGroup
   | GroupChannel     -- ^ Chat channel configuration
   | GroupVault       -- ^ Encrypted secrets vault
   | GroupTranscript  -- ^ Transcript / permanent log
+  | GroupHarness    -- ^ Harness management (tmux-based AI CLI tools)
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 -- | Human-readable section heading for '/help' output.
@@ -70,6 +76,7 @@ groupHeading GroupProvider = "Provider"
 groupHeading GroupChannel  = "Channel"
 groupHeading GroupVault      = "Vault"
 groupHeading GroupTranscript = "Transcript"
+groupHeading GroupHarness    = "Harness"
 
 -- | Specification for a single slash command.
 -- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
@@ -121,6 +128,15 @@ data TranscriptSubCommand
   | TranscriptUnknown Text        -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
+-- | Subcommands of the '/harness' family.
+data HarnessSubCommand
+  = HarnessStart Text          -- ^ Start a named harness (e.g. "claude-code")
+  | HarnessStop Text           -- ^ Stop a named harness
+  | HarnessList                -- ^ List running harnesses
+  | HarnessAttach              -- ^ Show tmux attach command
+  | HarnessUnknown Text        -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
@@ -137,6 +153,7 @@ data SlashCommand
   | CmdVault VaultSubCommand        -- ^ Vault command family
   | CmdChannel ChannelSubCommand       -- ^ Channel configuration
   | CmdTranscript TranscriptSubCommand -- ^ Transcript query commands
+  | CmdHarness HarnessSubCommand      -- ^ Harness management commands
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -149,7 +166,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -191,6 +208,14 @@ transcriptCommandSpecs =
   , CommandSpec "/transcript path"             "Show the JSONL file path"          GroupTranscript (transcriptExactP "path" TranscriptPath)
   ]
 
+harnessCommandSpecs :: [CommandSpec]
+harnessCommandSpecs =
+  [ CommandSpec "/harness start <name>"  "Start a harness (e.g. claude-code)"   GroupHarness (harnessArgP "start" HarnessStart)
+  , CommandSpec "/harness stop <name>"   "Stop a running harness"               GroupHarness (harnessArgP "stop" HarnessStop)
+  , CommandSpec "/harness list"          "List running harnesses"               GroupHarness (harnessExactP "list" HarnessList)
+  , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
+  ]
+
 -- ---------------------------------------------------------------------------
 -- Parsing — derived from allCommandSpecs
 -- ---------------------------------------------------------------------------
@@ -207,6 +232,7 @@ parseSlashCommand input =
             <|> channelUnknownFallback stripped
             <|> vaultUnknownFallback stripped
             <|> transcriptUnknownFallback stripped
+            <|> harnessUnknownFallback stripped
      else Nothing
 
 -- | Exact case-insensitive match.
@@ -341,6 +367,33 @@ transcriptUnknownFallback t =
           in Just (CmdTranscript (TranscriptUnknown sub))
      else Nothing
 
+-- | Case-insensitive exact match for "/harness <sub>".
+harnessExactP :: Text -> HarnessSubCommand -> Text -> Maybe SlashCommand
+harnessExactP sub cmd t =
+  if T.toLower t == "/harness " <> sub then Just (CmdHarness cmd) else Nothing
+
+-- | Case-insensitive prefix match for "/harness <sub> <arg>".
+harnessArgP :: Text -> (Text -> HarnessSubCommand) -> Text -> Maybe SlashCommand
+harnessArgP sub mkCmd t =
+  let pfx   = "/harness " <> sub
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let arg = T.strip (T.drop (T.length pfx) t)
+          in if T.null arg
+             then Nothing
+             else Just (CmdHarness (mkCmd arg))
+     else Nothing
+
+-- | Catch-all for any "/harness <X>" not matched by 'allCommandSpecs'.
+harnessUnknownFallback :: Text -> Maybe SlashCommand
+harnessUnknownFallback t =
+  let lower = T.toLower t
+  in if "/harness" `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/harness") lower)
+              sub  = fst (T.break (== ' ') rest)
+          in Just (CmdHarness (HarnessUnknown sub))
+     else Nothing
+
 -- ---------------------------------------------------------------------------
 -- Execution
 -- ---------------------------------------------------------------------------
@@ -425,6 +478,9 @@ executeSlashCommand env (CmdChannel sub) ctx = do
 
 executeSlashCommand env (CmdTranscript sub) ctx = do
   executeTranscriptCommand env sub ctx
+
+executeSlashCommand env (CmdHarness sub) ctx = do
+  executeHarnessCommand env sub ctx
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
@@ -946,6 +1002,72 @@ formatEntry entry =
                Just ms -> " (" <> T.pack (show ms) <> "ms)"
                Nothing -> ""
   in "[" <> ts <> "] " <> src <> " " <> dir <> dur
+
+-- ---------------------------------------------------------------------------
+-- Harness commands
+-- ---------------------------------------------------------------------------
+
+executeHarnessCommand :: AgentEnv -> HarnessSubCommand -> Context -> IO Context
+executeHarnessCommand env sub ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  case sub of
+    HarnessStart name -> do
+      harnesses <- readIORef (_env_harnesses env)
+      case Map.lookup name harnesses of
+        Just _ -> do
+          send ("Harness '" <> name <> "' is already running.")
+          pure ctx
+        Nothing -> do
+          mTh <- readIORef (_env_transcript env)
+          let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
+          result <- startHarnessByName (_env_policy env) th name
+          case result of
+            Left err -> do
+              send ("Failed to start harness '" <> name <> "': " <> T.pack (show err))
+              pure ctx
+            Right hh -> do
+              modifyIORef' (_env_harnesses env) (Map.insert name hh)
+              send ("Harness '" <> name <> "' started. Attach with: tmux attach -t pureclaw")
+              pure ctx
+
+    HarnessStop name -> do
+      harnesses <- readIORef (_env_harnesses env)
+      case Map.lookup name harnesses of
+        Nothing -> do
+          send ("No running harness named '" <> name <> "'.")
+          pure ctx
+        Just hh -> do
+          _hh_stop hh
+          modifyIORef' (_env_harnesses env) (Map.delete name)
+          send ("Harness '" <> name <> "' stopped.")
+          pure ctx
+
+    HarnessList -> do
+      harnesses <- readIORef (_env_harnesses env)
+      if Map.null harnesses
+        then send "No harnesses running."
+        else do
+          let lines' = map (\(n, hh) -> "  " <> n <> " (" <> _hh_name hh <> ")")
+                           (Map.toList harnesses)
+          send ("Running harnesses:\n" <> T.intercalate "\n" lines')
+      pure ctx
+
+    HarnessAttach -> do
+      send "tmux attach -t pureclaw"
+      pure ctx
+
+    HarnessUnknown subcmd -> do
+      send ("Unknown harness command: " <> subcmd <> ". Try /help for available commands.")
+      pure ctx
+
+-- | Start a harness by name. Currently only "claude-code" is supported.
+startHarnessByName
+  :: SecurityPolicy
+  -> TranscriptHandle
+  -> Text
+  -> IO (Either HarnessError HarnessHandle)
+startHarnessByName policy th "claude-code" = mkClaudeCodeHarness policy th
+startHarnessByName _ _ name = pure (Left (HarnessBinaryNotFound name))
 
 -- ---------------------------------------------------------------------------
 -- Signal setup wizard

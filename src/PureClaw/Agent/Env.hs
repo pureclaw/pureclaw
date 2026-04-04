@@ -4,13 +4,16 @@ module PureClaw.Agent.Env
   ) where
 
 import Data.IORef
+import Data.Map.Strict (Map)
 import Data.Text (Text)
 
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
+import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript
 import PureClaw.Providers.Class
+import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
@@ -40,4 +43,8 @@ data AgentEnv = AgentEnv
   , _env_transcript :: IORef (Maybe TranscriptHandle)
     -- ^ Optional transcript handle. When 'Just', the provider is wrapped
     -- with 'mkTranscriptProvider' to log all completions.
+  , _env_policy :: SecurityPolicy
+    -- ^ Security policy for command authorization. Needed by harness management.
+  , _env_harnesses :: IORef (Map Text HarnessHandle)
+    -- ^ Running harness handles, keyed by name (e.g. "claude-code").
   }

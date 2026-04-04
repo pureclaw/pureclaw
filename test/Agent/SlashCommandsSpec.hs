@@ -23,6 +23,7 @@ import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript
 import PureClaw.Providers.Class
+import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
@@ -219,6 +220,7 @@ spec = do
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
           transcriptRef <- newIORef Nothing
+          harnessRef    <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -230,6 +232,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -311,6 +315,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -322,6 +327,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -341,6 +348,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -352,6 +360,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -368,6 +378,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -378,6 +389,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -394,6 +407,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -404,6 +418,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -432,6 +448,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -442,6 +459,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -461,6 +480,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -471,6 +491,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdModel Nothing) ctx
@@ -486,6 +508,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -496,6 +519,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdModel (Just "llama3")) ctx
@@ -517,6 +542,7 @@ spec = do
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
           transcriptRef <- newIORef Nothing
+          harnessRef    <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -528,6 +554,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -557,6 +585,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -567,6 +596,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -592,6 +623,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -602,6 +634,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -619,6 +653,7 @@ spec = do
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
           transcriptRef <- newIORef Nothing
+          harnessRef    <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -630,6 +665,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -639,6 +676,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -649,6 +687,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -664,6 +704,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let yubikey = AgePlugin
             { _ap_name   = "yubikey"
             , _ap_binary = "age-plugin-yubikey"
@@ -679,6 +720,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [yubikey] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -705,6 +748,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -715,6 +759,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -743,6 +789,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -753,6 +800,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -768,6 +817,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let ch = mkMockChannelAll allSentRef msgsRef
           env = AgentEnv
             { _env_provider     = providerRef
@@ -780,6 +830,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -863,6 +915,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -873,6 +926,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -893,6 +948,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -903,6 +959,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -921,6 +979,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -934,6 +993,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -990,6 +1051,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1001,6 +1063,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1017,6 +1081,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1028,6 +1093,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1045,6 +1112,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1056,6 +1124,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -1113,6 +1183,7 @@ spec = do
     it "/transcript with no transcript configured shows helpful message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1127,6 +1198,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1139,6 +1212,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let th = mkNoOpTranscriptHandle { _th_getPath = pure "/tmp/test-transcript.jsonl" }
       transcriptRef <- newIORef (Just th)
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1153,6 +1227,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1176,6 +1252,7 @@ spec = do
             }
           th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [entry] }
       transcriptRef <- newIORef (Just th)
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1190,6 +1267,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1205,6 +1284,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [] }
       transcriptRef <- newIORef (Just th)
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1219,6 +1299,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1236,6 +1318,7 @@ spec = do
                 pure []
             }
       transcriptRef <- newIORef (Just th)
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1250,6 +1333,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -1262,6 +1347,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let th = mkNoOpTranscriptHandle
       transcriptRef <- newIORef (Just th)
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1276,6 +1362,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -1289,6 +1377,7 @@ spec = do
     it "/transcript path with no transcript configured shows helpful message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1303,6 +1392,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1317,6 +1408,7 @@ spec = do
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1328,6 +1420,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1351,6 +1445,7 @@ spec = do
             }
           th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [entry] }
       transcriptRef <- newIORef (Just th)
+      harnessRef    <- newIORef Map.empty
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1365,6 +1460,8 @@ spec = do
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
