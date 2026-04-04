@@ -65,6 +65,7 @@ import qualified Scheduler.HeartbeatSpec
 import qualified Integration.SignalFlowSpec
 import qualified Integration.CLISpec
 import qualified Integration.ImportRoundTripSpec
+import qualified Transcript.TypesSpec
 
 main :: IO ()
 main = hspec $ do
@@ -131,3 +132,4 @@ main = hspec $ do
   describe "Integration.SignalFlow" Integration.SignalFlowSpec.spec
   describe "Integration.CLI" Integration.CLISpec.spec
   describe "Integration.ImportRoundTrip" Integration.ImportRoundTripSpec.spec
+  describe "Transcript.Types" Transcript.TypesSpec.spec
