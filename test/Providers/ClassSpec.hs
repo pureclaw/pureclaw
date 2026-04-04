@@ -1,5 +1,6 @@
 module Providers.ClassSpec (spec) where
 
+import Data.Aeson qualified as Aeson
 import Data.Aeson (Value, object)
 import Test.Hspec
 
@@ -127,6 +128,8 @@ spec = do
         }
       responseText resp `shouldBe` "mock response"
 
+  jsonRoundTripSpec
+
 -- A trivial provider for testing SomeProvider dispatch.
 data MockProvider = MockProvider
 
@@ -139,3 +142,91 @@ instance Provider MockProvider where
 
 emptyObj :: Value
 emptyObj = object []
+
+-- | Helper: encode then decode, checking round-trip
+roundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a, Eq a, Show a) => a -> IO ()
+roundTrip x = Aeson.decode (Aeson.encode x) `shouldBe` Just x
+
+jsonRoundTripSpec :: Spec
+jsonRoundTripSpec = do
+  describe "JSON round-trip" $ do
+    describe "Role" $ do
+      it "round-trips User" $ roundTrip User
+      it "round-trips Assistant" $ roundTrip Assistant
+
+    describe "ContentBlock" $ do
+      it "round-trips TextBlock" $ roundTrip (TextBlock "hello")
+      it "round-trips ToolUseBlock" $
+        roundTrip (ToolUseBlock (ToolCallId "tc-1") "shell" emptyObj)
+      it "round-trips ToolResultBlock" $
+        roundTrip (ToolResultBlock (ToolCallId "tc-1") [TRPText "output"] False)
+      it "round-trips ToolResultBlock with error" $
+        roundTrip (ToolResultBlock (ToolCallId "tc-1") [TRPText "err"] True)
+
+    describe "ToolResultPart" $ do
+      it "round-trips TRPText" $ roundTrip (TRPText "text")
+      it "round-trips TRPImage" $ roundTrip (TRPImage "image/png" "base64data")
+
+    describe "Message" $ do
+      it "round-trips a text message" $
+        roundTrip (textMessage User "hello")
+      it "round-trips a tool result message" $
+        roundTrip (toolResultMessage [(ToolCallId "1", [TRPText "out"], False)])
+
+    describe "ToolDefinition" $ do
+      it "round-trips" $
+        roundTrip (ToolDefinition "shell" "Run a command" emptyObj)
+
+    describe "ToolChoice" $ do
+      it "round-trips AutoTool" $ roundTrip AutoTool
+      it "round-trips AnyTool" $ roundTrip AnyTool
+      it "round-trips SpecificTool" $ roundTrip (SpecificTool "shell")
+
+    describe "Usage" $ do
+      it "round-trips" $ roundTrip (Usage 100 50)
+
+    describe "CompletionRequest" $ do
+      it "round-trips a minimal request" $
+        roundTrip CompletionRequest
+          { _cr_model        = ModelId "test"
+          , _cr_messages     = [textMessage User "hi"]
+          , _cr_systemPrompt = Nothing
+          , _cr_maxTokens    = Nothing
+          , _cr_tools        = []
+          , _cr_toolChoice   = Nothing
+          }
+      it "round-trips a full request" $
+        roundTrip CompletionRequest
+          { _cr_model        = ModelId "claude-3"
+          , _cr_messages     = [textMessage User "hi"]
+          , _cr_systemPrompt = Just "Be helpful"
+          , _cr_maxTokens    = Just 1024
+          , _cr_tools        = [ToolDefinition "shell" "Run" emptyObj]
+          , _cr_toolChoice   = Just AutoTool
+          }
+
+    describe "CompletionResponse" $ do
+      it "round-trips with usage" $
+        roundTrip CompletionResponse
+          { _crsp_content = [TextBlock "Hello"]
+          , _crsp_model   = ModelId "claude"
+          , _crsp_usage   = Just (Usage 10 5)
+          }
+      it "round-trips without usage" $
+        roundTrip CompletionResponse
+          { _crsp_content = [TextBlock "Hello"]
+          , _crsp_model   = ModelId "claude"
+          , _crsp_usage   = Nothing
+          }
+
+    describe "StreamEvent" $ do
+      it "round-trips StreamText" $ roundTrip (StreamText "chunk")
+      it "round-trips StreamToolUse" $
+        roundTrip (StreamToolUse (ToolCallId "1") "shell")
+      it "round-trips StreamToolInput" $ roundTrip (StreamToolInput "{}")
+      it "round-trips StreamDone" $
+        roundTrip (StreamDone CompletionResponse
+          { _crsp_content = [TextBlock "done"]
+          , _crsp_model   = ModelId "m"
+          , _crsp_usage   = Nothing
+          })
