@@ -61,6 +61,10 @@ library
     PureClaw.Handles.Process
     PureClaw.Handles.Log
     PureClaw.Handles.Transcript
+    PureClaw.Handles.Harness
+    -- Harness (tmux lifecycle)
+    PureClaw.Harness
+    PureClaw.Harness.Tmux
     -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
     PureClaw.Tools.Shell
@@ -137,6 +141,7 @@ library
     optparse-applicative,
     sqlite-simple,
     stm,
+    temporary,
     text,
     time,
     tomland,
@@ -241,6 +246,8 @@ test-suite pureclaw-test
     Transcript.CombinatorSpec
     Transcript.ProviderSpec
     Handles.TranscriptSpec
+    Handles.HarnessSpec
+    Harness.TmuxSpec
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw
