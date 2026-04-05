@@ -80,6 +80,23 @@ spec = do
     it "returns error on invalid JSON" $ do
       decodeResponse "not json" `shouldSatisfy` isLeft
 
+  describe "parseModelNames" $ do
+    it "parses models from Ollama /api/tags response" $ do
+      let json = object
+            [ "models" .= [ object ["name" .= ("llama3:latest" :: String)]
+                          , object ["name" .= ("gemma4:26b" :: String)]
+                          , object ["name" .= ("codellama:7b" :: String)]
+                          ]
+            ]
+      parseModelNames json `shouldBe`
+        [ModelId "llama3:latest", ModelId "gemma4:26b", ModelId "codellama:7b"]
+
+    it "returns empty list for missing models key" $ do
+      parseModelNames (object []) `shouldBe` []
+
+    it "returns empty list for non-object input" $ do
+      parseModelNames (String "not an object") `shouldBe` []
+
 hasKey :: Key -> Value -> Bool
 hasKey k (Object obj) = KM.member k obj
 hasKey _ _ = False

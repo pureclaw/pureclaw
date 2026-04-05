@@ -151,6 +151,7 @@ data SlashCommand
   | CmdStatus                       -- ^ Show session status
   | CmdCompact                      -- ^ Summarise conversation to save context
   | CmdModel (Maybe Text)            -- ^ Show or switch model
+  | CmdModelList                     -- ^ List available models from provider
   | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
   | CmdVault VaultSubCommand        -- ^ Vault command family
   | CmdChannel ChannelSubCommand       -- ^ Channel configuration
@@ -182,6 +183,7 @@ sessionCommandSpecs =
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
+  , CommandSpec "/model list"      "List available models from provider" GroupProvider (exactP "/model list" CmdModelList)
   , CommandSpec "/model [name]"    "Show or switch the current model"   GroupProvider modelArgP
   ]
 
@@ -416,11 +418,37 @@ executeSlashCommand env CmdReset _ctx = do
   pure (emptyContext (contextSystemPrompt _ctx))
 
 executeSlashCommand env CmdStatus ctx = do
-  let status = T.intercalate "\n"
+  model <- readIORef (_env_model env)
+  mProvider <- readIORef (_env_provider env)
+  mVault <- readIORef (_env_vault env)
+  mTranscript <- readIORef (_env_transcript env)
+  harnesses <- readIORef (_env_harnesses env)
+  let providerLine = case mProvider of
+        Nothing -> "  Provider:  (not configured)"
+        Just _  -> "  Provider:  configured"
+      vaultLine = case mVault of
+        Nothing -> "  Vault:     (not configured)"
+        Just _  -> "  Vault:     configured"
+      transcriptLine = case mTranscript of
+        Nothing -> "  Transcript: disabled"
+        Just _  -> "  Transcript: enabled"
+      harnessLine = if Map.null harnesses
+        then "  Harnesses: (none)"
+        else "  Harnesses: " <> T.intercalate ", "
+               [n <> " (" <> _hh_name h <> ")" | (n, h) <- Map.toList harnesses]
+      policyLine = "  Policy:    " <> T.pack (show (_sp_autonomy (_env_policy env)))
+      status = T.intercalate "\n"
         [ "Session status:"
-        , "  Messages: "          <> T.pack (show (contextMessageCount ctx))
+        , "  Model:     " <> unModelId model
+        , providerLine
+        , policyLine
+        , vaultLine
+        , transcriptLine
+        , harnessLine
+        , ""
+        , "  Messages:            " <> T.pack (show (contextMessageCount ctx))
         , "  Est. context tokens: " <> T.pack (show (contextTokenEstimate ctx))
-        , "  Total input tokens: "  <> T.pack (show (contextTotalInputTokens ctx))
+        , "  Total input tokens:  " <> T.pack (show (contextTotalInputTokens ctx))
         , "  Total output tokens: " <> T.pack (show (contextTotalOutputTokens ctx))
         ]
   _ch_send (_env_channel env) (OutgoingMessage status)
@@ -442,6 +470,22 @@ executeSlashCommand env (CmdModel (Just name)) ctx = do
   writeFileConfig configPath (existing { _fc_model = Just name })
   send $ "Model switched to: " <> name
   pure ctx
+
+executeSlashCommand env CmdModelList ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  mProvider <- readIORef (_env_provider env)
+  case mProvider of
+    Nothing -> do
+      send "No provider configured. Use /provider to set one up first."
+      pure ctx
+    Just provider -> do
+      models <- listModels provider
+      if null models
+        then send "No models available (provider may not support model listing, or is unreachable)."
+        else do
+          let formatted = T.intercalate "\n" (map (\m -> "  " <> unModelId m) models)
+          send ("Available models:\n" <> formatted)
+      pure ctx
 
 executeSlashCommand env CmdCompact ctx = do
   mProvider <- readIORef (_env_provider env)
@@ -707,9 +751,30 @@ executeVaultCommand env vault sub ctx = do
       send msg
       pure ctx
 
-    VaultUnknown _ ->
-      send "Unknown vault command. Type /help to see all available commands."
-      >> pure ctx
+    VaultUnknown unknownSub
+      | T.null unknownSub -> do
+          -- Bare /vault: show status + available subcommands
+          mVault <- readIORef (_env_vault env)
+          let vaultStatus = case mVault of
+                Nothing -> "Vault: not configured"
+                Just _  -> "Vault: configured"
+              subcommands = T.intercalate "\n"
+                [ vaultStatus
+                , ""
+                , "Available commands:"
+                , "  /vault setup        — Set up or rekey the vault"
+                , "  /vault add <name>   — Store a named secret"
+                , "  /vault list         — List stored secret names"
+                , "  /vault delete <name> — Delete a secret"
+                , "  /vault lock         — Lock the vault"
+                , "  /vault unlock       — Unlock the vault"
+                , "  /vault status       — Show vault state and key type"
+                ]
+          send subcommands
+          pure ctx
+      | otherwise ->
+          send ("Unknown vault command: " <> unknownSub <> ". Type /vault to see available commands.")
+          >> pure ctx
 
 -- ---------------------------------------------------------------------------
 -- Vault setup wizard
@@ -1086,9 +1151,31 @@ executeHarnessCommand env sub ctx = do
       send "tmux attach -t pureclaw"
       pure ctx
 
-    HarnessUnknown subcmd -> do
-      send ("Unknown harness command: " <> subcmd <> ". Try /help for available commands.")
-      pure ctx
+    HarnessUnknown subcmd
+      | T.null subcmd -> do
+          -- Bare /harness: show status + available subcommands
+          harnesses <- readIORef (_env_harnesses env)
+          let runningSection = if Map.null harnesses
+                then ["  (none running)"]
+                else map (\(n, hh) -> "  " <> n <> " (" <> _hh_name hh <> ")")
+                         (Map.toList harnesses)
+              availSection = map (\(n, aliases, desc) ->
+                    "  " <> n <> " (aliases: " <> T.intercalate ", " aliases <> ") — " <> desc)
+                    knownHarnesses
+              output = T.intercalate "\n" $
+                ["Running:"] <> runningSection <>
+                ["", "Available:"] <> availSection <>
+                ["", "Commands:"
+                , "  /harness start <name>  — Start a harness"
+                , "  /harness stop <name>   — Stop a harness"
+                , "  /harness list          — List harnesses"
+                , "  /harness attach        — Show tmux attach command"
+                ]
+          send output
+          pure ctx
+      | otherwise -> do
+          send ("Unknown harness command: " <> subcmd <> ". Type /harness to see available commands.")
+          pure ctx
 
 -- | Known harnesses: (canonical name, aliases, description).
 knownHarnesses :: [(Text, [Text], Text)]

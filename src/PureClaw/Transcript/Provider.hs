@@ -112,6 +112,8 @@ instance Provider TranscriptProvider where
             _th_record th respEntry
         _ -> pure ()
 
+  listModels (TranscriptProvider (_th, _source, inner)) = listModels inner
+
 -- | Wrap a 'SomeProvider' with transcript logging. Every @complete@ and
 -- @completeStream@ call records a Request entry (with redacted headers)
 -- and a Response entry (with token usage metadata).

@@ -280,9 +280,11 @@ spec = do
       sent <- readIORef sentRef
       case sent of
         Just t -> do
-          T.unpack t `shouldContain` "Messages: 1"
+          T.unpack t `shouldContain` "Messages:"
+          T.unpack t `shouldContain` "1"
           T.unpack t `shouldContain` "100"
           T.unpack t `shouldContain` "50"
+          T.unpack t `shouldContain` "Model:"
         Nothing -> expectationFailure "Expected status message"
 
     it "/compact with few messages returns NotNeeded" $ do
@@ -1003,7 +1005,7 @@ spec = do
         Just t -> T.unpack t `shouldContain` "Error reading secret"
         Nothing -> expectationFailure "Expected error message"
 
-    it "/vault unknown subcommand refers to /help" $ do
+    it "/vault unknown subcommand refers to /vault" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vault <- mkMockVaultHandle
       env <- mkEnvWithVault sentRef vault
@@ -1013,7 +1015,7 @@ spec = do
       case sent of
         Just t -> do
           T.unpack t `shouldContain` "Unknown vault command"
-          T.unpack t `shouldContain` "/help"
+          T.unpack t `shouldContain` "/vault"
         Nothing -> expectationFailure "Expected help text"
 
   describe "allCommandSpecs / CommandSpec registry" $ do

@@ -333,6 +333,10 @@ class Provider p where
   completeStream p req callback = do
     resp <- complete p req
     callback (StreamDone resp)
+  -- | List available models from the provider.
+  -- Default returns @[]@ (no model listing support).
+  listModels :: p -> IO [ModelId]
+  listModels _ = pure []
 
 -- | Existential wrapper for runtime provider selection (e.g. from config).
 data SomeProvider where
@@ -341,3 +345,4 @@ data SomeProvider where
 instance Provider SomeProvider where
   complete (MkProvider p) = complete p
   completeStream (MkProvider p) = completeStream p
+  listModels (MkProvider p) = listModels p
