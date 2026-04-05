@@ -10,6 +10,7 @@ import Data.Char qualified as Char
 import Data.IORef
 import Data.List qualified as L
 import Data.Text qualified as T
+import Data.Time.Clock qualified as Time
 import System.Console.Haskeline qualified as HL
 import System.Timeout qualified as Timeout
 
@@ -18,19 +19,27 @@ import PureClaw.Agent.SlashCommands
 import PureClaw.Core.Types
 import PureClaw.Providers.Class
 
+-- | TTL cache for model listing results (30 seconds).
+data ModelCache = ModelCache
+  { _mc_models :: [ModelId]
+  , _mc_expiry :: Time.UTCTime
+  }
+
 -- | Build a haskeline 'CompletionFunc' from a live 'AgentEnv' reference.
+-- Creates an internal cache for model listing results.
 -- The IORef is read at completion time, so it reflects hot-swapped providers.
--- The IORef may be Nothing during early startup (before AgentEnv is built).
-buildCompleter :: IORef (Maybe AgentEnv) -> HL.CompletionFunc IO
-buildCompleter envRef (leftOfCursor, _rightOfCursor) = do
-  -- leftOfCursor is reversed (haskeline convention)
+buildCompleter :: IORef (Maybe AgentEnv) -> IO (HL.CompletionFunc IO)
+buildCompleter envRef = do
+  cacheRef <- newIORef Nothing
+  pure (completerImpl envRef cacheRef)
+
+completerImpl :: IORef (Maybe AgentEnv) -> IORef (Maybe ModelCache) -> HL.CompletionFunc IO
+completerImpl envRef cacheRef (leftOfCursor, _rightOfCursor) = do
   let line = reverse leftOfCursor
-  -- Get dynamic candidates from the environment if available
   mEnv <- readIORef envRef
-  dynamicCandidates <- getDynamicCandidates mEnv line
+  dynamicCandidates <- getDynamicCandidates mEnv cacheRef line
   let static = slashCompletions line
       allCandidates = L.nub (static ++ dynamicCandidates)
-  -- Find the word being completed
   let wordStart = lastWord line
   if null allCandidates
     then pure (leftOfCursor, [])
@@ -43,7 +52,7 @@ buildCompleter envRef (leftOfCursor, _rightOfCursor) = do
               }) allCandidates
       pure (leftOfCursor, completions)
 
--- | Extract the last word being typed (for determining replacement prefix).
+-- | Extract the last word being typed.
 lastWord :: String -> String
 lastWord = reverse . takeWhile (/= ' ') . reverse
 
@@ -57,17 +66,12 @@ hasSubcommands candidate =
     ) allCommandSpecs
 
 -- | Pure static completions for slash commands.
--- Given the full input line, returns candidate completions.
 slashCompletions :: String -> [String]
 slashCompletions line
-  -- Not starting with /
   | not ("/" `L.isPrefixOf` stripped) = []
-  -- Just "/" — show all top-level commands
   | stripped == "/" = L.nub (map commandName allCommandSpecs)
-  -- "/partial" with no space — complete command names
   | ' ' `notElem` stripped =
       filter (matchesCI stripped) (L.nub (map commandName allCommandSpecs))
-  -- "/command partial" — complete subcommands
   | otherwise =
       let (cmd, rest) = break (== ' ') stripped
           partial = dropWhile (== ' ') rest
@@ -84,7 +88,6 @@ completeSubcommands cmd partial =
   in filter (matchesCI partial) subcommands
 
 -- | Extract subcommand names from a CommandSpec syntax string.
--- E.g., "/vault setup" → "setup", "/vault add <name>" → "add"
 extractSubcommands :: String -> CommandSpec -> [String]
 extractSubcommands cmdPrefix spec =
   let syntax = T.unpack (_cs_syntax spec)
@@ -100,15 +103,15 @@ isPlaceholder ('<' : _) = True
 isPlaceholder ('[' : _) = True
 isPlaceholder _         = False
 
--- | Get dynamic completions that require IO (model listing, harness names).
-getDynamicCandidates :: Maybe AgentEnv -> String -> IO [String]
-getDynamicCandidates Nothing _ = pure []
-getDynamicCandidates (Just env) line = do
+-- | Get dynamic completions that require IO.
+getDynamicCandidates :: Maybe AgentEnv -> IORef (Maybe ModelCache) -> String -> IO [String]
+getDynamicCandidates Nothing _ _ = pure []
+getDynamicCandidates (Just env) cacheRef line = do
   let lower = map Char.toLower (dropWhile (== ' ') line)
   if "/model " `L.isPrefixOf` lower
     then do
       let partial = drop 7 (dropWhile (== ' ') line)
-      models <- getModelsWithTimeout env
+      models <- getCachedModels env cacheRef
       let names = map (T.unpack . unModelId) models
       pure (filter (matchesCI partial) names)
   else if "/harness start " `L.isPrefixOf` lower
@@ -124,6 +127,19 @@ getDynamicCandidates (Just env) line = do
       pure (filter (matchesCI partial) names)
   else
     pure []
+
+-- | Get models with a 30-second TTL cache.
+getCachedModels :: AgentEnv -> IORef (Maybe ModelCache) -> IO [ModelId]
+getCachedModels env cacheRef = do
+  now <- Time.getCurrentTime
+  mCache <- readIORef cacheRef
+  case mCache of
+    Just cache | _mc_expiry cache > now -> pure (_mc_models cache)
+    _ -> do
+      models <- getModelsWithTimeout env
+      let expiry = Time.addUTCTime 30 now
+      writeIORef cacheRef (Just (ModelCache models expiry))
+      pure models
 
 -- | Query the provider for available models with a 3-second timeout.
 getModelsWithTimeout :: AgentEnv -> IO [ModelId]

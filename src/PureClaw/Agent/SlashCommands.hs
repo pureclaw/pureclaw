@@ -559,9 +559,17 @@ supportedProviders =
 executeProviderCommand :: AgentEnv -> VaultHandle -> ProviderSubCommand -> Context -> IO Context
 executeProviderCommand env _vault ProviderList ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
+  mProvider <- readIORef (_env_provider env)
+  model <- readIORef (_env_model env)
+  let activeIndicator = case mProvider of
+        Nothing -> "(not configured)"
+        Just _  -> "active, model: " <> unModelId model
       listing = T.intercalate "\n" $
-        "Available providers:"
-        : [ "  " <> name <> " \x2014 " <> desc | (name, desc) <- supportedProviders ]
+        [ "Provider: " <> activeIndicator
+        , ""
+        , "Available providers:"
+        ]
+        ++ [ "  " <> name <> " \x2014 " <> desc | (name, desc) <- supportedProviders ]
         ++ ["", "Usage: /provider <name>"]
   send listing
   pure ctx

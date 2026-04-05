@@ -418,6 +418,7 @@ runChat opts = do
   -- IORef for two-phase init: completer is built before AgentEnv exists,
   -- but reads the env at completion time via this ref.
   envRef <- newIORef Nothing
+  slashCompleter <- buildCompleter envRef
 
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
@@ -470,16 +471,16 @@ runChat opts = do
           _lh_logWarn logger "  brew install signal-cli    (macOS)"
           _lh_logWarn logger "  nix-env -i signal-cli      (NixOS)"
           _lh_logWarn logger "Falling back to CLI channel."
-          mkCLIChannelHandle (Just (buildCompleter envRef)) >>= startWithChannel
+          mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
         Right _ -> do
           _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
           transport <- mkSignalCliTransport (_sc_account sigCfg) logger
           withSignalChannel sigCfg transport logger startWithChannel
     "cli" ->
-      mkCLIChannelHandle (Just (buildCompleter envRef)) >>= startWithChannel
+      mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
     other -> do
       _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
-      mkCLIChannelHandle (Just (buildCompleter envRef)) >>= startWithChannel
+      mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType
