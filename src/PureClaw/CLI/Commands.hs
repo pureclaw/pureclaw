@@ -16,15 +16,17 @@ import Control.Exception (IOException, bracket_, try)
 import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.IORef
+import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
-import System.Directory (doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -34,9 +36,11 @@ import System.Process.Typed qualified as P
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
 
+import PureClaw.Agent.Completion
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
+import PureClaw.Handles.Transcript
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -411,6 +415,11 @@ runChat opts = do
   let effectiveChannel = fromMaybe "cli"
         (_co_channel opts <|> fmap T.unpack (_fc_defaultChannel fileCfg))
 
+  -- IORef for two-phase init: completer is built before AgentEnv exists,
+  -- but reads the env at completion time via this ref.
+  envRef <- newIORef Nothing
+  slashCompleter <- buildCompleter envRef
+
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
         putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"
@@ -418,6 +427,17 @@ runChat opts = do
           "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
           _     -> putStrLn $ "Channel: " <> effectiveChannel
         putStrLn ""
+        -- Create transcript handle
+        pureclawDir <- getPureclawDir
+        let transcriptDir = pureclawDir </> "transcripts"
+        createDirectoryIfMissing True transcriptDir
+        timestamp <- getCurrentTime
+        let transcriptFile = transcriptDir
+              </> formatTime defaultTimeLocale "%Y%m%d-%H%M%S" timestamp
+                  <> "-" <> effectiveChannel <> ".jsonl"
+        th <- mkFileTranscriptHandle logger transcriptFile
+        transcriptRef <- newIORef (Just th)
+        harnessRef  <- newIORef Map.empty
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef model
@@ -430,7 +450,12 @@ runChat opts = do
               , _env_registry     = registry
               , _env_vault        = vaultRef
               , _env_pluginHandle = mkPluginHandle
+              , _env_transcript   = transcriptRef
+              , _env_policy       = policy
+              , _env_harnesses    = harnessRef
               }
+        -- Fill the envRef so the tab completer can access the live env
+        writeIORef envRef (Just env)
         runAgentLoop env
 
   case effectiveChannel of
@@ -446,16 +471,16 @@ runChat opts = do
           _lh_logWarn logger "  brew install signal-cli    (macOS)"
           _lh_logWarn logger "  nix-env -i signal-cli      (NixOS)"
           _lh_logWarn logger "Falling back to CLI channel."
-          mkCLIChannelHandle >>= startWithChannel
+          mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
         Right _ -> do
           _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
           transport <- mkSignalCliTransport (_sc_account sigCfg) logger
           withSignalChannel sigCfg transport logger startWithChannel
     "cli" ->
-      mkCLIChannelHandle >>= startWithChannel
+      mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
     other -> do
       _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
-      mkCLIChannelHandle >>= startWithChannel
+      mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType

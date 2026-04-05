@@ -60,6 +60,12 @@ library
     PureClaw.Handles.Channel
     PureClaw.Handles.Process
     PureClaw.Handles.Log
+    PureClaw.Handles.Transcript
+    PureClaw.Handles.Harness
+    -- Harness (tmux lifecycle)
+    PureClaw.Harness
+    PureClaw.Harness.ClaudeCode
+    PureClaw.Harness.Tmux
     -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
     PureClaw.Tools.Shell
@@ -75,6 +81,7 @@ library
     PureClaw.Tools.Cron
     PureClaw.Tools.Image
     -- Agent
+    PureClaw.Agent.Completion
     PureClaw.Agent.Env
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
@@ -106,6 +113,11 @@ library
     -- Scheduler
     PureClaw.Scheduler.Cron
     PureClaw.Scheduler.Heartbeat
+    -- Transcript
+    PureClaw.Transcript
+    PureClaw.Transcript.Combinator
+    PureClaw.Transcript.Provider
+    PureClaw.Transcript.Types
     -- CLI
     PureClaw.CLI.Config
     PureClaw.CLI.Import
@@ -131,12 +143,14 @@ library
     optparse-applicative,
     sqlite-simple,
     stm,
+    temporary,
     text,
     time,
     tomland,
     transformers,
     unix,
     typed-process,
+    uuid,
     vector,
     wai,
     wai-extra,
@@ -184,6 +198,7 @@ test-suite pureclaw-test
     Providers.ClassSpec
     Agent.ContextSpec
     Providers.AnthropicSpec
+    Agent.CompletionSpec
     Agent.LoopSpec
     Channels.CLISpec
     CLI.CommandsSpec
@@ -230,6 +245,13 @@ test-suite pureclaw-test
     Integration.SignalFlowSpec
     Integration.CLISpec
     Integration.ImportRoundTripSpec
+    Transcript.TypesSpec
+    Transcript.CombinatorSpec
+    Transcript.ProviderSpec
+    Handles.TranscriptSpec
+    Handles.HarnessSpec
+    Harness.ClaudeCodeSpec
+    Harness.TmuxSpec
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw
@@ -256,6 +278,8 @@ test-suite pureclaw-test
     warp,
     hspec,
     typed-process,
+    unix,
+    uuid,
     QuickCheck,
   default-language: GHC2021
   default-extensions:

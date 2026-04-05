@@ -17,6 +17,7 @@ import qualified Handles.NetworkSpec
 import qualified Handles.MemorySpec
 import qualified Handles.ChannelSpec
 import qualified Providers.ClassSpec
+import qualified Agent.CompletionSpec
 import qualified Agent.ContextSpec
 import qualified Providers.AnthropicSpec
 import qualified Agent.LoopSpec
@@ -65,6 +66,13 @@ import qualified Scheduler.HeartbeatSpec
 import qualified Integration.SignalFlowSpec
 import qualified Integration.CLISpec
 import qualified Integration.ImportRoundTripSpec
+import qualified Transcript.TypesSpec
+import qualified Handles.TranscriptSpec
+import qualified Handles.HarnessSpec
+import qualified Harness.ClaudeCodeSpec
+import qualified Harness.TmuxSpec
+import qualified Transcript.CombinatorSpec
+import qualified Transcript.ProviderSpec
 
 main :: IO ()
 main = hspec $ do
@@ -84,6 +92,7 @@ main = hspec $ do
   describe "Handles.Channel" Handles.ChannelSpec.spec
   describe "Providers.Class" Providers.ClassSpec.spec
   describe "Agent.Context" Agent.ContextSpec.spec
+  describe "Agent.Completion" Agent.CompletionSpec.spec
   describe "Providers.Anthropic" Providers.AnthropicSpec.spec
   describe "Agent.Loop" Agent.LoopSpec.spec
   describe "Channels.CLI" Channels.CLISpec.spec
@@ -131,3 +140,10 @@ main = hspec $ do
   describe "Integration.SignalFlow" Integration.SignalFlowSpec.spec
   describe "Integration.CLI" Integration.CLISpec.spec
   describe "Integration.ImportRoundTrip" Integration.ImportRoundTripSpec.spec
+  describe "Transcript.Types" Transcript.TypesSpec.spec
+  describe "Handles.Transcript" Handles.TranscriptSpec.spec
+  describe "Handles.Harness" Handles.HarnessSpec.spec
+  describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
+  describe "Harness.Tmux" Harness.TmuxSpec.spec
+  describe "Transcript.Combinator" Transcript.CombinatorSpec.spec
+  describe "Transcript.Provider" Transcript.ProviderSpec.spec

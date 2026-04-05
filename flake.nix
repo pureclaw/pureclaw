@@ -32,6 +32,8 @@
               shell.buildInputs = with final; [
                 age
                 age-plugin-yubikey
+                signal-cli
+                tmux
               ];
             };
         })

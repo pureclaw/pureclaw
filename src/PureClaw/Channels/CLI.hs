@@ -3,6 +3,7 @@ module PureClaw.Channels.CLI
     mkCLIChannelHandle
   ) where
 
+import Data.Maybe qualified
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.Console.Haskeline qualified as HL
@@ -16,10 +17,14 @@ import PureClaw.Handles.Channel
 -- | Create a channel handle that uses haskeline for line editing.
 -- Provides readline-style input: backspace, arrow keys, up/down history,
 -- Ctrl-A/E, etc. History is persisted to @~\/.pureclaw\/history@.
-mkCLIChannelHandle :: IO ChannelHandle
-mkCLIChannelHandle = do
+-- Accepts an optional completion function for tab completion of slash commands.
+mkCLIChannelHandle :: Maybe (HL.CompletionFunc IO) -> IO ChannelHandle
+mkCLIChannelHandle mCompleter = do
   histPath <- haskelineHistoryPath
-  let settings = HL.defaultSettings { HL.historyFile = Just histPath }
+  let settings = (HL.defaultSettings :: HL.Settings IO)
+        { HL.historyFile = Just histPath
+        , HL.complete = Data.Maybe.fromMaybe HL.completeFilename mCompleter
+        }
   pure ChannelHandle
     { _ch_receive = do
         mLine <- HL.runInputT settings (HL.getInputLine "> ")

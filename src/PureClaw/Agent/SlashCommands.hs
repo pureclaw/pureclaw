@@ -4,6 +4,10 @@ module PureClaw.Agent.SlashCommands
   , VaultSubCommand (..)
   , ProviderSubCommand (..)
   , ChannelSubCommand (..)
+  , TranscriptSubCommand (..)
+  , HarnessSubCommand (..)
+    -- * Known harnesses
+  , knownHarnesses
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)
@@ -18,8 +22,9 @@ import Control.Applicative ((<|>))
 import Control.Exception
 import Data.Foldable (asum)
 import Data.IORef
+import Data.Map.Strict qualified as Map
 import Data.List qualified as L
-import Data.Maybe (listToMaybe)
+import Data.Maybe qualified
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -40,12 +45,19 @@ import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
+import PureClaw.Handles.Harness
+import PureClaw.Handles.Log
+import PureClaw.Handles.Transcript
+import PureClaw.Harness.ClaudeCode
+import PureClaw.Harness.Tmux
 import PureClaw.Providers.Class
 import PureClaw.Providers.Ollama
+import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Transcript.Types
 
 -- ---------------------------------------------------------------------------
 -- Command taxonomy
@@ -53,10 +65,12 @@ import PureClaw.Security.Vault.Plugin
 
 -- | Organisational group for display in '/help'.
 data CommandGroup
-  = GroupSession   -- ^ Session and context management
-  | GroupProvider  -- ^ Model provider configuration
-  | GroupChannel   -- ^ Chat channel configuration
-  | GroupVault     -- ^ Encrypted secrets vault
+  = GroupSession     -- ^ Session and context management
+  | GroupProvider    -- ^ Model provider configuration
+  | GroupChannel     -- ^ Chat channel configuration
+  | GroupVault       -- ^ Encrypted secrets vault
+  | GroupTranscript  -- ^ Transcript / permanent log
+  | GroupHarness    -- ^ Harness management (tmux-based AI CLI tools)
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 -- | Human-readable section heading for '/help' output.
@@ -64,7 +78,9 @@ groupHeading :: CommandGroup -> Text
 groupHeading GroupSession  = "Session"
 groupHeading GroupProvider = "Provider"
 groupHeading GroupChannel  = "Channel"
-groupHeading GroupVault    = "Vault"
+groupHeading GroupVault      = "Vault"
+groupHeading GroupTranscript = "Transcript"
+groupHeading GroupHarness    = "Harness"
 
 -- | Specification for a single slash command.
 -- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
@@ -108,6 +124,23 @@ data ChannelSubCommand
   | ChannelUnknown Text       -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
+-- | Subcommands of the '/transcript' family.
+data TranscriptSubCommand
+  = TranscriptRecent (Maybe Int)  -- ^ Show last N entries (default 20)
+  | TranscriptSearch Text         -- ^ Filter by source name
+  | TranscriptPath                -- ^ Show log file path
+  | TranscriptUnknown Text        -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
+-- | Subcommands of the '/harness' family.
+data HarnessSubCommand
+  = HarnessStart Text          -- ^ Start a named harness (e.g. "claude-code")
+  | HarnessStop Text           -- ^ Stop a named harness
+  | HarnessList                -- ^ List running harnesses
+  | HarnessAttach              -- ^ Show tmux attach command
+  | HarnessUnknown Text        -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
@@ -120,9 +153,12 @@ data SlashCommand
   | CmdStatus                       -- ^ Show session status
   | CmdCompact                      -- ^ Summarise conversation to save context
   | CmdModel (Maybe Text)            -- ^ Show or switch model
+  | CmdModelList                     -- ^ List available models from provider
   | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
   | CmdVault VaultSubCommand        -- ^ Vault command family
-  | CmdChannel ChannelSubCommand    -- ^ Channel configuration
+  | CmdChannel ChannelSubCommand       -- ^ Channel configuration
+  | CmdTranscript TranscriptSubCommand -- ^ Transcript query commands
+  | CmdHarness HarnessSubCommand      -- ^ Harness management commands
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -135,7 +171,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -149,6 +185,7 @@ sessionCommandSpecs =
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
+  , CommandSpec "/model list"      "List available models from provider" GroupProvider (exactP "/model list" CmdModelList)
   , CommandSpec "/model [name]"    "Show or switch the current model"   GroupProvider modelArgP
   ]
 
@@ -170,6 +207,21 @@ vaultCommandSpecs =
   , CommandSpec "/vault status"          "Show vault state and key type"             GroupVault (vaultExactP "status" VaultStatus')
   ]
 
+transcriptCommandSpecs :: [CommandSpec]
+transcriptCommandSpecs =
+  [ CommandSpec "/transcript [N]"              "Show last N entries (default 20)"  GroupTranscript transcriptRecentP
+  , CommandSpec "/transcript search <source>"  "Filter by source name"             GroupTranscript (transcriptArgP "search" TranscriptSearch)
+  , CommandSpec "/transcript path"             "Show the JSONL file path"          GroupTranscript (transcriptExactP "path" TranscriptPath)
+  ]
+
+harnessCommandSpecs :: [CommandSpec]
+harnessCommandSpecs =
+  [ CommandSpec "/harness start <name>"  "Start a harness (e.g. claude-code)"   GroupHarness (harnessArgP "start" HarnessStart)
+  , CommandSpec "/harness stop <name>"   "Stop a running harness"               GroupHarness (harnessArgP "stop" HarnessStop)
+  , CommandSpec "/harness list"          "List running harnesses"               GroupHarness (harnessExactP "list" HarnessList)
+  , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
+  ]
+
 -- ---------------------------------------------------------------------------
 -- Parsing — derived from allCommandSpecs
 -- ---------------------------------------------------------------------------
@@ -185,6 +237,8 @@ parseSlashCommand input =
      then asum (map (`_cs_parse` stripped) allCommandSpecs)
             <|> channelUnknownFallback stripped
             <|> vaultUnknownFallback stripped
+            <|> transcriptUnknownFallback stripped
+            <|> harnessUnknownFallback stripped
      else Nothing
 
 -- | Exact case-insensitive match.
@@ -274,6 +328,78 @@ vaultUnknownFallback t =
           in Just (CmdVault (VaultUnknown sub))
      else Nothing
 
+-- | Parse "/transcript" with optional numeric argument.
+-- "/transcript" -> TranscriptRecent Nothing
+-- "/transcript 50" -> TranscriptRecent (Just 50)
+transcriptRecentP :: Text -> Maybe SlashCommand
+transcriptRecentP t =
+  let pfx   = "/transcript"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdTranscript (TranscriptRecent Nothing))
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdTranscript (TranscriptRecent Nothing))
+                  else case reads (T.unpack arg) of
+                    [(n, "")] -> Just (CmdTranscript (TranscriptRecent (Just n)))
+                    _         -> Nothing
+          else Nothing
+
+-- | Case-insensitive exact match for "/transcript <sub>".
+transcriptExactP :: Text -> TranscriptSubCommand -> Text -> Maybe SlashCommand
+transcriptExactP sub cmd t =
+  if T.toLower t == "/transcript " <> sub then Just (CmdTranscript cmd) else Nothing
+
+-- | Case-insensitive prefix match for "/transcript <sub> <arg>".
+transcriptArgP :: Text -> (Text -> TranscriptSubCommand) -> Text -> Maybe SlashCommand
+transcriptArgP sub mkCmd t =
+  let pfx   = "/transcript " <> sub
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let arg = T.strip (T.drop (T.length pfx) t)
+          in if T.null arg
+             then Nothing
+             else Just (CmdTranscript (mkCmd arg))
+     else Nothing
+
+-- | Catch-all for any "/transcript <X>" not matched by 'allCommandSpecs'.
+transcriptUnknownFallback :: Text -> Maybe SlashCommand
+transcriptUnknownFallback t =
+  let lower = T.toLower t
+  in if "/transcript" `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/transcript") lower)
+              sub  = fst (T.break (== ' ') rest)
+          in Just (CmdTranscript (TranscriptUnknown sub))
+     else Nothing
+
+-- | Case-insensitive exact match for "/harness <sub>".
+harnessExactP :: Text -> HarnessSubCommand -> Text -> Maybe SlashCommand
+harnessExactP sub cmd t =
+  if T.toLower t == "/harness " <> sub then Just (CmdHarness cmd) else Nothing
+
+-- | Case-insensitive prefix match for "/harness <sub> <arg>".
+harnessArgP :: Text -> (Text -> HarnessSubCommand) -> Text -> Maybe SlashCommand
+harnessArgP sub mkCmd t =
+  let pfx   = "/harness " <> sub
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let arg = T.strip (T.drop (T.length pfx) t)
+          in if T.null arg
+             then Nothing
+             else Just (CmdHarness (mkCmd arg))
+     else Nothing
+
+-- | Catch-all for any "/harness <X>" not matched by 'allCommandSpecs'.
+harnessUnknownFallback :: Text -> Maybe SlashCommand
+harnessUnknownFallback t =
+  let lower = T.toLower t
+  in if "/harness" `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/harness") lower)
+              sub  = fst (T.break (== ' ') rest)
+          in Just (CmdHarness (HarnessUnknown sub))
+     else Nothing
+
 -- ---------------------------------------------------------------------------
 -- Execution
 -- ---------------------------------------------------------------------------
@@ -294,11 +420,37 @@ executeSlashCommand env CmdReset _ctx = do
   pure (emptyContext (contextSystemPrompt _ctx))
 
 executeSlashCommand env CmdStatus ctx = do
-  let status = T.intercalate "\n"
+  model <- readIORef (_env_model env)
+  mProvider <- readIORef (_env_provider env)
+  mVault <- readIORef (_env_vault env)
+  mTranscript <- readIORef (_env_transcript env)
+  harnesses <- readIORef (_env_harnesses env)
+  let providerLine = case mProvider of
+        Nothing -> "  Provider:  (not configured)"
+        Just _  -> "  Provider:  configured"
+      vaultLine = case mVault of
+        Nothing -> "  Vault:     (not configured)"
+        Just _  -> "  Vault:     configured"
+      transcriptLine = case mTranscript of
+        Nothing -> "  Transcript: disabled"
+        Just _  -> "  Transcript: enabled"
+      harnessLine = if Map.null harnesses
+        then "  Harnesses: (none)"
+        else "  Harnesses: " <> T.intercalate ", "
+               [n <> " (" <> _hh_name h <> ")" | (n, h) <- Map.toList harnesses]
+      policyLine = "  Policy:    " <> T.pack (show (_sp_autonomy (_env_policy env)))
+      status = T.intercalate "\n"
         [ "Session status:"
-        , "  Messages: "          <> T.pack (show (contextMessageCount ctx))
+        , "  Model:     " <> unModelId model
+        , providerLine
+        , policyLine
+        , vaultLine
+        , transcriptLine
+        , harnessLine
+        , ""
+        , "  Messages:            " <> T.pack (show (contextMessageCount ctx))
         , "  Est. context tokens: " <> T.pack (show (contextTokenEstimate ctx))
-        , "  Total input tokens: "  <> T.pack (show (contextTotalInputTokens ctx))
+        , "  Total input tokens:  " <> T.pack (show (contextTotalInputTokens ctx))
         , "  Total output tokens: " <> T.pack (show (contextTotalOutputTokens ctx))
         ]
   _ch_send (_env_channel env) (OutgoingMessage status)
@@ -320,6 +472,22 @@ executeSlashCommand env (CmdModel (Just name)) ctx = do
   writeFileConfig configPath (existing { _fc_model = Just name })
   send $ "Model switched to: " <> name
   pure ctx
+
+executeSlashCommand env CmdModelList ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  mProvider <- readIORef (_env_provider env)
+  case mProvider of
+    Nothing -> do
+      send "No provider configured. Use /provider to set one up first."
+      pure ctx
+    Just provider -> do
+      models <- listModels provider
+      if null models
+        then send "No models available (provider may not support model listing, or is unreachable)."
+        else do
+          let formatted = T.intercalate "\n" (map (\m -> "  " <> unModelId m) models)
+          send ("Available models:\n" <> formatted)
+      pure ctx
 
 executeSlashCommand env CmdCompact ctx = do
   mProvider <- readIORef (_env_provider env)
@@ -356,6 +524,12 @@ executeSlashCommand env (CmdProvider sub) ctx = do
 executeSlashCommand env (CmdChannel sub) ctx = do
   executeChannelCommand env sub ctx
 
+executeSlashCommand env (CmdTranscript sub) ctx = do
+  executeTranscriptCommand env sub ctx
+
+executeSlashCommand env (CmdHarness sub) ctx = do
+  executeHarnessCommand env sub ctx
+
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
   case sub of
@@ -385,9 +559,17 @@ supportedProviders =
 executeProviderCommand :: AgentEnv -> VaultHandle -> ProviderSubCommand -> Context -> IO Context
 executeProviderCommand env _vault ProviderList ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
+  mProvider <- readIORef (_env_provider env)
+  model <- readIORef (_env_model env)
+  let activeIndicator = case mProvider of
+        Nothing -> "(not configured)"
+        Just _  -> "active, model: " <> unModelId model
       listing = T.intercalate "\n" $
-        "Available providers:"
-        : [ "  " <> name <> " \x2014 " <> desc | (name, desc) <- supportedProviders ]
+        [ "Provider: " <> activeIndicator
+        , ""
+        , "Available providers:"
+        ]
+        ++ [ "  " <> name <> " \x2014 " <> desc | (name, desc) <- supportedProviders ]
         ++ ["", "Usage: /provider <name>"]
   send listing
   pure ctx
@@ -405,7 +587,7 @@ executeProviderCommand env vault (ProviderConfigure providerName) ctx = do
       send menu
 
       choice <- _ch_prompt ch "Choice: "
-      let selectedOption = listToMaybe [o | o <- options, T.pack (show (_ao_number o)) == T.strip choice]
+      let selectedOption = Data.Maybe.listToMaybe [o | o <- options, T.pack (show (_ao_number o)) == T.strip choice]
 
       case selectedOption of
         Just opt -> _ao_handler opt env vault ctx
@@ -579,9 +761,30 @@ executeVaultCommand env vault sub ctx = do
       send msg
       pure ctx
 
-    VaultUnknown _ ->
-      send "Unknown vault command. Type /help to see all available commands."
-      >> pure ctx
+    VaultUnknown unknownSub
+      | T.null unknownSub -> do
+          -- Bare /vault: show status + available subcommands
+          mVault <- readIORef (_env_vault env)
+          let vaultStatus = case mVault of
+                Nothing -> "Vault: not configured"
+                Just _  -> "Vault: configured"
+              subcommands = T.intercalate "\n"
+                [ vaultStatus
+                , ""
+                , "Available commands:"
+                , "  /vault setup        — Set up or rekey the vault"
+                , "  /vault add <name>   — Store a named secret"
+                , "  /vault list         — List stored secret names"
+                , "  /vault delete <name> — Delete a secret"
+                , "  /vault lock         — Lock the vault"
+                , "  /vault unlock       — Unlock the vault"
+                , "  /vault status       — Show vault state and key type"
+                ]
+          send subcommands
+          pure ctx
+      | otherwise ->
+          send ("Unknown vault command: " <> unknownSub <> ". Type /vault to see available commands.")
+          >> pure ctx
 
 -- ---------------------------------------------------------------------------
 -- Vault setup wizard
@@ -825,6 +1028,190 @@ executeChannelCommand env (ChannelUnknown sub) ctx = do
   _ch_send (_env_channel env) (OutgoingMessage
     ("Unknown channel command: " <> sub <> ". Type /channel for available options."))
   pure ctx
+
+-- ---------------------------------------------------------------------------
+-- Transcript subcommand execution
+-- ---------------------------------------------------------------------------
+
+executeTranscriptCommand :: AgentEnv -> TranscriptSubCommand -> Context -> IO Context
+executeTranscriptCommand env sub ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  mTh <- readIORef (_env_transcript env)
+  case mTh of
+    Nothing -> do
+      send "No transcript configured. Start with --transcript to enable logging."
+      pure ctx
+    Just th -> case sub of
+      TranscriptRecent mN -> do
+        let n = Data.Maybe.fromMaybe 20 mN
+            tf = emptyFilter { _tf_limit = Just n }
+        entries <- _th_query th tf
+        if null entries
+          then send "No entries found."
+          else send (T.intercalate "\n" (map formatEntry entries))
+        pure ctx
+
+      TranscriptSearch query -> do
+        -- Search matches either harness or model name
+        allEntries <- _th_query th emptyFilter
+        let matches e = _te_harness e == Just query || _te_model e == Just query
+            entries = filter matches allEntries
+        if null entries
+          then send ("No entries found matching: " <> query)
+          else send (T.intercalate "\n" (map formatEntry entries))
+        pure ctx
+
+      TranscriptPath -> do
+        path <- _th_getPath th
+        send (T.pack path)
+        pure ctx
+
+      TranscriptUnknown subcmd -> do
+        send ("Unknown transcript command: " <> subcmd <> ". Try /help for available commands.")
+        pure ctx
+
+-- | Format a transcript entry as a one-line summary.
+-- Example: "[2026-04-04T15:30:00Z] ollama/llama3 Request (42ms)"
+formatEntry :: TranscriptEntry -> Text
+formatEntry entry =
+  let ts   = T.pack (show (_te_timestamp entry))
+      endpoint = case (_te_harness entry, _te_model entry) of
+        (Just h, Just m)  -> h <> "/" <> m
+        (Just h, Nothing) -> h
+        (Nothing, Just m) -> m
+        (Nothing, Nothing) -> "unknown"
+      dir  = T.pack (show (_te_direction entry))
+      dur  = case _te_durationMs entry of
+               Just ms -> " (" <> T.pack (show ms) <> "ms)"
+               Nothing -> ""
+  in "[" <> ts <> "] " <> endpoint <> " " <> dir <> dur
+
+-- ---------------------------------------------------------------------------
+-- Harness commands
+-- ---------------------------------------------------------------------------
+
+executeHarnessCommand :: AgentEnv -> HarnessSubCommand -> Context -> IO Context
+executeHarnessCommand env sub ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  case sub of
+    HarnessStart name -> do
+      harnesses <- readIORef (_env_harnesses env)
+      case Map.lookup name harnesses of
+        Just _ -> do
+          send ("Harness '" <> name <> "' is already running.")
+          pure ctx
+        Nothing -> do
+          mTh <- readIORef (_env_transcript env)
+          let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
+              logger = _env_logger env
+          -- Log diagnostic info before attempting start
+          let logInfo = _lh_logInfo logger
+              logError = _lh_logError logger
+          mTmuxPath <- findTmux
+          logInfo $ "Harness start: tmux path = " <> T.pack (show mTmuxPath)
+          mClaudePath <- Dir.findExecutable "claude"
+          logInfo $ "Harness start: claude path = " <> T.pack (show mClaudePath)
+          logInfo $ "Harness start: policy autonomy = " <> T.pack (show (_sp_autonomy (_env_policy env)))
+          result <- startHarnessByName (_env_policy env) th name
+          case result of
+            Left err -> do
+              let detail = case err of
+                    HarnessTmuxNotAvailable tmuxDetail ->
+                      tmuxDetail <> "\n  tmux path resolved: " <> T.pack (show mTmuxPath)
+                    HarnessBinaryNotFound bin ->
+                      "binary '" <> bin <> "' not found on PATH"
+                        <> "\n  claude path resolved: " <> T.pack (show mClaudePath)
+                    HarnessNotAuthorized cmdErr ->
+                      "command not authorized: " <> T.pack (show cmdErr)
+                        <> "\n  policy autonomy: " <> T.pack (show (_sp_autonomy (_env_policy env)))
+              send ("Failed to start harness '" <> name <> "':\n  " <> detail)
+              logError $ "Harness start failed: " <> T.pack (show err)
+              pure ctx
+            Right hh -> do
+              modifyIORef' (_env_harnesses env) (Map.insert name hh)
+              send ("Harness '" <> name <> "' started. Attach with: tmux attach -t pureclaw")
+              pure ctx
+
+    HarnessStop name -> do
+      harnesses <- readIORef (_env_harnesses env)
+      case Map.lookup name harnesses of
+        Nothing -> do
+          send ("No running harness named '" <> name <> "'.")
+          pure ctx
+        Just hh -> do
+          _hh_stop hh
+          modifyIORef' (_env_harnesses env) (Map.delete name)
+          send ("Harness '" <> name <> "' stopped.")
+          pure ctx
+
+    HarnessList -> do
+      harnesses <- readIORef (_env_harnesses env)
+      let running = if Map.null harnesses
+            then ["  (none)"]
+            else map (\(n, hh) -> "  " <> n <> " (" <> _hh_name hh <> ")")
+                     (Map.toList harnesses)
+          available = map (\(n, aliases, desc) ->
+                "  " <> n <> " (aliases: " <> T.intercalate ", " aliases <> ") — " <> desc)
+                knownHarnesses
+      send (T.intercalate "\n" $
+        ["Running:"] <> running <> ["", "Available:"] <> available)
+      pure ctx
+
+    HarnessAttach -> do
+      send "tmux attach -t pureclaw"
+      pure ctx
+
+    HarnessUnknown subcmd
+      | T.null subcmd -> do
+          -- Bare /harness: show status + available subcommands
+          harnesses <- readIORef (_env_harnesses env)
+          let runningSection = if Map.null harnesses
+                then ["  (none running)"]
+                else map (\(n, hh) -> "  " <> n <> " (" <> _hh_name hh <> ")")
+                         (Map.toList harnesses)
+              availSection = map (\(n, aliases, desc) ->
+                    "  " <> n <> " (aliases: " <> T.intercalate ", " aliases <> ") — " <> desc)
+                    knownHarnesses
+              output = T.intercalate "\n" $
+                ["Running:"] <> runningSection <>
+                ["", "Available:"] <> availSection <>
+                ["", "Commands:"
+                , "  /harness start <name>  — Start a harness"
+                , "  /harness stop <name>   — Stop a harness"
+                , "  /harness list          — List harnesses"
+                , "  /harness attach        — Show tmux attach command"
+                ]
+          send output
+          pure ctx
+      | otherwise -> do
+          send ("Unknown harness command: " <> subcmd <> ". Type /harness to see available commands.")
+          pure ctx
+
+-- | Known harnesses: (canonical name, aliases, description).
+knownHarnesses :: [(Text, [Text], Text)]
+knownHarnesses =
+  [ ("claude-code", ["claude", "cc"], "Anthropic Claude Code CLI")
+  ]
+
+-- | Start a harness by name or alias.
+startHarnessByName
+  :: SecurityPolicy
+  -> TranscriptHandle
+  -> Text
+  -> IO (Either HarnessError HarnessHandle)
+startHarnessByName policy th name =
+  case resolveHarnessName name of
+    Just "claude-code" -> mkClaudeCodeHarness policy th
+    _                  -> pure (Left (HarnessBinaryNotFound name))
+
+-- | Resolve a name or alias to the canonical harness name.
+resolveHarnessName :: Text -> Maybe Text
+resolveHarnessName input =
+  let lower = T.toLower input
+  in case [canonical | (canonical, aliases, _) <- knownHarnesses
+                     , lower == canonical || lower `elem` aliases] of
+       (c : _) -> Just c
+       []      -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- Signal setup wizard
