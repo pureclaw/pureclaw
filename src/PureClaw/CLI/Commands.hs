@@ -13,7 +13,7 @@ module PureClaw.CLI.Commands
   ) where
 
 import Control.Exception (IOException, bracket_, try)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -40,6 +40,7 @@ import PureClaw.Agent.Completion
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
+import PureClaw.Agent.SlashCommands
 import PureClaw.Handles.Transcript
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -437,10 +438,17 @@ runChat opts = do
                   <> "-" <> effectiveChannel <> ".jsonl"
         th <- mkFileTranscriptHandle logger transcriptFile
         transcriptRef <- newIORef (Just th)
-        harnessRef  <- newIORef Map.empty
+        -- Discover any harnesses still running from a previous session
+        (discoveredHarnesses, nextWindowIdx) <- discoverHarnesses th
+        unless (Map.null discoveredHarnesses) $
+          _lh_logInfo logger $ "Discovered " <> T.pack (show (Map.size discoveredHarnesses))
+            <> " running harness(es) from previous session"
+        harnessRef  <- newIORef discoveredHarnesses
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef model
+        targetRef   <- newIORef TargetProvider
+        windowIdxRef <- newIORef nextWindowIdx
         let env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -453,6 +461,8 @@ runChat opts = do
               , _env_transcript   = transcriptRef
               , _env_policy       = policy
               , _env_harnesses    = harnessRef
+              , _env_target       = targetRef
+              , _env_nextWindowIdx = windowIdxRef
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)

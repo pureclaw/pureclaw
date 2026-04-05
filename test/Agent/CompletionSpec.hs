@@ -10,7 +10,7 @@ spec = do
     it "returns all commands for bare /" $ do
       let results = slashCompletions "/"
       results `shouldSatisfy` ("/help" `elem`)
-      results `shouldSatisfy` ("/model" `elem`)
+      results `shouldSatisfy` ("/target" `elem`)
       results `shouldSatisfy` ("/vault" `elem`)
       results `shouldSatisfy` ("/harness" `elem`)
       results `shouldSatisfy` ("/transcript" `elem`)
@@ -18,8 +18,8 @@ spec = do
     it "completes /pro to /provider" $ do
       slashCompletions "/pro" `shouldSatisfy` ("/provider" `elem`)
 
-    it "completes /m to /model" $ do
-      slashCompletions "/m" `shouldSatisfy` ("/model" `elem`)
+    it "completes /t to /target and /transcript" $ do
+      slashCompletions "/t" `shouldSatisfy` ("/target" `elem`)
 
     it "completes /h to /harness and /help" $ do
       let results = slashCompletions "/h"

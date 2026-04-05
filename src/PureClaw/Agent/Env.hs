@@ -1,6 +1,8 @@
 module PureClaw.Agent.Env
   ( -- * Agent environment
     AgentEnv (..)
+    -- * Message target
+  , MessageTarget (..)
   ) where
 
 import Data.IORef
@@ -18,6 +20,12 @@ import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Tools.Registry
 
+-- | Where incoming user messages are routed.
+data MessageTarget
+  = TargetProvider          -- ^ Send to the configured LLM provider + model
+  | TargetHarness Text      -- ^ Send to a named running harness
+  deriving stock (Show, Eq)
+
 -- | All runtime dependencies for the agent loop, gathered into a single record.
 -- This replaces the multi-parameter signature of 'runAgentLoop' and
 -- 'executeSlashCommand', making it easy to add new capabilities (e.g.
@@ -27,7 +35,7 @@ data AgentEnv = AgentEnv
     -- ^ The LLM provider. 'Nothing' when no credentials are configured yet.
   , _env_model        :: IORef ModelId
     -- ^ The model to use for completions. Mutable so slash commands
-    -- like @\/provider@ and @\/model@ can hot-swap it.
+    -- like @\/provider@ and @\/target@ can hot-swap it.
   , _env_channel      :: ChannelHandle
     -- ^ The channel to read messages from and write responses to.
   , _env_logger       :: LogHandle
@@ -47,4 +55,10 @@ data AgentEnv = AgentEnv
     -- ^ Security policy for command authorization. Needed by harness management.
   , _env_harnesses :: IORef (Map Text HarnessHandle)
     -- ^ Running harness handles, keyed by name (e.g. "claude-code").
+  , _env_target :: IORef MessageTarget
+    -- ^ Where incoming user messages are routed. Mutable so @\/target@
+    -- can hot-swap the destination.
+  , _env_nextWindowIdx :: IORef Int
+    -- ^ Monotonically increasing counter for assigning tmux window indices
+    -- to new harnesses. Starts at 0.
   }

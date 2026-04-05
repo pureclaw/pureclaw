@@ -99,6 +99,8 @@ mkTestEnv p ch = do
   modelRef      <- newIORef (ModelId "mock")
   transcriptRef <- newIORef Nothing
   harnessRef    <- newIORef Map.empty
+  targetRef     <- newIORef TargetProvider
+  windowIdxRef  <- newIORef 0
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -111,6 +113,8 @@ mkTestEnv p ch = do
     , _env_transcript   = transcriptRef
     , _env_policy       = defaultPolicy
     , _env_harnesses    = harnessRef
+    , _env_target       = targetRef
+    , _env_nextWindowIdx = windowIdxRef
     }
 
 spec :: Spec
@@ -220,6 +224,109 @@ spec = do
       -- Should get "Let me check." from first response, then "Done!" after tool execution
       sent `shouldBe` ["Let me check.", "Done!"]
 
+  describe "sanitizeHarnessOutput" $ do
+    it "passes through plain text unchanged" $
+      sanitizeHarnessOutput "hello world" `shouldBe` "hello world"
+
+    it "preserves newlines and tabs" $
+      sanitizeHarnessOutput "line1\n\tline2\n" `shouldBe` "line1\n\tline2"
+
+    it "strips CSI (SGR color) sequences" $
+      sanitizeHarnessOutput "\ESC[32mgreen\ESC[0m" `shouldBe` "green"
+
+    it "strips CSI sequences with parameters" $
+      sanitizeHarnessOutput "\ESC[1;31mbold red\ESC[0m" `shouldBe` "bold red"
+
+    it "strips OSC sequences terminated by BEL" $
+      sanitizeHarnessOutput "\ESC]0;window title\BELtext" `shouldBe` "text"
+
+    it "strips OSC sequences terminated by ST" $
+      sanitizeHarnessOutput "\ESC]0;title\ESC\\text" `shouldBe` "text"
+
+    it "strips DCS sequences" $
+      sanitizeHarnessOutput "\ESCP+q\ESC\\text" `shouldBe` "text"
+
+    it "strips cursor movement sequences" $
+      sanitizeHarnessOutput "\ESC[2Jhello\ESC[H" `shouldBe` "hello"
+
+    it "removes C0 control characters except newline and tab" $
+      sanitizeHarnessOutput ("a\x01\x02\x07\x08\x0C" <> "b") `shouldBe` "ab"
+
+    it "normalizes \\r\\n to \\n" $
+      sanitizeHarnessOutput "line1\r\nline2\r\n" `shouldBe` "line1\nline2"
+
+    it "normalizes bare \\r to \\n" $
+      sanitizeHarnessOutput "old\rnew" `shouldBe` "old\nnew"
+
+    it "strips charset designator sequences" $
+      sanitizeHarnessOutput "\ESC(Btext" `shouldBe` "text"
+
+    it "handles empty input" $
+      sanitizeHarnessOutput "" `shouldBe` ""
+
+    it "handles input that is only escape sequences" $
+      sanitizeHarnessOutput "\ESC[31m\ESC[0m" `shouldBe` ""
+
+    it "removes DEL (0x7F)" $
+      sanitizeHarnessOutput ("ab\x7F" <> "cd") `shouldBe` "abcd"
+
+    -- Trailing blank lines from tmux capture
+    it "strips trailing blank lines from capture output" $
+      sanitizeHarnessOutput "hello\nworld\n\n\n\n\n\n"
+        `shouldBe` "hello\nworld"
+
+    it "strips trailing whitespace-only lines" $
+      sanitizeHarnessOutput "content\n   \n  \n\n"
+        `shouldBe` "content"
+
+    it "preserves internal blank lines" $
+      sanitizeHarnessOutput "para1\n\npara2\n\n\n"
+        `shouldBe` "para1\n\npara2"
+
+    it "handles output that is entirely blank lines" $
+      sanitizeHarnessOutput "\n\n\n\n"
+        `shouldBe` ""
+
+    it "strips leading blank lines" $
+      sanitizeHarnessOutput "\n\n\nhello\nworld"
+        `shouldBe` "hello\nworld"
+
+    -- Real Claude Code TUI output patterns
+    it "strips box-drawing block characters from Claude Code header" $
+      -- U+2590 RIGHT HALF BLOCK, U+259B UPPER LEFT AND LOWER RIGHT, etc.
+      sanitizeHarnessOutput " \x2590\x259B\x2588\x2588\x2588\x259C\x258C   Claude Code v2.1.75"
+        `shouldBe` "    Claude Code v2.1.75"
+
+    it "strips Private Use Area characters (Powerline symbols)" $
+      -- U+E0A0 = Powerline git branch symbol
+      sanitizeHarnessOutput ("on \xE0A0 main" <> " [$!?]")
+        `shouldBe` "on  main [$!?]"
+
+    it "strips line-drawing horizontal bar characters" $
+      -- U+2500 BOX DRAWINGS LIGHT HORIZONTAL repeated as a divider
+      let divider = T.replicate 40 "\x2500"
+      in sanitizeHarnessOutput ("text\n" <> divider <> "\nmore")
+        `shouldBe` "text\n\nmore"
+
+    it "strips mixed block elements and keeps ASCII content" $
+      -- Simulated Claude Code status line
+      sanitizeHarnessOutput "\x259D\x259C\x2588\x2588\x2588\x2588\x2588\x259B\x2598  Opus 4.6"
+        `shouldBe` "  Opus 4.6"
+
+    it "preserves standard Latin, punctuation, and common symbols" $
+      sanitizeHarnessOutput "Hello, world! Cost: $4.50 \x2014 done."
+        `shouldBe` "Hello, world! Cost: $4.50 \x2014 done."
+
+    it "preserves accented and non-Latin text" $
+      sanitizeHarnessOutput "caf\xe9 na\xEFve \x00FC" <> "ber"
+        `shouldBe` "caf\xe9 na\xEFve \x00FC" <> "ber"
+
+    it "strips full-width block fill (U+2500-U+257F, U+2580-U+259F)" $
+      -- A line of block fill characters that Claude Code uses as dividers
+      let blockFill = T.replicate 10 "\x2580"
+      in sanitizeHarnessOutput ("above\n" <> blockFill <> "\nbelow")
+        `shouldBe` "above\n\nbelow"
+
 -- | Create a mock channel that serves messages from a list, then
 -- throws IOError (simulating EOF). Captures sent messages in an IORef.
 mkMockChannel :: [Text] -> IO (ChannelHandle, IORef [Text])
@@ -247,3 +354,4 @@ mkMockChannel messages = do
         , _ch_promptSecret = \_ -> pure ""
         }
   pure (channel, sentRef)
+

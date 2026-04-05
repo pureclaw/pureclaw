@@ -47,6 +47,8 @@ mkTestEnv p ch = do
   modelRef      <- newIORef (ModelId "mock")
   transcriptRef <- newIORef Nothing
   harnessRef    <- newIORef Map.empty
+  targetRef     <- newIORef TargetProvider
+  windowIdxRef  <- newIORef 0
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -59,6 +61,8 @@ mkTestEnv p ch = do
     , _env_transcript   = transcriptRef
     , _env_policy       = defaultPolicy
     , _env_harnesses    = harnessRef
+    , _env_target       = targetRef
+    , _env_nextWindowIdx = windowIdxRef
     }
 
 spec :: Spec

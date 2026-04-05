@@ -16,6 +16,8 @@ module PureClaw.Agent.SlashCommands
   , parseSlashCommand
     -- * Execution
   , executeSlashCommand
+    -- * Discovery
+  , discoverHarnesses
   ) where
 
 import Control.Applicative ((<|>))
@@ -50,6 +52,7 @@ import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript
 import PureClaw.Harness.ClaudeCode
 import PureClaw.Harness.Tmux
+import Data.Text.Read qualified as TR
 import PureClaw.Providers.Class
 import PureClaw.Providers.Ollama
 import PureClaw.Security.Policy
@@ -152,8 +155,8 @@ data SlashCommand
   | CmdReset                        -- ^ Full reset including usage counters
   | CmdStatus                       -- ^ Show session status
   | CmdCompact                      -- ^ Summarise conversation to save context
-  | CmdModel (Maybe Text)            -- ^ Show or switch model
-  | CmdModelList                     -- ^ List available models from provider
+  | CmdTarget (Maybe Text)            -- ^ Show or switch message target
+  | CmdTargetList                    -- ^ List available targets (models + harnesses)
   | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
   | CmdVault VaultSubCommand        -- ^ Vault command family
   | CmdChannel ChannelSubCommand       -- ^ Channel configuration
@@ -185,8 +188,8 @@ sessionCommandSpecs =
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
-  , CommandSpec "/model list"      "List available models from provider" GroupProvider (exactP "/model list" CmdModelList)
-  , CommandSpec "/model [name]"    "Show or switch the current model"   GroupProvider modelArgP
+  , CommandSpec "/target list"      "List available targets (models + harnesses)" GroupProvider (exactP "/target list" CmdTargetList)
+  , CommandSpec "/target [name]"   "Show or switch the message target"           GroupProvider targetArgP
   ]
 
 channelCommandSpecs :: [CommandSpec]
@@ -276,16 +279,16 @@ providerArgP listCmd mkCfgCmd t =
                   else Just (CmdProvider (mkCfgCmd arg))
           else Nothing
 
--- | Case-insensitive match for "/model" with optional argument.
-modelArgP :: Text -> Maybe SlashCommand
-modelArgP t =
-  let pfx   = "/model"
+-- | Case-insensitive match for "/target" with optional argument.
+targetArgP :: Text -> Maybe SlashCommand
+targetArgP t =
+  let pfx   = "/target"
       lower = T.toLower t
   in if lower == pfx
-     then Just (CmdModel Nothing)
+     then Just (CmdTarget Nothing)
      else if (pfx <> " ") `T.isPrefixOf` lower
           then let arg = T.strip (T.drop (T.length pfx) t)
-               in Just (CmdModel (if T.null arg then Nothing else Just arg))
+               in Just (CmdTarget (if T.null arg then Nothing else Just arg))
           else Nothing
 
 -- | Case-insensitive match for "/channel" with optional argument.
@@ -421,11 +424,15 @@ executeSlashCommand env CmdReset _ctx = do
 
 executeSlashCommand env CmdStatus ctx = do
   model <- readIORef (_env_model env)
+  target <- readIORef (_env_target env)
   mProvider <- readIORef (_env_provider env)
   mVault <- readIORef (_env_vault env)
   mTranscript <- readIORef (_env_transcript env)
   harnesses <- readIORef (_env_harnesses env)
-  let providerLine = case mProvider of
+  let targetLine = case target of
+        TargetProvider    -> "  Target:    model: " <> unModelId model
+        TargetHarness name -> "  Target:    harness: " <> name
+      providerLine = case mProvider of
         Nothing -> "  Provider:  (not configured)"
         Just _  -> "  Provider:  configured"
       vaultLine = case mVault of
@@ -441,7 +448,7 @@ executeSlashCommand env CmdStatus ctx = do
       policyLine = "  Policy:    " <> T.pack (show (_sp_autonomy (_env_policy env)))
       status = T.intercalate "\n"
         [ "Session status:"
-        , "  Model:     " <> unModelId model
+        , targetLine
         , providerLine
         , policyLine
         , vaultLine
@@ -456,38 +463,53 @@ executeSlashCommand env CmdStatus ctx = do
   _ch_send (_env_channel env) (OutgoingMessage status)
   pure ctx
 
-executeSlashCommand env (CmdModel Nothing) ctx = do
-  model <- readIORef (_env_model env)
-  _ch_send (_env_channel env) (OutgoingMessage ("Current model: " <> unModelId model))
+executeSlashCommand env (CmdTarget Nothing) ctx = do
+  target <- readIORef (_env_target env)
+  model  <- readIORef (_env_model env)
+  let desc = case target of
+        TargetProvider    -> "model: " <> unModelId model
+        TargetHarness name -> "harness: " <> name
+  _ch_send (_env_channel env) (OutgoingMessage ("Current target: " <> desc))
   pure ctx
 
-executeSlashCommand env (CmdModel (Just name)) ctx = do
+executeSlashCommand env (CmdTarget (Just name)) ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
-  writeIORef (_env_model env) (ModelId name)
-  -- Persist to config.toml
-  pureclawDir <- getPureclawDir
-  let configPath = pureclawDir </> "config.toml"
-  existing <- loadFileConfig configPath
-  Dir.createDirectoryIfMissing True pureclawDir
-  writeFileConfig configPath (existing { _fc_model = Just name })
-  send $ "Model switched to: " <> name
+  harnesses <- readIORef (_env_harnesses env)
+  if Map.member name harnesses
+    then do
+      writeIORef (_env_target env) (TargetHarness name)
+      send $ "Target switched to harness: " <> name
+    else do
+      writeIORef (_env_target env) TargetProvider
+      writeIORef (_env_model env) (ModelId name)
+      -- Persist to config.toml
+      pureclawDir <- getPureclawDir
+      let configPath = pureclawDir </> "config.toml"
+      existing <- loadFileConfig configPath
+      Dir.createDirectoryIfMissing True pureclawDir
+      writeFileConfig configPath (existing { _fc_model = Just name })
+      send $ "Target switched to model: " <> name
   pure ctx
 
-executeSlashCommand env CmdModelList ctx = do
+executeSlashCommand env CmdTargetList ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
+  -- List running harnesses
+  harnesses <- readIORef (_env_harnesses env)
+  let harnessLines = if Map.null harnesses
+        then ["  (none running)"]
+        else map ("  " <>) (Map.keys harnesses)
+  -- List models from provider
   mProvider <- readIORef (_env_provider env)
-  case mProvider of
-    Nothing -> do
-      send "No provider configured. Use /provider to set one up first."
-      pure ctx
+  modelLines <- case mProvider of
+    Nothing -> pure ["  (no provider configured)"]
     Just provider -> do
       models <- listModels provider
-      if null models
-        then send "No models available (provider may not support model listing, or is unreachable)."
-        else do
-          let formatted = T.intercalate "\n" (map (\m -> "  " <> unModelId m) models)
-          send ("Available models:\n" <> formatted)
-      pure ctx
+      pure $ if null models
+        then ["  (none available)"]
+        else map (\m -> "  " <> unModelId m) models
+  send $ T.intercalate "\n" $
+    ["Harnesses:"] ++ harnessLines ++ ["", "Models:"] ++ modelLines
+  pure ctx
 
 executeSlashCommand env CmdCompact ctx = do
   mProvider <- readIORef (_env_provider env)
@@ -1095,42 +1117,43 @@ executeHarnessCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   case sub of
     HarnessStart name -> do
-      harnesses <- readIORef (_env_harnesses env)
-      case Map.lookup name harnesses of
-        Just _ -> do
-          send ("Harness '" <> name <> "' is already running.")
+      mTh <- readIORef (_env_transcript env)
+      let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
+          logger = _env_logger env
+      -- Log diagnostic info before attempting start
+      let logInfo = _lh_logInfo logger
+          logError = _lh_logError logger
+      mTmuxPath <- findTmux
+      logInfo $ "Harness start: tmux path = " <> T.pack (show mTmuxPath)
+      mClaudePath <- Dir.findExecutable "claude"
+      logInfo $ "Harness start: claude path = " <> T.pack (show mClaudePath)
+      logInfo $ "Harness start: policy autonomy = " <> T.pack (show (_sp_autonomy (_env_policy env)))
+      -- Assign a window index and build the unique harness key
+      windowIdx <- readIORef (_env_nextWindowIdx env)
+      let canonical = Data.Maybe.fromMaybe name (resolveHarnessName name)
+          harnessKey = canonical <> "-" <> T.pack (show windowIdx)
+      result <- startHarnessByName (_env_policy env) th windowIdx name
+      case result of
+        Left err -> do
+          let detail = case err of
+                HarnessTmuxNotAvailable tmuxDetail ->
+                  tmuxDetail <> "\n  tmux path resolved: " <> T.pack (show mTmuxPath)
+                HarnessBinaryNotFound bin ->
+                  "binary '" <> bin <> "' not found on PATH"
+                    <> "\n  claude path resolved: " <> T.pack (show mClaudePath)
+                HarnessNotAuthorized cmdErr ->
+                  "command not authorized: " <> T.pack (show cmdErr)
+                    <> "\n  policy autonomy: " <> T.pack (show (_sp_autonomy (_env_policy env)))
+          send ("Failed to start harness '" <> name <> "':\n  " <> detail)
+          logError $ "Harness start failed: " <> T.pack (show err)
           pure ctx
-        Nothing -> do
-          mTh <- readIORef (_env_transcript env)
-          let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
-              logger = _env_logger env
-          -- Log diagnostic info before attempting start
-          let logInfo = _lh_logInfo logger
-              logError = _lh_logError logger
-          mTmuxPath <- findTmux
-          logInfo $ "Harness start: tmux path = " <> T.pack (show mTmuxPath)
-          mClaudePath <- Dir.findExecutable "claude"
-          logInfo $ "Harness start: claude path = " <> T.pack (show mClaudePath)
-          logInfo $ "Harness start: policy autonomy = " <> T.pack (show (_sp_autonomy (_env_policy env)))
-          result <- startHarnessByName (_env_policy env) th name
-          case result of
-            Left err -> do
-              let detail = case err of
-                    HarnessTmuxNotAvailable tmuxDetail ->
-                      tmuxDetail <> "\n  tmux path resolved: " <> T.pack (show mTmuxPath)
-                    HarnessBinaryNotFound bin ->
-                      "binary '" <> bin <> "' not found on PATH"
-                        <> "\n  claude path resolved: " <> T.pack (show mClaudePath)
-                    HarnessNotAuthorized cmdErr ->
-                      "command not authorized: " <> T.pack (show cmdErr)
-                        <> "\n  policy autonomy: " <> T.pack (show (_sp_autonomy (_env_policy env)))
-              send ("Failed to start harness '" <> name <> "':\n  " <> detail)
-              logError $ "Harness start failed: " <> T.pack (show err)
-              pure ctx
-            Right hh -> do
-              modifyIORef' (_env_harnesses env) (Map.insert name hh)
-              send ("Harness '" <> name <> "' started. Attach with: tmux attach -t pureclaw")
-              pure ctx
+        Right hh -> do
+          -- Label the tmux window so discovery can reconstruct on restart
+          renameWindow "pureclaw" windowIdx harnessKey
+          modifyIORef' (_env_nextWindowIdx env) (+ 1)
+          modifyIORef' (_env_harnesses env) (Map.insert harnessKey hh)
+          send ("Harness '" <> harnessKey <> "' started (window " <> T.pack (show windowIdx) <> "). Attach with: tmux attach -t pureclaw")
+          pure ctx
 
     HarnessStop name -> do
       harnesses <- readIORef (_env_harnesses env)
@@ -1197,11 +1220,12 @@ knownHarnesses =
 startHarnessByName
   :: SecurityPolicy
   -> TranscriptHandle
+  -> Int              -- ^ tmux window index
   -> Text
   -> IO (Either HarnessError HarnessHandle)
-startHarnessByName policy th name =
+startHarnessByName policy th windowIdx name =
   case resolveHarnessName name of
-    Just "claude-code" -> mkClaudeCodeHarness policy th
+    Just "claude-code" -> mkClaudeCodeHarness policy th windowIdx
     _                  -> pure (Left (HarnessBinaryNotFound name))
 
 -- | Resolve a name or alias to the canonical harness name.
@@ -1212,6 +1236,58 @@ resolveHarnessName input =
                      , lower == canonical || lower `elem` aliases] of
        (c : _) -> Just c
        []      -> Nothing
+
+-- ---------------------------------------------------------------------------
+-- Harness discovery
+-- ---------------------------------------------------------------------------
+
+-- | Discover running harnesses by querying tmux window names.
+-- Returns the reconstructed harness map and the next window index to use.
+--
+-- Window names matching @\<canonical\>-\<N\>@ (e.g. @claude-code-0@) are
+-- recognised as harness windows. The handle is reconstructed so
+-- send\/receive\/stop work against the existing tmux window.
+discoverHarnesses
+  :: TranscriptHandle
+  -> IO (Map.Map Text HarnessHandle, Int)
+discoverHarnesses th = do
+  windows <- listSessionWindows "pureclaw"
+  let discovered =
+        [ (name, idx, canonical)
+        | (idx, name) <- windows
+        , Just (canonical, winIdx) <- [parseHarnessWindowName name]
+        , winIdx == idx  -- sanity: name encodes the same index
+        ]
+  handles <- mapM (\(name, idx, canonical) -> do
+    hh <- mkHandle canonical idx
+    pure (name, hh)) discovered
+  let harnessMap = Map.fromList handles
+      nextIdx = if null discovered
+        then 0
+        else maximum [idx | (_, idx, _) <- discovered] + 1
+  pure (harnessMap, nextIdx)
+  where
+    mkHandle :: Text -> Int -> IO HarnessHandle
+    mkHandle canonical idx = case canonical of
+      "claude-code" -> mkDiscoveredClaudeCodeHandle th idx
+      -- Future harness types go here
+      _             -> mkDiscoveredClaudeCodeHandle th idx  -- fallback
+
+    -- | Parse a window name like "claude-code-0" into (canonical, index).
+    parseHarnessWindowName :: Text -> Maybe (Text, Int)
+    parseHarnessWindowName name =
+      -- Try each known canonical name as a prefix
+      let candidates =
+            [ (canonical, T.drop (T.length canonical + 1) name)
+            | (canonical, _, _) <- knownHarnesses
+            , (canonical <> "-") `T.isPrefixOf` name
+            ]
+      in case candidates of
+        [(canonical, suffix)] ->
+          case TR.decimal suffix of
+            Right (n, rest) | T.null rest -> Just (canonical, n)
+            _ -> Nothing
+        _ -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- Signal setup wizard

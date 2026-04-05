@@ -84,3 +84,30 @@ spec = do
           stopTmuxSession sessionName
           -- Stopping again should not throw
           stopTmuxSession sessionName
+
+    it "listSessionWindows returns windows with names" $ do
+      available <- requireTmux
+      case available of
+        Left _ -> pendingWith "tmux not available on this system"
+        Right () -> do
+          let sName = "pureclaw-test-list-windows"
+          _ <- startTmuxSession sName
+          -- Rename the default window
+          renameWindow sName 0 "claude-code-0"
+          windows <- listSessionWindows sName
+          -- Should have at least one window
+          length windows `shouldSatisfy` (>= 1)
+          -- Window 0 should be named "claude-code-0"
+          case lookup 0 windows of
+            Just name -> name `shouldBe` "claude-code-0"
+            Nothing   -> expectationFailure "expected window 0"
+          -- Clean up
+          stopTmuxSession sName
+
+    it "listSessionWindows returns empty for nonexistent session" $ do
+      available <- requireTmux
+      case available of
+        Left _ -> pendingWith "tmux not available on this system"
+        Right () -> do
+          windows <- listSessionWindows "pureclaw-test-nonexistent"
+          windows `shouldBe` []

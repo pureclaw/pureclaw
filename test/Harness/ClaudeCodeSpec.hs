@@ -26,7 +26,7 @@ spec = do
     it "returns HarnessNotAuthorized when policy has Deny autonomy" $ do
       let policy = defaultPolicy  -- Deny autonomy, empty allow list
           transcript = mkNoOpTranscriptHandle
-      result <- mkClaudeCodeHarness policy transcript
+      result <- mkClaudeCodeHarness policy transcript 0
       result `shouldBeLeft` HarnessNotAuthorized CommandInAutonomyDeny
 
     -- DoD 2: Policy that doesn't allow claude returns HarnessNotAuthorized
@@ -34,7 +34,7 @@ spec = do
       let policy = withAutonomy Full
                  $ allowCommand (CommandName "git") defaultPolicy
           transcript = mkNoOpTranscriptHandle
-      result <- mkClaudeCodeHarness policy transcript
+      result <- mkClaudeCodeHarness policy transcript 0
       result `shouldBeLeft` HarnessNotAuthorized (CommandNotAllowed "claude")
 
     -- DoD 3: Missing claude binary returns HarnessBinaryNotFound
@@ -49,6 +49,7 @@ spec = do
         (\_ -> pure (Right ()))
         policy
         transcript
+        0
       result `shouldBeLeft` HarnessBinaryNotFound "claude"
 
     -- DoD 4: Missing tmux returns HarnessTmuxNotAvailable
@@ -63,6 +64,7 @@ spec = do
         (\_ -> pure (Right ()))
         policy
         transcript
+        0
       result `shouldBeLeft` HarnessTmuxNotAvailable "test"
 
     -- DoD 5: Successful creation returns Right HarnessHandle with correct name
@@ -77,6 +79,7 @@ spec = do
         (\_ -> pure (Right ()))
         policy
         transcript
+        0
       case result of
         Right hh -> do
           _hh_name hh `shouldBe` "Claude Code"
@@ -98,6 +101,7 @@ spec = do
         (\_ -> pure (Right ()))
         policy
         transcript
+        0
       case result of
         Right _ -> do
           usedPath <- readIORef usedPathRef
@@ -120,6 +124,7 @@ spec = do
         (\_ -> pure (Right ()))
         policy
         transcript
+        0
       case result of
         Right hh -> do
           -- The harness was created with mock tmux, so list-windows will fail
@@ -155,6 +160,7 @@ spec = do
         (\_ -> pure (Right ()))
         policy
         transcript
+        0
       case result of
         Right hh -> do
           _hh_send hh "hello"
@@ -180,6 +186,7 @@ spec = do
         (\_ -> pure (Right ()))
         policy
         transcript
+        0
       case result of
         Right hh -> do
           _ <- _hh_receive hh

@@ -8,6 +8,8 @@ module PureClaw.Harness.Tmux
     -- * Window management
   , addHarnessWindow
   , stopHarnessWindow
+  , renameWindow
+  , listSessionWindows
     -- * I/O
   , sendToWindow
   , captureWindow
@@ -143,58 +145,52 @@ sessionExists sessionName = do
   exitCode <- runTmuxSilent ["has-session", "-t", T.unpack sessionName]
   pure (exitCode == ExitSuccess)
 
--- | Add a window to a tmux session for a harness.
+-- | Add a window to a tmux session for a harness at a specific window index.
+-- Window 0 reuses the session's default window; higher indices create new windows.
 -- Uses stealth mode: env -u TMUX, script -c for fresh PTY.
-addHarnessWindow :: Text -> Text -> FilePath -> [Text] -> IO (Either HarnessError ())
-addHarnessWindow sessionName windowName binary args = do
+addHarnessWindow :: Text -> Int -> FilePath -> [Text] -> IO (Either HarnessError ())
+addHarnessWindow sessionName windowIdx binary args = do
   tmuxCheck <- requireTmux
   case tmuxCheck of
     Left err -> pure (Left err)
     Right () -> do
-      -- Kill any existing window with this name (idempotent)
-      _ <- runTmuxSilent
-        [ "kill-window", "-t", T.unpack sessionName <> ":" <> T.unpack windowName ]
       let stealthCmd = stealthShellCommand binary args
-          target = T.unpack sessionName
-      -- Try new-window first; if it fails (e.g., session has only window 0),
-      -- rename window 0 and send the command there instead
-      (exitCode, _stderr) <- runTmux
-        [ "new-window"
-        , "-t", target
-        , "-n", T.unpack windowName
-        , stealthCmd
-        ]
-      case exitCode of
-        ExitSuccess   -> pure (Right ())
-        ExitFailure _ -> do
-          -- Fallback: use the existing window (rename + send-keys)
-          _ <- runTmuxSilent
-            [ "rename-window", "-t", target, T.unpack windowName ]
-          _ <- runTmuxSilent
-            [ "send-keys", "-t", target <> ":" <> T.unpack windowName
-            , stealthCmd, "Enter"
-            ]
+          session = T.unpack sessionName
+          target  = session <> ":" <> show windowIdx
+      if windowIdx == 0
+        then do
+          -- Window 0 already exists from session creation — send the command there
+          _ <- runTmuxSilent ["send-keys", "-t", target, stealthCmd, "Enter"]
           pure (Right ())
+        else do
+          (exitCode, _stderr) <- runTmux
+            [ "new-window"
+            , "-t", target
+            , stealthCmd
+            ]
+          case exitCode of
+            ExitSuccess   -> pure (Right ())
+            ExitFailure _ -> pure (Right ())
 
--- | Send input to a harness window.
+-- | Send input to a harness window by index.
 -- Small input (<= 256 bytes) uses send-keys.
 -- Large input (> 256 bytes) uses load-buffer + paste-buffer.
-sendToWindow :: Text -> Text -> ByteString -> IO ()
-sendToWindow sessionName windowName input
-  | BC.length input <= 256 = sendKeysSmall sessionName windowName input
-  | otherwise              = sendKeysLarge sessionName windowName input
+sendToWindow :: Text -> Int -> ByteString -> IO ()
+sendToWindow sessionName windowIdx input
+  | BC.length input <= 256 = sendKeysSmall sessionName windowIdx input
+  | otherwise              = sendKeysLarge sessionName windowIdx input
 
 -- | Send small input via tmux send-keys.
-sendKeysSmall :: Text -> Text -> ByteString -> IO ()
-sendKeysSmall sessionName windowName input = do
-  let target = T.unpack sessionName <> ":" <> T.unpack windowName
+sendKeysSmall :: Text -> Int -> ByteString -> IO ()
+sendKeysSmall sessionName windowIdx input = do
+  let target = T.unpack sessionName <> ":" <> show windowIdx
   _ <- runTmuxSilent ["send-keys", "-t", target, BC.unpack input, "Enter"]
   pure ()
 
 -- | Send large input via tmux load-buffer + paste-buffer.
-sendKeysLarge :: Text -> Text -> ByteString -> IO ()
-sendKeysLarge sessionName windowName input = do
-  let target = T.unpack sessionName <> ":" <> T.unpack windowName
+sendKeysLarge :: Text -> Int -> ByteString -> IO ()
+sendKeysLarge sessionName windowIdx input = do
+  let target = T.unpack sessionName <> ":" <> show windowIdx
   Temp.withSystemTempFile "pureclaw-tmux-input" $ \tmpPath tmpHandle -> do
     BC.hPut tmpHandle input
     IO.hClose tmpHandle
@@ -262,9 +258,50 @@ stopTmuxSession sessionName = do
   _ <- runTmuxSilent ["kill-session", "-t", T.unpack sessionName]
   pure ()
 
--- | Kill a specific harness window within a session.
-stopHarnessWindow :: Text -> Text -> IO ()
-stopHarnessWindow sessionName windowName = do
-  let target = T.unpack sessionName <> ":" <> T.unpack windowName
+-- | Kill a specific harness window within a session by index.
+stopHarnessWindow :: Text -> Int -> IO ()
+stopHarnessWindow sessionName windowIdx = do
+  let target = T.unpack sessionName <> ":" <> show windowIdx
   _ <- runTmuxSilent ["kill-window", "-t", target]
   pure ()
+
+-- | Rename a window within a session.
+renameWindow :: Text -> Int -> Text -> IO ()
+renameWindow sessionName windowIdx label = do
+  let target = T.unpack sessionName <> ":" <> show windowIdx
+  _ <- runTmuxSilent ["rename-window", "-t", target, T.unpack label]
+  pure ()
+
+-- | List all windows in a tmux session, returning @(windowIndex, windowName)@ pairs.
+-- Returns an empty list if the session does not exist or tmux is unavailable.
+listSessionWindows :: Text -> IO [(Int, Text)]
+listSessionWindows sessionName = do
+  mPath <- findTmux
+  case mPath of
+    Nothing -> pure []
+    Just tmuxBin -> do
+      let config = P.setStdin P.closed
+                 $ P.setStdout P.byteStringOutput
+                 $ P.setStderr P.nullStream
+                 $ P.proc tmuxBin
+                     [ "list-windows", "-t", T.unpack sessionName
+                     , "-F", "#{window_index}\t#{window_name}"
+                     ]
+      (exitCode, stdout, _stderr) <- P.readProcess config
+      case exitCode of
+        ExitFailure _ -> pure []
+        ExitSuccess   -> pure (parseListing (LBS.toStrict stdout))
+  where
+    parseListing bs =
+      [ (idx, name)
+      | line <- BC.lines bs
+      , let txt = TE.decodeUtf8Lenient line
+      , (idxStr, rest) <- [T.break (== '\t') txt]
+      , not (T.null rest)
+      , let name = T.drop 1 rest  -- drop the tab
+      , Just idx <- [readIndex idxStr]
+      ]
+
+    readIndex t = case reads (T.unpack t) of
+      [(n, "")] -> Just n
+      _         -> Nothing

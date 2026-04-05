@@ -20,7 +20,9 @@ import PureClaw.Agent.SlashCommands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
+import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
+import PureClaw.Harness.Tmux
 import PureClaw.Handles.Transcript
 import PureClaw.Providers.Class
 import PureClaw.Security.Policy
@@ -189,14 +191,14 @@ spec = do
     it "parses /provider case-insensitively but preserves arg case" $ do
       parseSlashCommand "/Provider Anthropic" `shouldBe` Just (CmdProvider (ProviderConfigure "Anthropic"))
 
-    it "parses /model with no arg as show" $ do
-      parseSlashCommand "/model" `shouldBe` Just (CmdModel Nothing)
+    it "parses /target with no arg as show" $ do
+      parseSlashCommand "/target" `shouldBe` Just (CmdTarget Nothing)
 
-    it "parses /model with arg as switch" $ do
-      parseSlashCommand "/model llama3" `shouldBe` Just (CmdModel (Just "llama3"))
+    it "parses /target with arg as switch" $ do
+      parseSlashCommand "/target llama3" `shouldBe` Just (CmdTarget (Just "llama3"))
 
-    it "parses /model with trailing space as show" $ do
-      parseSlashCommand "/model " `shouldBe` Just (CmdModel Nothing)
+    it "parses /target with trailing space as show" $ do
+      parseSlashCommand "/target " `shouldBe` Just (CmdTarget Nothing)
 
     it "is case-insensitive" $ do
       parseSlashCommand "/NEW" `shouldBe` Just CmdNew
@@ -221,6 +223,8 @@ spec = do
           modelRef    <- newIORef (ModelId "test")
           transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -234,6 +238,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -284,7 +290,7 @@ spec = do
           T.unpack t `shouldContain` "1"
           T.unpack t `shouldContain` "100"
           T.unpack t `shouldContain` "50"
-          T.unpack t `shouldContain` "Model:"
+          T.unpack t `shouldContain` "Target:"
         Nothing -> expectationFailure "Expected status message"
 
     it "/compact with few messages returns NotNeeded" $ do
@@ -318,6 +324,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -331,6 +339,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -351,6 +361,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -364,6 +376,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -381,6 +395,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -393,6 +409,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -410,6 +428,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -422,6 +442,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -451,6 +473,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -463,6 +487,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -473,8 +499,8 @@ spec = do
       _fc_model cfg `shouldBe` Just "mistral"
       _fc_baseUrl cfg `shouldBe` Just "http://myhost:11434"
 
-  describe "model commands" $ do
-    it "/model with no arg shows current model" $ do
+  describe "target commands" $ do
+    it "/target with no arg shows current target (provider)" $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ([] :: [Text])
       vault <- mkMockVaultHandle
@@ -483,6 +509,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -495,14 +523,16 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
-      _ <- executeSlashCommand env (CmdModel Nothing) ctx
+      _ <- executeSlashCommand env (CmdTarget Nothing) ctx
       allSent <- readIORef allSentRef
       let combined = T.unpack (T.intercalate " " allSent)
-      combined `shouldContain` "Current model: test"
+      combined `shouldContain` "Current target: model: test"
 
-    it "/model <name> switches model in session and persists to config" $ withTempHome $ do
+    it "/target <name> switches to model when no matching harness" $ withTempHome $ do
       allSentRef <- newIORef ([] :: [Text])
       msgsRef <- newIORef ([] :: [Text])
       vault <- mkMockVaultHandle
@@ -511,6 +541,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -523,12 +555,17 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
-      _ <- executeSlashCommand env (CmdModel (Just "llama3")) ctx
-      -- Verify IORef was updated
+      _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
+      -- Verify model IORef was updated
       newModel <- readIORef modelRef
       newModel `shouldBe` ModelId "llama3"
+      -- Verify target is TargetProvider
+      newTarget <- readIORef targetRef
+      newTarget `shouldBe` TargetProvider
       -- Verify config.toml was updated
       pureclawDir <- getPureclawDir
       cfg <- loadFileConfig (pureclawDir </> "config.toml")
@@ -536,7 +573,46 @@ spec = do
       -- Verify success message
       allSent <- readIORef allSentRef
       let combined = T.unpack (T.intercalate " " allSent)
-      combined `shouldContain` "Model switched to: llama3"
+      combined `shouldContain` "Target switched to model: llama3"
+
+    it "/target <name> switches to harness when name matches running harness" $ do
+      allSentRef <- newIORef ([] :: [Text])
+      msgsRef <- newIORef ([] :: [Text])
+      vault <- mkMockVaultHandle
+      vaultRef    <- newIORef (Just vault)
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef (Map.singleton "claude-code" mkNoOpHarnessHandle)
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkMockChannelAll allSentRef msgsRef
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdTarget (Just "claude-code")) ctx
+      -- Verify target switched to harness
+      newTarget <- readIORef targetRef
+      newTarget `shouldBe` TargetHarness "claude-code"
+      -- Model should be unchanged
+      newModel <- readIORef modelRef
+      newModel `shouldBe` ModelId "test"
+      -- Verify success message
+      allSent <- readIORef allSentRef
+      let combined = T.unpack (T.intercalate " " allSent)
+      combined `shouldContain` "Target switched to harness: claude-code"
 
   describe "vault commands — no vault configured" $ do
     let mkEnvNoVault sentRef = do
@@ -545,6 +621,8 @@ spec = do
           modelRef    <- newIORef (ModelId "test")
           transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -558,6 +636,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -588,6 +668,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -600,6 +682,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -626,6 +710,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -638,6 +724,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -656,6 +744,8 @@ spec = do
           modelRef    <- newIORef (ModelId "test")
           transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -669,6 +759,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -679,6 +771,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -691,6 +785,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -707,6 +803,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let yubikey = AgePlugin
             { _ap_name   = "yubikey"
             , _ap_binary = "age-plugin-yubikey"
@@ -724,6 +822,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -751,6 +851,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -763,6 +865,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -792,6 +896,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -804,6 +910,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -820,6 +928,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let ch = mkMockChannelAll allSentRef msgsRef
           env = AgentEnv
             { _env_provider     = providerRef
@@ -834,6 +944,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -918,6 +1030,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -930,6 +1044,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -951,6 +1067,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -963,6 +1081,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -982,6 +1102,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -997,6 +1119,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -1054,6 +1178,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1067,6 +1193,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1084,6 +1212,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1097,6 +1227,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1115,6 +1247,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1128,6 +1262,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -1159,6 +1295,34 @@ spec = do
       CmdTranscript TranscriptPath `shouldBe` CmdTranscript TranscriptPath
       CmdTranscript TranscriptPath `shouldNotBe` CmdTranscript (TranscriptRecent Nothing)
 
+  describe "discoverHarnesses" $ do
+    it "returns empty map when no tmux session exists" $ do
+      let th = mkNoOpTranscriptHandle
+      (harnesses, nextIdx) <- discoverHarnesses th
+      Map.null harnesses `shouldBe` True
+      nextIdx `shouldBe` 0
+
+    it "discovers harnesses from tmux session (integration)" $ do
+      available <- requireTmux
+      case available of
+        Left _ -> pendingWith "tmux not available on this system"
+        Right () -> do
+          let sName = "pureclaw"
+          -- Start the session and rename window 0 to look like a harness
+          _ <- startTmuxSession sName
+          renameWindow sName 0 "claude-code-0"
+          let th = mkNoOpTranscriptHandle
+          (harnesses, nextIdx) <- discoverHarnesses th
+          -- Should discover the harness
+          Map.member "claude-code-0" harnesses `shouldBe` True
+          nextIdx `shouldBe` 1
+          -- Verify the handle has the right name
+          case Map.lookup "claude-code-0" harnesses of
+            Just hh -> _hh_name hh `shouldBe` "Claude Code"
+            Nothing -> expectationFailure "expected claude-code-0 in map"
+          -- Clean up
+          stopTmuxSession sName
+
   describe "parseSlashCommand — /transcript" $ do
     it "parses /transcript as TranscriptRecent Nothing" $
       parseSlashCommand "/transcript" `shouldBe` Just (CmdTranscript (TranscriptRecent Nothing))
@@ -1186,6 +1350,8 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1202,6 +1368,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1215,6 +1383,8 @@ spec = do
       let th = mkNoOpTranscriptHandle { _th_getPath = pure "/tmp/test-transcript.jsonl" }
       transcriptRef <- newIORef (Just th)
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1231,6 +1401,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1256,6 +1428,8 @@ spec = do
           th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [entry] }
       transcriptRef <- newIORef (Just th)
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1272,6 +1446,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1288,6 +1464,8 @@ spec = do
       let th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [] }
       transcriptRef <- newIORef (Just th)
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1304,6 +1482,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1342,6 +1522,8 @@ spec = do
             }
       transcriptRef <- newIORef (Just th)
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1358,6 +1540,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -1373,6 +1557,8 @@ spec = do
       let th = mkNoOpTranscriptHandle
       transcriptRef <- newIORef (Just th)
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1389,6 +1575,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -1403,6 +1591,8 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1419,6 +1609,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1434,6 +1626,8 @@ spec = do
       modelRef    <- newIORef (ModelId "test")
       transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1447,6 +1641,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1472,6 +1668,8 @@ spec = do
           th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [entry] }
       transcriptRef <- newIORef (Just th)
       harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
@@ -1488,6 +1686,8 @@ spec = do
             , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx

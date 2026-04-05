@@ -9,6 +9,7 @@ import Control.Exception
 import Data.Char qualified as Char
 import Data.IORef
 import Data.List qualified as L
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Time.Clock qualified as Time
 import System.Console.Haskeline qualified as HL
@@ -108,12 +109,15 @@ getDynamicCandidates :: Maybe AgentEnv -> IORef (Maybe ModelCache) -> String -> 
 getDynamicCandidates Nothing _ _ = pure []
 getDynamicCandidates (Just env) cacheRef line = do
   let lower = map Char.toLower (dropWhile (== ' ') line)
-  if "/model " `L.isPrefixOf` lower
+  if "/target " `L.isPrefixOf` lower
     then do
-      let partial = drop 7 (dropWhile (== ' ') line)
+      let partial = drop 8 (dropWhile (== ' ') line)
+      -- Complete with running harness names + available model names
+      harnesses <- readIORef (_env_harnesses env)
+      let harnessNames = map T.unpack (Map.keys harnesses)
       models <- getCachedModels env cacheRef
-      let names = map (T.unpack . unModelId) models
-      pure (filter (matchesCI partial) names)
+      let modelNames = map (T.unpack . unModelId) models
+      pure (filter (matchesCI partial) (harnessNames ++ modelNames))
   else if "/harness start " `L.isPrefixOf` lower
     then do
       let partial = drop 15 (dropWhile (== ' ') line)
