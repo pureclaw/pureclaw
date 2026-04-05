@@ -44,8 +44,10 @@ import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
+import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript
 import PureClaw.Harness.ClaudeCode
+import PureClaw.Harness.Tmux
 import PureClaw.Providers.Class
 import PureClaw.Providers.Ollama
 import PureClaw.Security.Policy
@@ -1026,10 +1028,20 @@ executeHarnessCommand env sub ctx = do
         Nothing -> do
           mTh <- readIORef (_env_transcript env)
           let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
+              logger = _env_logger env
+          -- Log diagnostic info before attempting start
+          let logInfo = _lh_logInfo logger
+              logError = _lh_logError logger
+          mTmuxPath <- findTmux
+          logInfo $ "Harness start: tmux path = " <> T.pack (show mTmuxPath)
+          mClaudePath <- Dir.findExecutable "claude"
+          logInfo $ "Harness start: claude path = " <> T.pack (show mClaudePath)
+          logInfo $ "Harness start: policy autonomy = " <> T.pack (show (_sp_autonomy (_env_policy env)))
           result <- startHarnessByName (_env_policy env) th name
           case result of
             Left err -> do
               send ("Failed to start harness '" <> name <> "': " <> T.pack (show err))
+              logError $ "Harness start failed: " <> T.pack (show err)
               pure ctx
             Right hh -> do
               modifyIORef' (_env_harnesses env) (Map.insert name hh)
