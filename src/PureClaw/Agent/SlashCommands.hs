@@ -1041,9 +1041,8 @@ executeHarnessCommand env sub ctx = do
           case result of
             Left err -> do
               let detail = case err of
-                    HarnessTmuxNotAvailable ->
-                      "tmux not found (searched PATH + /opt/homebrew/bin, /usr/local/bin, /usr/bin)"
-                        <> "\n  tmux path resolved: " <> T.pack (show mTmuxPath)
+                    HarnessTmuxNotAvailable tmuxDetail ->
+                      tmuxDetail <> "\n  tmux path resolved: " <> T.pack (show mTmuxPath)
                     HarnessBinaryNotFound bin ->
                       "binary '" <> bin <> "' not found on PATH"
                         <> "\n  claude path resolved: " <> T.pack (show mClaudePath)

@@ -23,7 +23,7 @@ data HarnessStatus
 data HarnessError
   = HarnessNotAuthorized CommandError
   | HarnessBinaryNotFound Text
-  | HarnessTmuxNotAvailable
+  | HarnessTmuxNotAvailable Text  -- ^ detail message (stderr from tmux, or "not found")
   deriving stock (Show, Eq)
 
 -- | Capability handle for interacting with a harness (e.g. Claude Code in tmux).

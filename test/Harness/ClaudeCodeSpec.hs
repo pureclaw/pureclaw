@@ -58,12 +58,12 @@ spec = do
           transcript = mkNoOpTranscriptHandle
       result <- mkClaudeCodeHarnessWith
         (pure (Just "/usr/bin/claude"))
-        (pure (Left HarnessTmuxNotAvailable))
+        (pure (Left (HarnessTmuxNotAvailable "test")))
         (\_ _ _ _ -> pure (Right ()))
         (\_ -> pure (Right ()))
         policy
         transcript
-      result `shouldBeLeft` HarnessTmuxNotAvailable
+      result `shouldBeLeft` HarnessTmuxNotAvailable "test"
 
     -- DoD 5: Successful creation returns Right HarnessHandle with correct name
     it "returns Right HarnessHandle with name 'Claude Code' on success" $ do

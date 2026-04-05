@@ -15,7 +15,7 @@ spec = do
       result <- requireTmux
       case result of
         Right () -> pure ()
-        Left HarnessTmuxNotAvailable ->
+        Left (HarnessTmuxNotAvailable _) ->
           pendingWith "tmux not available on this system"
         Left other ->
           expectationFailure ("unexpected error: " <> show other)

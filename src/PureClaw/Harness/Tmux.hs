@@ -21,6 +21,7 @@ import Data.ByteString.Char8 qualified as BC
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import System.Directory qualified as Dir
 import System.Exit
 import System.IO qualified as IO
@@ -54,22 +55,27 @@ requireTmux :: IO (Either HarnessError ())
 requireTmux = do
   mPath <- findTmux
   pure $ case mPath of
-    Nothing -> Left HarnessTmuxNotAvailable
+    Nothing -> Left (HarnessTmuxNotAvailable "tmux not found on PATH or fallback locations")
     Just _  -> Right ()
 
--- | Run a tmux command silently (no stdin, stdout/stderr to /dev/null).
--- Returns the exit code. Resolves tmux path at call time.
-runTmuxSilent :: [String] -> IO ExitCode
-runTmuxSilent args = do
+-- | Run a tmux command, capturing stderr for diagnostics.
+-- Returns the exit code and stderr output.
+runTmux :: [String] -> IO (ExitCode, ByteString)
+runTmux args = do
   mPath <- findTmux
   case mPath of
-    Nothing -> pure (ExitFailure 127)
-    Just tmuxBin ->
-      P.runProcess
-        $ P.setStdin P.closed
-        $ P.setStdout P.nullStream
-        $ P.setStderr P.nullStream
-        $ P.proc tmuxBin args
+    Nothing -> pure (ExitFailure 127, "tmux not found")
+    Just tmuxBin -> do
+      let config = P.setStdin P.closed
+                 $ P.setStdout P.nullStream
+                 $ P.setStderr P.byteStringOutput
+                 $ P.proc tmuxBin args
+      (exitCode, _stdout, stderr) <- P.readProcess config
+      pure (exitCode, LBS.toStrict stderr)
+
+-- | Run a tmux command silently. Returns just the exit code.
+runTmuxSilent :: [String] -> IO ExitCode
+runTmuxSilent args = fst <$> runTmux args
 
 -- | Build a stealth shell command string for launching a binary in tmux.
 -- Strips TMUX env vars and wraps with script(1) for a fresh PTY.
@@ -119,7 +125,7 @@ startTmuxSession sessionName = do
       if exists
         then pure (Right ())
         else do
-          exitCode <- runTmuxSilent
+          (exitCode, stderr) <- runTmux
             [ "new-session", "-d"
             , "-s", T.unpack sessionName
             , "-x", "300"
@@ -127,7 +133,9 @@ startTmuxSession sessionName = do
             ]
           case exitCode of
             ExitSuccess   -> pure (Right ())
-            ExitFailure _ -> pure (Left HarnessTmuxNotAvailable)
+            ExitFailure c -> pure (Left (HarnessTmuxNotAvailable
+              ("tmux new-session failed (exit " <> T.pack (show c) <> "): "
+                <> TE.decodeUtf8Lenient stderr)))
 
 -- | Check if a tmux session with the given name exists.
 sessionExists :: Text -> IO Bool
@@ -143,16 +151,30 @@ addHarnessWindow sessionName windowName binary args = do
   case tmuxCheck of
     Left err -> pure (Left err)
     Right () -> do
+      -- Kill any existing window with this name (idempotent)
+      _ <- runTmuxSilent
+        [ "kill-window", "-t", T.unpack sessionName <> ":" <> T.unpack windowName ]
       let stealthCmd = stealthShellCommand binary args
-      exitCode <- runTmuxSilent
+          target = T.unpack sessionName
+      -- Try new-window first; if it fails (e.g., session has only window 0),
+      -- rename window 0 and send the command there instead
+      (exitCode, _stderr) <- runTmux
         [ "new-window"
-        , "-t", T.unpack sessionName
+        , "-t", target
         , "-n", T.unpack windowName
         , stealthCmd
         ]
       case exitCode of
         ExitSuccess   -> pure (Right ())
-        ExitFailure _ -> pure (Left HarnessTmuxNotAvailable)
+        ExitFailure _ -> do
+          -- Fallback: use the existing window (rename + send-keys)
+          _ <- runTmuxSilent
+            [ "rename-window", "-t", target, T.unpack windowName ]
+          _ <- runTmuxSilent
+            [ "send-keys", "-t", target <> ":" <> T.unpack windowName
+            , stealthCmd, "Enter"
+            ]
+          pure (Right ())
 
 -- | Send input to a harness window.
 -- Small input (<= 256 bytes) uses send-keys.

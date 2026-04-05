@@ -25,10 +25,10 @@ spec = do
 
   describe "HarnessError" $ do
     it "has Show instance" $ do
-      show HarnessTmuxNotAvailable `shouldContain` "HarnessTmuxNotAvailable"
+      show (HarnessTmuxNotAvailable "test") `shouldContain` "HarnessTmuxNotAvailable"
 
     it "has Eq instance" $ do
-      HarnessTmuxNotAvailable `shouldBe` HarnessTmuxNotAvailable
+      HarnessTmuxNotAvailable "test" `shouldBe` HarnessTmuxNotAvailable "test"
 
     it "constructs HarnessBinaryNotFound" $ do
       let err = HarnessBinaryNotFound "claude"
