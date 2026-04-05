@@ -36,6 +36,7 @@ import System.Process.Typed qualified as P
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
 
+import PureClaw.Agent.Completion
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
@@ -414,6 +415,10 @@ runChat opts = do
   let effectiveChannel = fromMaybe "cli"
         (_co_channel opts <|> fmap T.unpack (_fc_defaultChannel fileCfg))
 
+  -- IORef for two-phase init: completer is built before AgentEnv exists,
+  -- but reads the env at completion time via this ref.
+  envRef <- newIORef Nothing
+
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
         putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"
@@ -448,6 +453,8 @@ runChat opts = do
               , _env_policy       = policy
               , _env_harnesses    = harnessRef
               }
+        -- Fill the envRef so the tab completer can access the live env
+        writeIORef envRef (Just env)
         runAgentLoop env
 
   case effectiveChannel of
@@ -463,16 +470,16 @@ runChat opts = do
           _lh_logWarn logger "  brew install signal-cli    (macOS)"
           _lh_logWarn logger "  nix-env -i signal-cli      (NixOS)"
           _lh_logWarn logger "Falling back to CLI channel."
-          mkCLIChannelHandle >>= startWithChannel
+          mkCLIChannelHandle (Just (buildCompleter envRef)) >>= startWithChannel
         Right _ -> do
           _lh_logInfo logger $ "Signal account: " <> _sc_account sigCfg
           transport <- mkSignalCliTransport (_sc_account sigCfg) logger
           withSignalChannel sigCfg transport logger startWithChannel
     "cli" ->
-      mkCLIChannelHandle >>= startWithChannel
+      mkCLIChannelHandle (Just (buildCompleter envRef)) >>= startWithChannel
     other -> do
       _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
-      mkCLIChannelHandle >>= startWithChannel
+      mkCLIChannelHandle (Just (buildCompleter envRef)) >>= startWithChannel
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType

@@ -6,6 +6,8 @@ module PureClaw.Agent.SlashCommands
   , ChannelSubCommand (..)
   , TranscriptSubCommand (..)
   , HarnessSubCommand (..)
+    -- * Known harnesses
+  , knownHarnesses
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)

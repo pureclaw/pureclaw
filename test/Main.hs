@@ -17,6 +17,7 @@ import qualified Handles.NetworkSpec
 import qualified Handles.MemorySpec
 import qualified Handles.ChannelSpec
 import qualified Providers.ClassSpec
+import qualified Agent.CompletionSpec
 import qualified Agent.ContextSpec
 import qualified Providers.AnthropicSpec
 import qualified Agent.LoopSpec
@@ -91,6 +92,7 @@ main = hspec $ do
   describe "Handles.Channel" Handles.ChannelSpec.spec
   describe "Providers.Class" Providers.ClassSpec.spec
   describe "Agent.Context" Agent.ContextSpec.spec
+  describe "Agent.Completion" Agent.CompletionSpec.spec
   describe "Providers.Anthropic" Providers.AnthropicSpec.spec
   describe "Agent.Loop" Agent.LoopSpec.spec
   describe "Channels.CLI" Channels.CLISpec.spec

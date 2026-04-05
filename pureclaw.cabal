@@ -81,6 +81,7 @@ library
     PureClaw.Tools.Cron
     PureClaw.Tools.Image
     -- Agent
+    PureClaw.Agent.Completion
     PureClaw.Agent.Env
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
@@ -197,6 +198,7 @@ test-suite pureclaw-test
     Providers.ClassSpec
     Agent.ContextSpec
     Providers.AnthropicSpec
+    Agent.CompletionSpec
     Agent.LoopSpec
     Channels.CLISpec
     CLI.CommandsSpec
