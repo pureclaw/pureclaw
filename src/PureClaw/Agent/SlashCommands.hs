@@ -1050,12 +1050,15 @@ executeHarnessCommand env sub ctx = do
 
     HarnessList -> do
       harnesses <- readIORef (_env_harnesses env)
-      if Map.null harnesses
-        then send "No harnesses running."
-        else do
-          let lines' = map (\(n, hh) -> "  " <> n <> " (" <> _hh_name hh <> ")")
-                           (Map.toList harnesses)
-          send ("Running harnesses:\n" <> T.intercalate "\n" lines')
+      let running = if Map.null harnesses
+            then ["  (none)"]
+            else map (\(n, hh) -> "  " <> n <> " (" <> _hh_name hh <> ")")
+                     (Map.toList harnesses)
+          available = map (\(n, aliases, desc) ->
+                "  " <> n <> " (aliases: " <> T.intercalate ", " aliases <> ") — " <> desc)
+                knownHarnesses
+      send (T.intercalate "\n" $
+        ["Running:"] <> running <> ["", "Available:"] <> available)
       pure ctx
 
     HarnessAttach -> do
@@ -1066,15 +1069,31 @@ executeHarnessCommand env sub ctx = do
       send ("Unknown harness command: " <> subcmd <> ". Try /help for available commands.")
       pure ctx
 
--- | Start a harness by name. Currently only "claude-code" is supported.
+-- | Known harnesses: (canonical name, aliases, description).
+knownHarnesses :: [(Text, [Text], Text)]
+knownHarnesses =
+  [ ("claude-code", ["claude", "cc"], "Anthropic Claude Code CLI")
+  ]
+
+-- | Start a harness by name or alias.
 startHarnessByName
   :: SecurityPolicy
   -> TranscriptHandle
   -> Text
   -> IO (Either HarnessError HarnessHandle)
-startHarnessByName policy th name
-  | name `elem` ["claude-code", "claude", "cc"] = mkClaudeCodeHarness policy th
-  | otherwise = pure (Left (HarnessBinaryNotFound name))
+startHarnessByName policy th name =
+  case resolveHarnessName name of
+    Just "claude-code" -> mkClaudeCodeHarness policy th
+    _                  -> pure (Left (HarnessBinaryNotFound name))
+
+-- | Resolve a name or alias to the canonical harness name.
+resolveHarnessName :: Text -> Maybe Text
+resolveHarnessName input =
+  let lower = T.toLower input
+  in case [canonical | (canonical, aliases, _) <- knownHarnesses
+                     , lower == canonical || lower `elem` aliases] of
+       (c : _) -> Just c
+       []      -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- Signal setup wizard
