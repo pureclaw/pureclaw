@@ -142,11 +142,18 @@ transcriptReceive th = do
 -- Uses @tmux list-windows@ to check if the window exists.
 checkWindowStatus :: TranscriptHandle -> IO HarnessStatus
 checkWindowStatus th = do
+  mTmux <- findTmux
+  case mTmux of
+    Nothing -> pure (HarnessExited (ExitFailure 127))
+    Just tmuxBin -> checkWithTmux tmuxBin th
+
+checkWithTmux :: FilePath -> TranscriptHandle -> IO HarnessStatus
+checkWithTmux tmuxBin th = do
   exitCode <- P.runProcess
     $ P.setStdin P.closed
     $ P.setStdout P.nullStream
     $ P.setStderr P.nullStream
-    $ P.proc "tmux" ["list-windows", "-t", "pureclaw", "-F", "#{window_name}"]
+    $ P.proc tmuxBin ["list-windows", "-t", "pureclaw", "-F", "#{window_name}"]
   case exitCode of
     ExitSuccess -> pure HarnessRunning
     ExitFailure code -> do

@@ -1,6 +1,7 @@
 module PureClaw.Harness.Tmux
   ( -- * tmux availability
     requireTmux
+  , findTmux
     -- * Session lifecycle
   , startTmuxSession
   , stopTmuxSession
@@ -29,23 +30,32 @@ import System.Process.Typed qualified as P
 
 import PureClaw.Handles.Harness
 
--- | Run a tmux command silently (no stdin, stdout/stderr to /dev/null).
--- Returns the exit code.
-runTmuxSilent :: [String] -> IO ExitCode
-runTmuxSilent args =
-  P.runProcess
-    $ P.setStdin P.closed
-    $ P.setStdout P.nullStream
-    $ P.setStderr P.nullStream
-    $ P.proc "tmux" args
+-- | Resolve the absolute path to the tmux binary.
+-- Returns 'Nothing' if tmux is not on PATH.
+findTmux :: IO (Maybe FilePath)
+findTmux = Dir.findExecutable "tmux"
 
 -- | Check if tmux is available on PATH.
 requireTmux :: IO (Either HarnessError ())
 requireTmux = do
-  mPath <- Dir.findExecutable "tmux"
+  mPath <- findTmux
   pure $ case mPath of
     Nothing -> Left HarnessTmuxNotAvailable
     Just _  -> Right ()
+
+-- | Run a tmux command silently (no stdin, stdout/stderr to /dev/null).
+-- Returns the exit code. Resolves tmux path at call time.
+runTmuxSilent :: [String] -> IO ExitCode
+runTmuxSilent args = do
+  mPath <- findTmux
+  case mPath of
+    Nothing -> pure (ExitFailure 127)
+    Just tmuxBin ->
+      P.runProcess
+        $ P.setStdin P.closed
+        $ P.setStdout P.nullStream
+        $ P.setStderr P.nullStream
+        $ P.proc tmuxBin args
 
 -- | Build a stealth shell command string for launching a binary in tmux.
 -- Strips TMUX env vars and wraps with script(1) for a fresh PTY.
@@ -161,19 +171,23 @@ sendKeysLarge sessionName windowName input = do
 -- Strips ANSI escape sequences from the captured output.
 captureWindow :: Text -> Int -> IO ByteString
 captureWindow sessionName lineCount = do
-  let target = T.unpack sessionName
-      config = P.setStdin P.closed
-             $ P.setStdout P.byteStringOutput
-             $ P.setStderr P.nullStream
-             $ P.proc "tmux"
-                 [ "capture-pane", "-t", target
-                 , "-p"
-                 , "-S", "-" <> show lineCount
-                 ]
-  (exitCode, stdout, _stderr) <- P.readProcess config
-  case exitCode of
-    ExitSuccess   -> pure (stripAnsi (LBS.toStrict stdout))
-    ExitFailure _ -> pure ""
+  mPath <- findTmux
+  case mPath of
+    Nothing -> pure ""
+    Just tmuxBin -> do
+      let target = T.unpack sessionName
+          config = P.setStdin P.closed
+                 $ P.setStdout P.byteStringOutput
+                 $ P.setStderr P.nullStream
+                 $ P.proc tmuxBin
+                     [ "capture-pane", "-t", target
+                     , "-p"
+                     , "-S", "-" <> show lineCount
+                     ]
+      (exitCode, stdout, _stderr) <- P.readProcess config
+      case exitCode of
+        ExitSuccess   -> pure (stripAnsi (LBS.toStrict stdout))
+        ExitFailure _ -> pure ""
 
 -- | Strip ANSI escape sequences from a ByteString.
 -- Matches ESC [ ... (letter or @) sequences.
