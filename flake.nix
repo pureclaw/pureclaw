@@ -33,6 +33,7 @@
                 age
                 age-plugin-yubikey
                 signal-cli
+                tmux
               ];
             };
         })
