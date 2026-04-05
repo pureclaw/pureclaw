@@ -31,9 +31,23 @@ import System.Process.Typed qualified as P
 import PureClaw.Handles.Harness
 
 -- | Resolve the absolute path to the tmux binary.
--- Returns 'Nothing' if tmux is not on PATH.
+-- First checks PATH via 'findExecutable', then tries common system locations.
 findTmux :: IO (Maybe FilePath)
-findTmux = Dir.findExecutable "tmux"
+findTmux = do
+  mPath <- Dir.findExecutable "tmux"
+  case mPath of
+    Just p  -> pure (Just p)
+    Nothing -> findFirstExisting fallbackPaths
+  where
+    fallbackPaths =
+      [ "/opt/homebrew/bin/tmux"
+      , "/usr/local/bin/tmux"
+      , "/usr/bin/tmux"
+      ]
+    findFirstExisting [] = pure Nothing
+    findFirstExisting (p : ps) = do
+      exists <- Dir.doesFileExist p
+      if exists then pure (Just p) else findFirstExisting ps
 
 -- | Check if tmux is available on PATH.
 requireTmux :: IO (Either HarnessError ())

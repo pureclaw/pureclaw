@@ -1040,7 +1040,17 @@ executeHarnessCommand env sub ctx = do
           result <- startHarnessByName (_env_policy env) th name
           case result of
             Left err -> do
-              send ("Failed to start harness '" <> name <> "': " <> T.pack (show err))
+              let detail = case err of
+                    HarnessTmuxNotAvailable ->
+                      "tmux not found (searched PATH + /opt/homebrew/bin, /usr/local/bin, /usr/bin)"
+                        <> "\n  tmux path resolved: " <> T.pack (show mTmuxPath)
+                    HarnessBinaryNotFound bin ->
+                      "binary '" <> bin <> "' not found on PATH"
+                        <> "\n  claude path resolved: " <> T.pack (show mClaudePath)
+                    HarnessNotAuthorized cmdErr ->
+                      "command not authorized: " <> T.pack (show cmdErr)
+                        <> "\n  policy autonomy: " <> T.pack (show (_sp_autonomy (_env_policy env)))
+              send ("Failed to start harness '" <> name <> "':\n  " <> detail)
               logError $ "Harness start failed: " <> T.pack (show err)
               pure ctx
             Right hh -> do
