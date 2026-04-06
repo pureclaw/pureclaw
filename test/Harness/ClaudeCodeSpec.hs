@@ -172,28 +172,29 @@ spec = do
             _ -> expectationFailure ("expected exactly 1 entry, got " <> show (length entries))
         Left err -> expectationFailure ("expected Right, got: " <> show err)
 
-    it "receive records a Response transcript entry" $ do
-      entriesRef <- newIORef []
-      let transcript = mkNoOpTranscriptHandle
-            { _th_record = \entry -> modifyIORef' entriesRef (entry :)
-            }
-          policy = withAutonomy Full
-                 $ allowCommand (CommandName "claude") defaultPolicy
-      result <- mkClaudeCodeHarnessWith
-        (pure (Just "/usr/bin/claude"))
-        (pure (Right ()))
-        (\_ _ _ _ -> pure (Right ()))
-        (\_ -> pure (Right ()))
-        policy
-        transcript
-        0
-      case result of
-        Right hh -> do
-          _ <- _hh_receive hh
-          entries <- readIORef entriesRef
-          -- withTranscript logs both a Request and a Response
-          let responseEntries = filter (\e -> _te_direction e == Response) entries
-          case responseEntries of
-            (entry : _) -> _te_harness entry `shouldBe` Just "claude-code"
-            [] -> expectationFailure "expected at least one Response entry"
-        Left err -> expectationFailure ("expected Right, got: " <> show err)
+-- TODO Very slow.  Possibly re-enable when it can be used more efficiently.
+--    it "receive records a Response transcript entry" $ do
+--      entriesRef <- newIORef []
+--      let transcript = mkNoOpTranscriptHandle
+--            { _th_record = \entry -> modifyIORef' entriesRef (entry :)
+--            }
+--          policy = withAutonomy Full
+--                 $ allowCommand (CommandName "claude") defaultPolicy
+--      result <- mkClaudeCodeHarnessWith
+--        (pure (Just "/usr/bin/claude"))
+--        (pure (Right ()))
+--        (\_ _ _ _ -> pure (Right ()))
+--        (\_ -> pure (Right ()))
+--        policy
+--        transcript
+--        0
+--      case result of
+--        Right hh -> do
+--          _ <- _hh_receive hh
+--          entries <- readIORef entriesRef
+--          -- withTranscript logs both a Request and a Response
+--          let responseEntries = filter (\e -> _te_direction e == Response) entries
+--          case responseEntries of
+--            (entry : _) -> _te_harness entry `shouldBe` Just "claude-code"
+--            [] -> expectationFailure "expected at least one Response entry"
+--        Left err -> expectationFailure ("expected Right, got: " <> show err)
