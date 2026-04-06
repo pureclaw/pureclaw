@@ -58,6 +58,30 @@ pureclaw --provider ollama --model llama3
 pureclaw --allow git --allow ls --memory sqlite
 ```
 
+## PureClaw Philosophy
+
+### Mission
+
+To provide a high-integrity **command interface** for autonomous agents—automating the complexity of orchestration while providing the precision visibility required for absolute operational control.
+
+### Vision
+
+To be the industry-standard **orchestration layer** for the agentic era, making the transition from single-agent scripts to complex, multi-agent systems seamless, observable, and inherently safe.
+
+### Core Values
+
+#### **1. Seamless Orchestration (UX)**
+PureClaw gives you just the tools you need to command your agents while staying out of your way and giving you a frictionless experience.  It automates the heavy lifting of agent management so developers can focus on building intelligence, not plumbing.
+
+#### **2. Deep Observability (Visibility)**
+A command interface is only as good as the data it provides. We utilize **progressive disclosure** to ensure you always have the right level of detail: essential system health at a glance, and deep, tamper-proof audit logs available for forensic investigation.
+
+#### **3. Structural Guardrails (Safety & Security)**
+Security should be a property of the system, not a task for the developer. By using type-level enforcement, we transform security from a "policy to remember" into a "structural guarantee," preventing unauthorized actions before they can even be executed.
+
+#### **4. Operational Efficiency (Reliability)**
+We design our runtime to be resource-aware. PureClaw prevents "runaway processes" (infinite loops) and "resource exhaustion" (token/compute waste), ensuring that every agent execution is purposeful, predictable, and cost-effective.
+
 ## Why PureClaw?
 
 Every major security vulnerability in existing AI agent runtimes shares a root cause: **the insecure path was as easy to write as the secure path**. Security depended on developers remembering to call the right function, add the right check, redact the right field.
