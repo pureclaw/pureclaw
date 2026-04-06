@@ -66,6 +66,7 @@ ollamaComplete provider req = do
         { HTTP.method = "POST"
         , HTTP.requestBody = HTTP.RequestBodyLBS (encodeRequest req)
         , HTTP.requestHeaders = [("content-type", "application/json")]
+        , HTTP.responseTimeout = HTTP.responseTimeoutMicro (5 * 60 * 1000000)  -- 5 minutes
         }
   resp <- HTTP.httpLbs httpReq (_ol_manager provider)
   let status = Status.statusCode (HTTP.responseStatus resp)
@@ -149,7 +150,8 @@ ollamaListModels :: OllamaProvider -> IO [ModelId]
 ollamaListModels provider = do
   result <- try @SomeException $ do
     initReq <- HTTP.parseRequest (_ol_baseUrl provider ++ "/api/tags")
-    resp <- HTTP.httpLbs initReq (_ol_manager provider)
+    let tagsReq = initReq { HTTP.responseTimeout = HTTP.responseTimeoutMicro (30 * 1000000) }  -- 30 seconds
+    resp <- HTTP.httpLbs tagsReq (_ol_manager provider)
     let status = Status.statusCode (HTTP.responseStatus resp)
     if status /= 200
       then pure []

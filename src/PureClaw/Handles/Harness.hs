@@ -52,14 +52,11 @@ mkNoOpHarnessHandle = HarnessHandle
   , _hh_stop    = pure ()
   }
 
--- | Prefix each line of harness output with the harness name, IRC-style.
--- e.g. @"claude-code-0\> line1\\nclaude-code-0\> line2"@.
+-- | Prefix harness output with the origin name on the first line only.
+-- e.g. @"claude-code-0\> line1\\nline2\\nline3"@.
 -- This is the single abstraction for displaying messages from a harness\/model.
 prefixHarnessOutput :: Text -> Text -> Text
-prefixHarnessOutput name output =
-  let prefix = name <> "> "
-      ls = T.splitOn "\n" output
-  in T.intercalate "\n" (map (prefix <>) ls)
+prefixHarnessOutput name output = name <> "> " <> output
 
 -- | Sanitize harness output for display in a TUI.
 -- Strips ANSI escape sequences (CSI, OSC, DCS, etc.), C0\/C1 control

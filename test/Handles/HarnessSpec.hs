@@ -72,17 +72,17 @@ spec = do
       prefixHarnessOutput "claude-code-0" "hello"
         `shouldBe` "claude-code-0> hello"
 
-    it "prefixes each line of multi-line output" $
+    it "prefixes only the first line of multi-line output" $
       prefixHarnessOutput "cc-1" "line1\nline2\nline3"
-        `shouldBe` "cc-1> line1\ncc-1> line2\ncc-1> line3"
+        `shouldBe` "cc-1> line1\nline2\nline3"
 
     it "handles empty output" $
       prefixHarnessOutput "name" ""
         `shouldBe` "name> "
 
-    it "preserves blank lines with prefix" $
+    it "preserves blank lines without extra prefixes" $
       prefixHarnessOutput "h" "a\n\nb"
-        `shouldBe` "h> a\nh> \nh> b"
+        `shouldBe` "h> a\n\nb"
 
     it "works with long harness names" $ do
       let name = "claude-code-42"
