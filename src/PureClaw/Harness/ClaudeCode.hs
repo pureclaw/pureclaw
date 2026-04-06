@@ -43,6 +43,7 @@ mkClaudeCodeHarness
   -> TranscriptHandle
   -> Int
   -> Maybe FilePath   -- ^ optional working directory
+  -> [Text]           -- ^ extra CLI arguments (e.g. --dangerously-skip-permissions)
   -> IO (Either HarnessError HarnessHandle)
 mkClaudeCodeHarness =
   mkClaudeCodeHarnessWith
@@ -61,8 +62,9 @@ mkClaudeCodeHarnessWith
   -> TranscriptHandle
   -> Int                                                                                -- ^ tmux window index
   -> Maybe FilePath                                                                     -- ^ optional working directory
+  -> [Text]                                                                             -- ^ extra CLI arguments
   -> IO (Either HarnessError HarnessHandle)
-mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th windowIdx mWorkDir =
+mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th windowIdx mWorkDir extraArgs =
   -- Step 1: Pre-check authorization (pure, no IO needed).
   -- This catches Deny autonomy and missing command allowlisting before any IO.
   case preAuthorize policy of
@@ -89,7 +91,7 @@ mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th wi
                     Left err -> pure (Left err)
                     Right () -> do
                       -- Step 6: Add harness window at the assigned index
-                      windowResult <- addWindow sessionName windowIdx program [] mWorkDir
+                      windowResult <- addWindow sessionName windowIdx program extraArgs mWorkDir
                       case windowResult of
                         Left err -> pure (Left err)
                         Right () -> do

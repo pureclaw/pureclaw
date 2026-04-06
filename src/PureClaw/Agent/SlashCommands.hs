@@ -138,7 +138,7 @@ data TranscriptSubCommand
 
 -- | Subcommands of the '/harness' family.
 data HarnessSubCommand
-  = HarnessStart Text (Maybe Text) -- ^ Start a named harness, optional working directory
+  = HarnessStart Text (Maybe Text) Bool -- ^ Start a named harness, optional working directory, skip permissions
   | HarnessStop Text           -- ^ Stop a named harness
   | HarnessList                -- ^ List running harnesses
   | HarnessAttach              -- ^ Show tmux attach command
@@ -221,7 +221,7 @@ transcriptCommandSpecs =
 
 harnessCommandSpecs :: [CommandSpec]
 harnessCommandSpecs =
-  [ CommandSpec "/harness start <name> [dir]"  "Start a harness, optionally in a directory"   GroupHarness harnessStartP
+  [ CommandSpec "/harness start <name> [dir] [--dangerously-skip-permissions]"  "Start a harness"   GroupHarness harnessStartP
   , CommandSpec "/harness stop <name>"   "Stop a running harness"               GroupHarness (harnessArgP "stop" HarnessStop)
   , CommandSpec "/harness list"          "List running harnesses"               GroupHarness (harnessExactP "list" HarnessList)
   , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
@@ -402,21 +402,26 @@ harnessExactP :: Text -> HarnessSubCommand -> Text -> Maybe SlashCommand
 harnessExactP sub cmd t =
   if T.toLower t == "/harness " <> sub then Just (CmdHarness cmd) else Nothing
 
--- | Parse "/harness start <name> [dir]".
--- The first word after "start" is the harness name; the optional second word
--- is the working directory.
+-- | Parse "/harness start <name> [dir] [--dangerously-skip-permissions]".
+-- The first word after "start" is the harness name. Remaining words are
+-- split into an optional directory (any non-flag token) and the
+-- @--dangerously-skip-permissions@ flag.
 harnessStartP :: Text -> Maybe SlashCommand
 harnessStartP t =
   let pfx   = "/harness start"
       lower = T.toLower t
   in if (pfx <> " ") `T.isPrefixOf` lower
-     then let rest = T.strip (T.drop (T.length pfx) t)
+     then let rest  = T.strip (T.drop (T.length pfx) t)
               (name, afterName) = T.break (== ' ') rest
           in if T.null name
              then Nothing
-             else let dir = let d = T.strip afterName
-                            in if T.null d then Nothing else Just d
-                  in Just (CmdHarness (HarnessStart name dir))
+             else let tokens = T.words (T.strip afterName)
+                      skipPerms = "--dangerously-skip-permissions" `elem` map T.toLower tokens
+                      positional = filter (\tok -> T.toLower tok /= "--dangerously-skip-permissions") tokens
+                      dir = case positional of
+                              (d : _) -> Just d
+                              []      -> Nothing
+                  in Just (CmdHarness (HarnessStart name dir skipPerms))
      else Nothing
 
 -- | Case-insensitive prefix match for "/harness <sub> <arg>".
@@ -1171,7 +1176,7 @@ executeHarnessCommand :: AgentEnv -> HarnessSubCommand -> Context -> IO Context
 executeHarnessCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   case sub of
-    HarnessStart name mDir -> do
+    HarnessStart name mDir skipPerms -> do
       mTh <- readIORef (_env_transcript env)
       let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
           logger = _env_logger env
@@ -1189,7 +1194,7 @@ executeHarnessCommand env sub ctx = do
       windowIdx <- readIORef (_env_nextWindowIdx env)
       let canonical = Data.Maybe.fromMaybe name (resolveHarnessName name)
           harnessKey = canonical <> "-" <> T.pack (show windowIdx)
-      result <- startHarnessByName (_env_policy env) th windowIdx name resolvedDir
+      result <- startHarnessByName (_env_policy env) th windowIdx name resolvedDir skipPerms
       case result of
         Left err -> do
           let detail = case err of
@@ -1256,7 +1261,7 @@ executeHarnessCommand env sub ctx = do
                 ["Running:"] <> runningSection <>
                 ["", "Available:"] <> availSection <>
                 ["", "Commands:"
-                , "  /harness start <name> [dir]  — Start a harness (optionally in dir)"
+                , "  /harness start <name> [dir] [--dangerously-skip-permissions]"
                 , "  /harness stop <name>   — Stop a harness"
                 , "  /harness list          — List harnesses"
                 , "  /harness attach        — Show tmux attach command"
@@ -1280,10 +1285,13 @@ startHarnessByName
   -> Int              -- ^ tmux window index
   -> Text
   -> Maybe FilePath   -- ^ optional working directory
+  -> Bool             -- ^ skip permission checks
   -> IO (Either HarnessError HarnessHandle)
-startHarnessByName policy th windowIdx name mWorkDir =
+startHarnessByName policy th windowIdx name mWorkDir skipPerms =
   case resolveHarnessName name of
-    Just "claude-code" -> mkClaudeCodeHarness policy th windowIdx mWorkDir
+    Just "claude-code" ->
+      let extraArgs = ["--dangerously-skip-permissions" | skipPerms]
+      in mkClaudeCodeHarness policy th windowIdx mWorkDir extraArgs
     _                  -> pure (Left (HarnessBinaryNotFound name))
 
 -- | Resolve an optional directory argument for harness start.
