@@ -138,7 +138,7 @@ data TranscriptSubCommand
 
 -- | Subcommands of the '/harness' family.
 data HarnessSubCommand
-  = HarnessStart Text (Maybe Text) Bool -- ^ Start a named harness, optional working directory, skip permissions
+  = HarnessStart Text (Maybe Text) Bool -- ^ Start a named harness, optional working directory, unsafe mode
   | HarnessStop Text           -- ^ Stop a named harness
   | HarnessList                -- ^ List running harnesses
   | HarnessAttach              -- ^ Show tmux attach command
@@ -221,7 +221,7 @@ transcriptCommandSpecs =
 
 harnessCommandSpecs :: [CommandSpec]
 harnessCommandSpecs =
-  [ CommandSpec "/harness start <name> [dir] [--dangerously-skip-permissions]"  "Start a harness"   GroupHarness harnessStartP
+  [ CommandSpec "/harness start <name> [dir] [--unsafe]"  "Start a harness (--unsafe skips permission checks)"   GroupHarness harnessStartP
   , CommandSpec "/harness stop <name>"   "Stop a running harness"               GroupHarness (harnessArgP "stop" HarnessStop)
   , CommandSpec "/harness list"          "List running harnesses"               GroupHarness (harnessExactP "list" HarnessList)
   , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
@@ -402,10 +402,10 @@ harnessExactP :: Text -> HarnessSubCommand -> Text -> Maybe SlashCommand
 harnessExactP sub cmd t =
   if T.toLower t == "/harness " <> sub then Just (CmdHarness cmd) else Nothing
 
--- | Parse "/harness start <name> [dir] [--dangerously-skip-permissions]".
+-- | Parse "/harness start <name> [dir] [--unsafe]".
 -- The first word after "start" is the harness name. Remaining words are
 -- split into an optional directory (any non-flag token) and the
--- @--dangerously-skip-permissions@ flag.
+-- @--unsafe@ flag.
 harnessStartP :: Text -> Maybe SlashCommand
 harnessStartP t =
   let pfx   = "/harness start"
@@ -416,8 +416,8 @@ harnessStartP t =
           in if T.null name
              then Nothing
              else let tokens = T.words (T.strip afterName)
-                      skipPerms = "--dangerously-skip-permissions" `elem` map T.toLower tokens
-                      positional = filter (\tok -> T.toLower tok /= "--dangerously-skip-permissions") tokens
+                      skipPerms = "--unsafe" `elem` map T.toLower tokens
+                      positional = filter (\tok -> T.toLower tok /= "--unsafe") tokens
                       dir = case positional of
                               (d : _) -> Just d
                               []      -> Nothing
@@ -1261,7 +1261,7 @@ executeHarnessCommand env sub ctx = do
                 ["Running:"] <> runningSection <>
                 ["", "Available:"] <> availSection <>
                 ["", "Commands:"
-                , "  /harness start <name> [dir] [--dangerously-skip-permissions]"
+                , "  /harness start <name> [dir] [--unsafe]"
                 , "  /harness stop <name>   — Stop a harness"
                 , "  /harness list          — List harnesses"
                 , "  /harness attach        — Show tmux attach command"
