@@ -2,7 +2,6 @@ module Security.VaultPassphraseSpec (spec) where
 
 import Data.ByteString qualified as BS
 import Data.Either (isLeft)
-import Data.IORef
 import Test.Hspec
 
 import PureClaw.Security.Vault.Age (VaultEncryptor (..), VaultError (..))
