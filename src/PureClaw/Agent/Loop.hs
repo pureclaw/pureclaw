@@ -1,13 +1,12 @@
 module PureClaw.Agent.Loop
   ( -- * Agent loop
     runAgentLoop
-    -- * Sanitization (exported for testing)
+    -- * Re-exports from Handles.Harness (for backward compatibility)
   , sanitizeHarnessOutput
   ) where
 
 import Control.Exception
 import Control.Monad
-import Data.Char qualified as Char
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -88,7 +87,7 @@ runAgentLoop env = do
                       output <- _hh_receive hh
                       let response = sanitizeHarnessOutput (TE.decodeUtf8 output)
                       unless (T.null (T.strip response)) $
-                        _ch_send channel (OutgoingMessage response)
+                        _ch_send channel (OutgoingMessage (prefixHarnessOutput name response))
                       go ctx
                 TargetProvider -> do
                   mProvider <- readIORef (_env_provider env)
@@ -112,7 +111,8 @@ runAgentLoop env = do
 
     handleCompletion provider ctx = do
       model <- readIORef (_env_model env)
-      let req = CompletionRequest
+      let modelName = unModelId model
+          req = CompletionRequest
             { _cr_model        = model
             , _cr_messages     = contextMessages ctx
             , _cr_systemPrompt = contextSystemPrompt ctx
@@ -122,9 +122,15 @@ runAgentLoop env = do
             }
       responseRef <- newIORef (Nothing :: Maybe CompletionResponse)
       streamedRef <- newIORef False
+      prefixSentRef <- newIORef False
       providerResult <- try @SomeException $
         completeStream provider req $ \case
           StreamText t -> do
+            -- Emit origin prefix before the first streamed chunk
+            prefixSent <- readIORef prefixSentRef
+            unless prefixSent $ do
+              _ch_sendChunk channel (ChunkText (modelName <> "> "))
+              writeIORef prefixSentRef True
             _ch_sendChunk channel (ChunkText t)
             writeIORef streamedRef True
           StreamDone resp ->
@@ -149,7 +155,7 @@ runAgentLoop env = do
               -- Send the full text. For streaming channels, the text was already
               -- displayed chunk-by-chunk so we skip the full send to avoid duplicates.
               unless (wasStreaming && _ch_streaming channel || T.null (T.strip text)) $
-                _ch_send channel (OutgoingMessage text)
+                _ch_send channel (OutgoingMessage (prefixHarnessOutput modelName text))
               -- If there are tool calls, execute them and continue
               if null calls
                 then go ctx'
@@ -183,81 +189,3 @@ noProviderMessage = T.intercalate "\n"
   , "  /provider <PROVIDER>"
   , ""
   ]
-
--- | Sanitize harness output for display in a TUI.
--- Strips ANSI escape sequences (CSI, OSC, DCS, etc.), C0\/C1 control
--- characters, and decorative Unicode (box drawing, block elements,
--- Private Use Area, etc.) that TUI applications use for rendering.
--- Also trims leading and trailing blank lines from tmux capture output.
-sanitizeHarnessOutput :: Text -> Text
-sanitizeHarnessOutput =
-    trimBlankLines . T.pack . go . T.unpack
-  where
-    trimBlankLines =
-      T.intercalate "\n"
-      . dropWhileEnd isBlankLine
-      . dropWhile isBlankLine
-      . T.splitOn "\n"
-
-    isBlankLine = T.all Char.isSpace
-
-    dropWhileEnd _ [] = []
-    dropWhileEnd p xs = reverse (dropWhile p (reverse xs))
-
-    go [] = []
-    go ('\ESC' : rest) = skipEscape rest
-    -- Keep newlines and tabs
-    go ('\n' : cs) = '\n' : go cs
-    go ('\t' : cs) = '\t' : go cs
-    -- Replace carriage return with newline (handles \r\n and bare \r)
-    go ('\r' : '\n' : cs) = '\n' : go cs
-    go ('\r' : cs) = '\n' : go cs
-    -- Drop control characters, then decorative Unicode
-    go (c : cs)
-      | Char.isControl c  = go cs
-      | isDecorativeChar c = go cs
-      | otherwise          = c : go cs
-
-    -- Skip ESC [ ... (final byte) — CSI sequences
-    skipEscape ('[' : cs) = skipCsi cs
-    -- Skip ESC ] ... ST — OSC sequences (terminated by BEL or ESC \)
-    skipEscape (']' : cs) = skipOsc cs
-    -- Skip ESC P ... ST — DCS sequences
-    skipEscape ('P' : cs) = skipOsc cs
-    -- Skip ESC ( X, ESC ) X — charset designators
-    skipEscape ('(' : _ : cs) = go cs
-    skipEscape (')' : _ : cs) = go cs
-    -- Skip ESC followed by any single character (SS2, SS3, etc.)
-    skipEscape (_ : cs) = go cs
-    skipEscape [] = []
-
-    -- CSI: skip parameter bytes (0x30-0x3F) and intermediate bytes (0x20-0x2F)
-    -- until a final byte (0x40-0x7E)
-    skipCsi [] = []
-    skipCsi (c : cs)
-      | c >= '@' && c <= '~' = go cs  -- final byte, done
-      | otherwise             = skipCsi cs
-
-    -- OSC / DCS: skip until BEL (0x07) or ST (ESC \)
-    skipOsc [] = []
-    skipOsc ('\BEL' : cs) = go cs
-    skipOsc ('\ESC' : '\\' : cs) = go cs
-    skipOsc (_ : cs) = skipOsc cs
-
--- | Characters used by TUI applications for rendering decorative elements.
--- These are valid Unicode but produce visual garbage when displayed outside
--- the originating terminal application.
-isDecorativeChar :: Char -> Bool
-isDecorativeChar c = let cp = Char.ord c in
-  -- Box Drawing (U+2500–U+257F)
-     (cp >= 0x2500 && cp <= 0x257F)
-  -- Block Elements (U+2580–U+259F)
-  || (cp >= 0x2580 && cp <= 0x259F)
-  -- Geometric Shapes (U+25A0–U+25FF) — squares, circles, triangles
-  || (cp >= 0x25A0 && cp <= 0x25FF)
-  -- Braille Patterns (U+2800–U+28FF) — used for sparklines/graphs
-  || (cp >= 0x2800 && cp <= 0x28FF)
-  -- Private Use Area (U+E000–U+F8FF) — Powerline, Nerd Font icons
-  || (cp >= 0xE000 && cp <= 0xF8FF)
-  -- Supplementary Private Use Areas (U+F0000–U+10FFFF)
-  || cp >= 0xF0000

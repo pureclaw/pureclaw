@@ -216,6 +216,27 @@ spec = do
     it "returns Nothing for empty input" $ do
       parseSlashCommand "" `shouldBe` Nothing
 
+    it "parses /msg with target and message" $ do
+      parseSlashCommand "/msg claude-code-0 hello world"
+        `shouldBe` Just (CmdMsg "claude-code-0" "hello world")
+
+    it "parses /msg case-insensitively for command" $ do
+      parseSlashCommand "/MSG cc-1 test message"
+        `shouldBe` Just (CmdMsg "cc-1" "test message")
+
+    it "returns Nothing for /msg with no arguments" $ do
+      parseSlashCommand "/msg" `shouldBe` Nothing
+
+    it "returns Nothing for /msg with target but no message" $ do
+      parseSlashCommand "/msg claude-code-0" `shouldBe` Nothing
+
+    it "returns Nothing for /msg with target and only spaces" $ do
+      parseSlashCommand "/msg claude-code-0   " `shouldBe` Nothing
+
+    it "preserves message body case in /msg" $ do
+      parseSlashCommand "/msg cc-0 List All TODO Items"
+        `shouldBe` Just (CmdMsg "cc-0" "List All TODO Items")
+
   describe "executeSlashCommand" $ do
     let mkEnv sentRef = do
           vaultRef    <- newIORef Nothing
@@ -613,6 +634,116 @@ spec = do
       allSent <- readIORef allSentRef
       let combined = T.unpack (T.intercalate " " allSent)
       combined `shouldContain` "Target switched to harness: claude-code"
+
+  describe "/msg command" $ do
+    it "sends message to a running harness and returns prefixed output" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      receivedRef <- newIORef (Nothing :: Maybe ByteString)
+      let mockHarness = mkNoOpHarnessHandle
+            { _hh_send = \bs -> writeIORef receivedRef (Just bs)
+            , _hh_receive = pure (TE.encodeUtf8 "some output")
+            , _hh_name = "Claude Code"
+            }
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef (Map.singleton "claude-code-0" mockHarness)
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 1
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdMsg "claude-code-0" "list TODOs") ctx
+      -- Verify message was sent to harness
+      received <- readIORef receivedRef
+      received `shouldBe` Just (TE.encodeUtf8 "list TODOs")
+      -- Verify output is prefixed IRC-style
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "claude-code-0> some output"
+        Nothing -> expectationFailure "Expected prefixed output"
+
+    it "returns error for nonexistent harness" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdMsg "nonexistent" "hello") ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "No running harness"
+        Nothing -> expectationFailure "Expected error message"
+
+    it "does not change the global target" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let mockHarness = mkNoOpHarnessHandle
+            { _hh_receive = pure (TE.encodeUtf8 "reply")
+            , _hh_name = "Claude Code"
+            }
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (ModelId "test")
+      transcriptRef <- newIORef Nothing
+      harnessRef    <- newIORef (Map.singleton "cc-0" mockHarness)
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 1
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            }
+          ctx = emptyContext Nothing
+      _ <- executeSlashCommand env (CmdMsg "cc-0" "test") ctx
+      -- Global target should still be TargetProvider
+      target <- readIORef targetRef
+      target `shouldBe` TargetProvider
 
   describe "vault commands — no vault configured" $ do
     let mkEnvNoVault sentRef = do

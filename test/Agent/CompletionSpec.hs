@@ -60,6 +60,9 @@ spec = do
       results `shouldSatisfy` ("search" `elem`)
       results `shouldSatisfy` ("path" `elem`)
 
+    it "completes /m to /msg" $ do
+      slashCompletions "/m" `shouldSatisfy` ("/msg" `elem`)
+
     it "is case-insensitive" $ do
       slashCompletions "/PRO" `shouldSatisfy` ("/provider" `elem`)
       slashCompletions "/VAULT S" `shouldSatisfy` ("setup" `elem`)

@@ -22,6 +22,7 @@ module PureClaw.Agent.SlashCommands
 
 import Control.Applicative ((<|>))
 import Control.Exception
+import Control.Monad
 import Data.Foldable (asum)
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -162,6 +163,7 @@ data SlashCommand
   | CmdChannel ChannelSubCommand       -- ^ Channel configuration
   | CmdTranscript TranscriptSubCommand -- ^ Transcript query commands
   | CmdHarness HarnessSubCommand      -- ^ Harness management commands
+  | CmdMsg Text Text                  -- ^ Send a message to a specific target (name, message)
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ msgCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -224,6 +226,25 @@ harnessCommandSpecs =
   , CommandSpec "/harness list"          "List running harnesses"               GroupHarness (harnessExactP "list" HarnessList)
   , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
   ]
+
+msgCommandSpecs :: [CommandSpec]
+msgCommandSpecs =
+  [ CommandSpec "/msg <target> <message>" "Send a message to a specific harness/model" GroupHarness msgArgP
+  ]
+
+-- | Parse "/msg <target> <message>". The first word after /msg is the target,
+-- the rest is the message body. Both are required.
+msgArgP :: Text -> Maybe SlashCommand
+msgArgP t =
+  let pfx   = "/msg"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length pfx) t)
+              (target, body) = T.break (== ' ') rest
+          in if T.null target || T.null (T.strip body)
+             then Nothing
+             else Just (CmdMsg target (T.strip body))
+     else Nothing
 
 -- ---------------------------------------------------------------------------
 -- Parsing — derived from allCommandSpecs
@@ -548,6 +569,23 @@ executeSlashCommand env (CmdChannel sub) ctx = do
 
 executeSlashCommand env (CmdTranscript sub) ctx = do
   executeTranscriptCommand env sub ctx
+
+executeSlashCommand env (CmdMsg target body) ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  harnesses <- readIORef (_env_harnesses env)
+  case Map.lookup target harnesses of
+    Nothing -> do
+      send ("No running harness named '" <> target
+        <> "'. Use /harness list to see running harnesses.")
+      pure ctx
+    Just hh -> do
+      _lh_logInfo (_env_logger env) $ "Msg to harness: " <> target
+      _hh_send hh (TE.encodeUtf8 body)
+      output <- _hh_receive hh
+      let response = sanitizeHarnessOutput (TE.decodeUtf8 output)
+      unless (T.null (T.strip response)) $
+        send (prefixHarnessOutput target response)
+      pure ctx
 
 executeSlashCommand env (CmdHarness sub) ctx = do
   executeHarnessCommand env sub ctx

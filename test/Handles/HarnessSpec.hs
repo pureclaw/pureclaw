@@ -1,6 +1,7 @@
 module Handles.HarnessSpec (spec) where
 
 import Data.ByteString ()
+import Data.Text qualified as T
 import System.Exit
 import Test.Hspec
 
@@ -65,3 +66,35 @@ spec = do
     it "stop is a no-op" $ do
       _hh_stop mkNoOpHarnessHandle
       -- Should not throw
+
+  describe "prefixHarnessOutput" $ do
+    it "prefixes a single line" $
+      prefixHarnessOutput "claude-code-0" "hello"
+        `shouldBe` "claude-code-0> hello"
+
+    it "prefixes each line of multi-line output" $
+      prefixHarnessOutput "cc-1" "line1\nline2\nline3"
+        `shouldBe` "cc-1> line1\ncc-1> line2\ncc-1> line3"
+
+    it "handles empty output" $
+      prefixHarnessOutput "name" ""
+        `shouldBe` "name> "
+
+    it "preserves blank lines with prefix" $
+      prefixHarnessOutput "h" "a\n\nb"
+        `shouldBe` "h> a\nh> \nh> b"
+
+    it "works with long harness names" $ do
+      let name = "claude-code-42"
+      T.isPrefixOf (name <> "> ") (prefixHarnessOutput name "test")
+        `shouldBe` True
+
+  describe "sanitizeHarnessOutput" $ do
+    it "passes through plain text unchanged" $
+      sanitizeHarnessOutput "hello world" `shouldBe` "hello world"
+
+    it "strips ANSI escape sequences" $
+      sanitizeHarnessOutput "\ESC[32mgreen\ESC[0m" `shouldBe` "green"
+
+    it "strips leading and trailing blank lines" $
+      sanitizeHarnessOutput "\n\nhello\n\n" `shouldBe` "hello"

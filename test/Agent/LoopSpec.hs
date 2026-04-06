@@ -12,6 +12,7 @@ import PureClaw.Agent.Loop
 import PureClaw.Core.Errors
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
+import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
 import PureClaw.Security.Policy
@@ -120,12 +121,12 @@ mkTestEnv p ch = do
 spec :: Spec
 spec = do
   describe "runAgentLoop" $ do
-    it "processes a message and sends response" $ do
+    it "processes a message and sends response with model prefix" $ do
       (channel, sentRef) <- mkMockChannel ["hello"]
       env <- mkTestEnv (MockProvider "Hi there!") channel
       runAgentLoop env
       sent <- readIORef sentRef
-      sent `shouldBe` ["Hi there!"]
+      sent `shouldBe` ["mock> Hi there!"]
 
     it "processes multiple messages" $ do
       (channel, sentRef) <- mkMockChannel ["first", "second"]
@@ -158,13 +159,13 @@ spec = do
       env <- mkTestEnv (MockProvider "reply") channel
       runAgentLoop env
       sent <- readIORef sentRef
-      -- First message is /status output, second is provider reply
+      -- First message is /status output, second is provider reply (with model prefix)
       length sent `shouldBe` 2
       -- The /status response should contain session info
       case sent of
         (statusMsg:replyMsg:_) -> do
           T.unpack statusMsg `shouldContain` "Messages"
-          replyMsg `shouldBe` "reply"
+          replyMsg `shouldBe` "mock> reply"
         _ -> expectationFailure "expected two messages"
 
     -- Invariant: slash-prefixed messages NEVER reach the provider
@@ -200,7 +201,7 @@ spec = do
       -- Should have: reply to "first message", /new confirmation, reply to "after reset"
       length sent `shouldBe` 3
 
-    it "streams text chunks to the channel" $ do
+    it "streams text chunks to the channel with model prefix" $ do
       chunksRef <- newIORef ([] :: [StreamChunk])
       (channel, _sentRef) <- mkMockChannel ["hello"]
       let channel' = channel { _ch_sendChunk = \c -> modifyIORef chunksRef (<> [c]) }
@@ -208,11 +209,14 @@ spec = do
       let env = baseEnv { _env_channel = channel' }
       runAgentLoop env
       chunks <- readIORef chunksRef
-      -- Should get text chunks plus ChunkDone
-      length chunks `shouldSatisfy` (>= 2)
+      -- Should get: model prefix chunk, text chunks, ChunkDone
+      length chunks `shouldSatisfy` (>= 3)
+      case chunks of
+        (ChunkText prefix : _) -> T.unpack prefix `shouldContain` "mock> "
+        _ -> expectationFailure "expected prefix chunk first"
       last chunks `shouldBe` ChunkDone
 
-    it "executes tool calls and sends final text" $ do
+    it "executes tool calls and sends final text with model prefix" $ do
       (channel, sentRef) <- mkMockChannel ["do something"]
       let testHandler = ToolHandler $ \_ -> pure ("tool output", False)
           testDef = ToolDefinition "test_tool" "A test tool" (object [])
@@ -221,8 +225,46 @@ spec = do
       let env = baseEnv { _env_registry = registry }
       runAgentLoop env
       sent <- readIORef sentRef
-      -- Should get "Let me check." from first response, then "Done!" after tool execution
-      sent `shouldBe` ["Let me check.", "Done!"]
+      -- Should get prefixed "Let me check." then prefixed "Done!" after tool execution
+      sent `shouldBe` ["mock> Let me check.", "mock> Done!"]
+
+    it "prefixes harness output IRC-style when target is a harness" $ do
+      (channel, sentRef) <- mkMockChannel ["hello harness"]
+      let mockHarness = HarnessHandle
+            { _hh_send = \_ -> pure ()
+            , _hh_receive = pure "response line"
+            , _hh_name = "Claude Code"
+            , _hh_session = "pureclaw"
+            , _hh_status = pure HarnessRunning
+            , _hh_stop = pure ()
+            }
+      baseEnv <- mkTestEnv (MockProvider "unused") channel
+      harnessRef <- newIORef (Map.singleton "cc-0" mockHarness)
+      targetRef <- newIORef (TargetHarness "cc-0")
+      let env = baseEnv
+            { _env_harnesses = harnessRef
+            , _env_target = targetRef
+            }
+      runAgentLoop env
+      sent <- readIORef sentRef
+      sent `shouldBe` ["cc-0> response line"]
+
+    it "/msg routes to specific harness with IRC prefix" $ do
+      (channel, sentRef) <- mkMockChannel ["/msg cc-0 test message"]
+      let mockHarness = HarnessHandle
+            { _hh_send = \_ -> pure ()
+            , _hh_receive = pure "harness reply"
+            , _hh_name = "Claude Code"
+            , _hh_session = "pureclaw"
+            , _hh_status = pure HarnessRunning
+            , _hh_stop = pure ()
+            }
+      baseEnv <- mkTestEnv (MockProvider "unused") channel
+      harnessRef <- newIORef (Map.singleton "cc-0" mockHarness)
+      let env = baseEnv { _env_harnesses = harnessRef }
+      runAgentLoop env
+      sent <- readIORef sentRef
+      sent `shouldBe` ["cc-0> harness reply"]
 
   describe "sanitizeHarnessOutput" $ do
     it "passes through plain text unchanged" $

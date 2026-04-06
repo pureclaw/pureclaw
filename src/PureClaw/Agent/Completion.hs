@@ -118,6 +118,16 @@ getDynamicCandidates (Just env) cacheRef line = do
       models <- getCachedModels env cacheRef
       let modelNames = map (T.unpack . unModelId) models
       pure (filter (matchesCI partial) (harnessNames ++ modelNames))
+  else if "/msg " `L.isPrefixOf` lower
+    then do
+      let rest = drop 5 (dropWhile (== ' ') line)
+      -- Only complete the first argument (target name), not the message body
+      if ' ' `notElem` rest
+        then do
+          harnesses <- readIORef (_env_harnesses env)
+          let harnessNames = map T.unpack (Map.keys harnesses)
+          pure (filter (matchesCI rest) harnessNames)
+        else pure []
   else if "/harness start " `L.isPrefixOf` lower
     then do
       let partial = drop 15 (dropWhile (== ' ') line)
