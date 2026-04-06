@@ -18,6 +18,7 @@ module PureClaw.Agent.SlashCommands
   , executeSlashCommand
     -- * Discovery
   , discoverHarnesses
+  , discoverHarnessesIn
   ) where
 
 import Control.Applicative ((<|>))
@@ -1331,8 +1332,16 @@ resolveHarnessName input =
 discoverHarnesses
   :: TranscriptHandle
   -> IO (Map.Map Text HarnessHandle, Int)
-discoverHarnesses th = do
-  windows <- listSessionWindows "pureclaw"
+discoverHarnesses = discoverHarnessesIn "pureclaw"
+
+-- | Like 'discoverHarnesses' but queries a specific tmux session name.
+-- Useful for testing with an isolated session.
+discoverHarnessesIn
+  :: Text             -- ^ tmux session name
+  -> TranscriptHandle
+  -> IO (Map.Map Text HarnessHandle, Int)
+discoverHarnessesIn session th = do
+  windows <- listSessionWindows session
   let discovered =
         [ (name, idx, canonical)
         | (idx, name) <- windows

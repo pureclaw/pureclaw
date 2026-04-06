@@ -1429,7 +1429,8 @@ spec = do
   describe "discoverHarnesses" $ do
     it "returns empty map when no tmux session exists" $ do
       let th = mkNoOpTranscriptHandle
-      (harnesses, nextIdx) <- discoverHarnesses th
+      -- Use a unique session name that won't collide with a running pureclaw
+      (harnesses, nextIdx) <- discoverHarnessesIn "pureclaw-test-no-session" th
       Map.null harnesses `shouldBe` True
       nextIdx `shouldBe` 0
 
@@ -1438,12 +1439,12 @@ spec = do
       case available of
         Left _ -> pendingWith "tmux not available on this system"
         Right () -> do
-          let sName = "pureclaw"
+          let sName = "pureclaw-test-discover"
           -- Start the session and rename window 0 to look like a harness
           _ <- startTmuxSession sName
           renameWindow sName 0 "claude-code-0"
           let th = mkNoOpTranscriptHandle
-          (harnesses, nextIdx) <- discoverHarnesses th
+          (harnesses, nextIdx) <- discoverHarnessesIn sName th
           -- Should discover the harness
           Map.member "claude-code-0" harnesses `shouldBe` True
           nextIdx `shouldBe` 1
