@@ -138,7 +138,7 @@ data TranscriptSubCommand
 
 -- | Subcommands of the '/harness' family.
 data HarnessSubCommand
-  = HarnessStart Text          -- ^ Start a named harness (e.g. "claude-code")
+  = HarnessStart Text (Maybe Text) -- ^ Start a named harness, optional working directory
   | HarnessStop Text           -- ^ Stop a named harness
   | HarnessList                -- ^ List running harnesses
   | HarnessAttach              -- ^ Show tmux attach command
@@ -221,7 +221,7 @@ transcriptCommandSpecs =
 
 harnessCommandSpecs :: [CommandSpec]
 harnessCommandSpecs =
-  [ CommandSpec "/harness start <name>"  "Start a harness (e.g. claude-code)"   GroupHarness (harnessArgP "start" HarnessStart)
+  [ CommandSpec "/harness start <name> [dir]"  "Start a harness, optionally in a directory"   GroupHarness harnessStartP
   , CommandSpec "/harness stop <name>"   "Stop a running harness"               GroupHarness (harnessArgP "stop" HarnessStop)
   , CommandSpec "/harness list"          "List running harnesses"               GroupHarness (harnessExactP "list" HarnessList)
   , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
@@ -401,6 +401,23 @@ transcriptUnknownFallback t =
 harnessExactP :: Text -> HarnessSubCommand -> Text -> Maybe SlashCommand
 harnessExactP sub cmd t =
   if T.toLower t == "/harness " <> sub then Just (CmdHarness cmd) else Nothing
+
+-- | Parse "/harness start <name> [dir]".
+-- The first word after "start" is the harness name; the optional second word
+-- is the working directory.
+harnessStartP :: Text -> Maybe SlashCommand
+harnessStartP t =
+  let pfx   = "/harness start"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length pfx) t)
+              (name, afterName) = T.break (== ' ') rest
+          in if T.null name
+             then Nothing
+             else let dir = let d = T.strip afterName
+                            in if T.null d then Nothing else Just d
+                  in Just (CmdHarness (HarnessStart name dir))
+     else Nothing
 
 -- | Case-insensitive prefix match for "/harness <sub> <arg>".
 harnessArgP :: Text -> (Text -> HarnessSubCommand) -> Text -> Maybe SlashCommand
@@ -1154,7 +1171,7 @@ executeHarnessCommand :: AgentEnv -> HarnessSubCommand -> Context -> IO Context
 executeHarnessCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   case sub of
-    HarnessStart name -> do
+    HarnessStart name mDir -> do
       mTh <- readIORef (_env_transcript env)
       let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
           logger = _env_logger env
@@ -1166,11 +1183,13 @@ executeHarnessCommand env sub ctx = do
       mClaudePath <- Dir.findExecutable "claude"
       logInfo $ "Harness start: claude path = " <> T.pack (show mClaudePath)
       logInfo $ "Harness start: policy autonomy = " <> T.pack (show (_sp_autonomy (_env_policy env)))
+      -- Resolve optional working directory
+      resolvedDir <- resolveHarnessDir mDir
       -- Assign a window index and build the unique harness key
       windowIdx <- readIORef (_env_nextWindowIdx env)
       let canonical = Data.Maybe.fromMaybe name (resolveHarnessName name)
           harnessKey = canonical <> "-" <> T.pack (show windowIdx)
-      result <- startHarnessByName (_env_policy env) th windowIdx name
+      result <- startHarnessByName (_env_policy env) th windowIdx name resolvedDir
       case result of
         Left err -> do
           let detail = case err of
@@ -1237,7 +1256,7 @@ executeHarnessCommand env sub ctx = do
                 ["Running:"] <> runningSection <>
                 ["", "Available:"] <> availSection <>
                 ["", "Commands:"
-                , "  /harness start <name>  — Start a harness"
+                , "  /harness start <name> [dir]  — Start a harness (optionally in dir)"
                 , "  /harness stop <name>   — Stop a harness"
                 , "  /harness list          — List harnesses"
                 , "  /harness attach        — Show tmux attach command"
@@ -1260,11 +1279,27 @@ startHarnessByName
   -> TranscriptHandle
   -> Int              -- ^ tmux window index
   -> Text
+  -> Maybe FilePath   -- ^ optional working directory
   -> IO (Either HarnessError HarnessHandle)
-startHarnessByName policy th windowIdx name =
+startHarnessByName policy th windowIdx name mWorkDir =
   case resolveHarnessName name of
-    Just "claude-code" -> mkClaudeCodeHarness policy th windowIdx
+    Just "claude-code" -> mkClaudeCodeHarness policy th windowIdx mWorkDir
     _                  -> pure (Left (HarnessBinaryNotFound name))
+
+-- | Resolve an optional directory argument for harness start.
+-- Relative paths are interpreted relative to @$HOME@; absolute paths are used as-is.
+resolveHarnessDir :: Maybe Text -> IO (Maybe FilePath)
+resolveHarnessDir Nothing = pure Nothing
+resolveHarnessDir (Just dir) = do
+  let path = T.unpack dir
+  if isAbsolutePath path
+    then pure (Just path)
+    else do
+      home <- Dir.getHomeDirectory
+      pure (Just (home </> path))
+  where
+    isAbsolutePath ('/':_) = True
+    isAbsolutePath _       = False
 
 -- | Resolve a name or alias to the canonical harness name.
 resolveHarnessName :: Text -> Maybe Text

@@ -105,6 +105,10 @@ escapeForShell = concatMap go
     go '`'  = "\\`"
     go c    = [c]
 
+-- | Shell-escape a 'String' argument. Convenience wrapper around 'shellEscape'.
+shellEscapeStr :: String -> String
+shellEscapeStr = T.unpack . shellEscape . T.pack
+
 -- | Simple shell escaping for individual arguments.
 -- Wraps in single quotes and escapes embedded single quotes.
 shellEscape :: Text -> Text
@@ -148,8 +152,10 @@ sessionExists sessionName = do
 -- | Add a window to a tmux session for a harness at a specific window index.
 -- Window 0 reuses the session's default window; higher indices create new windows.
 -- Uses stealth mode: env -u TMUX, script -c for fresh PTY.
-addHarnessWindow :: Text -> Int -> FilePath -> [Text] -> IO (Either HarnessError ())
-addHarnessWindow sessionName windowIdx binary args = do
+-- An optional working directory can be specified; for window 0 this sends a @cd@
+-- before the command, for higher indices it uses @tmux new-window -c@.
+addHarnessWindow :: Text -> Int -> FilePath -> [Text] -> Maybe FilePath -> IO (Either HarnessError ())
+addHarnessWindow sessionName windowIdx binary args mWorkDir = do
   tmuxCheck <- requireTmux
   case tmuxCheck of
     Left err -> pure (Left err)
@@ -159,15 +165,20 @@ addHarnessWindow sessionName windowIdx binary args = do
           target  = session <> ":" <> show windowIdx
       if windowIdx == 0
         then do
-          -- Window 0 already exists from session creation — send the command there
+          -- Window 0 already exists from session creation — cd then send command
+          case mWorkDir of
+            Just dir -> do
+              _ <- runTmuxSilent ["send-keys", "-t", target, "cd " <> shellEscapeStr dir, "Enter"]
+              pure ()
+            Nothing  -> pure ()
           _ <- runTmuxSilent ["send-keys", "-t", target, stealthCmd, "Enter"]
           pure (Right ())
         else do
-          (exitCode, _stderr) <- runTmux
-            [ "new-window"
-            , "-t", target
-            , stealthCmd
-            ]
+          let baseArgs = [ "new-window", "-t", target ]
+              dirArgs  = case mWorkDir of
+                           Just dir -> ["-c", dir]
+                           Nothing  -> []
+          (exitCode, _stderr) <- runTmux (baseArgs <> dirArgs <> [stealthCmd])
           case exitCode of
             ExitSuccess   -> pure (Right ())
             ExitFailure _ -> pure (Right ())

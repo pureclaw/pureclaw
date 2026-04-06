@@ -42,6 +42,7 @@ mkClaudeCodeHarness
   :: SecurityPolicy
   -> TranscriptHandle
   -> Int
+  -> Maybe FilePath   -- ^ optional working directory
   -> IO (Either HarnessError HarnessHandle)
 mkClaudeCodeHarness =
   mkClaudeCodeHarnessWith
@@ -52,15 +53,16 @@ mkClaudeCodeHarness =
 
 -- | Testable variant with injectable dependencies.
 mkClaudeCodeHarnessWith
-  :: IO (Maybe FilePath)                                                    -- ^ findExecutable "claude"
-  -> IO (Either HarnessError ())                                            -- ^ requireTmux
-  -> (Text -> Int -> FilePath -> [Text] -> IO (Either HarnessError ()))     -- ^ addHarnessWindow
-  -> (Text -> IO (Either HarnessError ()))                                  -- ^ startTmuxSession
+  :: IO (Maybe FilePath)                                                                -- ^ findExecutable "claude"
+  -> IO (Either HarnessError ())                                                        -- ^ requireTmux
+  -> (Text -> Int -> FilePath -> [Text] -> Maybe FilePath -> IO (Either HarnessError ()))  -- ^ addHarnessWindow
+  -> (Text -> IO (Either HarnessError ()))                                              -- ^ startTmuxSession
   -> SecurityPolicy
   -> TranscriptHandle
-  -> Int                                                                    -- ^ tmux window index
+  -> Int                                                                                -- ^ tmux window index
+  -> Maybe FilePath                                                                     -- ^ optional working directory
   -> IO (Either HarnessError HarnessHandle)
-mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th windowIdx =
+mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th windowIdx mWorkDir =
   -- Step 1: Pre-check authorization (pure, no IO needed).
   -- This catches Deny autonomy and missing command allowlisting before any IO.
   case preAuthorize policy of
@@ -87,7 +89,7 @@ mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th wi
                     Left err -> pure (Left err)
                     Right () -> do
                       -- Step 6: Add harness window at the assigned index
-                      windowResult <- addWindow sessionName windowIdx program []
+                      windowResult <- addWindow sessionName windowIdx program [] mWorkDir
                       case windowResult of
                         Left err -> pure (Left err)
                         Right () -> do
