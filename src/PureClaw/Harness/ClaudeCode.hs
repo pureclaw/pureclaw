@@ -10,6 +10,7 @@ module PureClaw.Harness.ClaudeCode
   ) where
 
 import Control.Concurrent
+import Control.Monad (when)
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -95,6 +96,10 @@ mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th wi
                       case windowResult of
                         Left err -> pure (Left err)
                         Right () -> do
+                          -- Step 6b: If unsafe mode, auto-confirm the safety prompt
+                          when (hasUnsafeFlag extraArgs) $ do
+                            threadDelay 2000000  -- 2s for the prompt to appear
+                            sendToWindow sessionName windowIdx ""
                           -- Step 7: Wire up the HarnessHandle
                           baselineRef <- newIORef BS.empty
                           let handle = HarnessHandle
@@ -106,6 +111,10 @@ mkClaudeCodeHarnessWith findClaude checkTmux addWindow startSession policy th wi
                                 , _hh_stop    = stopHarnessWindow sessionName windowIdx
                                 }
                           pure (Right handle)
+
+-- | Check whether the extra args include the unsafe/skip-permissions flag.
+hasUnsafeFlag :: [Text] -> Bool
+hasUnsafeFlag = elem "--dangerously-skip-permissions"
 
 -- | Pre-authorize: check that the policy would allow "claude" at all.
 -- This is a fast pure check before doing any IO (tmux, findExecutable, etc.).
