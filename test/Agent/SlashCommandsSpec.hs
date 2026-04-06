@@ -640,7 +640,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       receivedRef <- newIORef (Nothing :: Maybe ByteString)
       let mockHarness = mkNoOpHarnessHandle
-            { _hh_send = \bs -> writeIORef receivedRef (Just bs)
+            { _hh_send = writeIORef receivedRef . Just
             , _hh_receive = pure (TE.encodeUtf8 "some output")
             , _hh_name = "Claude Code"
             }
