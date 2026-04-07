@@ -22,6 +22,8 @@ import PureClaw.CLI.Config (getPureclawDir)
 import PureClaw.Core.Types
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Providers.Class
+import PureClaw.Session.Handle qualified as Session
+import PureClaw.Session.Types qualified as SessionTypes
 import System.FilePath ((</>))
 
 -- | TTL cache for model listing results (30 seconds).
@@ -138,6 +140,13 @@ getDynamicCandidates (Just env) cacheRef line = do
           names = concatMap (\(canonical, aliases, _) ->
             T.unpack canonical : map T.unpack aliases) knownHarnesses
       pure (filter (matchesCI partial) names)
+  else if "/session resume " `L.isPrefixOf` lower
+    then do
+      let partial = drop 16 (dropWhile (== ' ') line)
+      sessionsDir <- (</> "sessions") <$> getPureclawDir
+      metas <- Session.listSessions sessionsDir Nothing 1000
+      let ids = [unSessionId (SessionTypes._sm_id m) | m <- metas]
+      pure (map T.unpack (sessionIdMatches ids (T.pack partial)))
   else if "/agent info " `L.isPrefixOf` lower || "/agent start " `L.isPrefixOf` lower
     then do
       let prefixLen = if "/agent info " `L.isPrefixOf` lower then 12 else 13

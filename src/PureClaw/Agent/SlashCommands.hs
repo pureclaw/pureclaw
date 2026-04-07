@@ -7,10 +7,15 @@ module PureClaw.Agent.SlashCommands
   , TranscriptSubCommand (..)
   , HarnessSubCommand (..)
   , AgentSubCommand (..)
+  , SessionSubCommand (..)
     -- * Known harnesses
   , knownHarnesses
     -- * Agent name tab completion helper
   , agentNameMatches
+    -- * Session id tab completion helper
+  , sessionIdMatches
+    -- * Sessions directory helper
+  , getSessionsDir
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)
@@ -67,6 +72,10 @@ import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Transcript.Types
+
+import Data.Time.Clock qualified as Time
+import PureClaw.Session.Handle qualified as Session
+import PureClaw.Session.Types qualified as SessionTypes
 
 -- ---------------------------------------------------------------------------
 -- Command taxonomy
@@ -152,6 +161,18 @@ data HarnessSubCommand
   | HarnessUnknown Text        -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
+-- | Subcommands of the '/session' family.
+data SessionSubCommand
+  = SessionNew                         -- ^ Create a new session (clear ctx + write on disk)
+  | SessionList (Maybe Text)           -- ^ List recent sessions (optionally filter by agent)
+  | SessionResume Text                 -- ^ Resume a session by id or prefix
+  | SessionLast                        -- ^ Resume the most recent session
+  | SessionInfo                        -- ^ Show info for the current session
+  | SessionReset                       -- ^ Full reset (alias for CmdReset behaviour)
+  | SessionCompact                     -- ^ Compact the current session (alias for CmdCompact)
+  | SessionUnknown Text                -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
 -- | Subcommands of the '/agent' family.
 data AgentSubCommand
   = AgentList                  -- ^ List discovered agents
@@ -179,6 +200,7 @@ data SlashCommand
   | CmdTranscript TranscriptSubCommand -- ^ Transcript query commands
   | CmdHarness HarnessSubCommand      -- ^ Harness management commands
   | CmdAgent AgentSubCommand          -- ^ Agent management commands
+  | CmdSession SessionSubCommand      -- ^ Session management commands
   | CmdMsg Text Text                  -- ^ Send a message to a specific target (name, message)
   deriving stock (Show, Eq)
 
@@ -192,7 +214,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ msgCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ msgCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -201,7 +223,62 @@ sessionCommandSpecs =
   , CommandSpec "/new"     "Clear conversation, keep configuration"   GroupSession (exactP "/new"     CmdNew)
   , CommandSpec "/reset"   "Full reset including usage counters"      GroupSession (exactP "/reset"   CmdReset)
   , CommandSpec "/compact" "Summarise conversation to save context"   GroupSession (exactP "/compact" CmdCompact)
+  , CommandSpec "/last"    "Resume the most recent session"           GroupSession (exactP "/last"    (CmdSession SessionLast))
   ]
+
+-- | The '/session' command family. Subcommands manage the on-disk session
+-- lifecycle (create, list, resume, info, reset, compact).
+sessionFamilyCommandSpecs :: [CommandSpec]
+sessionFamilyCommandSpecs =
+  [ CommandSpec "/session new"              "Create a new session (clears context)"          GroupSession (sessionExactP "new"     SessionNew)
+  , CommandSpec "/session list [<agent>]"   "List recent sessions (optionally by agent)"     GroupSession sessionListP
+  , CommandSpec "/session resume <id>"      "Resume a session by id or unambiguous prefix"   GroupSession sessionResumeP
+  , CommandSpec "/session last"             "Resume the most recent session"                 GroupSession (sessionExactP "last"    SessionLast)
+  , CommandSpec "/session info"             "Show current session info"                      GroupSession (sessionExactP "info"    SessionInfo)
+  , CommandSpec "/session reset"            "Full reset of current session"                  GroupSession (sessionExactP "reset"   SessionReset)
+  , CommandSpec "/session compact"          "Compact current session"                        GroupSession (sessionExactP "compact" SessionCompact)
+  ]
+
+-- | Case-insensitive exact match for "/session <sub>" with no argument.
+sessionExactP :: Text -> SessionSubCommand -> Text -> Maybe SlashCommand
+sessionExactP sub cmd t =
+  if T.toLower t == "/session " <> sub then Just (CmdSession cmd) else Nothing
+
+-- | Parse "/session list [<agent>]". With no argument yields @SessionList Nothing@.
+sessionListP :: Text -> Maybe SlashCommand
+sessionListP t =
+  let pfx   = "/session list"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdSession (SessionList Nothing))
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdSession (SessionList Nothing))
+                  else Just (CmdSession (SessionList (Just arg)))
+          else Nothing
+
+-- | Parse "/session resume <id>". The argument is required.
+sessionResumeP :: Text -> Maybe SlashCommand
+sessionResumeP t =
+  let pfx   = "/session resume"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let arg = T.strip (T.drop (T.length pfx) t)
+          in if T.null arg
+             then Nothing
+             else Just (CmdSession (SessionResume arg))
+     else Nothing
+
+-- | Catch-all for any "/session <X>" not matched by 'allCommandSpecs'.
+sessionUnknownFallback :: Text -> Maybe SlashCommand
+sessionUnknownFallback t =
+  let lower = T.toLower t
+  in if "/session" `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/session") lower)
+              sub  = fst (T.break (== ' ') rest)
+          in Just (CmdSession (SessionUnknown sub))
+     else Nothing
 
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
@@ -329,6 +406,7 @@ parseSlashCommand input =
             <|> transcriptUnknownFallback stripped
             <|> harnessUnknownFallback stripped
             <|> agentUnknownFallback stripped
+            <|> sessionUnknownFallback stripped
      else Nothing
 
 -- | Exact case-insensitive match.
@@ -680,6 +758,9 @@ executeSlashCommand env (CmdHarness sub) ctx = do
 
 executeSlashCommand env (CmdAgent sub) ctx = do
   executeAgentCommand env sub ctx
+
+executeSlashCommand env (CmdSession sub) ctx = do
+  executeSessionCommand env sub ctx
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
@@ -1468,6 +1549,164 @@ agentNameMatches :: [Text] -> Text -> [Text]
 agentNameMatches candidates prefix =
   let lowerPfx = T.toLower prefix
   in filter (\c -> lowerPfx `T.isPrefixOf` T.toLower c) candidates
+
+-- ---------------------------------------------------------------------------
+-- Session subcommand execution
+-- ---------------------------------------------------------------------------
+
+-- | Directory holding per-session subdirectories. Honours @HOME@ via
+-- 'getPureclawDir' so tests can redirect via 'withTempHome'.
+getSessionsDir :: IO FilePath
+getSessionsDir = do
+  pureclawDir <- getPureclawDir
+  pure (pureclawDir </> "sessions")
+
+-- | Filter a list of session IDs by a case-insensitive prefix. Pure helper
+-- used by the tab completer. Empty prefix returns all candidates.
+sessionIdMatches :: [Text] -> Text -> [Text]
+sessionIdMatches candidates prefix =
+  let lowerPfx = T.toLower prefix
+  in filter (\c -> lowerPfx `T.isPrefixOf` T.toLower c) candidates
+
+-- | Execute a '/session' subcommand. In Session C scope, @/session new@ and
+-- @/session resume@ do NOT swap the active session (that is Session D's job
+-- once 'AgentEnv' gains mutable session state); instead they validate,
+-- persist to disk (new) or report (resume), and return confirmation
+-- messages.
+executeSessionCommand :: AgentEnv -> SessionSubCommand -> Context -> IO Context
+executeSessionCommand env sub ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  case sub of
+    SessionNew -> do
+      sessionsDir <- getSessionsDir
+      Dir.createDirectoryIfMissing True sessionsDir
+      now <- Time.getCurrentTime
+      let sid = SessionTypes.newSessionId Nothing now
+          meta = SessionTypes.SessionMeta
+            { SessionTypes._sm_id                = sid
+            , SessionTypes._sm_agent             = Nothing
+            , SessionTypes._sm_runtime           = SessionTypes.RTProvider
+            , SessionTypes._sm_model             = ""
+            , SessionTypes._sm_channel           = ""
+            , SessionTypes._sm_createdAt         = now
+            , SessionTypes._sm_lastActive        = now
+            , SessionTypes._sm_bootstrapConsumed = False
+            }
+      _ <- Session.mkSessionHandle (_env_logger env) sessionsDir meta
+      send ("New session created: " <> unSessionId sid
+            <> "\nSession cleared. Starting fresh.")
+      pure (clearMessages ctx)
+
+    SessionList mAgentFilter -> do
+      sessionsDir <- getSessionsDir
+      -- /session list <agent> filters by the named agent; invalid name => empty
+      let mAgent = case mAgentFilter of
+            Nothing   -> Nothing
+            Just name -> case AgentDef.mkAgentName name of
+              Right n -> Just n
+              Left _  -> Nothing
+      metas <- Session.listSessions sessionsDir mAgent 20
+      if null metas
+        then do
+          send "No sessions found."
+          pure ctx
+        else do
+          let line m = "  " <> unSessionId (SessionTypes._sm_id m)
+              output = T.intercalate "\n" ("Sessions:" : map line metas)
+          send output
+          pure ctx
+
+    SessionResume ref -> do
+      sessionsDir <- getSessionsDir
+      result <- Session.resolveSessionRef sessionsDir ref
+      case result of
+        Left Session.NotFound -> do
+          send ("No session matching " <> ref <> " found.")
+          pure ctx
+        Left (Session.Ambiguous matches) -> do
+          let names = T.intercalate ", " (map unSessionId matches)
+          send ("Multiple sessions match: " <> names)
+          pure ctx
+        Right sid -> do
+          eHandle <- Session.resumeSession (_env_logger env) sessionsDir sid
+          case eHandle of
+            Left err -> do
+              send ("Failed to resume session: " <> T.pack (show err))
+              pure ctx
+            Right _ -> do
+              send ("Resumed session " <> unSessionId sid)
+              pure ctx
+
+    SessionLast -> do
+      sessionsDir <- getSessionsDir
+      metas <- Session.listSessions sessionsDir Nothing 1
+      case metas of
+        [] -> do
+          send "No sessions found."
+          pure ctx
+        (m : _) -> do
+          let sid = SessionTypes._sm_id m
+          eHandle <- Session.resumeSession (_env_logger env) sessionsDir sid
+          case eHandle of
+            Left err -> do
+              send ("Failed to resume session: " <> T.pack (show err))
+              pure ctx
+            Right _ -> do
+              send ("Resumed session " <> unSessionId sid)
+              pure ctx
+
+    SessionInfo -> do
+      meta <- readIORef (_sh_meta (_env_session env))
+      model <- readIORef (_env_model env)
+      target <- readIORef (_env_target env)
+      let sidLine    = "  Session: " <> unSessionId (_sm_id meta)
+          agentLine  = case _sm_agent meta of
+            Nothing -> "  Agent:   (no agent)"
+            Just a  -> "  Agent:   " <> AgentDef.unAgentName a
+          runtimeLine = "  Runtime: " <> case _sm_runtime meta of
+            SessionTypes.RTProvider   -> "provider"
+            SessionTypes.RTHarness n  -> "harness:" <> n
+          targetLine = case target of
+            TargetProvider     -> "  Target:  model: " <> unModelId model
+            TargetHarness name -> "  Target:  harness: " <> name
+          body = T.intercalate "\n"
+            [ "Session info:"
+            , sidLine
+            , agentLine
+            , runtimeLine
+            , targetLine
+            , "  Messages:            " <> T.pack (show (contextMessageCount ctx))
+            , "  Est. context tokens: " <> T.pack (show (contextTokenEstimate ctx))
+            , "  Total input tokens:  " <> T.pack (show (contextTotalInputTokens ctx))
+            , "  Total output tokens: " <> T.pack (show (contextTotalOutputTokens ctx))
+            ]
+      send body
+      pure ctx
+
+    SessionReset -> executeSlashCommand env CmdReset ctx
+    SessionCompact -> executeSlashCommand env CmdCompact ctx
+
+    SessionUnknown subcmd
+      | T.null subcmd -> do
+          send (T.intercalate "\n"
+            [ "Session commands:"
+            , "  /session new"
+            , "  /session list [<agent>]"
+            , "  /session resume <id>"
+            , "  /session last"
+            , "  /session info"
+            , "  /session reset"
+            , "  /session compact"
+            ])
+          pure ctx
+      | otherwise -> do
+          send ("Unknown session command: " <> subcmd <> ". Type /session to see available commands.")
+          pure ctx
+  where
+    _sh_meta = Session._sh_meta
+    _sm_id = SessionTypes._sm_id
+    _sm_agent = SessionTypes._sm_agent
+    _sm_runtime = SessionTypes._sm_runtime
 
 -- | Known harnesses: (canonical name, aliases, description).
 knownHarnesses :: [(Text, [Text], Text)]
