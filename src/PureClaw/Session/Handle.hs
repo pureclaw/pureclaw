@@ -14,6 +14,10 @@ module PureClaw.Session.Handle
     -- * Runtime validation
   , ResolvedRuntime (..)
   , validateRuntime
+    -- * Bootstrap consumption
+  , markBootstrapConsumed
+    -- * Resume context reload
+  , loadRecentMessages
   ) where
 
 import Control.Exception (IOException, try)
@@ -22,6 +26,7 @@ import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
   ( IORef
+  , atomicModifyIORef'
   , newIORef
   , readIORef
   )
@@ -51,9 +56,19 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Harness (HarnessHandle)
 import PureClaw.Handles.Log (LogHandle)
 import PureClaw.Handles.Transcript
-  ( TranscriptHandle
+  ( TranscriptHandle (..)
   , mkFileTranscriptHandle
   , mkNoOpTranscriptHandle
+  )
+import PureClaw.Providers.Class
+  ( ContentBlock (..)
+  , Message (..)
+  , Role (..)
+  )
+import PureClaw.Transcript.Types
+  ( Direction (..)
+  , TranscriptEntry (..)
+  , TranscriptFilter (..)
   )
 import PureClaw.Session.Types
   ( RuntimeType (..)
@@ -332,4 +347,72 @@ validateRuntime harnesses (RTHarness name)
   | otherwise =
       let msg = "harness '" <> name <> "' is not running, falling back to provider"
        in RuntimeFallback TargetProvider msg
+
+-- ----------------------------------------------------------------------------
+-- Bootstrap consumption
+-- ----------------------------------------------------------------------------
+
+-- | Flip '_sm_bootstrapConsumed' to 'True' in the session metadata
+-- 'IORef' and persist the change to @session.json@ via '_sh_save'.
+--
+-- Called by the agent loop the first time a provider response completes
+-- ('StreamDone'), via the one-shot callback installed on
+-- @_env_onFirstStreamDone@. Idempotent: re-invocations re-save the same
+-- metadata without error.
+markBootstrapConsumed :: SessionHandle -> IO ()
+markBootstrapConsumed sh = do
+  atomicModifyIORef' (_sh_meta sh) $ \m ->
+    (m { _sm_bootstrapConsumed = True }, ())
+  _sh_save sh
+
+-- ----------------------------------------------------------------------------
+-- Resume context reload
+-- ----------------------------------------------------------------------------
+
+-- | Load a bounded window of recent 'Message' values from a session's
+-- transcript, oldest-first.
+--
+-- @loadRecentMessages th maxCount maxTokens@ reads every recorded
+-- transcript entry via '_th_query', converts each to a text 'Message'
+-- (mapping 'Request' → 'User' and 'Response' → 'Assistant'), keeps at
+-- most the last @maxCount@, then walks that window from newest back to
+-- oldest accumulating an estimated token budget (computed as
+-- @T.length payload `div` 4@ — a rough heuristic, not a true tokenizer).
+-- Once the budget is exhausted no further messages are added.
+--
+-- Returns the surviving messages in chronological (oldest-first) order
+-- so they can be replayed directly into the context.
+loadRecentMessages :: TranscriptHandle -> Int -> Int -> IO [Message]
+loadRecentMessages th maxCount maxTokens = do
+  entries <- _th_query th TranscriptFilter
+    { _tf_harness   = Nothing
+    , _tf_model     = Nothing
+    , _tf_direction = Nothing
+    , _tf_timeRange = Nothing
+    , _tf_limit     = Nothing
+    }
+  let total     = length entries
+      countWin  = if total > maxCount
+                    then drop (total - maxCount) entries
+                    else entries
+      -- Walk newest→oldest, adding to the budget; stop at the first
+      -- entry that would push us OVER the limit. Always include at
+      -- least one entry if the window is non-empty, so a single
+      -- oversized message is not silently dropped.
+      reversed  = reverse countWin
+      budgeted  = goBudget 0 True reversed
+      goBudget _    _     [] = []
+      goBudget used first (e:es) =
+        let cost  = T.length (_te_payload e) `div` 4
+            used' = used + cost
+        in if used' > maxTokens && not first
+             then []
+             else e : goBudget used' False es
+  pure (map entryToMessage (reverse budgeted))
+  where
+    entryToMessage e =
+      let role = case _te_direction e of
+            Request  -> User
+            Response -> Assistant
+      in Message role [TextBlock (_te_payload e)]
 
