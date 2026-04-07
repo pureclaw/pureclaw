@@ -7,7 +7,6 @@ import Data.Text qualified as T
 import Data.Time (UTCTime (..), picosecondsToDiffTime)
 import Data.Time.Calendar (Day (ModifiedJulianDay))
 import PureClaw.Agent.AgentDef (mkAgentName)
-import PureClaw.Agent.Env (MessageTarget (..))
 import PureClaw.Core.Types
 import PureClaw.Session.Types
 
