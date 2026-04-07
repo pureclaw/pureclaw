@@ -17,6 +17,7 @@ module PureClaw.Agent.AgentDef
   , composeAgentPrompt
   ) where
 
+import Control.Exception qualified as Exc
 import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
 import Data.Text (Text)
@@ -159,32 +160,69 @@ sectionMarker IdentityK  = "--- IDENTITY ---"
 sectionMarker ToolsK     = "--- TOOLS ---"
 sectionMarker BootstrapK = "--- BOOTSTRAP ---"
 
+-- | Maximum raw file size we will read. Anything larger is rejected with a
+-- log warning and skipped.
+maxBootstrapFileBytes :: Integer
+maxBootstrapFileBytes = 1024 * 1024
+
+-- | Truncate a section body to @limit@ characters, appending the exact
+-- truncation marker. Strings at or under the limit are returned as-is.
+truncateSection :: Int -> Text -> Text
+truncateSection limit txt
+  | T.length txt <= limit = txt
+  | otherwise =
+      T.take limit txt
+        <> "\n[...truncated at " <> T.pack (show limit) <> " chars...]"
+
+-- | Read a single bootstrap section file, applying size/empty/truncation
+-- rules. Returns 'Nothing' when the file is missing, empty (including
+-- whitespace-only), or rejected as oversized.
+readSection :: LogHandle -> FilePath -> SectionKind -> Int -> IO (Maybe Text)
+readSection lg dir kind limit = do
+  let path = dir </> sectionFileName kind
+  exists <- Dir.doesFileExist path
+  if not exists
+    then pure Nothing
+    else do
+      size <- Dir.getFileSize path
+      if size > maxBootstrapFileBytes
+        then do
+          _lh_logWarn lg $
+            "Skipping oversized bootstrap file (>" <> T.pack (show maxBootstrapFileBytes) <>
+            " bytes): " <> T.pack path
+          pure Nothing
+        else do
+          raw <- Exc.try (TIO.readFile path) :: IO (Either Exc.IOException Text)
+          case raw of
+            Left e -> do
+              _lh_logWarn lg $
+                "Failed to read bootstrap file " <> T.pack path <> ": " <> T.pack (show e)
+              pure Nothing
+            Right txt ->
+              let contents = case kind of
+                    AgentsK -> case parseAgentsMd txt of
+                      Right (_, body) -> body
+                      Left _ -> txt
+                    _ -> txt
+                  trimmed = T.dropWhileEnd Char.isSpace contents
+              in if T.null (T.strip trimmed)
+                   then pure Nothing
+                   else pure (Just (truncateSection limit trimmed))
+
 -- | Compose a system prompt from an agent's bootstrap files. Files are read
 -- in the fixed injection order (SOUL, USER, AGENTS, MEMORY, IDENTITY, TOOLS,
--- BOOTSTRAP); missing files are skipped. For @AGENTS.md@, only the body
--- after the TOML frontmatter fence is injected (the frontmatter itself
--- lives in '_ad_config'). Sections are trimmed of trailing whitespace and
--- joined with a blank line between them.
+-- BOOTSTRAP), missing or empty (including whitespace-only) files are
+-- skipped, oversized files (>1MB) are rejected with a log warning, and any
+-- section exceeding @limit@ characters is truncated with the exact marker
+-- @"\\n[...truncated at \<limit\> chars...]"@.
+--
+-- For @AGENTS.md@, only the body after the TOML frontmatter fence is
+-- injected (the frontmatter itself lives in '_ad_config').
 composeAgentPrompt :: LogHandle -> AgentDef -> Int -> IO Text
-composeAgentPrompt _lg def _limit = do
+composeAgentPrompt lg def limit = do
   let kinds = [ SoulK, UserK, AgentsK, MemoryK, IdentityK, ToolsK, BootstrapK ]
-  sections <- mapM (readOne (_ad_dir def)) kinds
+  sections <- mapM (\k -> readSection lg (_ad_dir def) k limit) kinds
   let rendered = [ sectionMarker k <> "\n" <> body
                  | (k, Just body) <- zip kinds sections
                  ]
   pure (T.intercalate "\n\n" rendered)
-  where
-    readOne dir kind = do
-      let path = dir </> sectionFileName kind
-      exists <- Dir.doesFileExist path
-      if not exists
-        then pure Nothing
-        else do
-          txt <- TIO.readFile path
-          let contents = case kind of
-                AgentsK -> case parseAgentsMd txt of
-                  Right (_, body) -> body
-                  Left _ -> txt
-                _ -> txt
-              trimmed = T.dropWhileEnd Char.isSpace contents
-          pure (Just trimmed)
