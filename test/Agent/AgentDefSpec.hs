@@ -1,10 +1,33 @@
 module Agent.AgentDefSpec (spec) where
 
 import Data.Aeson qualified as Aeson
+import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
+import System.Directory (createDirectory)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import PureClaw.Agent.AgentDef
+import PureClaw.Handles.Log (mkNoOpLogHandle)
+
+-- | Helper: resolve an 'AgentName' from raw text in a test (only used for
+-- fixture names known to be valid).
+mustName :: Text -> AgentName
+mustName t = case mkAgentName t of
+  Right n -> n
+  Left e  -> error ("mustName: invalid fixture name " <> show t <> ": " <> show e)
+
+-- | Helper: build an 'AgentDef' for an on-disk fixture directory, with
+-- 'defaultAgentConfig'. Tests that exercise config parsing should construct
+-- the record directly instead.
+fixtureAgentDef :: Text -> FilePath -> AgentDef
+fixtureAgentDef name dir = AgentDef
+  { _ad_name   = mustName name
+  , _ad_dir    = dir
+  , _ad_config = defaultAgentConfig
+  }
 
 spec :: Spec
 spec = do
@@ -87,3 +110,46 @@ spec = do
       case parseAgentsMd "---\nmodel = = broken\n---\nbody" of
         Left (AgentsMdTomlError _) -> pure ()
         other -> expectationFailure $ "Expected AgentsMdTomlError, got: " ++ show other
+
+  describe "composeAgentPrompt (basics)" $ do
+    let log_ = mkNoOpLogHandle
+        zoeDef = fixtureAgentDef "zoe" "test/fixtures/agents/zoe"
+        limit8k = 8000
+
+    it "concatenates SOUL, USER, AGENTS (body only) with section markers in injection order" $ do
+      out <- composeAgentPrompt log_ zoeDef limit8k
+      out `shouldBe` T.intercalate "\n\n"
+        [ "--- SOUL ---\nYou are zoe."
+        , "--- USER ---\nThe user is Doug."
+        , "--- AGENTS ---\nAgent body text."
+        ]
+
+    it "emits only sections for files that exist (single-file case)" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "solo"
+        createDirectory dir
+        TIO.writeFile (dir </> "MEMORY.md") "remember this"
+        out <- composeAgentPrompt log_ (fixtureAgentDef "solo" dir) limit8k
+        out `shouldBe` "--- MEMORY ---\nremember this"
+
+    it "honors injection order SOUL,USER,AGENTS,MEMORY,IDENTITY,TOOLS,BOOTSTRAP" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "all"
+        createDirectory dir
+        TIO.writeFile (dir </> "SOUL.md") "s"
+        TIO.writeFile (dir </> "USER.md") "u"
+        TIO.writeFile (dir </> "AGENTS.md") "a"
+        TIO.writeFile (dir </> "MEMORY.md") "m"
+        TIO.writeFile (dir </> "IDENTITY.md") "i"
+        TIO.writeFile (dir </> "TOOLS.md") "t"
+        TIO.writeFile (dir </> "BOOTSTRAP.md") "b"
+        out <- composeAgentPrompt log_ (fixtureAgentDef "all" dir) limit8k
+        out `shouldBe` T.intercalate "\n\n"
+          [ "--- SOUL ---\ns"
+          , "--- USER ---\nu"
+          , "--- AGENTS ---\na"
+          , "--- MEMORY ---\nm"
+          , "--- IDENTITY ---\ni"
+          , "--- TOOLS ---\nt"
+          , "--- BOOTSTRAP ---\nb"
+          ]
