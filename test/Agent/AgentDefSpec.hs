@@ -18,6 +18,9 @@ spec = do
     it "rejects names containing a slash" $
       mkAgentName "foo/bar" `shouldBe` Left (AgentNameInvalidChars "foo/bar")
 
+    it "rejects names containing a backslash" $
+      mkAgentName "foo\\bar" `shouldBe` Left (AgentNameInvalidChars "foo\\bar")
+
     it "rejects names containing a null byte" $
       mkAgentName "a\0b" `shouldBe` Left (AgentNameInvalidChars "a\0b")
 
