@@ -4,6 +4,8 @@ module PureClaw.Agent.AgentDef
   , unAgentName
   , mkAgentName
   , AgentNameError (..)
+    -- * TOML frontmatter extraction
+  , extractFrontmatter
   ) where
 
 import Data.Aeson qualified as Aeson
@@ -50,6 +52,22 @@ mkAgentName raw
 
 -- | Custom 'Aeson.FromJSON' routes through 'mkAgentName' so that invalid
 -- names on disk cannot bypass the smart constructor.
+-- | Split a TOML frontmatter fence off the front of a document. Recognizes a
+-- leading @---\\n@, a terminating @\\n---\\n@, and returns the inner block as
+-- the first component and the body after the closer as the second. If the
+-- input does not start with a fence or the fence is not closed, returns
+-- @(Nothing, originalInput)@ unchanged.
+extractFrontmatter :: Text -> (Maybe Text, Text)
+extractFrontmatter input =
+  case T.stripPrefix "---\n" input of
+    Nothing -> (Nothing, input)
+    Just rest ->
+      case T.breakOn "\n---\n" rest of
+        (_, "") -> (Nothing, input)  -- no closing fence
+        (inner, afterBreak) ->
+          let body = T.drop (T.length ("\n---\n" :: Text)) afterBreak
+          in (Just inner, body)
+
 instance Aeson.FromJSON AgentName where
   parseJSON = Aeson.withText "AgentName" $ \t ->
     case mkAgentName t of
