@@ -47,6 +47,7 @@ import PureClaw.Session.Handle
   , loadRecentMessages
   , markBootstrapConsumed
   , mkSessionHandle
+  , resolveResumedTarget
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
@@ -557,7 +558,7 @@ runChat opts = do
         -- After resume, load a bounded window of recent messages so
         -- the agent has context to continue. Budget: 50 messages or
         -- ~100K estimated tokens, whichever is smaller.
-        _reloadedMessages <- case _co_session opts of
+        reloadedMessages <- case _co_session opts of
           Just _  -> loadRecentMessages (_sh_transcript sessionHandle) 50 100000
           Nothing -> pure []
         let th = _sh_transcript sessionHandle
@@ -570,7 +571,18 @@ runChat opts = do
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef model
-        targetRef   <- newIORef TargetProvider
+        -- Runtime validation on resume: if the session's recorded
+        -- runtime was an RTHarness, validate that the harness is still
+        -- running (it may have been discovered by 'discoverHarnesses'
+        -- above). Missing harness falls back to TargetProvider with a
+        -- warning; fresh sessions simply start at TargetProvider.
+        initialTarget <- case _co_session opts of
+          Just _  -> do
+            resumedMeta <- readIORef (_sh_meta sessionHandle)
+            resolveResumedTarget logger discoveredHarnesses
+              (SessionTypes._sm_runtime resumedMeta)
+          Nothing -> pure TargetProvider
+        targetRef   <- newIORef initialTarget
         windowIdxRef <- newIORef nextWindowIdx
         sessionRef <- newIORef sessionHandle
         -- Install a one-shot "bootstrap consumed" callback that fires
@@ -597,7 +609,7 @@ runChat opts = do
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
-        runAgentLoop env
+        runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of
     "signal" -> do

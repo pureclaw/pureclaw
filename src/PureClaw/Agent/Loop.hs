@@ -1,6 +1,7 @@
 module PureClaw.Agent.Loop
   ( -- * Agent loop
     runAgentLoop
+  , runAgentLoopWith
     -- * Re-exports from Handles.Harness (for backward compatibility)
   , sanitizeHarnessOutput
   ) where
@@ -41,9 +42,17 @@ import PureClaw.Transcript.Provider
 -- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
 -- Provider errors are logged and a 'PublicError' is sent to the channel.
 runAgentLoop :: AgentEnv -> IO ()
-runAgentLoop env = do
+runAgentLoop env = runAgentLoopWith env []
+
+-- | Like 'runAgentLoop' but seeds the initial 'Context' with the given
+-- messages (in chronological, oldest-first order). Used by the resume
+-- path to replay recent transcript entries so the agent has memory of
+-- prior turns.
+runAgentLoopWith :: AgentEnv -> [Message] -> IO ()
+runAgentLoopWith env initialMessages = do
   _lh_logInfo logger "Agent loop started"
-  go (emptyContext (_env_systemPrompt env))
+  let ctx0 = replaceMessages initialMessages (emptyContext (_env_systemPrompt env))
+  go ctx0
   where
     channel  = _env_channel env
     logger   = _env_logger env

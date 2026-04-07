@@ -56,7 +56,7 @@ import PureClaw.Core.Types
   , parseSessionId
   )
 import PureClaw.Handles.Harness (HarnessHandle)
-import PureClaw.Handles.Log (LogHandle)
+import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
   , mkFileTranscriptHandle
@@ -359,14 +359,24 @@ validateRuntime harnesses (RTHarness name)
       let msg = "harness '" <> name <> "' is not running, falling back to provider"
        in RuntimeFallback TargetProvider msg
 
--- | Stub implementation — intentionally incorrect so that the RED test
--- exercising this helper fails until the GREEN commit replaces it.
+-- | Resolve a resumed session's 'RuntimeType' to a concrete
+-- 'MessageTarget' given the currently-running harness map, logging a
+-- warning if the recorded runtime is no longer available.
+--
+-- Wraps 'validateRuntime': on 'RuntimeFallback' the provided warning
+-- message is routed to @_lh_logWarn@ and the fallback target (always
+-- 'TargetProvider') is returned; on 'RuntimeOk' the target is returned
+-- without logging.
 resolveResumedTarget
   :: LogHandle
   -> Map Text HarnessHandle
   -> RuntimeType
   -> IO MessageTarget
-resolveResumedTarget _logger _harnesses _rt = pure TargetProvider
+resolveResumedTarget logger harnesses rt = case validateRuntime harnesses rt of
+  RuntimeOk tgt -> pure tgt
+  RuntimeFallback tgt warning -> do
+    _lh_logWarn logger warning
+    pure tgt
 
 -- ----------------------------------------------------------------------------
 -- Bootstrap consumption
