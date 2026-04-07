@@ -99,11 +99,10 @@ mkTestEnv p ch = do
   vaultRef      <- newIORef Nothing
   providerRef   <- newIORef (Just (MkProvider p))
   modelRef      <- newIORef (ModelId "mock")
-  transcriptRef <- newIORef Nothing
   harnessRef    <- newIORef Map.empty
   targetRef     <- newIORef TargetProvider
   windowIdxRef  <- newIORef 0
-  sessionHandle <- mkNoOpSessionHandle
+  sessionRef <- newIORef =<< mkNoOpSessionHandle
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -113,13 +112,12 @@ mkTestEnv p ch = do
     , _env_registry     = emptyRegistry
     , _env_vault        = vaultRef
     , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-    , _env_transcript   = transcriptRef
     , _env_policy       = defaultPolicy
     , _env_harnesses    = harnessRef
     , _env_target       = targetRef
     , _env_nextWindowIdx = windowIdxRef
     , _env_agentDef      = Nothing
-    , _env_session       = sessionHandle
+    , _env_session       = sessionRef
     }
 
 spec :: Spec

@@ -100,12 +100,10 @@ runAgentLoop env = do
                           ctx' = addMessage userMsg ctx
                       _lh_logDebug logger $
                         "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-                      -- Wrap provider with transcript logging if configured
-                      mTranscript <- readIORef (_env_transcript env)
+                      -- Wrap provider with transcript logging (session owns the transcript)
+                      th <- envTranscript env
                       model <- readIORef (_env_model env)
-                      let provider' = case mTranscript of
-                            Just th -> mkTranscriptProvider th (unModelId model) provider
-                            Nothing -> provider
+                      let provider' = mkTranscriptProvider th (unModelId model) provider
                       handleCompletion provider' ctx'
           where stripped = T.strip (_im_content msg)
 

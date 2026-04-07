@@ -614,7 +614,8 @@ executeSlashCommand env CmdStatus ctx = do
   target <- readIORef (_env_target env)
   mProvider <- readIORef (_env_provider env)
   mVault <- readIORef (_env_vault env)
-  mTranscript <- readIORef (_env_transcript env)
+  th <- envTranscript env
+  transcriptPath <- _th_getPath th
   harnesses <- readIORef (_env_harnesses env)
   let targetLine = case target of
         TargetProvider    -> "  Target:    model: " <> unModelId model
@@ -625,9 +626,9 @@ executeSlashCommand env CmdStatus ctx = do
       vaultLine = case mVault of
         Nothing -> "  Vault:     (not configured)"
         Just _  -> "  Vault:     configured"
-      transcriptLine = case mTranscript of
-        Nothing -> "  Transcript: disabled"
-        Just _  -> "  Transcript: enabled"
+      transcriptLine = if null transcriptPath
+        then "  Transcript: disabled"
+        else "  Transcript: " <> T.pack transcriptPath
       harnessLine = if Map.null harnesses
         then "  Harnesses: (none)"
         else "  Harnesses: " <> T.intercalate ", "
@@ -1268,39 +1269,37 @@ executeChannelCommand env (ChannelUnknown sub) ctx = do
 executeTranscriptCommand :: AgentEnv -> TranscriptSubCommand -> Context -> IO Context
 executeTranscriptCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
-  mTh <- readIORef (_env_transcript env)
-  case mTh of
-    Nothing -> do
-      send "No transcript configured. Start with --transcript to enable logging."
+  th <- envTranscript env
+  case sub of
+    TranscriptRecent mN -> do
+      let n = Data.Maybe.fromMaybe 20 mN
+          tf = emptyFilter { _tf_limit = Just n }
+      entries <- _th_query th tf
+      if null entries
+        then send "No entries found."
+        else send (T.intercalate "\n" (map formatEntry entries))
       pure ctx
-    Just th -> case sub of
-      TranscriptRecent mN -> do
-        let n = Data.Maybe.fromMaybe 20 mN
-            tf = emptyFilter { _tf_limit = Just n }
-        entries <- _th_query th tf
-        if null entries
-          then send "No entries found."
-          else send (T.intercalate "\n" (map formatEntry entries))
-        pure ctx
 
-      TranscriptSearch query -> do
-        -- Search matches either harness or model name
-        allEntries <- _th_query th emptyFilter
-        let matches e = _te_harness e == Just query || _te_model e == Just query
-            entries = filter matches allEntries
-        if null entries
-          then send ("No entries found matching: " <> query)
-          else send (T.intercalate "\n" (map formatEntry entries))
-        pure ctx
+    TranscriptSearch query -> do
+      -- Search matches either harness or model name
+      allEntries <- _th_query th emptyFilter
+      let matches e = _te_harness e == Just query || _te_model e == Just query
+          entries = filter matches allEntries
+      if null entries
+        then send ("No entries found matching: " <> query)
+        else send (T.intercalate "\n" (map formatEntry entries))
+      pure ctx
 
-      TranscriptPath -> do
-        path <- _th_getPath th
-        send (T.pack path)
-        pure ctx
+    TranscriptPath -> do
+      path <- _th_getPath th
+      if null path
+        then send "No transcript configured."
+        else send (T.pack path)
+      pure ctx
 
-      TranscriptUnknown subcmd -> do
-        send ("Unknown transcript command: " <> subcmd <> ". Try /help for available commands.")
-        pure ctx
+    TranscriptUnknown subcmd -> do
+      send ("Unknown transcript command: " <> subcmd <> ". Try /help for available commands.")
+      pure ctx
 
 -- | Format a transcript entry as a one-line summary.
 -- Example: "[2026-04-04T15:30:00Z] ollama/llama3 Request (42ms)"
@@ -1327,9 +1326,8 @@ executeHarnessCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   case sub of
     HarnessStart name mDir skipPerms -> do
-      mTh <- readIORef (_env_transcript env)
-      let th = Data.Maybe.fromMaybe mkNoOpTranscriptHandle mTh
-          logger = _env_logger env
+      th <- envTranscript env
+      let logger = _env_logger env
       -- Log diagnostic info before attempting start
       let logInfo = _lh_logInfo logger
           logError = _lh_logError logger
@@ -1592,7 +1590,8 @@ executeSessionCommand env sub ctx = do
             , SessionTypes._sm_lastActive        = now
             , SessionTypes._sm_bootstrapConsumed = False
             }
-      _ <- Session.mkSessionHandle (_env_logger env) sessionsDir meta
+      newHandle <- Session.mkSessionHandle (_env_logger env) sessionsDir meta
+      writeIORef (_env_session env) newHandle
       send ("New session created: " <> unSessionId sid
             <> "\nSession cleared. Starting fresh.")
       pure (clearMessages ctx)
@@ -1633,7 +1632,8 @@ executeSessionCommand env sub ctx = do
             Left err -> do
               send ("Failed to resume session: " <> T.pack (show err))
               pure ctx
-            Right _ -> do
+            Right newHandle -> do
+              writeIORef (_env_session env) newHandle
               send ("Resumed session " <> unSessionId sid)
               pure ctx
 
@@ -1651,12 +1651,14 @@ executeSessionCommand env sub ctx = do
             Left err -> do
               send ("Failed to resume session: " <> T.pack (show err))
               pure ctx
-            Right _ -> do
+            Right newHandle -> do
+              writeIORef (_env_session env) newHandle
               send ("Resumed session " <> unSessionId sid)
               pure ctx
 
     SessionInfo -> do
-      meta <- readIORef (_sh_meta (_env_session env))
+      activeSession <- readIORef (_env_session env)
+      meta <- readIORef (_sh_meta activeSession)
       model <- readIORef (_env_model env)
       target <- readIORef (_env_target env)
       let sidLine    = "  Session: " <> unSessionId (_sm_id meta)

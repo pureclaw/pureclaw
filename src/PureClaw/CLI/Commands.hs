@@ -22,7 +22,6 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (getCurrentTime)
-import Data.Time.Format (defaultTimeLocale, formatTime)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
@@ -42,8 +41,8 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Agent.SlashCommands
-import PureClaw.Session.Handle (mkNoOpSessionHandle)
-import PureClaw.Handles.Transcript
+import PureClaw.Session.Handle (SessionHandle (..), mkSessionHandle)
+import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -470,15 +469,26 @@ runChat opts = do
           "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
           _     -> putStrLn $ "Channel: " <> effectiveChannel
         putStrLn ""
-        -- Create transcript handle
-        let transcriptDir = pureclawDir </> "transcripts"
-        createDirectoryIfMissing True transcriptDir
-        timestamp <- getCurrentTime
-        let transcriptFile = transcriptDir
-              </> formatTime defaultTimeLocale "%Y%m%d-%H%M%S" timestamp
-                  <> "-" <> effectiveChannel <> ".jsonl"
-        th <- mkFileTranscriptHandle logger transcriptFile
-        transcriptRef <- newIORef (Just th)
+        -- Build a real on-disk session. The transcript now lives inside
+        -- the session directory at @~/.pureclaw/sessions/<id>/transcript.jsonl@;
+        -- the legacy @~/.pureclaw/transcripts/@ directory is no longer written to.
+        let sessionsDir = pureclawDir </> "sessions"
+        createDirectoryIfMissing True sessionsDir
+        now <- getCurrentTime
+        let sid = SessionTypes.newSessionId Nothing now
+            initialMeta = SessionTypes.SessionMeta
+              { SessionTypes._sm_id                = sid
+              , SessionTypes._sm_agent             =
+                  fmap AgentDef._ad_name mAgentDef
+              , SessionTypes._sm_runtime           = SessionTypes.RTProvider
+              , SessionTypes._sm_model             = T.pack effectiveModel
+              , SessionTypes._sm_channel           = T.pack effectiveChannel
+              , SessionTypes._sm_createdAt         = now
+              , SessionTypes._sm_lastActive        = now
+              , SessionTypes._sm_bootstrapConsumed = False
+              }
+        sessionHandle <- mkSessionHandle logger sessionsDir initialMeta
+        let th = _sh_transcript sessionHandle
         -- Discover any harnesses still running from a previous session
         (discoveredHarnesses, nextWindowIdx) <- discoverHarnesses th
         unless (Map.null discoveredHarnesses) $
@@ -490,7 +500,7 @@ runChat opts = do
         modelRef    <- newIORef model
         targetRef   <- newIORef TargetProvider
         windowIdxRef <- newIORef nextWindowIdx
-        sessionHandle <- mkNoOpSessionHandle
+        sessionRef <- newIORef sessionHandle
         let env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -500,13 +510,12 @@ runChat opts = do
               , _env_registry     = registry
               , _env_vault        = vaultRef
               , _env_pluginHandle = mkPluginHandle
-              , _env_transcript   = transcriptRef
               , _env_policy       = policy
               , _env_harnesses    = harnessRef
               , _env_target       = targetRef
               , _env_nextWindowIdx = windowIdxRef
               , _env_agentDef     = mAgentDef
-              , _env_session      = sessionHandle
+              , _env_session      = sessionRef
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
