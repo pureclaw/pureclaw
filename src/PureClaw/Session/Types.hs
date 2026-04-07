@@ -1,3 +1,71 @@
 module PureClaw.Session.Types
-  (
+  ( -- * Session prefix (smart constructor)
+    -- The data constructor is intentionally NOT exported. The only way to
+    -- obtain a 'SessionPrefix' is via 'mkSessionPrefix' (or its 'FromJSON'
+    -- instance, which routes through the same validation).
+    SessionPrefix
+  , unSessionPrefix
+  , mkSessionPrefix
+  , SessionPrefixError (..)
   ) where
+
+import Data.Aeson qualified as Aeson
+import Data.Char qualified as Char
+import Data.Text (Text)
+import Data.Text qualified as T
+
+-- | Validated session prefix. Used as the human-readable leading segment
+-- of a 'PureClaw.Core.Types.SessionId'. Same character rules as
+-- 'PureClaw.Agent.AgentDef.AgentName' plus a reserved-word denylist.
+newtype SessionPrefix = SessionPrefix { unSessionPrefix :: Text }
+  deriving stock (Show, Eq, Ord)
+
+-- | Reasons a raw 'Text' cannot be promoted to a 'SessionPrefix'.
+data SessionPrefixError
+  = PrefixEmpty
+  | PrefixTooLong
+  | PrefixInvalidChars Text
+  | PrefixLeadingDot
+  | PrefixReserved Text
+  deriving stock (Show, Eq)
+
+-- | Maximum allowed length for a session prefix.
+sessionPrefixMaxLength :: Int
+sessionPrefixMaxLength = 64
+
+-- | Valid character predicate: ASCII letters, digits, underscore, hyphen.
+-- Mirrors 'PureClaw.Agent.AgentDef.isValidAgentNameChar'.
+isValidPrefixChar :: Char -> Bool
+isValidPrefixChar c =
+  Char.isAsciiUpper c
+    || Char.isAsciiLower c
+    || Char.isDigit c
+    || c == '_'
+    || c == '-'
+
+-- | Reserved tokens that look like prefixes but collide with CLI verbs.
+-- Currently just @"new"@, which is the literal argument to
+-- @\/session new@ and would create ambiguous resume targets if allowed
+-- as a prefix.
+reservedPrefixes :: [Text]
+reservedPrefixes = ["new"]
+
+-- | Smart constructor. Same validation as 'mkAgentName' (non-empty,
+-- max 64 chars, no leading dot, only @[a-zA-Z0-9_-]@), plus rejection
+-- of reserved tokens like @"new"@.
+mkSessionPrefix :: Text -> Either SessionPrefixError SessionPrefix
+mkSessionPrefix raw
+  | T.null raw = Left PrefixEmpty
+  | T.length raw > sessionPrefixMaxLength = Left PrefixTooLong
+  | T.head raw == '.' = Left PrefixLeadingDot
+  | not (T.all isValidPrefixChar raw) = Left (PrefixInvalidChars raw)
+  | raw `elem` reservedPrefixes = Left (PrefixReserved raw)
+  | otherwise = Right (SessionPrefix raw)
+
+-- | Custom 'Aeson.FromJSON' routes through 'mkSessionPrefix' so corrupted
+-- on-disk JSON cannot bypass the smart constructor.
+instance Aeson.FromJSON SessionPrefix where
+  parseJSON = Aeson.withText "SessionPrefix" $ \t ->
+    case mkSessionPrefix t of
+      Right p -> pure p
+      Left e -> fail ("invalid SessionPrefix: " ++ show e)
