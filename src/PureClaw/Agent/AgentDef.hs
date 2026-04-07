@@ -16,11 +16,15 @@ module PureClaw.Agent.AgentDef
     -- * Prompt composition
   , composeAgentPrompt
   , composeAgentPromptWithBootstrap
+    -- * Discovery and loading
+  , discoverAgents
+  , loadAgent
   ) where
 
 import Control.Exception qualified as Exc
 import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
+import Data.Either (rights)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -236,3 +240,59 @@ composeAgentPromptWithBootstrap lg def limit bootstrapConsumed = do
                  | (k, Just body) <- zip kinds sections
                  ]
   pure (T.intercalate "\n\n" rendered)
+
+-- | Enumerate agent directories under @parent@. Subdirectories whose name
+-- is not a valid 'AgentName' are skipped with a log warning. A missing
+-- parent directory returns the empty list (no error).
+discoverAgents :: LogHandle -> FilePath -> IO [AgentDef]
+discoverAgents lg parent = do
+  exists <- Dir.doesDirectoryExist parent
+  if not exists
+    then pure []
+    else do
+      entries <- Dir.listDirectory parent
+      results <- mapM tryOne entries
+      pure (rights results)
+  where
+    tryOne entry = do
+      let full = parent </> entry
+      isDir <- Dir.doesDirectoryExist full
+      if not isDir
+        then pure (Left ())
+        else case mkAgentName (T.pack entry) of
+          Left err -> do
+            _lh_logWarn lg $
+              "Skipping invalid agent directory name " <> T.pack (show entry) <>
+              ": " <> T.pack (show err)
+            pure (Left ())
+          Right name -> do
+            cfg <- loadAgentConfig full
+            pure (Right AgentDef { _ad_name = name, _ad_dir = full, _ad_config = cfg })
+
+-- | Load an agent by validated name from @parent@. Returns 'Nothing' if the
+-- corresponding directory does not exist.
+loadAgent :: FilePath -> AgentName -> IO (Maybe AgentDef)
+loadAgent parent name = do
+  let dir = parent </> T.unpack (unAgentName name)
+  exists <- Dir.doesDirectoryExist dir
+  if not exists
+    then pure Nothing
+    else do
+      cfg <- loadAgentConfig dir
+      pure (Just AgentDef { _ad_name = name, _ad_dir = dir, _ad_config = cfg })
+
+-- | Read and parse the @AGENTS.md@ frontmatter inside an agent directory.
+-- If the file is missing or fails to parse, returns 'defaultAgentConfig'.
+loadAgentConfig :: FilePath -> IO AgentConfig
+loadAgentConfig dir = do
+  let path = dir </> "AGENTS.md"
+  exists <- Dir.doesFileExist path
+  if not exists
+    then pure defaultAgentConfig
+    else do
+      raw <- Exc.try (TIO.readFile path) :: IO (Either Exc.IOException Text)
+      case raw of
+        Left _ -> pure defaultAgentConfig
+        Right txt -> case parseAgentsMd txt of
+          Right (cfg, _) -> pure cfg
+          Left _ -> pure defaultAgentConfig
