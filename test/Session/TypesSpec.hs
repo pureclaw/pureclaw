@@ -7,6 +7,7 @@ import Data.Text qualified as T
 import Data.Time (UTCTime (..), picosecondsToDiffTime)
 import Data.Time.Calendar (Day (ModifiedJulianDay))
 import PureClaw.Agent.AgentDef (mkAgentName)
+import PureClaw.Agent.Env (MessageTarget (..))
 import PureClaw.Core.Types
 import PureClaw.Session.Types
 
@@ -138,6 +139,13 @@ spec = do
     it "round-trips bootstrap_consumed = True" $ do
       let s = sample { _sm_bootstrapConsumed = True }
       Aeson.decode (Aeson.encode s) `shouldBe` Just s
+
+    it "defaultTarget RTProvider == TargetProvider" $
+      defaultTarget RTProvider `shouldBe` TargetProvider
+
+    it "defaultTarget (RTHarness x) == TargetHarness x" $
+      defaultTarget (RTHarness "claude-code")
+        `shouldBe` TargetHarness "claude-code"
 
     it "decodes JSON missing the optional agent field" $ do
       let json =
