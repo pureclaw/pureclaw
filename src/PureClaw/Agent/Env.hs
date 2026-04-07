@@ -1,7 +1,7 @@
 module PureClaw.Agent.Env
   ( -- * Agent environment
     AgentEnv (..)
-    -- * Message target
+    -- * Message target (re-exported from "PureClaw.Core.Types")
   , MessageTarget (..)
   ) where
 
@@ -21,12 +21,6 @@ import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Session.Handle (SessionHandle)
 import PureClaw.Tools.Registry
-
--- | Where incoming user messages are routed.
-data MessageTarget
-  = TargetProvider          -- ^ Send to the configured LLM provider + model
-  | TargetHarness Text      -- ^ Send to a named running harness
-  deriving stock (Show, Eq)
 
 -- | All runtime dependencies for the agent loop, gathered into a single record.
 -- This replaces the multi-parameter signature of 'runAgentLoop' and

@@ -13,6 +13,8 @@ module PureClaw.Core.Types
     -- the constructor under a friendlier name.
   , SessionId (..)
   , parseSessionId
+    -- * Message target
+  , MessageTarget (..)
     -- * Workspace
   , WorkspaceRoot (..)
     -- * Autonomy
@@ -71,6 +73,15 @@ instance Aeson.FromJSON SessionId where
 -- symmetry with smart constructors elsewhere; performs no validation.
 parseSessionId :: Text -> SessionId
 parseSessionId = SessionId
+
+-- | Where incoming user messages are routed. Lives in 'Core.Types'
+-- (rather than 'PureClaw.Agent.Env') so that 'PureClaw.Session.Types'
+-- can refer to it without creating an import cycle through
+-- 'PureClaw.Session.Handle'.
+data MessageTarget
+  = TargetProvider          -- ^ Send to the configured LLM provider + model
+  | TargetHarness Text      -- ^ Send to a named running harness
+  deriving stock (Show, Eq)
 
 -- | Workspace root directory — anchors all SafePath resolution
 newtype WorkspaceRoot = WorkspaceRoot { unWorkspaceRoot :: FilePath }

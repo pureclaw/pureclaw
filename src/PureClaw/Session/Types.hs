@@ -26,8 +26,7 @@ import Data.Time.Calendar (toModifiedJulianDay)
 import GHC.Generics (Generic)
 
 import PureClaw.Agent.AgentDef (AgentName, unAgentName)
-import PureClaw.Agent.Env (MessageTarget (..))
-import PureClaw.Core.Types (SessionId (..))
+import PureClaw.Core.Types (MessageTarget (..), SessionId (..))
 
 -- | Validated session prefix. Used as the human-readable leading segment
 -- of a 'PureClaw.Core.Types.SessionId'. Same character rules as
