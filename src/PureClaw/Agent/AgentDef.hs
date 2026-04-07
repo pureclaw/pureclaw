@@ -11,14 +11,23 @@ module PureClaw.Agent.AgentDef
   , defaultAgentConfig
   , parseAgentsMd
   , AgentsMdParseError (..)
+    -- * Agent definition
+  , AgentDef (..)
+    -- * Prompt composition
+  , composeAgentPrompt
   ) where
 
 import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
+import System.Directory qualified as Dir
+import System.FilePath ((</>))
 import Toml (TomlCodec, (.=))
 import Toml qualified
+
+import PureClaw.Handles.Log (LogHandle (..))
 
 -- | Validated agent name. The data constructor is intentionally NOT exported —
 -- the only way to obtain an 'AgentName' is through 'mkAgentName'.
@@ -117,3 +126,65 @@ parseAgentsMd input =
       case Toml.decode agentConfigCodec toml of
         Left errs -> Left (AgentsMdTomlError (Toml.prettyTomlDecodeErrors errs))
         Right cfg -> Right (cfg, body)
+
+-- | A discovered and loaded agent: its validated name, the on-disk directory
+-- that holds its bootstrap files, and its parsed @AGENTS.md@ frontmatter
+-- (falling back to 'defaultAgentConfig' when no frontmatter is present).
+data AgentDef = AgentDef
+  { _ad_name   :: AgentName
+  , _ad_dir    :: FilePath
+  , _ad_config :: AgentConfig
+  } deriving stock (Eq, Show)
+
+-- | Bootstrap file types, in the order they should be injected into the
+-- system prompt.
+data SectionKind = SoulK | UserK | AgentsK | MemoryK | IdentityK | ToolsK | BootstrapK
+  deriving stock (Eq, Show)
+
+sectionFileName :: SectionKind -> FilePath
+sectionFileName SoulK      = "SOUL.md"
+sectionFileName UserK      = "USER.md"
+sectionFileName AgentsK    = "AGENTS.md"
+sectionFileName MemoryK    = "MEMORY.md"
+sectionFileName IdentityK  = "IDENTITY.md"
+sectionFileName ToolsK     = "TOOLS.md"
+sectionFileName BootstrapK = "BOOTSTRAP.md"
+
+sectionMarker :: SectionKind -> Text
+sectionMarker SoulK      = "--- SOUL ---"
+sectionMarker UserK      = "--- USER ---"
+sectionMarker AgentsK    = "--- AGENTS ---"
+sectionMarker MemoryK    = "--- MEMORY ---"
+sectionMarker IdentityK  = "--- IDENTITY ---"
+sectionMarker ToolsK     = "--- TOOLS ---"
+sectionMarker BootstrapK = "--- BOOTSTRAP ---"
+
+-- | Compose a system prompt from an agent's bootstrap files. Files are read
+-- in the fixed injection order (SOUL, USER, AGENTS, MEMORY, IDENTITY, TOOLS,
+-- BOOTSTRAP); missing files are skipped. For @AGENTS.md@, only the body
+-- after the TOML frontmatter fence is injected (the frontmatter itself
+-- lives in '_ad_config'). Sections are trimmed of trailing whitespace and
+-- joined with a blank line between them.
+composeAgentPrompt :: LogHandle -> AgentDef -> Int -> IO Text
+composeAgentPrompt _lg def _limit = do
+  let kinds = [ SoulK, UserK, AgentsK, MemoryK, IdentityK, ToolsK, BootstrapK ]
+  sections <- mapM (readOne (_ad_dir def)) kinds
+  let rendered = [ sectionMarker k <> "\n" <> body
+                 | (k, Just body) <- zip kinds sections
+                 ]
+  pure (T.intercalate "\n\n" rendered)
+  where
+    readOne dir kind = do
+      let path = dir </> sectionFileName kind
+      exists <- Dir.doesFileExist path
+      if not exists
+        then pure Nothing
+        else do
+          txt <- TIO.readFile path
+          let contents = case kind of
+                AgentsK -> case parseAgentsMd txt of
+                  Right (_, body) -> body
+                  Left _ -> txt
+                _ -> txt
+              trimmed = T.dropWhileEnd Char.isSpace contents
+          pure (Just trimmed)
