@@ -4,6 +4,8 @@ import Test.Hspec
 
 import Data.Aeson qualified as Aeson
 import Data.Text qualified as T
+import Data.Time (UTCTime (..), picosecondsToDiffTime)
+import Data.Time.Calendar (Day (ModifiedJulianDay))
 import PureClaw.Core.Types
 import PureClaw.Session.Types
 
@@ -63,3 +65,16 @@ spec = do
     it "FromJSON accepts a valid prefix" $
       fmap unSessionPrefix (Aeson.decode "\"zoe\"" :: Maybe SessionPrefix)
         `shouldBe` Just "zoe"
+
+  describe "newSessionId" $ do
+    let fixedTime =
+          UTCTime (ModifiedJulianDay 60759) (picosecondsToDiffTime 12345000000)
+        Right zoePrefix = mkSessionPrefix "zoe"
+
+    it "produces \"<prefix>-<mjd>-<picos>\" when a prefix is supplied" $
+      newSessionId (Just zoePrefix) fixedTime
+        `shouldBe` parseSessionId "zoe-60759-12345000000"
+
+    it "omits the prefix and leading hyphen when Nothing is supplied" $
+      newSessionId Nothing fixedTime
+        `shouldBe` parseSessionId "60759-12345000000"
