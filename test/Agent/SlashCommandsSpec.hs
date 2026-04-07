@@ -20,7 +20,7 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
-import PureClaw.Session.Handle (SessionHandle (..), mkNoOpSessionHandle)
+import PureClaw.Session.Handle (SessionHandle (..), mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
 import PureClaw.Session.Types (SessionMeta (..))
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
@@ -265,6 +265,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -367,6 +368,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -405,6 +407,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -439,6 +442,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -473,6 +477,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -519,6 +524,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -556,6 +562,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget Nothing) ctx
@@ -589,6 +596,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
@@ -633,6 +641,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "claude-code")) ctx
@@ -679,6 +688,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "claude-code-0" "list TODOs") ctx
@@ -716,6 +726,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "nonexistent" "hello") ctx
@@ -753,6 +764,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "cc-0" "test") ctx
@@ -785,6 +797,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -832,6 +845,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -875,6 +889,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -911,6 +926,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -938,6 +954,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -976,6 +993,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1020,6 +1038,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1066,6 +1085,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1101,6 +1121,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1202,6 +1223,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -1240,6 +1262,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -1279,6 +1302,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -1354,6 +1378,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1389,6 +1414,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1425,6 +1451,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -1533,6 +1560,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1569,6 +1597,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1617,6 +1646,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1656,6 +1686,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1717,6 +1748,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -1755,6 +1787,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -1790,6 +1823,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1823,6 +1857,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1871,6 +1906,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1933,6 +1969,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/agent list lists discovered agent names" $ withTempHome $ do
@@ -1985,6 +2022,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/agent info <name> shows files and frontmatter" $ withTempHome $ do
@@ -2054,6 +2092,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/agent start <name> returns a placeholder message in WU1" $ withTempHome $ do
@@ -2177,6 +2216,7 @@ spec = do
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/session new writes session.json on disk and returns a confirmation" $ withTempHome $ do

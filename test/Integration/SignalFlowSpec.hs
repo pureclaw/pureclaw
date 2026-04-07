@@ -21,7 +21,7 @@ import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle (mkNoOpSessionHandle)
+import PureClaw.Session.Handle (mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
@@ -65,6 +65,7 @@ mkTestEnv p ch = do
     , _env_nextWindowIdx = windowIdxRef
     , _env_agentDef      = Nothing
     , _env_session       = sessionRef
+    , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
     }
 
 spec :: Spec

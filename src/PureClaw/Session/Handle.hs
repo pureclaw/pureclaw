@@ -4,6 +4,7 @@ module PureClaw.Session.Handle
   , mkSessionHandle
   , mkNoOpSessionHandle
   , noOpSessionHandle
+  , noOpOnFirstStreamDoneRef
     -- * Resume
   , ResumeError (..)
   , resumeSession
@@ -192,6 +193,15 @@ noOpSessionHandle = SessionHandle
 {-# NOINLINE noOpMetaRef #-}
 noOpMetaRef :: IORef SessionMeta
 noOpMetaRef = unsafePerformIO (newIORef noOpMeta)
+
+-- | Shared no-op callback slot for tests that do not care about
+-- bootstrap consumption. Equivalent in spirit to 'noOpMetaRef': tests
+-- that only READ or only set-to-'Nothing' can share the same cell.
+-- Tests that need to OBSERVE the callback firing should create their
+-- own @IORef (Maybe (IO ()))@ rather than using this sentinel.
+{-# NOINLINE noOpOnFirstStreamDoneRef #-}
+noOpOnFirstStreamDoneRef :: IORef (Maybe (IO ()))
+noOpOnFirstStreamDoneRef = unsafePerformIO (newIORef Nothing)
 
 -- | Static default metadata for no-op handles.
 noOpMeta :: SessionMeta

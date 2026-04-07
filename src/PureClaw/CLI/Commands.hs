@@ -41,7 +41,11 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Agent.SlashCommands
-import PureClaw.Session.Handle (SessionHandle (..), mkSessionHandle)
+import PureClaw.Session.Handle
+  ( SessionHandle (..)
+  , markBootstrapConsumed
+  , mkSessionHandle
+  )
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -501,6 +505,11 @@ runChat opts = do
         targetRef   <- newIORef TargetProvider
         windowIdxRef <- newIORef nextWindowIdx
         sessionRef <- newIORef sessionHandle
+        -- Install a one-shot "bootstrap consumed" callback that fires
+        -- after the first StreamDone. Only arm it if the agent has a
+        -- BOOTSTRAP.md and its consumed flag is currently False.
+        onFirstStreamDoneRef <- newIORef
+          =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         let env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -516,6 +525,7 @@ runChat opts = do
               , _env_nextWindowIdx = windowIdxRef
               , _env_agentDef     = mAgentDef
               , _env_session      = sessionRef
+              , _env_onFirstStreamDone = onFirstStreamDoneRef
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
@@ -544,6 +554,30 @@ runChat opts = do
     other -> do
       _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
       mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
+
+-- | Decide whether the first streamed completion should trigger
+-- 'markBootstrapConsumed' on the active session.
+--
+-- Returns @Just action@ only if there is an active agent, the agent
+-- directory contains a non-empty @BOOTSTRAP.md@, and the session's
+-- current metadata has @_sm_bootstrapConsumed == False@. Otherwise
+-- returns 'Nothing' so the loop performs no work on first
+-- 'StreamDone'.
+resolveBootstrapCallback
+  :: LogHandle
+  -> Maybe AgentDef.AgentDef
+  -> SessionHandle
+  -> IO (Maybe (IO ()))
+resolveBootstrapCallback _ Nothing _ = pure Nothing
+resolveBootstrapCallback _ (Just def) sh = do
+  let bootstrapPath = AgentDef._ad_dir def </> "BOOTSTRAP.md"
+  hasBootstrap <- doesFileExist bootstrapPath
+  meta <- readIORef (_sh_meta sh)
+  if hasBootstrap && not (SessionTypes._sm_bootstrapConsumed meta)
+    then pure (Just (markBootstrapConsumedShim sh))
+    else pure Nothing
+  where
+    markBootstrapConsumedShim = markBootstrapConsumed
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType

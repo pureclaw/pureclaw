@@ -63,6 +63,13 @@ data AgentEnv = AgentEnv
   , _env_session :: IORef SessionHandle
     -- ^ Current conversation session. Mutable so @\/session new@ and
     -- @\/session resume@ can swap the active session in place.
+  , _env_onFirstStreamDone :: IORef (Maybe (IO ()))
+    -- ^ One-shot callback fired by 'runAgentLoop' after the first
+    -- 'StreamDone' it observes. The loop atomically consumes the
+    -- action (setting the field back to 'Nothing') so a second
+    -- 'StreamDone' does not re-fire it. In production this is
+    -- populated with @'markBootstrapConsumed' session@ so the agent
+    -- marks its bootstrap as consumed exactly once per process start.
   }
 
 -- | Read the active session's transcript handle.

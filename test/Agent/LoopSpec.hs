@@ -18,7 +18,7 @@ import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle (mkNoOpSessionHandle)
+import PureClaw.Session.Handle (mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
@@ -118,6 +118,7 @@ mkTestEnv p ch = do
     , _env_nextWindowIdx = windowIdxRef
     , _env_agentDef      = Nothing
     , _env_session       = sessionRef
+    , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
     }
 
 spec :: Spec
@@ -136,6 +137,33 @@ spec = do
       runAgentLoop env
       sent <- readIORef sentRef
       length sent `shouldBe` 2
+
+    it "fires _env_onFirstStreamDone exactly once across multiple turns" $ do
+      -- Drive the loop with TWO user messages so completeStream is
+      -- invoked twice, then assert the one-shot callback ran exactly once.
+      (channel, _sentRef) <- mkMockChannel ["first", "second"]
+      baseEnv <- mkTestEnv (MockProvider "reply") channel
+      counter <- newIORef (0 :: Int)
+      onceRef <- newIORef (Just (modifyIORef' counter (+1)))
+      let env = baseEnv { _env_onFirstStreamDone = onceRef }
+      runAgentLoop env
+      finalCount <- readIORef counter
+      finalCount `shouldBe` 1
+      -- After firing, the slot is cleared so a resume cannot re-arm.
+      mAfter <- readIORef onceRef
+      case mAfter of
+        Nothing -> pure ()
+        Just _  -> expectationFailure "expected callback slot to be cleared"
+
+    it "does not fire the callback when no StreamDone is observed (empty input)" $ do
+      (channel, _sentRef) <- mkMockChannel []
+      baseEnv <- mkTestEnv (MockProvider "reply") channel
+      counter <- newIORef (0 :: Int)
+      onceRef <- newIORef (Just (modifyIORef' counter (+1)))
+      let env = baseEnv { _env_onFirstStreamDone = onceRef }
+      runAgentLoop env
+      finalCount <- readIORef counter
+      finalCount `shouldBe` 0
 
     it "skips empty messages" $ do
       (channel, sentRef) <- mkMockChannel ["", "  ", "hello"]
