@@ -3,7 +3,9 @@ module Session.TypesSpec (spec) where
 import Test.Hspec
 
 import Data.Aeson qualified as Aeson
+import Data.Text qualified as T
 import PureClaw.Core.Types
+import PureClaw.Session.Types
 
 spec :: Spec
 spec = do
@@ -20,3 +22,44 @@ spec = do
     it "JSON round-trip preserves value" $ do
       let sid = parseSessionId "zoe-60759-12345"
       Aeson.decode (Aeson.encode sid) `shouldBe` Just sid
+
+  describe "SessionPrefix" $ do
+    it "rejects empty input" $
+      mkSessionPrefix "" `shouldBe` Left PrefixEmpty
+
+    it "rejects names longer than 64 characters" $
+      mkSessionPrefix (T.replicate 65 "a") `shouldBe` Left PrefixTooLong
+
+    it "rejects forward slashes" $
+      mkSessionPrefix "foo/bar" `shouldBe` Left (PrefixInvalidChars "foo/bar")
+
+    it "rejects backslashes" $
+      mkSessionPrefix "foo\\bar" `shouldBe` Left (PrefixInvalidChars "foo\\bar")
+
+    it "rejects double-dot" $
+      mkSessionPrefix ".." `shouldBe` Left PrefixLeadingDot
+
+    it "rejects null byte" $
+      mkSessionPrefix "a\0b" `shouldBe` Left (PrefixInvalidChars "a\0b")
+
+    it "rejects leading dot" $
+      mkSessionPrefix ".hidden" `shouldBe` Left PrefixLeadingDot
+
+    it "rejects the reserved word \"new\"" $
+      mkSessionPrefix "new" `shouldBe` Left (PrefixReserved "new")
+
+    it "accepts a valid prefix" $
+      fmap unSessionPrefix (mkSessionPrefix "zoe") `shouldBe` Right "zoe"
+
+    it "accepts a prefix with digits, underscores, and hyphens" $
+      fmap unSessionPrefix (mkSessionPrefix "ops-team_1") `shouldBe` Right "ops-team_1"
+
+    it "FromJSON routes through mkSessionPrefix and rejects \"new\"" $
+      (Aeson.decode "\"new\"" :: Maybe SessionPrefix) `shouldBe` Nothing
+
+    it "FromJSON routes through mkSessionPrefix and rejects \"../evil\"" $
+      (Aeson.decode "\"../evil\"" :: Maybe SessionPrefix) `shouldBe` Nothing
+
+    it "FromJSON accepts a valid prefix" $
+      fmap unSessionPrefix (Aeson.decode "\"zoe\"" :: Maybe SessionPrefix)
+        `shouldBe` Just "zoe"
