@@ -6,12 +6,19 @@ module PureClaw.Agent.AgentDef
   , AgentNameError (..)
     -- * TOML frontmatter extraction
   , extractFrontmatter
+    -- * Agent configuration (TOML frontmatter)
+  , AgentConfig (..)
+  , defaultAgentConfig
+  , parseAgentsMd
+  , AgentsMdParseError (..)
   ) where
 
 import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
 import Data.Text (Text)
 import Data.Text qualified as T
+import Toml (TomlCodec, (.=))
+import Toml qualified
 
 -- | Validated agent name. The data constructor is intentionally NOT exported —
 -- the only way to obtain an 'AgentName' is through 'mkAgentName'.
@@ -73,3 +80,40 @@ instance Aeson.FromJSON AgentName where
     case mkAgentName t of
       Right n -> pure n
       Left err -> fail ("invalid AgentName: " ++ show err)
+
+-- | Configuration loaded from the TOML frontmatter of an @AGENTS.md@ file.
+-- All fields are optional; unknown fields are ignored by the codec.
+data AgentConfig = AgentConfig
+  { _ac_model       :: Maybe Text
+  , _ac_toolProfile :: Maybe Text
+  , _ac_workspace   :: Maybe Text
+  } deriving stock (Eq, Show)
+
+-- | An 'AgentConfig' with every field unset.
+defaultAgentConfig :: AgentConfig
+defaultAgentConfig = AgentConfig Nothing Nothing Nothing
+
+agentConfigCodec :: TomlCodec AgentConfig
+agentConfigCodec = AgentConfig
+  <$> Toml.dioptional (Toml.text "model")        .= _ac_model
+  <*> Toml.dioptional (Toml.text "tool_profile") .= _ac_toolProfile
+  <*> Toml.dioptional (Toml.text "workspace")    .= _ac_workspace
+
+-- | Errors that may occur while parsing an @AGENTS.md@ document.
+newtype AgentsMdParseError
+  = AgentsMdTomlError Text
+  deriving stock (Eq, Show)
+
+-- | Parse an @AGENTS.md@ document: extract the optional TOML frontmatter,
+-- decode it as an 'AgentConfig', and return the remaining body. A document
+-- with no frontmatter yields 'defaultAgentConfig' and the whole input as the
+-- body.
+parseAgentsMd :: Text -> Either AgentsMdParseError (AgentConfig, Text)
+parseAgentsMd input =
+  case extractFrontmatter input of
+    (Nothing, body) -> Right (defaultAgentConfig, body)
+    (Just "", body) -> Right (defaultAgentConfig, body)
+    (Just toml, body) ->
+      case Toml.decode agentConfigCodec toml of
+        Left errs -> Left (AgentsMdTomlError (Toml.prettyTomlDecodeErrors errs))
+        Right cfg -> Right (cfg, body)
