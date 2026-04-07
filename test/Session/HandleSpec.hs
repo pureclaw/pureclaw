@@ -34,6 +34,7 @@ import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
   )
+import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Session.Handle
   ( ResolveError (..)
   , ResolvedRuntime (..)
@@ -44,6 +45,7 @@ import PureClaw.Session.Handle
   , markBootstrapConsumed
   , mkNoOpSessionHandle
   , mkSessionHandle
+  , resolveResumedTarget
   , resolveSessionRef
   , resumeSession
   , validateRuntime
@@ -379,9 +381,46 @@ spec = do
       ms `shouldBe` []
       _th_close th
 
+  describe "resolveResumedTarget" $ do
+    it "RTProvider resolves to TargetProvider without logging a warning" $ do
+      (logger, warnRef) <- mkCaptureLogger
+      tgt <- resolveResumedTarget logger Map.empty RTProvider
+      tgt `shouldBe` TargetProvider
+      readIORef warnRef `shouldReturn` []
+
+    it "RTHarness present resolves to TargetHarness without a warning" $ do
+      (logger, warnRef) <- mkCaptureLogger
+      let harnesses = Map.singleton "cc" noOpHarness
+      tgt <- resolveResumedTarget logger harnesses (RTHarness "cc")
+      tgt `shouldBe` TargetHarness "cc"
+      readIORef warnRef `shouldReturn` []
+
+    it "RTHarness missing logs a warning and falls back to TargetProvider" $ do
+      (logger, warnRef) <- mkCaptureLogger
+      tgt <- resolveResumedTarget logger Map.empty (RTHarness "dead")
+      tgt `shouldBe` TargetProvider
+      warnings <- readIORef warnRef
+      case warnings of
+        [msg] -> do
+          ("dead" `T.isInfixOf` msg) `shouldBe` True
+          ("falling back" `T.isInfixOf` msg) `shouldBe` True
+        other -> expectationFailure ("expected 1 warning, got: " <> show other)
+
 -- ----------------------------------------------------------------------------
 -- Local helpers (used only by listSessions/resolveSessionRef tests)
 -- ----------------------------------------------------------------------------
+
+-- | Create a LogHandle that captures warn-level messages into an IORef.
+mkCaptureLogger :: IO (LogHandle, IORef [Text])
+mkCaptureLogger = do
+  ref <- newIORef []
+  let logger = LogHandle
+        { _lh_logInfo  = \_ -> pure ()
+        , _lh_logWarn  = \m -> modifyIORef' ref (<> [m])
+        , _lh_logError = \_ -> pure ()
+        , _lh_logDebug = \_ -> pure ()
+        }
+  pure (logger, ref)
 
 -- | Write a session.json under <base>/<sid>/ with the given last-active offset
 -- (in seconds, added to t0). Closes the transcript handle so that file

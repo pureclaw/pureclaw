@@ -18,6 +18,22 @@ import System.IO.Temp
 import System.Process.Typed
 import Test.Hspec
 
+import Data.Map.Strict qualified as Map
+import Data.Text (Text)
+import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import PureClaw.Core.Types (parseSessionId)
+import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Handles.Transcript (TranscriptHandle (..))
+import PureClaw.Session.Handle (SessionHandle (..), mkSessionHandle)
+import PureClaw.Session.Types
+  ( RuntimeType (..)
+  , SessionMeta (..)
+  )
+import PureClaw.Transcript.Types
+  ( Direction (..)
+  , TranscriptEntry (..)
+  )
+
 -- | Find the built pureclaw binary via cabal list-bin.
 findPureclaw :: IO FilePath
 findPureclaw = do
@@ -357,6 +373,109 @@ spec = do
         bin ["--no-vault", "--session", "does-not-exist"] "" 5000000
       exitCode `shouldNotBe` ExitSuccess
       err `shouldContain` "not found"
+
+    it "resumes a session and replays prior transcript entries into the agent context" $ do
+      bin <- findPureclaw
+      withSystemTempDirectory "pureclaw-session-replay-test" $ \tmpDir -> do
+        -- Build a session fixture directly on disk with two transcript
+        -- entries (one Request, one Response) using the real session
+        -- and transcript handles, so the binary has something to reload.
+        let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
+            t0 = UTCTime (fromGregorian 2025 1 1) (secondsToDiffTime 0)
+            sid = parseSessionId "replay-fixture-1"
+            meta = SessionMeta
+              { _sm_id                = sid
+              , _sm_agent             = Nothing
+              , _sm_runtime           = RTProvider
+              , _sm_model             = "test-model"
+              , _sm_channel           = "cli"
+              , _sm_createdAt         = t0
+              , _sm_lastActive        = t0
+              , _sm_bootstrapConsumed = False
+              }
+            mkTxEntry eid dir payload = TranscriptEntry
+              { _te_id            = eid
+              , _te_timestamp     = t0
+              , _te_harness       = Nothing
+              , _te_model         = Just "test-model"
+              , _te_direction     = dir
+              , _te_payload       = payload
+              , _te_durationMs    = Nothing
+              , _te_correlationId = "corr"
+              , _te_metadata      = Map.empty
+              } :: TranscriptEntry
+        createDirectoryIfMissing True sessionsDir
+        sh <- mkSessionHandle mkNoOpLogHandle sessionsDir meta
+        let th = _sh_transcript sh
+        _th_record th (mkTxEntry "e1" Request  "prior user message")
+        _th_record th (mkTxEntry "e2" Response "prior assistant reply")
+        _th_flush th
+        _th_close th
+        -- Now spawn the binary with --session <id> and /status; the
+        -- reported Messages count should include the two replayed
+        -- entries rather than the pre-fix value of 0.
+        let args = ["--no-vault", "--session", "replay-fixture-1"]
+            pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "/status\n")))
+               $ setStdout byteStringOutput
+               $ setStderr byteStringOutput
+               $ setWorkingDir tmpDir
+               $ setEnv
+                   [ ("HOME", tmpDir)
+                   , ("PATH", "/usr/bin:/bin")
+                   , ("TERM", "dumb")
+                   , ("LANG", "C.UTF-8")
+                   ]
+               $ proc bin args
+        r <- race' (threadDelay 5000000) (readProcess pc)
+        case r of
+          Left () -> expectationFailure "pureclaw timed out"
+          Right (ec, out, err) -> do
+            let outStr = T.unpack (TE.decodeUtf8 (LBS.toStrict out))
+                errStr = T.unpack (TE.decodeUtf8 (LBS.toStrict err))
+            annotate errStr ec `shouldBe` annotate errStr ExitSuccess
+            -- The /status handler prints "  Messages: N" — must be 2.
+            outStr `shouldContain` "Messages:            2"
+
+    it "logs a warning and falls back to TargetProvider when resuming an RTHarness session whose harness is not running" $ do
+      bin <- findPureclaw
+      withSystemTempDirectory "pureclaw-resume-rth-test" $ \tmpDir -> do
+        let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
+            t0 = UTCTime (fromGregorian 2025 1 1) (secondsToDiffTime 0)
+            sid = parseSessionId "dead-harness-fixture-1"
+            meta = SessionMeta
+              { _sm_id                = sid
+              , _sm_agent             = Nothing
+              , _sm_runtime           = RTHarness ("ghost-harness" :: Text)
+              , _sm_model             = "test-model"
+              , _sm_channel           = "cli"
+              , _sm_createdAt         = t0
+              , _sm_lastActive        = t0
+              , _sm_bootstrapConsumed = False
+              }
+        createDirectoryIfMissing True sessionsDir
+        sh <- mkSessionHandle mkNoOpLogHandle sessionsDir meta
+        _th_close (_sh_transcript sh)
+        let args = ["--no-vault", "--session", "dead-harness-fixture-1"]
+            pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "")))
+               $ setStdout byteStringOutput
+               $ setStderr byteStringOutput
+               $ setWorkingDir tmpDir
+               $ setEnv
+                   [ ("HOME", tmpDir)
+                   , ("PATH", "/usr/bin:/bin")
+                   , ("TERM", "dumb")
+                   , ("LANG", "C.UTF-8")
+                   ]
+               $ proc bin args
+        r <- race' (threadDelay 5000000) (readProcess pc)
+        case r of
+          Left () -> expectationFailure "pureclaw timed out"
+          Right (ec, _out, err) -> do
+            let errStr = T.unpack (TE.decodeUtf8 (LBS.toStrict err))
+            annotate errStr ec `shouldBe` annotate errStr ExitSuccess
+            -- The warning from validateRuntime must fire.
+            errStr `shouldContain` "ghost-harness"
+            errStr `shouldContain` "falling back"
 
     it "rejects --session and --prefix together with a mutual-exclusion error" $ do
       bin <- findPureclaw
