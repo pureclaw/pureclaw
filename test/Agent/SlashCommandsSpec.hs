@@ -2125,3 +2125,225 @@ spec = do
 
     it "agentNameMatches returns empty for empty candidate list" $
       agentNameMatches [] "z" `shouldBe` []
+
+  describe "parseSlashCommand — /session" $ do
+    it "parses /session new" $
+      parseSlashCommand "/session new" `shouldBe` Just (CmdSession SessionNew)
+
+    it "parses /session list (no arg)" $
+      parseSlashCommand "/session list" `shouldBe` Just (CmdSession (SessionList Nothing))
+
+    it "parses /session list <agent>" $
+      parseSlashCommand "/session list zoe" `shouldBe` Just (CmdSession (SessionList (Just "zoe")))
+
+    it "parses /session resume <id>" $
+      parseSlashCommand "/session resume abc-123" `shouldBe` Just (CmdSession (SessionResume "abc-123"))
+
+    it "rejects /session resume with no argument (falls through to unknown)" $
+      parseSlashCommand "/session resume" `shouldBe` Just (CmdSession (SessionUnknown "resume"))
+
+    it "parses /session last" $
+      parseSlashCommand "/session last" `shouldBe` Just (CmdSession SessionLast)
+
+    it "parses /last as /session last alias" $
+      parseSlashCommand "/last" `shouldBe` Just (CmdSession SessionLast)
+
+    it "parses /session info" $
+      parseSlashCommand "/session info" `shouldBe` Just (CmdSession SessionInfo)
+
+    it "parses /session reset" $
+      parseSlashCommand "/session reset" `shouldBe` Just (CmdSession SessionReset)
+
+    it "parses /session compact" $
+      parseSlashCommand "/session compact" `shouldBe` Just (CmdSession SessionCompact)
+
+    it "parses /session case-insensitively" $
+      parseSlashCommand "/SESSION NEW" `shouldBe` Just (CmdSession SessionNew)
+
+    it "parses bare /session as unknown" $
+      parseSlashCommand "/session" `shouldBe` Just (CmdSession (SessionUnknown ""))
+
+    it "parses /session foo as unknown subcommand" $
+      parseSlashCommand "/session foo" `shouldBe` Just (CmdSession (SessionUnknown "foo"))
+
+    it "/new still parses to CmdNew (backward compat)" $
+      parseSlashCommand "/new" `shouldBe` Just CmdNew
+
+    it "/reset still parses to CmdReset (backward compat)" $
+      parseSlashCommand "/reset" `shouldBe` Just CmdReset
+
+    it "/status still parses to CmdStatus (backward compat)" $
+      parseSlashCommand "/status" `shouldBe` Just CmdStatus
+
+    it "/compact still parses to CmdCompact (backward compat)" $
+      parseSlashCommand "/compact" `shouldBe` Just CmdCompact
+
+  describe "executeSlashCommand — /session" $ do
+    let mkSessionEnv sentRef = do
+          vaultRef      <- newIORef Nothing
+          providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef      <- newIORef (ModelId "test")
+          transcriptRef <- newIORef Nothing
+          harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
+          pure AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
+            }
+
+    it "/session new writes session.json on disk and returns a confirmation" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "New session created:"
+        Nothing -> expectationFailure "Expected new-session confirmation"
+      -- Verify a session.json was written under the sessions dir
+      home <- getEnv "HOME"
+      let sessionsDir = home </> ".pureclaw" </> "sessions"
+      entries <- Dir.listDirectory sessionsDir
+      entries `shouldSatisfy` (not . null)
+
+    it "/session new clears messages" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = addMessage (textMessage User "hello") (emptyContext (Just "sys"))
+      ctx' <- executeSlashCommand env (CmdSession SessionNew) ctx
+      contextMessages ctx' `shouldBe` []
+
+    it "/session list with empty dir shows 'No sessions found.'" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession (SessionList Nothing)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "No sessions found."
+        Nothing -> expectationFailure "Expected empty-list message"
+
+    it "/session list lists existing sessions" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create two sessions
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      writeIORef sentRef Nothing
+      _ <- executeSlashCommand env (CmdSession (SessionList Nothing)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "Sessions:"
+        Nothing -> expectationFailure "Expected list output"
+
+    it "/session resume missing returns not-found message" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession (SessionResume "ghost")) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "No session matching ghost found."
+        Nothing -> expectationFailure "Expected not-found message"
+
+    it "/session resume <exact-id> returns a Resumed message" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create a session
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      home <- getEnv "HOME"
+      let sessionsDir = home </> ".pureclaw" </> "sessions"
+      entries <- Dir.listDirectory sessionsDir
+      case entries of
+        (sid : _) -> do
+          writeIORef sentRef Nothing
+          _ <- executeSlashCommand env (CmdSession (SessionResume (T.pack sid))) (emptyContext Nothing)
+          sent <- readIORef sentRef
+          case sent of
+            Just t  -> T.unpack t `shouldContain` "Resumed session"
+            Nothing -> expectationFailure "Expected resume confirmation"
+        [] -> expectationFailure "Expected at least one session dir"
+
+    it "/session last with no sessions reports none" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession SessionLast) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "No sessions found."
+        Nothing -> expectationFailure "Expected empty message"
+
+    it "/session last resumes most recent after creating" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      writeIORef sentRef Nothing
+      _ <- executeSlashCommand env (CmdSession SessionLast) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "Resumed session"
+        Nothing -> expectationFailure "Expected resume confirmation"
+
+    it "/session info shows session fields" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = recordUsage (Just (Usage 42 17))
+              $ addMessage (textMessage User "hello")
+              $ emptyContext Nothing
+      _ <- executeSlashCommand env (CmdSession SessionInfo) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "Session info:"
+          T.unpack t `shouldContain` "Session:"
+          T.unpack t `shouldContain` "Runtime:"
+          T.unpack t `shouldContain` "Messages:"
+          T.unpack t `shouldContain` "42"
+          T.unpack t `shouldContain` "17"
+        Nothing -> expectationFailure "Expected session info output"
+
+    it "/session reset clears context (aliases /reset)" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = recordUsage (Just (Usage 100 50))
+              $ addMessage (textMessage User "hello")
+              $ emptyContext (Just "sys")
+      ctx' <- executeSlashCommand env (CmdSession SessionReset) ctx
+      contextMessages ctx' `shouldBe` []
+      contextTotalInputTokens ctx' `shouldBe` 0
+      contextSystemPrompt ctx' `shouldBe` Just "sys"
+
+    it "/session compact routes through compact handler" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession SessionCompact) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "few messages"
+        Nothing -> expectationFailure "Expected compact message"
+
+  describe "session id tab completion" $ do
+    it "sessionIdMatches returns all on empty prefix" $
+      sessionIdMatches ["a-1", "b-2", "c-3"] "" `shouldMatchList` ["a-1", "b-2", "c-3"]
+
+    it "sessionIdMatches filters by prefix" $
+      sessionIdMatches ["zoe-1", "ops-2", "zoe-3"] "zoe" `shouldMatchList` ["zoe-1", "zoe-3"]
+
+    it "sessionIdMatches is case-insensitive" $
+      sessionIdMatches ["Zoe-1", "Ops-2"] "z" `shouldMatchList` ["Zoe-1"]
+
+    it "sessionIdMatches on empty candidate list is empty" $
+      sessionIdMatches [] "x" `shouldBe` []
