@@ -1,5 +1,6 @@
 module Agent.AgentDefSpec (spec) where
 
+import Data.Aeson qualified as Aeson
 import Data.Text qualified as T
 import Test.Hspec
 
@@ -31,3 +32,10 @@ spec = do
 
     it "accepts a name exactly 64 characters long" $
       fmap unAgentName (mkAgentName (T.replicate 64 "a")) `shouldBe` Right (T.replicate 64 "a")
+
+  describe "AgentName FromJSON" $ do
+    it "returns Nothing for an invalid name (prevents smart-constructor bypass)" $
+      (Aeson.decode "\"../evil\"" :: Maybe AgentName) `shouldBe` Nothing
+
+    it "returns Just for a valid name via JSON" $
+      fmap unAgentName (Aeson.decode "\"zoe\"" :: Maybe AgentName) `shouldBe` Just "zoe"
