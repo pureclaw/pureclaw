@@ -260,3 +260,131 @@ spec = do
         bin ["--system", "custom-prompt", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       err `shouldNotContain` "Agent:"
+
+  describe "--prefix CLI flag" $ do
+    it "creates a session whose dir starts with the given prefix" $ do
+      bin <- findPureclaw
+      withSystemTempDirectory "pureclaw-prefix-test" $ \tmpDir -> do
+        let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "")))
+               $ setStdout byteStringOutput
+               $ setStderr byteStringOutput
+               $ setWorkingDir tmpDir
+               $ setEnv
+                   [ ("HOME", tmpDir)
+                   , ("PATH", "/usr/bin:/bin")
+                   , ("TERM", "dumb")
+                   , ("LANG", "C.UTF-8")
+                   ]
+               $ proc bin ["--no-vault", "--prefix", "myrun"]
+        result <- race' (threadDelay 5000000) (readProcess pc)
+        case result of
+          Left () -> expectationFailure "pureclaw timed out"
+          Right (ec, _out, err) -> do
+            annotate (T.unpack (TE.decodeUtf8 (LBS.toStrict err))) ec
+              `shouldBe` annotate (T.unpack (TE.decodeUtf8 (LBS.toStrict err))) ExitSuccess
+            let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
+            dirs <- listDirectory sessionsDir
+            any (\d -> take 6 d == "myrun-") dirs `shouldBe` True
+
+    it "rejects --prefix ../evil with an error exit" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithArgs
+        bin ["--no-vault", "--prefix", "../evil"] "" 5000000
+      exitCode `shouldNotBe` ExitSuccess
+      err `shouldContain` "invalid"
+
+  describe "--session CLI flag" $ do
+    it "resumes an existing session by exact ID" $ do
+      bin <- findPureclaw
+      withSystemTempDirectory "pureclaw-session-resume-test" $ \tmpDir -> do
+        -- First run: create a session under a known prefix.
+        let runArgs args = do
+              let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "")))
+                     $ setStdout byteStringOutput
+                     $ setStderr byteStringOutput
+                     $ setWorkingDir tmpDir
+                     $ setEnv
+                         [ ("HOME", tmpDir)
+                         , ("PATH", "/usr/bin:/bin")
+                         , ("TERM", "dumb")
+                         , ("LANG", "C.UTF-8")
+                         ]
+                     $ proc bin args
+              r <- race' (threadDelay 5000000) (readProcess pc)
+              case r of
+                Left () -> fail "pureclaw timed out"
+                Right (ec, _o, e) ->
+                  pure (ec, T.unpack (TE.decodeUtf8 (LBS.toStrict e)))
+        (ec1, _err1) <- runArgs ["--no-vault", "--prefix", "seed"]
+        ec1 `shouldBe` ExitSuccess
+        let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
+        dirs <- listDirectory sessionsDir
+        let mResumeId = case filter (\d -> take 5 d == "seed-") dirs of
+                          (d:_) -> Just d
+                          _     -> Nothing
+        resumeId <- maybe (fail "no seed session directory found") pure mResumeId
+        -- Second run: resume it by exact ID.
+        (ec2, err2) <- runArgs ["--no-vault", "--session", resumeId]
+        ec2 `shouldBe` ExitSuccess
+        -- The resumed session dir must still exist and still have its
+        -- transcript file (independence / migration check).
+        doesFileExist (sessionsDir </> resumeId </> "transcript.jsonl")
+          `shouldReturn` True
+        -- And at least one new session dir was NOT created for the resume path.
+        dirs2 <- listDirectory sessionsDir
+        length dirs2 `shouldBe` length dirs
+        -- Sanity: stderr contains a resume log line
+        err2 `shouldContain` "Resuming session"
+
+    it "errors out when --session points to a nonexistent ID" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithArgs
+        bin ["--no-vault", "--session", "does-not-exist"] "" 5000000
+      exitCode `shouldNotBe` ExitSuccess
+      err `shouldContain` "not found"
+
+    it "rejects --session and --prefix together with a mutual-exclusion error" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithArgs
+        bin ["--no-vault", "--session", "foo", "--prefix", "bar"] "" 5000000
+      exitCode `shouldNotBe` ExitSuccess
+      err `shouldContain` "mutually exclusive"
+
+  describe "session transcript independence" $ do
+    it "two different sessions do not share transcript state" $ do
+      bin <- findPureclaw
+      withSystemTempDirectory "pureclaw-session-indep-test" $ \tmpDir -> do
+        let runArgs args = do
+              let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "")))
+                     $ setStdout byteStringOutput
+                     $ setStderr byteStringOutput
+                     $ setWorkingDir tmpDir
+                     $ setEnv
+                         [ ("HOME", tmpDir)
+                         , ("PATH", "/usr/bin:/bin")
+                         , ("TERM", "dumb")
+                         , ("LANG", "C.UTF-8")
+                         ]
+                     $ proc bin args
+              r <- race' (threadDelay 5000000) (readProcess pc)
+              case r of
+                Left () -> fail "pureclaw timed out"
+                Right (ec, _, _) -> pure ec
+        ec1 <- runArgs ["--no-vault", "--prefix", "one"]
+        ec1 `shouldBe` ExitSuccess
+        ec2 <- runArgs ["--no-vault", "--prefix", "two"]
+        ec2 `shouldBe` ExitSuccess
+        let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
+        dirs <- listDirectory sessionsDir
+        let hasPrefix p d = take (length p) d == p
+        length (filter (hasPrefix "one-") dirs) `shouldBe` 1
+        length (filter (hasPrefix "two-") dirs) `shouldBe` 1
+        -- Each session dir has its own transcript file (not shared)
+        case (filter (hasPrefix "one-") dirs, filter (hasPrefix "two-") dirs) of
+          ((oneDir:_), (twoDir:_)) -> do
+            doesFileExist (sessionsDir </> oneDir </> "transcript.jsonl")
+              `shouldReturn` True
+            doesFileExist (sessionsDir </> twoDir </> "transcript.jsonl")
+              `shouldReturn` True
+            oneDir `shouldNotBe` twoDir
+          _ -> expectationFailure "missing expected session directories"
