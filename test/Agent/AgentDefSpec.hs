@@ -39,3 +39,16 @@ spec = do
 
     it "returns Just for a valid name via JSON" $
       fmap unAgentName (Aeson.decode "\"zoe\"" :: Maybe AgentName) `shouldBe` Just "zoe"
+
+  describe "extractFrontmatter" $ do
+    it "extracts a TOML fence at the start of the input" $
+      extractFrontmatter "---\nmodel = \"foo\"\n---\nbody"
+        `shouldBe` (Just "model = \"foo\"", "body")
+
+    it "returns Nothing and the full text when there is no fence" $
+      extractFrontmatter "just body text"
+        `shouldBe` (Nothing, "just body text")
+
+    it "returns Nothing and the full text for a malformed fence (missing closer)" $
+      extractFrontmatter "---\nmodel = \"foo\"\nbody with no closer"
+        `shouldBe` (Nothing, "---\nmodel = \"foo\"\nbody with no closer")
