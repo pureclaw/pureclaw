@@ -5,7 +5,9 @@ import Control.Concurrent
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import System.Directory (createDirectoryIfMissing)
 import System.Exit
+import System.FilePath ((</>))
 import System.IO.Temp
 import System.Process.Typed
 import Test.Hspec
@@ -26,8 +28,21 @@ runPureclaw bin = runPureclawWithArgs bin ["--no-vault"]
 
 -- | Run the pureclaw binary with custom arguments.
 runPureclawWithArgs :: FilePath -> [String] -> String -> Int -> IO (ExitCode, String, String)
-runPureclawWithArgs bin args stdinContent timeoutUs = do
+runPureclawWithArgs bin args stdinContent timeoutUs =
+  runPureclawWithSetup bin args stdinContent timeoutUs (\_ -> pure ())
+
+-- | Run pureclaw after a caller-supplied setup action that can populate the
+-- temp HOME directory (e.g. fixture agents, config.toml).
+runPureclawWithSetup
+  :: FilePath
+  -> [String]
+  -> String
+  -> Int
+  -> (FilePath -> IO ())  -- setup receives the tmpDir (HOME)
+  -> IO (ExitCode, String, String)
+runPureclawWithSetup bin args stdinContent timeoutUs setup = do
   withSystemTempDirectory "pureclaw-cli-test" $ \tmpDir -> do
+    setup tmpDir
     let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 (T.pack stdinContent))))
            $ setStdout byteStringOutput
            $ setStderr byteStringOutput
@@ -129,3 +144,71 @@ spec = do
       err `shouldContain` "signal-cli"
       -- Should still start and show the banner
       out `shouldContain` "PureClaw"
+
+  describe "--agent CLI flag" $ do
+
+    let setupFixtureAgent tmp name body = do
+          let agentDir = tmp </> ".pureclaw" </> "agents" </> name
+          createDirectoryIfMissing True agentDir
+          writeFile (agentDir </> "SOUL.md") body
+
+    it "loads a named agent from ~/.pureclaw/agents/<name>/ and logs the name" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithSetup
+        bin ["--agent", "zoe", "--no-vault"] "" 5000000
+        (\tmp -> setupFixtureAgent tmp "zoe" "You are Zoe, a helpful agent.")
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      err `shouldContain` "Agent: zoe"
+
+    it "rejects an invalid agent name with a helpful error" $ do
+      bin <- findPureclaw
+      (_exitCode, _out, err) <- runPureclawWithArgs
+        bin ["--agent", "../evil", "--no-vault"] "" 5000000
+      err `shouldContain` "invalid agent name"
+
+    it "reports a missing agent and lists available ones" $ do
+      bin <- findPureclaw
+      (_exitCode, _out, err) <- runPureclawWithSetup
+        bin ["--agent", "nonexistent", "--no-vault"] "" 5000000
+        (\tmp -> setupFixtureAgent tmp "zoe" "hi")
+      err `shouldContain` "not found"
+      err `shouldContain` "Available agents:"
+
+    it "loads default_agent from config.toml when --agent is omitted" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithSetup
+        bin ["--no-vault"] "" 5000000
+        (\tmp -> do
+           setupFixtureAgent tmp "zoe" "hi"
+           let cfgDir = tmp </> ".pureclaw"
+           createDirectoryIfMissing True cfgDir
+           writeFile (cfgDir </> "config.toml") "default_agent = \"zoe\"\n")
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      err `shouldContain` "Agent: zoe"
+
+    it "--agent flag overrides default_agent in config" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithSetup
+        bin ["--agent", "bob", "--no-vault"] "" 5000000
+        (\tmp -> do
+           setupFixtureAgent tmp "zoe" "hi"
+           setupFixtureAgent tmp "bob" "hi"
+           let cfgDir = tmp </> ".pureclaw"
+           createDirectoryIfMissing True cfgDir
+           writeFile (cfgDir </> "config.toml") "default_agent = \"zoe\"\n")
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      err `shouldContain` "Agent: bob"
+
+    it "backward-compat: no agent, no SOUL.md → no system prompt, no crash" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "PureClaw"
+      err `shouldNotContain` "Agent:"
+
+    it "backward-compat: --system is honored when no agent is selected" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithArgs
+        bin ["--system", "custom-prompt", "--no-vault"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      err `shouldNotContain` "Agent:"
