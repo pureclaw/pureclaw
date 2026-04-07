@@ -11,15 +11,20 @@ module PureClaw.Session.Types
   , newSessionId
     -- * Runtime type
   , RuntimeType (..)
+    -- * Session metadata
+  , SessionMeta (..)
   ) where
 
+import Data.Aeson ((.=), (.:), (.:?))
 import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), diffTimeToPicoseconds)
 import Data.Time.Calendar (toModifiedJulianDay)
+import GHC.Generics (Generic)
 
+import PureClaw.Agent.AgentDef (AgentName, unAgentName)
 import PureClaw.Core.Types (SessionId (..))
 
 -- | Validated session prefix. Used as the human-readable leading segment
@@ -112,3 +117,45 @@ instance Aeson.FromJSON RuntimeType where
       "provider" -> pure RTProvider
       _ | Just name <- T.stripPrefix "harness:" t -> pure (RTHarness name)
         | otherwise -> fail ("Unknown RuntimeType: " <> T.unpack t)
+
+-- | Persistent metadata for a single session. Stored as @session.json@
+-- inside the session's on-disk directory.
+data SessionMeta = SessionMeta
+  { _sm_id                :: SessionId
+  , _sm_agent             :: Maybe AgentName
+  , _sm_runtime           :: RuntimeType
+  , _sm_model             :: Text
+  , _sm_channel           :: Text
+  , _sm_createdAt         :: UTCTime
+  , _sm_lastActive        :: UTCTime
+  , _sm_bootstrapConsumed :: Bool
+  } deriving stock (Show, Eq, Generic)
+
+-- Hand-written JSON so we don't depend on a 'ToJSON' instance for
+-- 'AgentName' (which 'PureClaw.Agent.AgentDef' deliberately does not
+-- export). The agent is serialized as its bare 'unAgentName' string and
+-- deserialized via the existing 'FromJSON AgentName' instance, which
+-- routes through 'mkAgentName'.
+instance Aeson.ToJSON SessionMeta where
+  toJSON s = Aeson.object $
+    [ "id"                 .= _sm_id s
+    , "runtime"            .= _sm_runtime s
+    , "model"              .= _sm_model s
+    , "channel"            .= _sm_channel s
+    , "created_at"         .= _sm_createdAt s
+    , "last_active"        .= _sm_lastActive s
+    , "bootstrap_consumed" .= _sm_bootstrapConsumed s
+    ] <> case _sm_agent s of
+      Just n  -> ["agent" .= unAgentName n]
+      Nothing -> []
+
+instance Aeson.FromJSON SessionMeta where
+  parseJSON = Aeson.withObject "SessionMeta" $ \o -> SessionMeta
+    <$> o .:  "id"
+    <*> o .:? "agent"
+    <*> o .:  "runtime"
+    <*> o .:  "model"
+    <*> o .:  "channel"
+    <*> o .:  "created_at"
+    <*> o .:  "last_active"
+    <*> o .:  "bootstrap_consumed"
