@@ -6,6 +6,7 @@ module PureClaw.Agent.AgentDef
   , AgentNameError (..)
   ) where
 
+import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -46,3 +47,11 @@ mkAgentName raw
   | T.head raw == '.' && T.all isValidAgentNameChar (T.tail raw) = Left AgentNameLeadingDot
   | not (T.all isValidAgentNameChar raw) = Left (AgentNameInvalidChars raw)
   | otherwise = Right (AgentName raw)
+
+-- | Custom 'Aeson.FromJSON' routes through 'mkAgentName' so that invalid
+-- names on disk cannot bypass the smart constructor.
+instance Aeson.FromJSON AgentName where
+  parseJSON = Aeson.withText "AgentName" $ \t ->
+    case mkAgentName t of
+      Right n -> pure n
+      Left err -> fail ("invalid AgentName: " ++ show err)
