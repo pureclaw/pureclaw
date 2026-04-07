@@ -69,7 +69,9 @@ spec = do
   describe "newSessionId" $ do
     let fixedTime =
           UTCTime (ModifiedJulianDay 60759) (picosecondsToDiffTime 12345000000)
-        Right zoePrefix = mkSessionPrefix "zoe"
+        zoePrefix = case mkSessionPrefix "zoe" of
+          Right p -> p
+          Left e  -> error ("test fixture: " ++ show e)
 
     it "produces \"<prefix>-<mjd>-<picos>\" when a prefix is supplied" $
       newSessionId (Just zoePrefix) fixedTime

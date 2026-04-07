@@ -7,12 +7,18 @@ module PureClaw.Session.Types
   , unSessionPrefix
   , mkSessionPrefix
   , SessionPrefixError (..)
+    -- * Session ID generation
+  , newSessionId
   ) where
 
 import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (UTCTime (..), diffTimeToPicoseconds)
+import Data.Time.Calendar (toModifiedJulianDay)
+
+import PureClaw.Core.Types (SessionId (..))
 
 -- | Validated session prefix. Used as the human-readable leading segment
 -- of a 'PureClaw.Core.Types.SessionId'. Same character rules as
@@ -69,3 +75,17 @@ instance Aeson.FromJSON SessionPrefix where
     case mkSessionPrefix t of
       Right p -> pure p
       Left e -> fail ("invalid SessionPrefix: " ++ show e)
+
+-- | Pure session ID generator. Encodes a 'UTCTime' as
+-- @\<modified-julian-day\>-\<picoseconds-since-midnight\>@ (matching the
+-- format used by 'PureClaw.Transcript.Provider.generateId') and prefixes
+-- it with the optional 'SessionPrefix' separated by a hyphen.
+newSessionId :: Maybe SessionPrefix -> UTCTime -> SessionId
+newSessionId mPrefix time =
+  let mjd     = toModifiedJulianDay (utctDay time)
+      picos   = diffTimeToPicoseconds (utctDayTime time)
+      timeStr = T.pack (show mjd) <> "-" <> T.pack (show picos)
+      full    = case mPrefix of
+        Nothing -> timeStr
+        Just p  -> unSessionPrefix p <> "-" <> timeStr
+  in SessionId full
