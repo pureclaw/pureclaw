@@ -80,3 +80,28 @@ spec = do
     it "omits the prefix and leading hyphen when Nothing is supplied" $
       newSessionId Nothing fixedTime
         `shouldBe` parseSessionId "60759-12345000000"
+
+  describe "RuntimeType JSON" $ do
+    it "encodes RTProvider as the bare string \"provider\"" $
+      Aeson.encode RTProvider `shouldBe` "\"provider\""
+
+    it "encodes RTHarness as \"harness:<name>\"" $
+      Aeson.encode (RTHarness "claude-code") `shouldBe` "\"harness:claude-code\""
+
+    it "decodes \"provider\" to RTProvider" $
+      (Aeson.decode "\"provider\"" :: Maybe RuntimeType) `shouldBe` Just RTProvider
+
+    it "decodes \"harness:claude-code\" to RTHarness \"claude-code\"" $
+      (Aeson.decode "\"harness:claude-code\"" :: Maybe RuntimeType)
+        `shouldBe` Just (RTHarness "claude-code")
+
+    it "round-trips RTProvider" $
+      (Aeson.decode (Aeson.encode RTProvider) :: Maybe RuntimeType)
+        `shouldBe` Just RTProvider
+
+    it "round-trips RTHarness" $
+      (Aeson.decode (Aeson.encode (RTHarness "cc")) :: Maybe RuntimeType)
+        `shouldBe` Just (RTHarness "cc")
+
+    it "fails to decode an unknown string" $
+      (Aeson.decode "\"banana\"" :: Maybe RuntimeType) `shouldBe` Nothing
