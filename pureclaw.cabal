@@ -93,6 +93,7 @@ library
     PureClaw.Agent.SlashCommands
     -- Session
     PureClaw.Session.Handle
+    PureClaw.Session.Types
     -- Providers
     PureClaw.Providers.Class
     PureClaw.Providers.Anthropic
@@ -252,6 +253,7 @@ test-suite pureclaw-test
     Transcript.TypesSpec
     Transcript.CombinatorSpec
     Transcript.ProviderSpec
+    Session.TypesSpec
     Handles.TranscriptSpec
     Handles.HarnessSpec
     Harness.ClaudeCodeSpec

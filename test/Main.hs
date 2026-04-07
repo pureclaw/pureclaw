@@ -74,6 +74,7 @@ import qualified Harness.ClaudeCodeSpec
 import qualified Harness.TmuxSpec
 import qualified Transcript.CombinatorSpec
 import qualified Transcript.ProviderSpec
+import qualified Session.TypesSpec
 
 main :: IO ()
 main = hspec $ do
@@ -149,3 +150,4 @@ main = hspec $ do
   describe "Harness.Tmux" Harness.TmuxSpec.spec
   describe "Transcript.Combinator" Transcript.CombinatorSpec.spec
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
+  describe "Session.Types" Session.TypesSpec.spec
