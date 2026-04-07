@@ -286,6 +286,21 @@ spec = do
             dirs <- listDirectory sessionsDir
             any (\d -> take 6 d == "myrun-") dirs `shouldBe` True
 
+    it "defaults --prefix to the agent name when --agent is set and --prefix is omitted" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithSetup
+        bin ["--agent", "zoe", "--no-vault"] "" 5000000
+        (\tmp -> do
+           let agentDir = tmp </> ".pureclaw" </> "agents" </> "zoe"
+           createDirectoryIfMissing True agentDir
+           writeFile (agentDir </> "SOUL.md") "hi")
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      -- The new session dir name must start with the agent prefix.
+      -- We can't easily inspect tmpDir here because runPureclawWithSetup
+      -- destroys it, so assert indirectly via a stderr log line we emit
+      -- at startup listing the session id.
+      err `shouldContain` "Session: zoe-"
+
     it "rejects --prefix ../evil with an error exit" $ do
       bin <- findPureclaw
       (exitCode, _out, err) <- runPureclawWithArgs
@@ -381,7 +396,7 @@ spec = do
         length (filter (hasPrefix "two-") dirs) `shouldBe` 1
         -- Each session dir has its own transcript file (not shared)
         case (filter (hasPrefix "one-") dirs, filter (hasPrefix "two-") dirs) of
-          ((oneDir:_), (twoDir:_)) -> do
+          (oneDir:_, twoDir:_) -> do
             doesFileExist (sessionsDir </> oneDir </> "transcript.jsonl")
               `shouldReturn` True
             doesFileExist (sessionsDir </> twoDir </> "transcript.jsonl")

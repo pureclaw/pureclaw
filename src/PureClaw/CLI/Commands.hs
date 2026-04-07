@@ -504,9 +504,15 @@ runChat opts = do
         -- Validate and construct the optional session prefix. Invalid
         -- prefixes (path traversal, reserved words, bad chars) are
         -- rejected before any on-disk state is touched.
-        mPrefix <- case _co_prefix opts of
+        -- Prefix resolution: explicit --prefix flag > agent name > Nothing.
+        -- The agent name is already validated (AgentName smart constructor),
+        -- but we still route it through mkSessionPrefix in case the two
+        -- character sets diverge in the future.
+        let rawPrefix = fmap T.pack (_co_prefix opts)
+                    <|> fmap (AgentDef.unAgentName . AgentDef._ad_name) mAgentDef
+        mPrefix <- case rawPrefix of
           Nothing  -> pure Nothing
-          Just raw -> case SessionTypes.mkSessionPrefix (T.pack raw) of
+          Just raw -> case SessionTypes.mkSessionPrefix raw of
             Right p -> pure (Just p)
             Left  e -> do
               _lh_logWarn logger $ "invalid --prefix: " <> T.pack (show e)
@@ -542,6 +548,11 @@ runChat opts = do
                   , SessionTypes._sm_bootstrapConsumed = False
                   }
             mkSessionHandle logger sessionsDir initialMeta
+        -- Log the active session ID so tests and humans can find it.
+        do
+          currentMeta <- readIORef (_sh_meta sessionHandle)
+          _lh_logInfo logger $ "Session: "
+            <> unSessionId (SessionTypes._sm_id currentMeta)
         -- After resume, load a bounded window of recent messages so
         -- the agent has context to continue. Budget: 50 messages or
         -- ~100K estimated tokens, whichever is smaller.
