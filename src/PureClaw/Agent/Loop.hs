@@ -8,6 +8,7 @@ module PureClaw.Agent.Loop
 import Control.Exception
 import Control.Monad
 import Data.IORef
+import Data.Foldable (for_)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -131,8 +132,15 @@ runAgentLoop env = do
               writeIORef prefixSentRef True
             _ch_sendChunk channel (ChunkText t)
             writeIORef streamedRef True
-          StreamDone resp ->
+          StreamDone resp -> do
             writeIORef responseRef (Just resp)
+            -- Fire and clear the one-shot "first StreamDone" callback
+            -- atomically so concurrent StreamDone deliveries cannot
+            -- race and invoke it twice. In production this is used to
+            -- mark the active session's bootstrap as consumed.
+            mAction <- atomicModifyIORef' (_env_onFirstStreamDone env)
+                         (\m -> (Nothing, m))
+            for_ mAction id
           _ -> pure ()
       case providerResult of
         Left e -> do
