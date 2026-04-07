@@ -36,11 +36,13 @@ import System.Process.Typed qualified as P
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
 
+import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Completion
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Agent.SlashCommands
+import PureClaw.Session.Handle (mkNoOpSessionHandle)
 import PureClaw.Handles.Transcript
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -110,6 +112,7 @@ data ChatOptions = ChatOptions
   , _co_config        :: Maybe FilePath
   , _co_noVault       :: Bool
   , _co_oauth         :: Bool
+  , _co_agent         :: Maybe String
   }
   deriving stock (Show, Eq)
 
@@ -169,6 +172,10 @@ chatOptionsParser = ChatOptions
       ( long "oauth"
      <> help "Authenticate with Anthropic via OAuth (opens browser). Tokens are cached in the vault."
       )
+  <*> optional (strOption
+      ( long "agent"
+     <> help "Load a named agent from ~/.pureclaw/agents/<name>/ as the system prompt"
+      ))
 
 -- | Parse a provider type from a CLI string.
 parseProviderType :: ReadM ProviderType
@@ -370,15 +377,46 @@ runChat opts = do
   -- Model
   let model = ModelId (T.pack effectiveModel)
 
-  -- System prompt: effective --system flag > SOUL.md > nothing
-  sysPrompt <- case effectiveSystem of
-    Just s  -> pure (Just (T.pack s))
-    Nothing -> do
-      let soulPath = fromMaybe "SOUL.md" (_co_soul opts)
-      ident <- loadIdentity soulPath
-      if ident == defaultIdentity
-        then pure Nothing
-        else pure (Just (identitySystemPrompt ident))
+  -- Agent resolution: CLI --agent > config default_agent > Nothing.
+  -- On invalid name or missing agent, log a clear error and exit non-zero.
+  let rawAgentName =
+        fmap T.pack (_co_agent opts) <|> _fc_defaultAgent fileCfg
+  pureclawDir <- getPureclawDir
+  let agentsDir = pureclawDir </> "agents"
+      truncateLimit = fromMaybe 8000 (_fc_agentTruncateLimit fileCfg)
+  mAgentDef <- case rawAgentName of
+    Nothing -> pure Nothing
+    Just raw -> case AgentDef.mkAgentName raw of
+      Left _ -> do
+        _lh_logWarn logger $ "invalid agent name: " <> raw
+        exitFailure
+      Right validName -> do
+        mDef <- AgentDef.loadAgent agentsDir validName
+        case mDef of
+          Just d  -> pure (Just d)
+          Nothing -> do
+            defs <- AgentDef.discoverAgents logger agentsDir
+            let names = [AgentDef.unAgentName (AgentDef._ad_name d) | d <- defs]
+                avail = if null names then "(none)" else T.intercalate ", " names
+            _lh_logWarn logger $
+              "Agent \"" <> raw <> "\" not found. Available agents: " <> avail
+            exitFailure
+
+  agentSysPrompt <- case mAgentDef of
+    Nothing  -> pure Nothing
+    Just def -> Just <$> AgentDef.composeAgentPrompt logger def truncateLimit
+
+  -- System prompt: agent > effective --system flag > SOUL.md > nothing
+  sysPrompt <- case agentSysPrompt of
+    Just p  -> pure (Just p)
+    Nothing -> case effectiveSystem of
+      Just s  -> pure (Just (T.pack s))
+      Nothing -> do
+        let soulPath = fromMaybe "SOUL.md" (_co_soul opts)
+        ident <- loadIdentity soulPath
+        if ident == defaultIdentity
+          then pure Nothing
+          else pure (Just (identitySystemPrompt ident))
 
   -- Security policy
   let policy = buildPolicy effectiveAutonomy effectiveAllow
@@ -399,6 +437,10 @@ runChat opts = do
     Nothing -> _lh_logInfo logger
       "No providers configured \x2014 use /provider to get started"
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
+  case mAgentDef of
+    Just d  -> _lh_logInfo logger $
+      "Agent: " <> AgentDef.unAgentName (AgentDef._ad_name d)
+    Nothing -> pure ()
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case (_sp_allowedCommands policy, _sp_autonomy policy) of
     (AllowAll, Full) -> do
@@ -429,7 +471,6 @@ runChat opts = do
           _     -> putStrLn $ "Channel: " <> effectiveChannel
         putStrLn ""
         -- Create transcript handle
-        pureclawDir <- getPureclawDir
         let transcriptDir = pureclawDir </> "transcripts"
         createDirectoryIfMissing True transcriptDir
         timestamp <- getCurrentTime
@@ -449,6 +490,7 @@ runChat opts = do
         modelRef    <- newIORef model
         targetRef   <- newIORef TargetProvider
         windowIdxRef <- newIORef nextWindowIdx
+        sessionHandle <- mkNoOpSessionHandle
         let env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -463,6 +505,8 @@ runChat opts = do
               , _env_harnesses    = harnessRef
               , _env_target       = targetRef
               , _env_nextWindowIdx = windowIdxRef
+              , _env_agentDef     = mAgentDef
+              , _env_session      = sessionHandle
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)

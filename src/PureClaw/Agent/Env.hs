@@ -9,6 +9,7 @@ import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 
+import PureClaw.Agent.AgentDef (AgentDef)
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
@@ -18,6 +19,7 @@ import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Session.Handle (SessionHandle)
 import PureClaw.Tools.Registry
 
 -- | Where incoming user messages are routed.
@@ -61,4 +63,11 @@ data AgentEnv = AgentEnv
   , _env_nextWindowIdx :: IORef Int
     -- ^ Monotonically increasing counter for assigning tmux window indices
     -- to new harnesses. Starts at 0.
+  , _env_agentDef :: Maybe AgentDef
+    -- ^ Currently-selected agent, if any. Populated by the @--agent@ flag
+    -- or the @default_agent@ config field. Used by agent-aware slash
+    -- commands; 'Nothing' in the backward-compat no-agent path.
+  , _env_session :: SessionHandle
+    -- ^ Current conversation session. In WU1 this is always a no-op
+    -- placeholder; WU2 promotes it to a real on-disk session.
   }

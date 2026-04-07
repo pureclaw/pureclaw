@@ -18,6 +18,7 @@ import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Session.Handle (mkNoOpSessionHandle)
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
@@ -102,6 +103,7 @@ mkTestEnv p ch = do
   harnessRef    <- newIORef Map.empty
   targetRef     <- newIORef TargetProvider
   windowIdxRef  <- newIORef 0
+  sessionHandle <- mkNoOpSessionHandle
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -116,6 +118,8 @@ mkTestEnv p ch = do
     , _env_harnesses    = harnessRef
     , _env_target       = targetRef
     , _env_nextWindowIdx = windowIdxRef
+    , _env_agentDef      = Nothing
+    , _env_session       = sessionHandle
     }
 
 spec :: Spec

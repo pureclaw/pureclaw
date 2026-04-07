@@ -15,10 +15,14 @@ import Data.Time.Clock qualified as Time
 import System.Console.Haskeline qualified as HL
 import System.Timeout qualified as Timeout
 
+import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
+import PureClaw.CLI.Config (getPureclawDir)
 import PureClaw.Core.Types
+import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Providers.Class
+import System.FilePath ((</>))
 
 -- | TTL cache for model listing results (30 seconds).
 data ModelCache = ModelCache
@@ -134,6 +138,14 @@ getDynamicCandidates (Just env) cacheRef line = do
           names = concatMap (\(canonical, aliases, _) ->
             T.unpack canonical : map T.unpack aliases) knownHarnesses
       pure (filter (matchesCI partial) names)
+  else if "/agent info " `L.isPrefixOf` lower || "/agent start " `L.isPrefixOf` lower
+    then do
+      let prefixLen = if "/agent info " `L.isPrefixOf` lower then 12 else 13
+          partial   = drop prefixLen (dropWhile (== ' ') line)
+      agentsDir <- (</> "agents") <$> getPureclawDir
+      defs <- AgentDef.discoverAgents mkNoOpLogHandle agentsDir
+      let names = map (T.unpack . AgentDef.unAgentName . AgentDef._ad_name) defs
+      pure (map T.unpack (agentNameMatches (map T.pack names) (T.pack partial)))
   else if "/provider " `L.isPrefixOf` lower
     then do
       let partial = drop 10 (dropWhile (== ' ') line)
