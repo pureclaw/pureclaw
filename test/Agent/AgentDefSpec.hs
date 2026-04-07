@@ -132,6 +132,60 @@ spec = do
         out <- composeAgentPrompt log_ (fixtureAgentDef "solo" dir) limit8k
         out `shouldBe` "--- MEMORY ---\nremember this"
 
+    it "skips files that are zero bytes" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "a"
+        createDirectory dir
+        TIO.writeFile (dir </> "SOUL.md") ""
+        TIO.writeFile (dir </> "USER.md") "u"
+        out <- composeAgentPrompt log_ (fixtureAgentDef "a" dir) limit8k
+        out `shouldBe` "--- USER ---\nu"
+
+    it "skips files that are whitespace only" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "a"
+        createDirectory dir
+        TIO.writeFile (dir </> "SOUL.md") "   \n\t \n"
+        TIO.writeFile (dir </> "USER.md") "u"
+        out <- composeAgentPrompt log_ (fixtureAgentDef "a" dir) limit8k
+        out `shouldBe` "--- USER ---\nu"
+
+    it "does not truncate a file exactly at the limit" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "a"
+        createDirectory dir
+        let body = T.replicate 100 "x"
+        TIO.writeFile (dir </> "MEMORY.md") body
+        out <- composeAgentPrompt log_ (fixtureAgentDef "a" dir) 100
+        out `shouldBe` "--- MEMORY ---\n" <> body
+
+    it "truncates a file just over the limit with the exact marker" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "a"
+        createDirectory dir
+        let body = T.replicate 101 "x"
+        TIO.writeFile (dir </> "MEMORY.md") body
+        out <- composeAgentPrompt log_ (fixtureAgentDef "a" dir) 100
+        out `shouldBe` "--- MEMORY ---\n" <> T.replicate 100 "x"
+              <> "\n[...truncated at 100 chars...]"
+
+    it "truncates a 10000-char fixture at 8000 with the exact marker" $ do
+      out <- composeAgentPrompt log_
+        (fixtureAgentDef "needs-truncation" "test/fixtures/agents/needs-truncation")
+        8000
+      out `shouldBe` "--- AGENTS ---\n" <> T.replicate 8000 "x"
+              <> "\n[...truncated at 8000 chars...]"
+
+    it "rejects files larger than 1MB and skips them" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "a"
+        createDirectory dir
+        let big = T.replicate (1024 * 1024 + 1) "x"
+        TIO.writeFile (dir </> "MEMORY.md") big
+        TIO.writeFile (dir </> "USER.md") "u"
+        out <- composeAgentPrompt log_ (fixtureAgentDef "a" dir) limit8k
+        out `shouldBe` "--- USER ---\nu"
+
     it "honors injection order SOUL,USER,AGENTS,MEMORY,IDENTITY,TOOLS,BOOTSTRAP" $
       withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
         let dir = tmp </> "all"
