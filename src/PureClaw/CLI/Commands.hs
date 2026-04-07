@@ -42,9 +42,12 @@ import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Agent.SlashCommands
 import PureClaw.Session.Handle
-  ( SessionHandle (..)
+  ( ResumeError (..)
+  , SessionHandle (..)
+  , loadRecentMessages
   , markBootstrapConsumed
   , mkSessionHandle
+  , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Channels.CLI
@@ -116,6 +119,8 @@ data ChatOptions = ChatOptions
   , _co_noVault       :: Bool
   , _co_oauth         :: Bool
   , _co_agent         :: Maybe String
+  , _co_session       :: Maybe String
+  , _co_prefix        :: Maybe String
   }
   deriving stock (Show, Eq)
 
@@ -178,6 +183,14 @@ chatOptionsParser = ChatOptions
   <*> optional (strOption
       ( long "agent"
      <> help "Load a named agent from ~/.pureclaw/agents/<name>/ as the system prompt"
+      ))
+  <*> optional (strOption
+      ( long "session"
+     <> help "Resume an existing session by exact ID (mutually exclusive with --prefix)"
+      ))
+  <*> optional (strOption
+      ( long "prefix"
+     <> help "Prefix for the new session ID (mutually exclusive with --session)"
       ))
 
 -- | Parse a provider type from a CLI string.
@@ -341,6 +354,15 @@ runChat :: ChatOptions -> IO ()
 runChat opts = do
   let logger = mkStderrLogHandle
 
+  -- --session and --prefix are mutually exclusive. We enforce this
+  -- post-parse because optparse-applicative's <|> would make one
+  -- flag shadow the other rather than producing a clear error.
+  case (_co_session opts, _co_prefix opts) of
+    (Just _, Just _) -> do
+      _lh_logWarn logger "--session and --prefix are mutually exclusive"
+      exitFailure
+    _ -> pure ()
+
   -- Load config file: --config flag overrides default search locations
   configResult <- maybe loadConfigDiag loadFileConfigDiag (_co_config opts)
   let fileCfg = configFileConfig configResult
@@ -479,19 +501,53 @@ runChat opts = do
         let sessionsDir = pureclawDir </> "sessions"
         createDirectoryIfMissing True sessionsDir
         now <- getCurrentTime
-        let sid = SessionTypes.newSessionId Nothing now
-            initialMeta = SessionTypes.SessionMeta
-              { SessionTypes._sm_id                = sid
-              , SessionTypes._sm_agent             =
-                  fmap AgentDef._ad_name mAgentDef
-              , SessionTypes._sm_runtime           = SessionTypes.RTProvider
-              , SessionTypes._sm_model             = T.pack effectiveModel
-              , SessionTypes._sm_channel           = T.pack effectiveChannel
-              , SessionTypes._sm_createdAt         = now
-              , SessionTypes._sm_lastActive        = now
-              , SessionTypes._sm_bootstrapConsumed = False
-              }
-        sessionHandle <- mkSessionHandle logger sessionsDir initialMeta
+        -- Validate and construct the optional session prefix. Invalid
+        -- prefixes (path traversal, reserved words, bad chars) are
+        -- rejected before any on-disk state is touched.
+        mPrefix <- case _co_prefix opts of
+          Nothing  -> pure Nothing
+          Just raw -> case SessionTypes.mkSessionPrefix (T.pack raw) of
+            Right p -> pure (Just p)
+            Left  e -> do
+              _lh_logWarn logger $ "invalid --prefix: " <> T.pack (show e)
+              exitFailure
+        -- If --session is supplied, resume that session; otherwise
+        -- create a fresh one.
+        sessionHandle <- case _co_session opts of
+          Just sidRaw -> do
+            _lh_logInfo logger $ "Resuming session " <> T.pack sidRaw
+            result <- resumeSession logger sessionsDir
+                        (parseSessionId (T.pack sidRaw))
+            case result of
+              Right resumed -> pure resumed
+              Left (ResumeMissingMetadata _) -> do
+                _lh_logWarn logger $
+                  "Session not found: " <> T.pack sidRaw
+                exitFailure
+              Left (ResumeCorruptedMetadata _ msg) -> do
+                _lh_logWarn logger $
+                  "Session not found (corrupted metadata): " <> T.pack msg
+                exitFailure
+          Nothing -> do
+            let sid = SessionTypes.newSessionId mPrefix now
+                initialMeta = SessionTypes.SessionMeta
+                  { SessionTypes._sm_id                = sid
+                  , SessionTypes._sm_agent             =
+                      fmap AgentDef._ad_name mAgentDef
+                  , SessionTypes._sm_runtime           = SessionTypes.RTProvider
+                  , SessionTypes._sm_model             = T.pack effectiveModel
+                  , SessionTypes._sm_channel           = T.pack effectiveChannel
+                  , SessionTypes._sm_createdAt         = now
+                  , SessionTypes._sm_lastActive        = now
+                  , SessionTypes._sm_bootstrapConsumed = False
+                  }
+            mkSessionHandle logger sessionsDir initialMeta
+        -- After resume, load a bounded window of recent messages so
+        -- the agent has context to continue. Budget: 50 messages or
+        -- ~100K estimated tokens, whichever is smaller.
+        _reloadedMessages <- case _co_session opts of
+          Just _  -> loadRecentMessages (_sh_transcript sessionHandle) 50 100000
+          Nothing -> pure []
         let th = _sh_transcript sessionHandle
         -- Discover any harnesses still running from a previous session
         (discoveredHarnesses, nextWindowIdx) <- discoverHarnesses th
