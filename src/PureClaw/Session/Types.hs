@@ -11,6 +11,7 @@ module PureClaw.Session.Types
   , newSessionId
     -- * Runtime type
   , RuntimeType (..)
+  , defaultTarget
     -- * Session metadata
   , SessionMeta (..)
   ) where
@@ -25,6 +26,7 @@ import Data.Time.Calendar (toModifiedJulianDay)
 import GHC.Generics (Generic)
 
 import PureClaw.Agent.AgentDef (AgentName, unAgentName)
+import PureClaw.Agent.Env (MessageTarget (..))
 import PureClaw.Core.Types (SessionId (..))
 
 -- | Validated session prefix. Used as the human-readable leading segment
@@ -117,6 +119,13 @@ instance Aeson.FromJSON RuntimeType where
       "provider" -> pure RTProvider
       _ | Just name <- T.stripPrefix "harness:" t -> pure (RTHarness name)
         | otherwise -> fail ("Unknown RuntimeType: " <> T.unpack t)
+
+-- | Map a 'RuntimeType' to its corresponding 'MessageTarget'. Pure helper
+-- so the session loader and CLI can share the same default-routing logic
+-- without duplicating the case match.
+defaultTarget :: RuntimeType -> MessageTarget
+defaultTarget RTProvider       = TargetProvider
+defaultTarget (RTHarness name) = TargetHarness name
 
 -- | Persistent metadata for a single session. Stored as @session.json@
 -- inside the session's on-disk directory.
