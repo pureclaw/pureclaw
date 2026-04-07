@@ -7,6 +7,7 @@ import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Time
   ( UTCTime (..)
   , addUTCTime
@@ -39,11 +40,18 @@ import PureClaw.Session.Handle
   , ResumeError (..)
   , SessionHandle (..)
   , listSessions
+  , loadRecentMessages
+  , markBootstrapConsumed
   , mkNoOpSessionHandle
   , mkSessionHandle
   , resolveSessionRef
   , resumeSession
   , validateRuntime
+  )
+import PureClaw.Providers.Class
+  ( ContentBlock (..)
+  , Message (..)
+  , Role (..)
   )
 import PureClaw.Session.Types
   ( RuntimeType (..)
@@ -80,6 +88,19 @@ permBits :: FilePath -> IO Int
 permBits p = do
   st <- getFileStatus p
   pure (fromIntegral (fileMode st) .&. 0o777)
+
+mkTextEntry :: Text -> UTCTime -> Direction -> Text -> TranscriptEntry
+mkTextEntry eid ts dir payload = TranscriptEntry
+  { _te_id            = eid
+  , _te_timestamp     = ts
+  , _te_harness       = Nothing
+  , _te_model         = Just "test"
+  , _te_direction     = dir
+  , _te_payload       = encodePayload (TE.encodeUtf8 payload)
+  , _te_durationMs    = Nothing
+  , _te_correlationId = "corr"
+  , _te_metadata      = Map.empty
+  }
 
 mkEntry :: Text -> UTCTime -> TranscriptEntry
 mkEntry eid ts = TranscriptEntry
@@ -262,6 +283,101 @@ spec = do
       _ <- writeMeta base "zoe-60759-111" 1
       result <- resolveSessionRef base "nothing"
       result `shouldBe` Left NotFound
+
+  describe "markBootstrapConsumed" $ do
+    it "flips _sm_bootstrapConsumed to True and persists to session.json" $ withTmp $ \base -> do
+      let meta = mkMeta "bc-1" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      _sm_bootstrapConsumed <$> readIORef (_sh_meta sh) `shouldReturn` False
+      markBootstrapConsumed sh
+      -- IORef reflects the change.
+      updated <- readIORef (_sh_meta sh)
+      _sm_bootstrapConsumed updated `shouldBe` True
+      -- Persisted to disk.
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (_sh_dir sh </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_bootstrapConsumed onDisk `shouldBe` True
+      _th_close (_sh_transcript sh)
+
+    it "is idempotent on repeated invocations" $ withTmp $ \base -> do
+      let meta = mkMeta "bc-2" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      markBootstrapConsumed sh
+      markBootstrapConsumed sh
+      markBootstrapConsumed sh
+      updated <- readIORef (_sh_meta sh)
+      _sm_bootstrapConsumed updated `shouldBe` True
+      _th_close (_sh_transcript sh)
+
+    it "survives resumeSession (flag preserved on reload)" $ withTmp $ \base -> do
+      let meta = mkMeta "bc-3" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      markBootstrapConsumed sh
+      _th_close (_sh_transcript sh)
+      Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "bc-3")
+      loaded <- readIORef (_sh_meta sh')
+      _sm_bootstrapConsumed loaded `shouldBe` True
+      _th_close (_sh_transcript sh')
+
+  describe "loadRecentMessages" $ do
+    it "returns all messages when fewer than maxCount exist" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-1" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkTextEntry "e1" t0 Request  "hello")
+      _th_record th (mkTextEntry "e2" t0 Response "hi there")
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      length ms `shouldBe` 2
+      -- Oldest first; first entry is User.
+      case ms of
+        [Message User [TextBlock a], Message Assistant [TextBlock b]] -> do
+          a `shouldBe` "hello"
+          b `shouldBe` "hi there"
+        _ -> expectationFailure ("unexpected shape: " <> show ms)
+      _th_close th
+
+    it "caps at maxCount and returns the MOST RECENT window (oldest-first)" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-2" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      mapM_ (\i -> _th_record th
+                     (mkTextEntry (T.pack ("e" <> show i)) t0 Request
+                                  (T.pack ("msg-" <> show i))))
+            [1 .. 100 :: Int]
+      _th_flush th
+      ms <- loadRecentMessages th 50 1000000
+      length ms `shouldBe` 50
+      -- The window must be the LAST 50 (msg-51 .. msg-100), oldest first.
+      case ms of
+        (Message _ [TextBlock first] : _) -> first `shouldBe` "msg-51"
+        _ -> expectationFailure "unexpected first message"
+      case reverse ms of
+        (Message _ [TextBlock lastT] : _) -> lastT `shouldBe` "msg-100"
+        _ -> expectationFailure "unexpected last message"
+      _th_close th
+
+    it "truncates by token budget (chars `div` 4) when budget smaller than count" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-3" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      -- Each payload is 400 chars → ~100 tokens; budget of 250 tokens → 2 messages fit.
+      let big = T.replicate 400 "x"
+      mapM_ (\i -> _th_record th (mkTextEntry (T.pack ("big" <> show i)) t0 Request big))
+            [1 .. 10 :: Int]
+      _th_flush th
+      ms <- loadRecentMessages th 50 250
+      length ms `shouldSatisfy` (<= 3)
+      length ms `shouldSatisfy` (>= 1)
+      _th_close th
+
+    it "returns [] on an empty transcript" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-4" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      ms <- loadRecentMessages th 50 100000
+      ms `shouldBe` []
+      _th_close th
 
 -- ----------------------------------------------------------------------------
 -- Local helpers (used only by listSessions/resolveSessionRef tests)
