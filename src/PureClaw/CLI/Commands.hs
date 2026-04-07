@@ -510,6 +510,7 @@ runChat opts = do
         -- character sets diverge in the future.
         let rawPrefix = fmap T.pack (_co_prefix opts)
                     <|> fmap (AgentDef.unAgentName . AgentDef._ad_name) mAgentDef
+                    <|> _fc_sessionPrefix fileCfg
         mPrefix <- case rawPrefix of
           Nothing  -> pure Nothing
           Just raw -> case SessionTypes.mkSessionPrefix raw of
