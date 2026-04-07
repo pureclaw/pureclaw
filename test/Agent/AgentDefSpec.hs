@@ -52,3 +52,35 @@ spec = do
     it "returns Nothing and the full text for a malformed fence (missing closer)" $
       extractFrontmatter "---\nmodel = \"foo\"\nbody with no closer"
         `shouldBe` (Nothing, "---\nmodel = \"foo\"\nbody with no closer")
+
+  describe "parseAgentsMd" $ do
+    it "parses a file with no frontmatter into defaultAgentConfig and full body" $
+      parseAgentsMd "just body"
+        `shouldBe` Right (defaultAgentConfig, "just body")
+
+    it "parses an empty frontmatter block into defaultAgentConfig" $
+      parseAgentsMd "---\n\n---\nbody"
+        `shouldBe` Right (defaultAgentConfig, "body")
+
+    it "parses all fields when present" $
+      parseAgentsMd "---\nmodel = \"claude-opus\"\ntool_profile = \"full\"\nworkspace = \"~/ws\"\n---\nbody"
+        `shouldBe` Right
+          ( AgentConfig
+              { _ac_model = Just "claude-opus"
+              , _ac_toolProfile = Just "full"
+              , _ac_workspace = Just "~/ws"
+              }
+          , "body"
+          )
+
+    it "ignores unknown fields in the frontmatter" $
+      parseAgentsMd "---\nmodel = \"m\"\nunknown_field = \"x\"\n---\nbody"
+        `shouldBe` Right
+          ( defaultAgentConfig { _ac_model = Just "m" }
+          , "body"
+          )
+
+    it "returns an error for a malformed TOML body in the frontmatter" $
+      case parseAgentsMd "---\nmodel = = broken\n---\nbody" of
+        Left (AgentsMdTomlError _) -> pure ()
+        other -> expectationFailure $ "Expected AgentsMdTomlError, got: " ++ show other
