@@ -5,7 +5,13 @@ import Control.Concurrent
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import System.Directory (createDirectoryIfMissing)
+import Control.Monad (forM_, when)
+import System.Directory
+  ( createDirectoryIfMissing
+  , doesDirectoryExist
+  , doesFileExist
+  , listDirectory
+  )
 import System.Exit
 import System.FilePath ((</>))
 import System.IO.Temp
@@ -144,6 +150,48 @@ spec = do
       err `shouldContain` "signal-cli"
       -- Should still start and show the banner
       out `shouldContain` "PureClaw"
+
+    it "writes transcripts under ~/.pureclaw/sessions/<id>/transcript.jsonl, not ~/.pureclaw/transcripts/" $ do
+      bin <- findPureclaw
+      -- We need to inspect HOME after the run, so we run the binary inside
+      -- a temp dir we control (rather than going through runPureclawWithSetup,
+      -- which destroys its tmpdir on exit).
+      withSystemTempDirectory "pureclaw-transcript-path-test" $ \tmpDir -> do
+        let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 (T.pack "/help\n"))))
+               $ setStdout byteStringOutput
+               $ setStderr byteStringOutput
+               $ setWorkingDir tmpDir
+               $ setEnv
+                   [ ("HOME", tmpDir)
+                   , ("PATH", "/usr/bin:/bin")
+                   , ("TERM", "dumb")
+                   , ("LANG", "C.UTF-8")
+                   ]
+               $ proc bin ["--no-vault"]
+        result <- race' (threadDelay 5000000) (readProcess pc)
+        case result of
+          Left ()              -> expectationFailure "pureclaw timed out"
+          Right (ec, _out, err) -> do
+            annotate (T.unpack (TE.decodeUtf8 (LBS.toStrict err))) ec
+              `shouldBe` annotate (T.unpack (TE.decodeUtf8 (LBS.toStrict err))) ExitSuccess
+            -- Session dir should exist and contain at least one session.
+            let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
+            sessionsExists <- doesDirectoryExist sessionsDir
+            sessionsExists `shouldBe` True
+            sessionDirs <- listDirectory sessionsDir
+            sessionDirs `shouldNotBe` []
+            -- Every session dir should contain a transcript.jsonl.
+            forM_ sessionDirs $ \sid -> do
+              let transcriptPath = sessionsDir </> sid </> "transcript.jsonl"
+              transcriptExists <- doesFileExist transcriptPath
+              transcriptExists `shouldBe` True
+            -- The legacy flat directory should not exist, or if it does
+            -- (from unrelated code), it must be empty of transcript files.
+            let legacyDir = tmpDir </> ".pureclaw" </> "transcripts"
+            legacyExists <- doesDirectoryExist legacyDir
+            when legacyExists $ do
+              legacyContents <- listDirectory legacyDir
+              legacyContents `shouldBe` []
 
   describe "--agent CLI flag" $ do
 
