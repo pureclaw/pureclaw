@@ -30,11 +30,10 @@ import PureClaw.Core.Types
   , parseSessionId
   )
 import PureClaw.Handles.Harness (HarnessHandle, mkNoOpHarnessHandle)
-import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
   )
-import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Session.Handle
   ( ResolveError (..)
   , ResolvedRuntime (..)

@@ -148,7 +148,7 @@ runAgentLoopWith env initialMessages = do
             -- race and invoke it twice. In production this is used to
             -- mark the active session's bootstrap as consumed.
             mAction <- atomicModifyIORef' (_env_onFirstStreamDone env)
-                         (\m -> (Nothing, m))
+                         (Nothing,)
             for_ mAction id
           _ -> pure ()
       case providerResult of
