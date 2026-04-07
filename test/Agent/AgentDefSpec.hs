@@ -4,9 +4,10 @@ import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import System.Directory (createDirectory, createDirectoryIfMissing)
+import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.Posix.Files qualified as PF
 import Test.Hspec
 
 import PureClaw.Agent.AgentDef
@@ -299,3 +300,155 @@ spec = do
               , _ac_toolProfile = Just "full"
               }
           Nothing -> expectationFailure "expected Just AgentDef"
+
+  describe "validateWorkspace" $ do
+    let checkDenied path = do
+          exists <- doesDirectoryExist path
+          if not exists
+            then pendingWith ("denied path not present on this OS: " <> path)
+            else
+              withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+                result <- validateWorkspace home (T.pack path)
+                case result of
+                  Left (WorkspaceDenied _ _) -> pure ()
+                  other -> expectationFailure $
+                    "expected WorkspaceDenied for " <> path <> ", got: " <> show other
+
+    it "accepts a valid existing temp directory" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home ->
+        withSystemTempDirectory "pureclaw-ws-" $ \ws -> do
+          result <- validateWorkspace home (T.pack ws)
+          canonical <- canonicalizePath ws
+          result `shouldBe` Right canonical
+
+    it "rejects a relative path" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        result <- validateWorkspace home "relative/path"
+        case result of
+          Left (WorkspaceNotAbsolute _) -> pure ()
+          other -> expectationFailure $ "expected WorkspaceNotAbsolute, got: " <> show other
+
+    it "rejects a nonexistent directory" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        result <- validateWorkspace home "/this/does/not/exist/pureclaw-xyz"
+        case result of
+          Left (WorkspaceDoesNotExist _) -> pure ()
+          other -> expectationFailure $ "expected WorkspaceDoesNotExist, got: " <> show other
+
+    it "tilde-expands a leading ~/ to the supplied home dir" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        let sub = home </> "myws"
+        createDirectory sub
+        result <- validateWorkspace home "~/myws"
+        canonical <- canonicalizePath sub
+        result `shouldBe` Right canonical
+
+    it "rejects /" $ checkDenied "/"
+    it "rejects /etc" $ checkDenied "/etc"
+    it "rejects /usr" $ checkDenied "/usr"
+    it "rejects /bin" $ checkDenied "/bin"
+    it "rejects /sbin" $ checkDenied "/sbin"
+    it "rejects /var" $ checkDenied "/var"
+    it "rejects /sys" $ checkDenied "/sys"
+    it "rejects /proc" $ checkDenied "/proc"
+    it "rejects /dev" $ checkDenied "/dev"
+
+    it "rejects <home>/.ssh" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        let d = home </> ".ssh"
+        createDirectory d
+        result <- validateWorkspace home (T.pack d)
+        case result of
+          Left (WorkspaceDenied _ _) -> pure ()
+          other -> expectationFailure $ "expected WorkspaceDenied, got: " <> show other
+
+    it "rejects <home>/.gnupg" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        let d = home </> ".gnupg"
+        createDirectory d
+        result <- validateWorkspace home (T.pack d)
+        case result of
+          Left (WorkspaceDenied _ _) -> pure ()
+          other -> expectationFailure $ "expected WorkspaceDenied, got: " <> show other
+
+    it "rejects <home>/.aws" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        let d = home </> ".aws"
+        createDirectory d
+        result <- validateWorkspace home (T.pack d)
+        case result of
+          Left (WorkspaceDenied _ _) -> pure ()
+          other -> expectationFailure $ "expected WorkspaceDenied, got: " <> show other
+
+    it "rejects <home>/.config" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        let d = home </> ".config"
+        createDirectory d
+        result <- validateWorkspace home (T.pack d)
+        case result of
+          Left (WorkspaceDenied _ _) -> pure ()
+          other -> expectationFailure $ "expected WorkspaceDenied, got: " <> show other
+
+    it "rejects <home>/.pureclaw" $
+      withSystemTempDirectory "pureclaw-ws-home-" $ \home -> do
+        let d = home </> ".pureclaw"
+        createDirectory d
+        result <- validateWorkspace home (T.pack d)
+        case result of
+          Left (WorkspaceDenied _ _) -> pure ()
+          other -> expectationFailure $ "expected WorkspaceDenied, got: " <> show other
+
+    it "rejects a symlink pointing to a denied directory (/etc)" $ do
+      etcExists <- doesDirectoryExist "/etc"
+      if not etcExists
+        then pendingWith "/etc not present on this OS"
+        else
+          withSystemTempDirectory "pureclaw-ws-home-" $ \home ->
+            withSystemTempDirectory "pureclaw-ws-link-" $ \tmp -> do
+              let link = tmp </> "link-to-etc"
+              PF.createSymbolicLink "/etc" link
+              result <- validateWorkspace home (T.pack link)
+              case result of
+                Left (WorkspaceDenied _ _) -> pure ()
+                other -> expectationFailure $ "expected WorkspaceDenied, got: " <> show other
+
+  describe "ensureDefaultWorkspace" $ do
+    it "creates <pureclawDir>/agents/<name>/workspace with mode 0o700" $
+      withSystemTempDirectory "pureclaw-dir-" $ \pcDir -> do
+        let name = mustName "zoe"
+        ws <- ensureDefaultWorkspace pcDir name
+        ws `shouldBe` pcDir </> "agents" </> "zoe" </> "workspace"
+        exists <- doesDirectoryExist ws
+        exists `shouldBe` True
+        st <- PF.getFileStatus ws
+        let mode = PF.fileMode st `PF.intersectFileModes` PF.accessModes
+        mode `shouldBe` PF.ownerModes
+
+    it "is idempotent (second call does not fail)" $
+      withSystemTempDirectory "pureclaw-dir-" $ \pcDir -> do
+        let name = mustName "zoe"
+        _ <- ensureDefaultWorkspace pcDir name
+        ws <- ensureDefaultWorkspace pcDir name
+        exists <- doesDirectoryExist ws
+        exists `shouldBe` True
+
+  describe "resolveOverride" $ do
+    it "returns the CLI value when present (highest priority)" $
+      resolveOverride (Just "X") (Just "Y") (Just "Z") (Just "D")
+        `shouldBe` Just ("X" :: Text)
+
+    it "falls back to frontmatter when CLI is Nothing" $
+      resolveOverride Nothing (Just "Y") (Just "Z") (Just "D")
+        `shouldBe` Just ("Y" :: Text)
+
+    it "falls back to config when CLI and frontmatter are Nothing" $
+      resolveOverride Nothing Nothing (Just "Z") (Just "D")
+        `shouldBe` Just ("Z" :: Text)
+
+    it "falls back to default when all else is Nothing" $
+      resolveOverride Nothing Nothing Nothing (Just "D")
+        `shouldBe` Just ("D" :: Text)
+
+    it "returns Nothing when all four are Nothing" $
+      resolveOverride Nothing Nothing Nothing Nothing
+        `shouldBe` (Nothing :: Maybe Text)
