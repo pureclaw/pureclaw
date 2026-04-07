@@ -4,7 +4,7 @@ import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import System.Directory (createDirectory)
+import System.Directory (createDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -242,3 +242,60 @@ spec = do
         createDirectory dir
         out <- composeAgentPrompt mkNoOpLogHandle (fixtureAgentDef "nil" dir) 8000
         out `shouldBe` ""
+
+  describe "discoverAgents" $ do
+    let log_ = mkNoOpLogHandle
+
+    it "returns an empty list when the parent directory is missing" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        agents <- discoverAgents log_ (tmp </> "does-not-exist")
+        fmap _ad_name agents `shouldBe` []
+
+    it "returns an empty list when the parent directory has no subdirs" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        agents <- discoverAgents log_ tmp
+        fmap _ad_name agents `shouldBe` []
+
+    it "discovers only directories with valid agent names, skipping invalid ones" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        createDirectoryIfMissing True (tmp </> "zoe")
+        createDirectoryIfMissing True (tmp </> "valid_1")
+        createDirectoryIfMissing True (tmp </> "bad name")
+        createDirectoryIfMissing True (tmp </> ".hidden")
+        agents <- discoverAgents log_ tmp
+        let names = T.unpack . unAgentName . _ad_name <$> agents
+        names `shouldMatchList` ["zoe", "valid_1"]
+
+  describe "loadAgent" $ do
+    it "returns Nothing for a directory that does not exist" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        result <- loadAgent tmp (mustName "missing")
+        result `shouldBe` Nothing
+
+    it "returns Just AgentDef with defaultAgentConfig when AGENTS.md is absent" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "zoe"
+        createDirectory dir
+        TIO.writeFile (dir </> "SOUL.md") "s"
+        result <- loadAgent tmp (mustName "zoe")
+        case result of
+          Just def -> do
+            unAgentName (_ad_name def) `shouldBe` "zoe"
+            _ad_dir def `shouldBe` dir
+            _ad_config def `shouldBe` defaultAgentConfig
+          Nothing -> expectationFailure "expected Just AgentDef"
+
+    it "parses AGENTS.md frontmatter into AgentConfig when present" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "haskell"
+        createDirectory dir
+        TIO.writeFile (dir </> "AGENTS.md")
+          "---\nmodel = \"claude-sonnet\"\ntool_profile = \"full\"\n---\nbody"
+        result <- loadAgent tmp (mustName "haskell")
+        case result of
+          Just def -> _ad_config def `shouldBe`
+            defaultAgentConfig
+              { _ac_model = Just "claude-sonnet"
+              , _ac_toolProfile = Just "full"
+              }
+          Nothing -> expectationFailure "expected Just AgentDef"
