@@ -228,3 +228,17 @@ spec = do
         TIO.writeFile (dir </> "BOOTSTRAP.md") "b"
         out <- composeAgentPromptWithBootstrap log_ (fixtureAgentDef "a" dir) 8000 True
         out `shouldBe` "--- SOUL ---\ns"
+
+  describe "composeAgentPrompt (empty dir)" $ do
+    it "returns empty Text when the directory has no .md files (fixture)" $ do
+      out <- composeAgentPrompt mkNoOpLogHandle
+        (fixtureAgentDef "empty" "test/fixtures/agents/empty")
+        8000
+      out `shouldBe` ""
+
+    it "returns empty Text when the directory is completely empty (temp)" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "nil"
+        createDirectory dir
+        out <- composeAgentPrompt mkNoOpLogHandle (fixtureAgentDef "nil" dir) 8000
+        out `shouldBe` ""
