@@ -21,6 +21,7 @@ import PureClaw.Agent.SlashCommands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Session.Handle (SessionHandle (..), mkNoOpSessionHandle)
+import PureClaw.Session.Types (SessionMeta (..))
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
@@ -2267,6 +2268,70 @@ spec = do
       case sent of
         Just t  -> T.unpack t `shouldContain` "Resumed session"
         Nothing -> expectationFailure "Expected resume confirmation"
+
+    it "/session new swaps the active session in _env_session IORef" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Read the initial session id (from the no-op handle)
+      initialHandle <- readIORef (_env_session env)
+      initialMeta   <- readIORef (_sh_meta initialHandle)
+      let initialId = _sm_id initialMeta
+      -- Run /session new
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      -- The active session handle should now point at a different SessionMeta
+      -- with a fresh ID. If the implementation used `_ <- mkSessionHandle ...`
+      -- (discard), this assertion fails because _env_session still holds the
+      -- no-op handle with id "noop".
+      newHandle <- readIORef (_env_session env)
+      newMeta   <- readIORef (_sh_meta newHandle)
+      let newId = _sm_id newMeta
+      newId `shouldNotBe` initialId
+      unSessionId newId `shouldNotBe` "noop"
+
+    it "/session resume swaps the active session to the resumed one" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create two sessions via /session new so we have two on disk
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      -- After the second /session new, the active session is the second one.
+      activeAfterSecond <- readIORef (_env_session env)
+      metaAfterSecond   <- readIORef (_sh_meta activeAfterSecond)
+      let secondId = _sm_id metaAfterSecond
+      -- Enumerate sessions on disk and pick one that is NOT the current active.
+      home <- getEnv "HOME"
+      let sessionsDir = home </> ".pureclaw" </> "sessions"
+      entries <- Dir.listDirectory sessionsDir
+      let otherIds = filter (/= T.unpack (unSessionId secondId)) entries
+      case otherIds of
+        (otherSid : _) -> do
+          _ <- executeSlashCommand env
+                 (CmdSession (SessionResume (T.pack otherSid)))
+                 (emptyContext Nothing)
+          -- Verify the active session is now `otherSid`.
+          afterHandle <- readIORef (_env_session env)
+          afterMeta   <- readIORef (_sh_meta afterHandle)
+          T.unpack (unSessionId (_sm_id afterMeta)) `shouldBe` otherSid
+          _sm_id afterMeta `shouldNotBe` secondId
+        [] -> expectationFailure "Expected at least two sessions on disk"
+
+    it "/session last swaps the active session to the most recent on disk" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create a session and capture its id.
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      createdHandle <- readIORef (_env_session env)
+      createdMeta   <- readIORef (_sh_meta createdHandle)
+      let createdId = _sm_id createdMeta
+      -- Replace the active handle with a fresh no-op so we can observe the swap.
+      noop <- mkNoOpSessionHandle
+      writeIORef (_env_session env) noop
+      -- /session last should swap the active handle back to the recent session.
+      _ <- executeSlashCommand env (CmdSession SessionLast) (emptyContext Nothing)
+      afterHandle <- readIORef (_env_session env)
+      afterMeta   <- readIORef (_sh_meta afterHandle)
+      _sm_id afterMeta `shouldBe` createdId
+      unSessionId (_sm_id afterMeta) `shouldNotBe` "noop"
 
     it "/session info shows session fields" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
