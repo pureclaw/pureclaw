@@ -9,6 +9,8 @@ module PureClaw.Session.Types
   , SessionPrefixError (..)
     -- * Session ID generation
   , newSessionId
+    -- * Runtime type
+  , RuntimeType (..)
   ) where
 
 import Data.Aeson qualified as Aeson
@@ -89,3 +91,24 @@ newSessionId mPrefix time =
         Nothing -> timeStr
         Just p  -> unSessionPrefix p <> "-" <> timeStr
   in SessionId full
+
+-- | Whether a session targets the LLM provider directly or a named harness
+-- (e.g. an interactive @claude-code@ tmux session).
+data RuntimeType
+  = RTProvider
+  | RTHarness Text
+  deriving stock (Show, Eq)
+
+-- | JSON encoding: @"provider"@ or @"harness:<name>"@. Custom rather than
+-- generic so on-disk @session.json@ files stay human-readable and so we
+-- don't tie ourselves to aeson's tagged-sum format.
+instance Aeson.ToJSON RuntimeType where
+  toJSON RTProvider       = Aeson.String "provider"
+  toJSON (RTHarness name) = Aeson.String ("harness:" <> name)
+
+instance Aeson.FromJSON RuntimeType where
+  parseJSON = Aeson.withText "RuntimeType" $ \t ->
+    case t of
+      "provider" -> pure RTProvider
+      _ | Just name <- T.stripPrefix "harness:" t -> pure (RTHarness name)
+        | otherwise -> fail ("Unknown RuntimeType: " <> T.unpack t)
