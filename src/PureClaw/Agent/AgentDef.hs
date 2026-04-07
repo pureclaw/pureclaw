@@ -15,6 +15,7 @@ module PureClaw.Agent.AgentDef
   , AgentDef (..)
     -- * Prompt composition
   , composeAgentPrompt
+  , composeAgentPromptWithBootstrap
   ) where
 
 import Control.Exception qualified as Exc
@@ -219,8 +220,17 @@ readSection lg dir kind limit = do
 -- For @AGENTS.md@, only the body after the TOML frontmatter fence is
 -- injected (the frontmatter itself lives in '_ad_config').
 composeAgentPrompt :: LogHandle -> AgentDef -> Int -> IO Text
-composeAgentPrompt lg def limit = do
-  let kinds = [ SoulK, UserK, AgentsK, MemoryK, IdentityK, ToolsK, BootstrapK ]
+composeAgentPrompt lg def limit =
+  composeAgentPromptWithBootstrap lg def limit False
+
+-- | Like 'composeAgentPrompt', but when @bootstrapConsumed@ is 'True' the
+-- @BOOTSTRAP.md@ section is skipped entirely (used after the first
+-- @StreamDone@ in a session).
+composeAgentPromptWithBootstrap :: LogHandle -> AgentDef -> Int -> Bool -> IO Text
+composeAgentPromptWithBootstrap lg def limit bootstrapConsumed = do
+  let kinds =
+        [ SoulK, UserK, AgentsK, MemoryK, IdentityK, ToolsK ]
+        <> [ BootstrapK | not bootstrapConsumed ]
   sections <- mapM (\k -> readSection lg (_ad_dir def) k limit) kinds
   let rendered = [ sectionMarker k <> "\n" <> body
                  | (k, Just body) <- zip kinds sections
