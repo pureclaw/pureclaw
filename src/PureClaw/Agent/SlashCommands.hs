@@ -6,8 +6,11 @@ module PureClaw.Agent.SlashCommands
   , ChannelSubCommand (..)
   , TranscriptSubCommand (..)
   , HarnessSubCommand (..)
+  , AgentSubCommand (..)
     -- * Known harnesses
   , knownHarnesses
+    -- * Agent name tab completion helper
+  , agentNameMatches
     -- * Command registry — single source of truth
   , CommandGroup (..)
   , CommandSpec (..)
@@ -42,6 +45,7 @@ import System.Exit
 import System.IO (Handle, hGetLine)
 import System.Process.Typed qualified as P
 
+import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
 import PureClaw.Agent.Env
@@ -76,6 +80,7 @@ data CommandGroup
   | GroupVault       -- ^ Encrypted secrets vault
   | GroupTranscript  -- ^ Transcript / permanent log
   | GroupHarness    -- ^ Harness management (tmux-based AI CLI tools)
+  | GroupAgent      -- ^ Agent management (bootstrap file collections)
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 -- | Human-readable section heading for '/help' output.
@@ -86,6 +91,7 @@ groupHeading GroupChannel  = "Channel"
 groupHeading GroupVault      = "Vault"
 groupHeading GroupTranscript = "Transcript"
 groupHeading GroupHarness    = "Harness"
+groupHeading GroupAgent      = "Agent"
 
 -- | Specification for a single slash command.
 -- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
@@ -146,6 +152,14 @@ data HarnessSubCommand
   | HarnessUnknown Text        -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
+-- | Subcommands of the '/agent' family.
+data AgentSubCommand
+  = AgentList                  -- ^ List discovered agents
+  | AgentInfo (Maybe Text)     -- ^ Show info for a named agent (or the current one when 'Nothing')
+  | AgentStart Text            -- ^ Switch to a named agent (placeholder in WU1)
+  | AgentUnknown Text          -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
@@ -164,6 +178,7 @@ data SlashCommand
   | CmdChannel ChannelSubCommand       -- ^ Channel configuration
   | CmdTranscript TranscriptSubCommand -- ^ Transcript query commands
   | CmdHarness HarnessSubCommand      -- ^ Harness management commands
+  | CmdAgent AgentSubCommand          -- ^ Agent management commands
   | CmdMsg Text Text                  -- ^ Send a message to a specific target (name, message)
   deriving stock (Show, Eq)
 
@@ -177,7 +192,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ msgCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ msgCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -228,6 +243,55 @@ harnessCommandSpecs =
   , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
   ]
 
+agentCommandSpecs :: [CommandSpec]
+agentCommandSpecs =
+  [ CommandSpec "/agent list"          "List discovered agents in ~/.pureclaw/agents/" GroupAgent (agentExactP "list" AgentList)
+  , CommandSpec "/agent info [<name>]" "Show files and frontmatter for an agent"       GroupAgent agentInfoP
+  , CommandSpec "/agent start <name>"  "Switch to a named agent"                       GroupAgent agentStartP
+  ]
+
+-- | Case-insensitive exact match for "/agent <sub>" with no argument.
+agentExactP :: Text -> AgentSubCommand -> Text -> Maybe SlashCommand
+agentExactP sub cmd t =
+  if T.toLower t == "/agent " <> sub then Just (CmdAgent cmd) else Nothing
+
+-- | Parse "/agent info [<name>]". With no argument, yields @AgentInfo Nothing@.
+agentInfoP :: Text -> Maybe SlashCommand
+agentInfoP t =
+  let pfx   = "/agent info"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdAgent (AgentInfo Nothing))
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdAgent (AgentInfo Nothing))
+                  else Just (CmdAgent (AgentInfo (Just arg)))
+          else Nothing
+
+-- | Parse "/agent start <name>". The name is required; a bare "/agent start"
+-- falls through to the unknown fallback ("start").
+agentStartP :: Text -> Maybe SlashCommand
+agentStartP t =
+  let pfx   = "/agent start"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let arg = T.strip (T.drop (T.length pfx) t)
+          in if T.null arg
+             then Nothing
+             else Just (CmdAgent (AgentStart arg))
+     else Nothing
+
+-- | Catch-all for any "/agent <X>" not matched by 'allCommandSpecs'.
+agentUnknownFallback :: Text -> Maybe SlashCommand
+agentUnknownFallback t =
+  let lower = T.toLower t
+  in if "/agent" `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/agent") lower)
+              sub  = fst (T.break (== ' ') rest)
+          in Just (CmdAgent (AgentUnknown sub))
+     else Nothing
+
 msgCommandSpecs :: [CommandSpec]
 msgCommandSpecs =
   [ CommandSpec "/msg <target> <message>" "Send a message to a specific harness/model" GroupHarness msgArgP
@@ -264,6 +328,7 @@ parseSlashCommand input =
             <|> vaultUnknownFallback stripped
             <|> transcriptUnknownFallback stripped
             <|> harnessUnknownFallback stripped
+            <|> agentUnknownFallback stripped
      else Nothing
 
 -- | Exact case-insensitive match.
@@ -612,6 +677,9 @@ executeSlashCommand env (CmdMsg target body) ctx = do
 
 executeSlashCommand env (CmdHarness sub) ctx = do
   executeHarnessCommand env sub ctx
+
+executeSlashCommand env (CmdAgent sub) ctx = do
+  executeAgentCommand env sub ctx
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
@@ -1272,6 +1340,134 @@ executeHarnessCommand env sub ctx = do
       | otherwise -> do
           send ("Unknown harness command: " <> subcmd <> ". Type /harness to see available commands.")
           pure ctx
+
+-- ---------------------------------------------------------------------------
+-- Agent subcommand execution
+-- ---------------------------------------------------------------------------
+
+-- | Directory that holds per-agent bootstrap subdirectories.
+-- Derives from 'getPureclawDir' so it honours @HOME@ in tests.
+getAgentsDir :: IO FilePath
+getAgentsDir = do
+  pureclawDir <- getPureclawDir
+  pure (pureclawDir </> "agents")
+
+-- | Execute a '/agent' subcommand. In WU1 the environment does not yet
+-- carry a currently-selected agent, so '/agent info' without an argument
+-- always reports that no agent is selected, and '/agent start' returns a
+-- placeholder message pending session support in WU2.
+executeAgentCommand :: AgentEnv -> AgentSubCommand -> Context -> IO Context
+executeAgentCommand env sub ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+      lg   = _env_logger env
+  case sub of
+    AgentList -> do
+      agentsDir <- getAgentsDir
+      defs <- AgentDef.discoverAgents lg agentsDir
+      if null defs
+        then do
+          send "No agents found. Create one at ~/.pureclaw/agents/<name>/"
+          pure ctx
+        else do
+          let names = [AgentDef.unAgentName (AgentDef._ad_name d) | d <- defs]
+          send (T.intercalate "\n"
+                 ("Agents:" : map ("  " <>) (L.sort names)))
+          pure ctx
+
+    AgentInfo Nothing -> do
+      send "No agent selected. Use --agent <name>."
+      pure ctx
+
+    AgentInfo (Just name) -> do
+      agentsDir <- getAgentsDir
+      case AgentDef.mkAgentName name of
+        Left _ -> do
+          send ("Agent \"" <> name <> "\" not found. invalid agent name.")
+          pure ctx
+        Right validName -> do
+          mDef <- AgentDef.loadAgent agentsDir validName
+          case mDef of
+            Nothing -> do
+              defs <- AgentDef.discoverAgents lg agentsDir
+              let names = L.sort
+                    [AgentDef.unAgentName (AgentDef._ad_name d) | d <- defs]
+                  avail = if null names
+                    then "(none)"
+                    else T.intercalate ", " names
+              send ("Agent \"" <> name <> "\" not found. Available agents: " <> avail)
+              pure ctx
+            Just def -> do
+              files <- listAgentFiles (AgentDef._ad_dir def)
+              let cfg = AgentDef._ad_config def
+                  cfgLines =
+                    [ "  model: "        <> fromMaybeT "(unset)" (AgentDef._ac_model cfg)
+                    , "  tool_profile: " <> fromMaybeT "(unset)" (AgentDef._ac_toolProfile cfg)
+                    , "  workspace: "    <> fromMaybeT "(default)" (AgentDef._ac_workspace cfg)
+                    ]
+                  output = T.intercalate "\n" $
+                    [ "Agent: " <> AgentDef.unAgentName (AgentDef._ad_name def)
+                    , "  dir: " <> T.pack (AgentDef._ad_dir def)
+                    , "Files:"
+                    ] <>
+                    (if null files
+                       then ["  (none)"]
+                       else map ("  " <>) files) <>
+                    [ "Config:" ] <> cfgLines
+              send output
+              pure ctx
+
+    AgentStart name -> do
+      agentsDir <- getAgentsDir
+      case AgentDef.mkAgentName name of
+        Left _ -> do
+          send ("invalid agent name: \"" <> name <> "\".")
+          pure ctx
+        Right validName -> do
+          mDef <- AgentDef.loadAgent agentsDir validName
+          case mDef of
+            Nothing -> do
+              send ("Agent \"" <> name <> "\" not found.")
+              pure ctx
+            Just _ -> do
+              send "Agent start will be fully wired up in a later session (requires Session support)."
+              pure ctx
+
+    AgentUnknown subcmd
+      | T.null subcmd -> do
+          send (T.intercalate "\n"
+            [ "Agent commands:"
+            , "  /agent list"
+            , "  /agent info [<name>]"
+            , "  /agent start <name>"
+            ])
+          pure ctx
+      | otherwise -> do
+          send ("Unknown agent command: " <> subcmd <> ". Type /agent to see available commands.")
+          pure ctx
+
+-- | List the known bootstrap @.md@ files present in an agent directory, in
+-- the same order used by 'composeAgentPrompt'.
+listAgentFiles :: FilePath -> IO [Text]
+listAgentFiles dir = do
+  let candidates =
+        [ "SOUL.md", "USER.md", "AGENTS.md", "MEMORY.md"
+        , "IDENTITY.md", "TOOLS.md", "BOOTSTRAP.md"
+        ]
+  present <- filterM (Dir.doesFileExist . (dir </>)) candidates
+  pure (map T.pack present)
+
+fromMaybeT :: Text -> Maybe Text -> Text
+fromMaybeT def Nothing  = def
+fromMaybeT _   (Just t) = t
+
+-- | Filter a list of agent names by a case-insensitive prefix. Exported as
+-- a pure helper so the tab completer can present matching names for
+-- @/agent info@ and @/agent start@ without needing IO. When the prefix is
+-- empty, all candidates are returned.
+agentNameMatches :: [Text] -> Text -> [Text]
+agentNameMatches candidates prefix =
+  let lowerPfx = T.toLower prefix
+  in filter (\c -> lowerPfx `T.isPrefixOf` T.toLower c) candidates
 
 -- | Known harnesses: (canonical name, aliases, description).
 knownHarnesses :: [(Text, [Text], Text)]

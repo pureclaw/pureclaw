@@ -8,6 +8,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock
+import System.Directory qualified as Dir
 import System.Environment (setEnv, getEnv)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -19,6 +20,7 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
+import PureClaw.Session.Handle (noOpSessionHandle)
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
@@ -261,6 +263,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -362,6 +366,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -399,6 +405,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -432,6 +440,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -465,6 +475,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -510,6 +522,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -546,6 +560,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget Nothing) ctx
@@ -578,6 +594,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
@@ -621,6 +639,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "claude-code")) ctx
@@ -666,6 +686,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "claude-code-0" "list TODOs") ctx
@@ -702,6 +724,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "nonexistent" "hello") ctx
@@ -738,6 +762,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "cc-0" "test") ctx
@@ -769,6 +795,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -815,6 +843,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -857,6 +887,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -892,6 +924,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -918,6 +952,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -955,6 +991,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -998,6 +1036,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1043,6 +1083,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1077,6 +1119,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1177,6 +1221,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -1214,6 +1260,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -1252,6 +1300,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -1326,6 +1376,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1360,6 +1412,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1395,6 +1449,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -1502,6 +1558,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1535,6 +1593,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1580,6 +1640,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1616,6 +1678,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1674,6 +1738,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -1709,6 +1775,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -1743,6 +1811,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1775,6 +1845,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1820,6 +1892,8 @@ spec = do
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1830,3 +1904,224 @@ spec = do
           T.unpack t `shouldContain` "Response"
           T.unpack t `shouldNotContain` "ms"
         Nothing -> expectationFailure "Expected formatted entries"
+
+  -- -------------------------------------------------------------------------
+  -- /agent commands (WU1 Session D)
+  -- -------------------------------------------------------------------------
+
+  describe "parseSlashCommand — /agent" $ do
+    it "parses /agent list" $
+      parseSlashCommand "/agent list" `shouldBe` Just (CmdAgent AgentList)
+
+    it "parses /AGENT LIST case-insensitively" $
+      parseSlashCommand "/AGENT LIST" `shouldBe` Just (CmdAgent AgentList)
+
+    it "parses /agent info with no argument" $
+      parseSlashCommand "/agent info" `shouldBe` Just (CmdAgent (AgentInfo Nothing))
+
+    it "parses /agent info <name> preserving case" $
+      parseSlashCommand "/agent info Zoe" `shouldBe` Just (CmdAgent (AgentInfo (Just "Zoe")))
+
+    it "parses /agent start <name>" $
+      parseSlashCommand "/agent start zoe" `shouldBe` Just (CmdAgent (AgentStart "zoe"))
+
+    it "returns AgentUnknown for /agent start with no name" $
+      parseSlashCommand "/agent start" `shouldBe` Just (CmdAgent (AgentUnknown "start"))
+
+    it "returns AgentUnknown for bare /agent" $
+      parseSlashCommand "/agent" `shouldBe` Just (CmdAgent (AgentUnknown ""))
+
+  describe "executeSlashCommand — /agent list" $ do
+    let mkAgentEnv sentRef = do
+          vaultRef      <- newIORef Nothing
+          providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef      <- newIORef (ModelId "test")
+          transcriptRef <- newIORef Nothing
+          harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
+          pure AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
+            }
+
+    it "/agent list lists discovered agent names" $ withTempHome $ do
+      home <- getEnv "HOME"
+      let agentsDir = home </> ".pureclaw" </> "agents"
+      Dir.createDirectoryIfMissing True (agentsDir </> "zoe")
+      Dir.createDirectoryIfMissing True (agentsDir </> "ops")
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv sentRef
+      _ <- executeSlashCommand env (CmdAgent AgentList) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "zoe"
+          T.unpack t `shouldContain` "ops"
+        Nothing -> expectationFailure "Expected /agent list output"
+
+    it "/agent list with no agents dir shows helpful message" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv sentRef
+      _ <- executeSlashCommand env (CmdAgent AgentList) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain`
+          "No agents found. Create one at ~/.pureclaw/agents/<name>/"
+        Nothing -> expectationFailure "Expected empty message"
+
+  describe "executeSlashCommand — /agent info" $ do
+    let mkAgentEnv2 sentRef = do
+          vaultRef      <- newIORef Nothing
+          providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef      <- newIORef (ModelId "test")
+          transcriptRef <- newIORef Nothing
+          harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
+          pure AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
+            }
+
+    it "/agent info <name> shows files and frontmatter" $ withTempHome $ do
+      home <- getEnv "HOME"
+      let zoeDir = home </> ".pureclaw" </> "agents" </> "zoe"
+      Dir.createDirectoryIfMissing True zoeDir
+      writeFile (zoeDir </> "SOUL.md") "soul body"
+      writeFile (zoeDir </> "AGENTS.md") "---\nmodel = \"claude-opus\"\n---\nbody"
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv2 sentRef
+      _ <- executeSlashCommand env (CmdAgent (AgentInfo (Just "zoe"))) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "zoe"
+          T.unpack t `shouldContain` "SOUL.md"
+          T.unpack t `shouldContain` "AGENTS.md"
+          T.unpack t `shouldContain` "claude-opus"
+        Nothing -> expectationFailure "Expected /agent info output"
+
+    it "/agent info <name> for missing agent lists available" $ withTempHome $ do
+      home <- getEnv "HOME"
+      let agentsDir = home </> ".pureclaw" </> "agents"
+      Dir.createDirectoryIfMissing True (agentsDir </> "zoe")
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv2 sentRef
+      _ <- executeSlashCommand env (CmdAgent (AgentInfo (Just "nonexistent"))) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "Agent \"nonexistent\" not found"
+          T.unpack t `shouldContain` "Available agents"
+          T.unpack t `shouldContain` "zoe"
+        Nothing -> expectationFailure "Expected not-found message"
+
+    it "/agent info with no argument reports no agent selected" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv2 sentRef
+      _ <- executeSlashCommand env (CmdAgent (AgentInfo Nothing)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "No agent selected. Use --agent <name>."
+        Nothing -> expectationFailure "Expected no-agent-selected message"
+
+  describe "executeSlashCommand — /agent start" $ do
+    let mkAgentEnv3 sentRef = do
+          vaultRef      <- newIORef Nothing
+          providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef      <- newIORef (ModelId "test")
+          transcriptRef <- newIORef Nothing
+          harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
+          pure AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_transcript   = transcriptRef
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = noOpSessionHandle
+            }
+
+    it "/agent start <name> returns a placeholder message in WU1" $ withTempHome $ do
+      home <- getEnv "HOME"
+      let zoeDir = home </> ".pureclaw" </> "agents" </> "zoe"
+      Dir.createDirectoryIfMissing True zoeDir
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv3 sentRef
+      _ <- executeSlashCommand env (CmdAgent (AgentStart "zoe")) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain`
+          "Agent start will be fully wired up in a later session"
+        Nothing -> expectationFailure "Expected placeholder message"
+
+    it "/agent start <name> for missing agent reports not-found" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv3 sentRef
+      _ <- executeSlashCommand env (CmdAgent (AgentStart "ghost")) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "Agent \"ghost\" not found"
+        Nothing -> expectationFailure "Expected not-found message"
+
+    it "/agent start <invalid> reports invalid name" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkAgentEnv3 sentRef
+      _ <- executeSlashCommand env (CmdAgent (AgentStart "../evil")) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> T.unpack t `shouldContain` "invalid agent name"
+        Nothing -> expectationFailure "Expected invalid-name message"
+
+  describe "agent name tab completion" $ do
+    it "agentNameMatches returns all names on empty prefix" $
+      agentNameMatches ["zoe", "ops", "alice"] "" `shouldMatchList` ["zoe", "ops", "alice"]
+
+    it "agentNameMatches filters by prefix" $
+      agentNameMatches ["zoe", "ops", "zeus"] "z" `shouldMatchList` ["zoe", "zeus"]
+
+    it "agentNameMatches is case-insensitive" $
+      agentNameMatches ["Zoe", "Ops"] "z" `shouldMatchList` ["Zoe"]
+
+    it "agentNameMatches returns empty for empty candidate list" $
+      agentNameMatches [] "z" `shouldBe` []

@@ -51,6 +51,8 @@ data FileConfig = FileConfig
   , _fc_vault_recipient :: Maybe Text  -- ^ age recipient string (required to enable vault)
   , _fc_vault_identity  :: Maybe Text  -- ^ age identity path or plugin string
   , _fc_vault_unlock    :: Maybe Text  -- ^ "startup", "on_demand", or "per_access"
+  , _fc_defaultAgent   :: Maybe Text  -- ^ Name of the agent loaded when @--agent@ is omitted
+  , _fc_agentTruncateLimit :: Maybe Int -- ^ Per-file truncation limit (chars) for composed prompts; default 8000
   } deriving stock (Show, Eq)
 
 -- | Signal channel configuration from the @[signal]@ TOML table.
@@ -66,6 +68,7 @@ emptyFileConfig =
   FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
              Nothing Nothing Nothing Nothing Nothing Nothing Nothing
              Nothing Nothing Nothing Nothing Nothing
+             Nothing Nothing
 
 emptyFileSignalConfig :: FileSignalConfig
 emptyFileSignalConfig = FileSignalConfig Nothing Nothing Nothing Nothing
@@ -100,6 +103,8 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.text "vault_recipient")           .= _fc_vault_recipient
   <*> Toml.dioptional (Toml.text "vault_identity")            .= _fc_vault_identity
   <*> Toml.dioptional (Toml.text "vault_unlock")              .= _fc_vault_unlock
+  <*> Toml.dioptional (Toml.text "default_agent")             .= _fc_defaultAgent
+  <*> Toml.dioptional (Toml.int  "agent_truncate_limit")      .= _fc_agentTruncateLimit
 
 fileSignalConfigCodec :: TomlCodec FileSignalConfig
 fileSignalConfigCodec = FileSignalConfig

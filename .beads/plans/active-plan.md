@@ -1,402 +1,443 @@
-# MVP OpenClaw Feature Parity
+# Sessions and Agents — Implementation Plan (Revision 2)
 
-**Status**: draft
-**Branch**: TBD (per-epic branches off main)
+**Status**: in-progress
+**Branch**: sessions-and-agents
+**Design**: `.beads/plans/sessions-and-agents.md` (revision 3)
 **Priority**: P1
 
 ## Overview
 
-Bring PureClaw to MVP feature parity with OpenClaw across three areas: messaging channels (Signal + Telegram), unrestricted shell execution, and OpenClaw config import (channels + agent definitions).
+Implement Sessions and Agents per the approved design. Two sequential work units with a clean seam — WU1 (Agents) has no dependency on sessions and is independently shippable.
+
+**Revision 2 changes** (addressing Plan Review Gate feedback):
+- `pureclaw.cabal` module registration added to both work units
+- `AgentEnv` construction site enumeration (production + test helpers) added
+- `/transcript` slash command update added to WU2
+- Exhaustive TDD sequences covering every DoD bullet
+- Custom `FromJSON` for smart-constructor types to prevent bypass
+- Injectable bootstrap-consumed callback for testability
+- TOML frontmatter fence extraction step called out
+- Prefix-matching semantics pinned
+
+## AgentEnv Construction Sites
+
+Enumerated to avoid hidden file scope explosion. All sites must be updated when adding new `AgentEnv` fields (`-Werror` enforced):
+
+1. `src/PureClaw/CLI/Commands.hs:startWithChannel` — primary production construction
+2. `test/Agent/SlashCommandsSpec.hs` — test helper (likely `mkTestEnv` or similar)
+3. `test/Agent/LoopSpec.hs` — test helper
+
+**Strategy to minimize churn**: Both `_env_agentDef :: Maybe AgentDef` AND `_env_session :: SessionHandle` are added in WU1. In WU1, `_env_session` is initialized to `mkNoOpSessionHandle`. WU2 replaces the no-op with real session handling. This touches each construction site once instead of twice.
 
 ---
 
-## Epic 1: Unrestricted Shell Execution
+## Work Unit 1: Agents
 
-**Goal**: Power users on dedicated hardware can run with zero command restrictions.
+**Goal**: Named collections of `.md` bootstrap files in `~/.pureclaw/agents/<name>/` can be discovered, loaded, validated, and composed into a system prompt. Selectable via `--agent` flag and `/agent` slash commands.
 
-### Current State
+### DoD
 
-- `SecurityPolicy` has `AllowList CommandName` + `AutonomyLevel`
-- `AllowList` already has an `AllowAll` constructor
-- `authorize` checks both allow-list and autonomy level
-- Shell tool has basic foreground execution only
+- [ ] `AgentName` smart constructor rejects path traversal, validates `[a-zA-Z0-9_-]`, max 64 chars, non-exported constructor
+- [ ] `AgentName` has custom `FromJSON` that calls `mkAgentName` (prevents bypass via corrupted JSON)
+- [ ] `AgentDef`, `AgentConfig` types implemented with TOML frontmatter parsing
+- [ ] TOML frontmatter fence extraction (splits `---\n...\n---\nbody`) before handing inner block to `tomland`
+- [ ] `discoverAgents` enumerates `~/.pureclaw/agents/` and skips invalid directory names with log warning
+- [ ] `loadAgent :: FilePath -> AgentName -> IO (Maybe AgentDef)` works for existing dirs
+- [ ] `composeAgentPrompt` reads bootstrap files in order, skips empty/missing, truncates at 8000 chars (configurable), rejects files >1MB at read time
+- [ ] Truncation marker string is exactly `\n[...truncated at 8000 chars...]`
+- [ ] Section markers are exactly `--- SOUL ---`, `--- USER ---`, `--- AGENTS ---`, `--- MEMORY ---`, `--- IDENTITY ---`, `--- TOOLS ---`, `--- BOOTSTRAP ---`
+- [ ] `composeAgentPromptWithBootstrap` skips `BOOTSTRAP.md` when `bootstrapConsumed=True`
+- [ ] Empty agent dir (no .md files) is valid — returns empty system prompt with log info
+- [ ] Workspace validation: tilde-expand, absolute required, must exist, canonicalize, denylist check covering `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/var`, `/sys`, `/proc`, `/dev`, `$HOME/.ssh`, `$HOME/.gnupg`, `$HOME/.aws`, `$HOME/.config`, `$HOME/.pureclaw`
+- [ ] Default workspace `~/.pureclaw/agents/<name>/workspace/` is created on first use with `0o700` permissions
+- [ ] Custom workspace (from frontmatter) must exist — not auto-created
+- [ ] Override priority enforced: CLI flag > agent frontmatter > config file > default
+- [ ] `--agent <name>` CLI flag works; invalid name → error with hint; missing agent → error lists available agents
+- [ ] `default_agent` config field loads agent when `--agent` omitted
+- [ ] `/agent list` shows agents, or helpful message when none
+- [ ] `/agent info [<name>]` shows files, frontmatter, workspace; no-agent-selected message; missing agent error
+- [ ] `/agent start <name>` switches agent (placeholder in WU1 — full behavior lands in WU2 when sessions exist)
+- [ ] Tab completion for agent names in `/agent info` and `/agent start`
+- [ ] No-agent backward-compat path (existing `loadIdentity` + `--system`) still works and is tested
+- [ ] `AgentEnv` gains `_env_agentDef :: Maybe AgentDef` and `_env_session :: SessionHandle` (no-op in WU1)
+- [ ] `mkNoOpSessionHandle` stub exists in `src/PureClaw/Session/Handle.hs` (minimal skeleton for WU1, full implementation in WU2)
+- [ ] `pureclaw.cabal` updated with new modules in `exposed-modules` and test spec in test suite `other-modules`
+- [ ] 100% test coverage (lines, branches, functions, statements)
+- [ ] `-Wall -Werror` clean, hlint clean, `-Wmissing-export-lists` honored (explicit export lists on all new modules)
 
-### Design
+### Files Affected
 
-**No new security types needed.** `SecurityPolicy { _sp_allowedCommands = AllowAll, _sp_autonomy = Full }` already represents unrestricted execution — `authorize` succeeds for any command. We just need to:
+**New**:
+- `src/PureClaw/Agent/AgentDef.hs` — `AgentName` (smart constructor, custom `FromJSON`), `AgentConfig`, `AgentDef`, `discoverAgents`, `loadAgent`, `composeAgentPrompt`, `composeAgentPromptWithBootstrap`, workspace validation, TOML fence extraction
+- `src/PureClaw/Session/Handle.hs` — `SessionHandle` type, `mkNoOpSessionHandle` ONLY (full implementation in WU2)
+- `test/Agent/AgentDefSpec.hs` — unit tests
+- `test/fixtures/agents/` — fixture agent directories used across tests
 
-1. Wire up config: `autonomy = "full"` in TOML. When `full` + no explicit `allow` list → `AllowAll`
-2. Add CLI flag: `--autonomy full|supervised|deny`
-3. Print startup warning when autonomy is `full`
-4. Enhance the shell tool with:
-   - **Background execution**: `background :: Bool` param → returns process ID, delivers results async
-   - **Timeout**: `exec_timeout_sec` config (default 300s), kill after timeout
-   - **Working directory**: `cwd` param on shell tool
-   - **Environment variables**: `env` param (Map Text Text)
-   - **Streaming output**: forward stdout/stderr chunks via `_ch_sendChunk`
+**Modified**:
+- `pureclaw.cabal` — add `PureClaw.Agent.AgentDef` and `PureClaw.Session.Handle` to `exposed-modules`; add `Agent.AgentDefSpec` to test suite `other-modules`
+- `src/PureClaw/Agent/Env.hs` — add `_env_agentDef :: Maybe AgentDef` and `_env_session :: SessionHandle`; add `envTranscript` accessor (reads from session's no-op transcript in WU1)
+- `src/PureClaw/Agent/SlashCommands.hs` — add `/agent list|info|start` commands + tab completion over agent names
+- `src/PureClaw/CLI/Commands.hs:startWithChannel` — add `--agent` flag, discover agents, load selected agent, compose system prompt, initialize `_env_session` with `mkNoOpSessionHandle`, update `AgentEnv` construction
+- `src/PureClaw/CLI/Config.hs` — add `_fc_defaultAgent`, `_fc_agentTruncateLimit` fields + TOML codec
+- `test/Agent/SlashCommandsSpec.hs` — update test helper to include `_env_agentDef` and `_env_session`
+- `test/Agent/LoopSpec.hs` — update test helper similarly
+- `test/Integration/CLISpec.hs` — add `--agent` integration tests (confirmed to exist)
 
-**Key insight**: Type safety is preserved — `AuthorizedCommand` is still required to call `ShellHandle`. Unrestricted mode just means `authorize` always succeeds.
+### TDD Sequence
 
-### Config
+**Each step = separate commits: (1) failing test, (2) minimum implementation, (3) optional refactor.**
 
-```toml
-autonomy = "full"    # full | supervised | deny (default: supervised)
+1. **AgentName smart constructor**
+   - Red: tests for `mkAgentName ""`, `mkAgentName "../evil"`, `mkAgentName "foo/bar"`, `mkAgentName "a\0b"`, `mkAgentName ".hidden"`, `mkAgentName (T.replicate 65 "a")`, `mkAgentName "valid-name_1"`
+   - Green: implement with `[a-zA-Z0-9_-]` regex, max 64, reject empty
+   - Exhaustive: every rejection branch has a dedicated test (coverage requirement)
 
-[exec]
-timeout_sec = 300
-background_ms = 10000
-```
+2. **AgentName custom FromJSON**
+   - Red: `decode "\"../evil\"" :: Maybe AgentName` returns `Nothing`; `decode "\"zoe\""` returns `Just (AgentName "zoe")`
+   - Green: custom `FromJSON` calls `mkAgentName`, fails with `parseFail` on error
+   - Ensures smart constructor cannot be bypassed via corrupted JSON files
 
-### File Scope
+3. **TOML frontmatter fence extraction**
+   - Red: `extractFrontmatter "---\nmodel = \"foo\"\n---\nbody"` returns `(Just "model = \"foo\"", "body")`; no fence returns `(Nothing, whole)`; malformed fence returns `(Nothing, whole)` with warning
+   - Green: implement fence splitter (plain Text parsing, no library)
 
-- `src/PureClaw/Security/Policy.hs` — verify AllowAll path
-- `src/PureClaw/Security/Command.hs` — verify authorize handles AllowAll
-- `src/PureClaw/Tools/Shell.hs` — background exec, timeout, cwd, env params
-- `src/PureClaw/Handles/Shell.hs` — extend for background + streaming
-- `src/PureClaw/Handles/Process.hs` — process tracking for background jobs
-- `src/PureClaw/CLI/Config.hs` — autonomy + exec config fields, TOML codec
-- `src/PureClaw/CLI/Commands.hs` — `--autonomy` flag, startup warning
-- `src/PureClaw/Core/Types.hs` — exec config types
-- `test/Security/PolicySpec.hs` — unrestricted policy tests
-- `test/Security/CommandSpec.hs` — AllowAll authorize tests
-- `test/Tools/ShellSpec.hs` — background exec, timeout tests
+4. **AgentConfig TOML parser**
+   - Red: full pipeline `parseAgentsMd` on fixture files → expected `(AgentConfig, body)` pairs
+   - Green: wire `extractFrontmatter` → `Toml.decode` → `AgentConfig`
+   - Tests: no frontmatter, empty frontmatter, all fields set, unknown fields ignored, parse error returns `defaultAgentConfig` + log warning
+
+5. **composeAgentPrompt — file reading basics**
+   - Red: fixture agent dir with SOUL.md + AGENTS.md → exact expected output with section markers
+   - Green: implement file reading with section concatenation
+   - Tests cover each file type in the injection order table
+
+6. **composeAgentPrompt — skip empty, truncate large, reject >1MB**
+   - Red: fixture with empty SOUL.md (skipped), 10000-char AGENTS.md (truncated at 8000 + marker), 2MB MEMORY.md (rejected with log warning)
+   - Green: implement skip/truncate/reject logic
+   - Tests cover: zero bytes, whitespace-only, exactly-at-limit, just-over-limit, >1MB
+
+7. **composeAgentPromptWithBootstrap**
+   - Red: fixture with BOOTSTRAP.md → when `consumed=False`, BOOTSTRAP included; when `consumed=True`, BOOTSTRAP skipped
+   - Green: add bootstrap flag branch
+   - Tests cover both paths
+
+8. **composeAgentPrompt — empty agent dir**
+   - Red: fixture dir with no .md files → returns empty Text, logs info
+   - Green: handle empty-result case
+
+9. **discoverAgents**
+   - Red: fixture parent with `zoe/` (valid), `../escape/` (not possible since it's a real dir name test), `bad name/` (contains space → invalid), `valid_1/` (valid) → returns `[zoe, valid_1]`, logs warning for bad name
+   - Green: implement with `listDirectory` + `mkAgentName` filter
+   - Tests: missing parent dir, empty parent, invalid names skipped
+
+10. **Workspace validation — exhaustive denylist**
+    - Red: for EACH entry in the denylist table (`/etc`, `/usr`, ..., `$HOME/.ssh`, `$HOME/.pureclaw`), create a test asserting `validateWorkspace` rejects it
+    - Red: valid temp dir accepted; relative path rejected; nonexistent dir rejected
+    - Red: symlink pointing to denylisted dir rejected (via `canonicalizePath` resolution) — requires `createSymbolicLink` from `unix`
+    - Green: implement validation pipeline
+    - Coverage: every denylist entry hit (branch coverage requirement)
+
+11. **Default workspace auto-creation**
+    - Red: session starts with no custom workspace → `~/.pureclaw/agents/<name>/workspace/` is created with mode `0o700` (verified via `getFileStatus`)
+    - Green: add auto-creation in `loadAgent` or session setup
+    - Tests: creation is idempotent (second start doesn't fail); custom workspace does NOT auto-create
+
+12. **Override priority resolution**
+    - Red: with CLI `--model X`, frontmatter `model = "Y"`, config `model = "Z"` → effective model is `X`. Drop CLI → `Y`. Drop frontmatter → `Z`. Drop all → default.
+    - Green: implement priority resolution in `runChat`
+    - Tests: test table for model, tool_profile, workspace
+
+13. **`/agent list`**
+    - Red: parser test; handler test with fixture agent dir; empty-dir case produces "No agents found. Create one at ~/.pureclaw/agents/<name>/"
+    - Green: implement command and handler
+
+14. **`/agent info`**
+    - Red: `/agent info zoe` shows files + frontmatter + effective workspace; `/agent info nonexistent` → "Agent \"nonexistent\" not found. Available agents: ..."; `/agent info` with no agent selected shows "No agent selected. Use --agent <name>."
+    - Green: implement
+    - Tests: all three branches
+
+15. **`/agent start` (WU1 skeleton)**
+    - Red: parser test; handler test stubs for future expansion
+    - Green: implement parser + placeholder handler (full behavior in WU2)
+
+16. **Tab completion for agent names**
+    - Red: completer returns discovered agent names when completing `/agent info ` prefix; returns empty when no agents
+    - Green: wire discovered agent names into `buildCompleter`
+    - Tests: with/without agents
+
+17. **`--agent` CLI flag integration (happy path)**
+    - Red: `test/Integration/CLISpec.hs` — spawn `pureclaw` with `HOME=$tmp` and fixture agent `$tmp/.pureclaw/agents/zoe/`, verify startup log contains `Agent: zoe` and system prompt is used
+    - Green: wire up in `runChat`
+
+18. **`--agent` CLI flag error states**
+    - Red: `--agent ../evil` → stderr contains "invalid agent name"; `--agent nonexistent` → stderr contains "Available agents:"
+    - Green: validate via `mkAgentName`, list agents on miss
+
+19. **`default_agent` config field**
+    - Red: config with `default_agent = "zoe"`, no `--agent` flag, fixture agent present → agent is loaded
+    - Red: `--agent` overrides `default_agent` in config
+    - Green: wire config field through `FileConfig` → `runChat`
+
+20. **Backward-compat: no-agent path**
+    - Red: integration test with no agents dir, no `--agent`, no `default_agent`, with SOUL.md in cwd → existing `loadIdentity` path runs, system prompt contains identity; no SOUL.md → no system prompt
+    - Red: integration test with `--system "custom"` and no agent → custom system prompt
+    - Green: preserve existing code path (no change should be required if fall-through is correct)
+
+21. **AgentEnv construction site updates**
+    - Red: any test that constructs `AgentEnv` fails to compile (this happens as soon as fields are added)
+    - Green: update `test/Agent/SlashCommandsSpec.hs` and `test/Agent/LoopSpec.hs` helpers to include `_env_agentDef = Nothing` and `_env_session = mkNoOpSessionHandle`
+    - This step runs concurrently with step 17 because `-Werror` forces it
+
+22. **pureclaw.cabal updates**
+    - Add `PureClaw.Agent.AgentDef` and `PureClaw.Session.Handle` to `exposed-modules`
+    - Add `Agent.AgentDefSpec` to test suite `other-modules`
+    - Verify `cabal build` succeeds (no `-Wmissing-home-modules` warnings)
+
+### Work Unit 1 Estimate
+~20-22 commits (TDD red/green pairs), 1 PR
 
 ---
 
-## Epic 2: Signal Channel (Full Integration)
+## Work Unit 2: Sessions
 
-**Goal**: Signal as a first-class chat interface via signal-cli JSON-RPC.
+**Goal**: Conversations are organized into sessions with unique IDs, persistent metadata, and per-session transcript directories. Sessions are created implicitly on startup, resumable via `/session resume`, and listed via `/session list`.
 
-### Current State
+### DoD
 
-Skeleton in `PureClaw.Channels.Signal` — parses `SignalEnvelope` from JSON, has `TQueue`-based inbox, but `sendSignalMessage` only logs. No signal-cli process management.
+- [ ] `SessionId` newtype in `PureClaw.Core.Types` with custom `FromJSON` that validates format
+- [ ] `SessionPrefix` smart constructor: same character restrictions as `AgentName` + rejects reserved word "new"; non-exported constructor; custom `FromJSON`
+- [ ] `newSessionId :: Maybe SessionPrefix -> UTCTime -> SessionId` (pure, deterministic for fixed time)
+- [ ] `SessionMeta` type with JSON round-trip
+- [ ] `RuntimeType` with custom JSON encoding (`"provider"`, `"harness:claude-code"`)
+- [ ] `defaultTarget :: RuntimeType -> MessageTarget`
+- [ ] `SessionHandle` full implementation with `_sh_save`, `_sh_transcript`, `_sh_dir`, `_sh_meta`
+- [ ] `mkSessionHandle` creates session dir with `0o700`, writes `session.json` with `0o600`, opens transcript
+- [ ] `resumeSession` reads metadata, reopens transcript for append, validates runtime
+- [ ] `mkNoOpSessionHandle` (promoted from WU1 skeleton to full implementation)
+- [ ] Runtime validation on resume: if `RTHarness name` and harness not in `_env_harnesses`, log warning, set `_env_target` to `TargetProvider`, retain `RTHarness` in metadata
+- [ ] Session resume recomposes system prompt from current agent files (picks up edits)
+- [ ] Resume context reload: load last 50 messages or 100K estimated tokens (whichever is smaller) from transcript
+- [ ] Bootstrap consumption callback: after first `StreamDone`, update `session.json` with `bootstrap_consumed: true`
+- [ ] Bootstrap callback is injectable (testable in isolation without driving full agent loop)
+- [ ] `--session <id>` CLI flag resumes by exact match
+- [ ] `--prefix <prefix>` CLI flag for new sessions, validated via `mkSessionPrefix`
+- [ ] `--session` and `--prefix` are mutually exclusive (post-parse validation in `runChat`)
+- [ ] `/session list [<agent>]` shows up to 20 recent sessions, sorted by `last_active` desc
+- [ ] `/session resume <id-or-prefix>` with `isPrefixOf`-over-full-ID matching; ambiguous matches list candidates
+- [ ] `/session last` and `/last` resume most recent
+- [ ] `/session new|reset|info|compact` all work
+- [ ] `/new`, `/reset`, `/status`, `/compact` become aliases
+- [ ] `/session info` shows session ID, agent, runtime, message count, token usage (subsumes `/status`)
+- [ ] Tab completion for session IDs in `/session resume`
+- [ ] `_env_transcript` deprecated; `envTranscript` accessor reads from `_env_session._sh_transcript`
+- [ ] All existing `_env_transcript` call sites migrated to `envTranscript`
+- [ ] Transcripts write to `~/.pureclaw/sessions/<id>/transcript.jsonl`
+- [ ] `/transcript` slash command handler updated to read from current session transcript via `envTranscript`
+- [ ] Default workspace `~/.pureclaw/agents/<name>/workspace/` is initialized via session setup
+- [ ] `pureclaw.cabal` updated with new modules and test specs
+- [ ] 100% test coverage
+- [ ] `-Wall -Werror` clean, hlint clean, export lists explicit
 
-### Design
+### Files Affected
 
-**Transport**: Spawn `signal-cli --output=json jsonRpc` as a child process (stdio JSON-RPC). Same approach as OpenClaw. Process stays running for session lifetime.
+**New**:
+- `src/PureClaw/Session/Types.hs` — `SessionPrefix`, `SessionMeta`, `RuntimeType`, `defaultTarget`
+- `test/Session/TypesSpec.hs`
+- `test/Session/HandleSpec.hs`
 
-**SignalHandle** (new):
-```haskell
-data SignalHandle = SignalHandle
-  { _sh_process :: Process Handle Handle ()  -- signal-cli child
-  , _sh_inbox   :: TQueue SignalEnvelope
-  , _sh_account :: Text                      -- E.164 phone number
-  }
-```
+**Modified**:
+- `pureclaw.cabal` — add `PureClaw.Session.Types` to `exposed-modules`; add `Session.TypesSpec`, `Session.HandleSpec` to test suite `other-modules`
+- `src/PureClaw/Core/Types.hs` — add `SessionId` newtype (with custom `FromJSON`)
+- `src/PureClaw/Session/Handle.hs` — promote `mkNoOpSessionHandle` skeleton to full implementation; add `mkSessionHandle`, `resumeSession`, listing, prefix matching
+- `src/PureClaw/Agent/Env.hs` — deprecate `_env_transcript`, add `envTranscript` accessor reading from session
+- `src/PureClaw/Agent/SlashCommands.hs` — add `/session list|new|resume|last|info|reset|compact`, register aliases for `/new`, `/reset`, `/status`, `/compact`, `/last`; update `/transcript` handler to use `envTranscript`; tab completion for session IDs
+- `src/PureClaw/CLI/Commands.hs` — add `--session`, `--prefix` flags with mutual exclusion; update startup flow (create or resume session); replace `mkNoOpSessionHandle` with real handle in `AgentEnv` construction
+- `src/PureClaw/CLI/Config.hs` — add `_fc_sessionPrefix` field
+- `src/PureClaw/Agent/Loop.hs` — bootstrap consumed callback after first `StreamDone`; use `envTranscript` instead of `_env_transcript`
+- Any other modules referencing `_env_transcript` — migrated to `envTranscript`
+- `test/Integration/CLISpec.hs` — integration tests for `--session`, `--prefix`, transcript migration
 
-**Receive loop**: Background thread reads stdout line-by-line, parses JSON envelopes, filters for `dataMessage`, pushes to inbox queue.
+### TDD Sequence
 
-**Send**: JSON-RPC `send` method written to stdin. Chunking at 6000 chars on paragraph boundaries.
+1. **SessionId in Core.Types**
+   - Red: round-trip `parseSessionId` / `unSessionId`; JSON encode/decode
+   - Red: `FromJSON` with corrupted `SessionId` value — define intended behavior (opaque string, so always succeeds)
+   - Green: implement newtype + instances
 
-**DM policy**: Reuse `AllowList UserId`. Map E.164 numbers and UUIDs to `UserId`.
+2. **SessionPrefix smart constructor**
+   - Red: `mkSessionPrefix "new"` → `Left PrefixReserved`; same character rejection tests as `AgentName`
+   - Red: custom `FromJSON` prevents bypass
+   - Green: implement with character validation + reserved word check
 
-**Group support**: Parse `groupInfo` from envelopes. Mention-gating via bot's phone number in message text.
+3. **newSessionId pure function**
+   - Red: `newSessionId (Just zoe) fixedTime` produces exactly `SessionId "zoe-<mjd>-<picos>"` for a known time; `Nothing` prefix omits the prefix hyphen
+   - Green: implement using `diffTimeToPicoseconds` + `toModifiedJulianDay`
 
-**Lifecycle**: `withSignalChannel :: SignalConfig -> (ChannelHandle -> IO a) -> IO a` — starts signal-cli, spawns reader thread, cleans up on exit.
+4. **RuntimeType custom JSON**
+   - Red: `encode RTProvider == "\"provider\""`; `encode (RTHarness "cc") == "\"harness:cc\""`; both round-trip; invalid string → parse failure
+   - Green: custom `ToJSON`/`FromJSON`
 
-**ChannelHandle mapping**: `_ch_readSecret`/`_ch_promptSecret` throw IOError (same as current). `_ch_prompt` sends message, waits for next from same sender.
+5. **SessionMeta JSON round-trip**
+   - Red: sample JSON decodes; encode matches canonical form; missing optional field handled
+   - Green: implement instances
 
-### Config
+6. **defaultTarget**
+   - Red: `defaultTarget RTProvider == TargetProvider`; `defaultTarget (RTHarness "x") == TargetHarness "x"`
+   - Green: trivial implementation
+   - Red: integration test — session created with `RTProvider` initializes `_env_target` to `TargetProvider` via `defaultTarget`
 
-```toml
-channel = "signal"
+7. **mkSessionHandle — create path**
+   - Red: `mkSessionHandle` in temp dir creates dir with mode `0o700` (verified via `getFileStatus`); `session.json` exists with mode `0o600`; transcript file exists with mode `0o600`
+   - Green: implement using `createDirectory`, `setFileMode`, `mkFileTranscriptHandle`
 
-[signal]
-account = "+15555550123"
-dm_policy = "allowlist"
-allow_from = ["+15551234567"]
-text_chunk_limit = 6000
-```
+8. **mkSessionHandle — metadata persistence**
+   - Red: after `_sh_save`, reading `session.json` from disk yields the same `SessionMeta`; `last_active` updates on subsequent saves
+   - Green: implement IORef + save action
 
-### File Scope
+9. **resumeSession**
+   - Red: create session, write transcript entries, close, resume — metadata matches, transcript appendable
+   - Red: resume missing `session.json` → `Left MissingMetadata`
+   - Red: resume corrupted `session.json` → `Left (CorruptedMetadata path err)` with recovery hint
+   - Green: implement resume path
 
-- `src/PureClaw/Channels/Signal.hs` — complete rewrite (signal-cli JSON-RPC)
-- `src/PureClaw/Channels/Class.hs` — Signal in SomeChannel
-- `src/PureClaw/CLI/Config.hs` — signal config fields + TOML codec
-- `src/PureClaw/CLI/Commands.hs` — `--channel` flag, signal startup path
-- `src/PureClaw/Core/Types.hs` — ChannelType enum, signal types
-- `test/Channels/SignalSpec.hs` — new module
-- `test/CLI/ConfigSpec.hs` — signal config parsing tests
+10. **mkNoOpSessionHandle (full)**
+    - Red: no-op save is safe; transcript is `mkNoOpTranscriptHandle`; meta is a static default
+    - Green: promote WU1 skeleton to full implementation
+
+11. **Runtime validation on resume**
+    - Red: resume session with `RTHarness "dead"` where `_env_harnesses` is empty → `_env_target` ends up as `TargetProvider`, warning logged; `session.json` still has `"runtime": "harness:dead"`
+    - Red: resume with `RTHarness "cc"` where cc IS in `_env_harnesses` → `_env_target` is `TargetHarness "cc"`
+    - Green: implement validation in resume path
+
+12. **Session listing and prefix matching**
+    - Red: sessions `zoe-60759-111`, `zoe-60759-222`, `ops-60759-333` on disk
+    - Red: `listSessions Nothing 20` returns all 3 sorted by `last_active` desc
+    - Red: `listSessions (Just "zoe") 20` returns only zoe sessions
+    - Red: `resolveSessionRef "zoe-60759-222"` → exact match returned
+    - Red: `resolveSessionRef "zoe-607"` → ambiguous (both match by `isPrefixOf`); returns `Left [zoe-60759-111, zoe-60759-222]`
+    - Red: `resolveSessionRef "ops"` → unambiguous match
+    - Red: `resolveSessionRef "nothing"` → `Left []` (not found)
+    - Red: default list count is 20 (create 25 sessions, assert 20 returned)
+    - Green: implement
+
+13. **Bootstrap consumption callback**
+    - Red: test callback directly — `markBootstrapConsumed session` updates `session.json`'s `bootstrap_consumed` field to `true`; idempotent on re-call
+    - Red: unit test that `runAgentLoop` invokes the callback exactly once on first `StreamDone` (use injectable `OnFirstStreamDone :: IO ()` callback in `AgentEnv`, or a mock provider that stubs the stream)
+    - Green: implement callback and inject
+    - Red: resume test — session with `bootstrap_consumed: true` preserves the flag after resume + save
+
+14. **Slash command aliases**
+    - Red: parser tests — `/new` parses to same `SlashCommand` as `/session new`; same for `/reset`→`/session reset`, `/status`→`/session info`, `/compact`→`/session compact`, `/last`→`/session last`
+    - Green: add aliases to `allCommandSpecs`
+
+15. **`/session new`**
+    - Red: handler test — creates new session, resets context, returns confirmation
+    - Green: implement
+
+16. **`/session list`**
+    - Red: handler test with fixture sessions dir; `/session list zoe` filters
+    - Green: implement using `listSessions`
+
+17. **`/session resume`**
+    - Red: unambiguous prefix resumes; ambiguous prefix lists candidates; missing → error
+    - Green: implement using `resolveSessionRef` + `resumeSession`
+
+18. **`/session last` and `/last`**
+    - Red: handler test resumes most recent by `last_active`
+    - Green: implement
+
+19. **`/session info`**
+    - Red: handler test — output contains session ID, agent name, runtime string, message count from context, token usage from context
+    - Green: implement
+    - Verifies `/status` subsumption is behaviorally complete
+
+20. **`/session reset` and `/session compact`**
+    - Red: handler tests assert same behavior as existing `/reset` and `/compact`
+    - Green: route through existing logic or extract shared handler
+
+21. **Tab completion for session IDs**
+    - Red: completer returns session IDs from sessions dir when completing `/session resume ` prefix; sorted by `last_active` desc
+    - Green: extend `buildCompleter` to enumerate sessions
+
+22. **`_env_transcript` deprecation migration**
+    - Red: every call site of `_env_transcript` in `src/` has been replaced with `envTranscript`; `-Wall -Werror` passes; test helpers updated
+    - Green: grep + replace; run build
+
+23. **`/transcript` slash command update**
+    - Red: integration test — `/transcript` reads from the current session's transcript file, not old flat dir
+    - Green: update handler to use `envTranscript`
+
+24. **`--session` CLI flag**
+    - Red: integration test — create session, restart pureclaw with `--session <id>`, verify session is resumed (metadata matches, transcript reopened)
+    - Red: `--session nonexistent` → clear error
+    - Green: wire up in `runChat`
+
+25. **`--prefix` CLI flag**
+    - Red: integration test — `pureclaw tui --prefix myrun` creates session dir matching `myrun-*` under `$tmp/.pureclaw/sessions/`
+    - Red: `--prefix "../evil"` rejected
+    - Red: `--prefix` defaults to agent name when `--agent` is set
+    - Green: wire up via `mkSessionPrefix`
+
+26. **`--session` and `--prefix` mutual exclusion**
+    - Red: passing both flags → post-parse validation error
+    - Green: add validation in `runChat` (optparse `<|>` is insufficient — explicit check needed)
+
+27. **Resume context reload budget**
+    - Red: session with 100 transcript messages on disk → resume loads only last 50 messages into context
+    - Red: session with 10 messages totaling >100K tokens → resume loads only messages fitting in 100K budget
+    - Red: session with <50 messages → all loaded
+    - Green: implement reload logic with budget
+
+28. **Transcript migration end-to-end**
+    - Red: integration test — new `pureclaw tui` creates `~/.pureclaw/sessions/<id>/transcript.jsonl`, NOT `~/.pureclaw/transcripts/*.jsonl`
+    - Red: old transcripts (if any) in the old dir are untouched
+    - Green: update `startWithChannel` to use `_sh_transcript` from real session handle
+
+29. **AgentEnv construction migration**
+    - Red: `startWithChannel` constructs real `SessionHandle` (no longer `mkNoOpSessionHandle`); test helpers still use `mkNoOpSessionHandle`; compiles clean
+    - Green: update production construction site
+
+30. **pureclaw.cabal updates**
+    - Add `PureClaw.Session.Types` to `exposed-modules`
+    - Add `Session.TypesSpec`, `Session.HandleSpec` to test suite `other-modules`
+    - Verify build clean
+
+### Work Unit 2 Estimate
+~28-32 commits, 1 PR (can split into 2 if review load is high: types/handle vs CLI integration)
 
 ---
 
-## Epic 3: Telegram Channel (Complete Integration)
+## Execution Order
 
-**Goal**: Telegram as a fully working chat interface via Bot API long polling.
+1. **WU1: Agents** — branch `sessions-and-agents`, TDD red/green pairs, PR when DoD complete
+2. **Review + merge WU1**
+3. **WU2: Sessions** — continue on same branch, same TDD discipline
+4. **Review + merge WU2**
 
-### Current State
+## Pre-PR Checklist (both WUs)
 
-Skeleton in `PureClaw.Channels.Telegram` — parses `TelegramUpdate`, has `TQueue`, sends via `sendMessage` Bot API. Missing: polling loop, lifecycle management.
+- [ ] All tests pass: `nix develop . --command cabal test`
+- [ ] Coverage meets thresholds: `nix develop . --command cabal test --enable-coverage` satisfies `.coverage-thresholds.json`
+- [ ] `-Wall -Werror` clean: `nix develop . --command cabal build`
+- [ ] hlint clean: `nix develop . --command hlint src test`
+- [ ] `pureclaw.cabal` modules registered (no `-Wmissing-home-modules` warnings)
+- [ ] `/self-reflect` run to capture learnings before PR creation
+- [ ] Knowledge base updates committed atomically with code
 
-### Design
+## Rollback Strategy
 
-**Transport**: Long polling via `getUpdates` (simpler than webhooks, no TLS/domain needed for MVP). Configurable timeout (default 30s).
+Each WU is a self-contained PR. If WU2 has issues post-merge, WU1 remains valuable (agents without sessions still improve over the current single-SOUL.md model). If WU1 has issues, revert and re-plan.
 
-**TelegramHandle** (extend existing):
-```haskell
-data TelegramHandle = TelegramHandle
-  { _th_config  :: TelegramConfig
-  , _th_inbox   :: TQueue TelegramUpdate
-  , _th_network :: NetworkHandle
-  , _th_lastId  :: IORef Int     -- last update_id for offset
-  , _th_chatId  :: IORef (Maybe Int)
-  }
-```
+## Risks
 
-**Receive loop**: Background thread polls `getUpdates?offset=N&timeout=30`, parses updates, pushes text messages to inbox.
-
-**Send**: Existing `sendMessage`. Add chunking at 4096 chars. Add `parse_mode=Markdown`.
-
-**DM policy**: `AllowList UserId` with `tg:123456789` format.
-
-**Group support**: Parse `chat.type`. Mention-gating via `@botusername` or reply-to-bot.
-
-**Bot commands**: Register via `setMyCommands` API at startup (`/help`, `/status`, `/new`).
-
-**Lifecycle**: `withTelegramChannel :: TelegramConfig -> NetworkHandle -> (ChannelHandle -> IO a) -> IO a`
-
-### Config
-
-```toml
-channel = "telegram"
-
-[telegram]
-bot_token = "123456:ABC-DEF..."
-dm_policy = "pairing"
-allow_from = ["tg:123456789"]
-require_mention = true
-text_chunk_limit = 4096
-```
-
-### File Scope
-
-- `src/PureClaw/Channels/Telegram.hs` — complete implementation
-- `src/PureClaw/CLI/Config.hs` — telegram config fields + TOML codec
-- `src/PureClaw/CLI/Commands.hs` — telegram startup path
-- `test/Channels/TelegramSpec.hs` — new module
-- `test/CLI/ConfigSpec.hs` — telegram config parsing tests
-
----
-
-## Epic 4: OpenClaw Config Import (Channels + Agents)
-
-**Goal**: `pureclaw import <path>` reads an OpenClaw config and generates PureClaw config, covering channels and agent definitions.
-
-### Current State
-
-Provider import (API key, model) already works. No channel or agent definition import.
-
-### Design
-
-**CLI subcommand**: `pureclaw import <path>` (runs before agent loop, not a slash command).
-
-**JSON5 parsing**: Lightweight preprocessor to strip `//` comments and trailing commas, then parse with `aeson`. OpenClaw configs rarely use advanced JSON5 features (no hex literals, multiline strings, etc.).
-
-**Import scope (MVP)**:
-
-| OpenClaw field | PureClaw equivalent |
+| Risk | Mitigation |
 |---|---|
-| `channels.signal.account` | `[signal] account` |
-| `channels.signal.dmPolicy` | `[signal] dm_policy` |
-| `channels.signal.allowFrom` | `[signal] allow_from` |
-| `channels.telegram.botToken` | `[telegram] bot_token` |
-| `channels.telegram.dmPolicy` | `[telegram] dm_policy` |
-| `channels.telegram.allowFrom` | `[telegram] allow_from` |
-| `channels.telegram.groups` | `[telegram] groups` (simplified) |
-| `agents.defaults.model` | `model` (already working) |
-| `agents.defaults.workspace` | `workspace` (new field) |
-| `agents.list[].name` | `[[agents]] name` |
-| `agents.list[].systemPrompt` | `[[agents]] system` |
-| `agents.list[].model` | `[[agents]] model` |
-| `agents.list[].tools.profile` | `[[agents]] tool_profile` |
-| API keys in config | Prompt to store in vault |
-
-**Agent definitions as files on disk**:
-
-OpenClaw's `agents.list[]` entries become individual files under `~/.pureclaw/agents/`:
-```
-~/.pureclaw/agents/coder.toml
-~/.pureclaw/agents/research.toml
-```
-
-Each agent file:
-```toml
-name = "coder"
-system = "You are a coding assistant..."
-model = "anthropic/claude-sonnet-4-6"
-tool_profile = "coding"    # minimal | coding | full
-workspace = "~/Projects"
-```
-
-**AgentDef type** (new):
-```haskell
-data AgentDef = AgentDef
-  { _ad_name        :: Text
-  , _ad_system      :: Maybe Text
-  , _ad_model       :: Maybe Text
-  , _ad_toolProfile :: Maybe Text
-  , _ad_workspace   :: Maybe Text
-  }
-```
-
-The importer writes one `.toml` file per OpenClaw agent definition into `~/.pureclaw/agents/`.
-
-**Output**: Write config to `~/.pureclaw/` (prompt before overwrite). Print summary of imported vs. skipped fields.
-
-**$include handling**: Follow `$include` directives (single file or array) up to 3 levels deep, resolve relative paths from including file's directory.
-
-### File Scope
-
-- `src/PureClaw/CLI/Import.hs` — new module: JSON5 preprocessor, field mapping, $include resolution
-- `src/PureClaw/CLI/Commands.hs` — `import` subcommand
-- `src/PureClaw/CLI/Config.hs` — AgentDef type, extended FileConfig with agents
-- `test/CLI/ImportSpec.hs` — new module with fixture OpenClaw configs
-- `test/fixtures/openclaw/` — sample openclaw.json files for testing
-
----
-
-## Directory Structure: Config vs. State
-
-**Principle**: All user-editable configuration lives under `~/.pureclaw/` (version-controllable with git). All mutable runtime state lives under a separate directory (not version-controlled).
-
-### Config directory (`~/.pureclaw/`) — git-friendly
-
-```
-~/.pureclaw/
-├── config.toml              # main config (provider, model, channel, autonomy, etc.)
-├── agents/                  # agent definitions (one .toml per agent)
-│   ├── coder.toml
-│   └── research.toml
-└── system.md                # default system prompt (optional)
-```
-
-Everything here is user-authored or imported. Plain text, deterministic, suitable for `git init && git add .`.
-
-### State directory (`~/.pureclaw/state/` or XDG `~/.local/share/pureclaw/`) — mutable
-
-```
-~/.local/share/pureclaw/     # or ~/.pureclaw/state/
-├── vault/                   # encrypted secrets (vault.age, identity files)
-│   ├── vault.age
-│   └── age-plugin-yubikey-identity.txt
-├── memory/                  # memory backend data (sqlite, markdown files)
-├── sessions/                # conversation history / session state
-├── pairing/                 # pairing codes and paired device state
-└── logs/                    # runtime logs
-```
-
-Everything here is written by PureClaw at runtime. Excluded from version control.
-
-**Migration**: Existing `~/.pureclaw/vault/` paths continue to work. We add a config field `state_dir` with a sensible default and migrate gracefully.
-
-**Design decision**: We use `~/.local/share/pureclaw/` (XDG data dir) as the default on Linux/macOS. The config field `state_dir` allows override. The vault path fields in existing configs are respected as-is for backward compatibility.
-
----
-
-## Channel Selection at Startup
-
-Shared infrastructure for Epics 2 & 3:
-
-- New CLI flag: `--channel <cli|signal|telegram>` (default: `cli`)
-- Config field: `channel = "cli"`
-- CLI flag overrides config
-- Channel-specific config sections only read when that channel is selected
-- Future: multi-channel gateway mode (not MVP — single channel per process)
-
----
-
-## Dependency Graph
-
-```
-Epic 1 (Exec)     ─── independent, smallest scope
-Epic 2 (Signal)   ─── independent, highest priority
-Epic 4 (Import)   ─── depends on Signal config schema; defines Telegram schema ahead of impl
-Epic 3 (Telegram) ─── uses config schema established by Epic 4
-```
-
-Recommended execution order: **1 → 2 → 4 → 3**
-
-Epics 1 and 2 can be parallelized. Epic 4 comes before Telegram so the import defines the Telegram config schema before we implement the channel — this way Telegram implementation consumes an already-settled config format rather than the import having to reverse-engineer it. Epic 3 comes last, building on both the channel patterns from Epic 2 and the config schema from Epic 4.
-
-## Human Checkpoints
-
-- [ ] After Epic 1: Review security model for unrestricted exec before merging
-- [ ] After Epic 2: Test with real signal-cli installation
-- [ ] After Epic 4: Test with real OpenClaw config file
-- [ ] After Epic 3: Test with real Telegram bot
-
-## Resolved Questions
-
-1. **signal-cli installation**: Require pre-installed. Print helpful error with install instructions if missing. No auto-install for MVP.
-2. **Agent definitions**: Stored as individual `.toml` files under `~/.pureclaw/agents/`. Runtime selection (`/agent <name>`) is a fast follow-up, not MVP.
-3. **$include depth**: 3 levels for MVP.
-4. **Config vs. state separation**: All config under `~/.pureclaw/` (git-friendly), all mutable state under `~/.local/share/pureclaw/` (not version-controlled).
-
-## Open Questions
-
-1. **State dir default**: `~/.local/share/pureclaw/` (XDG) vs `~/.pureclaw/state/` — XDG is more standard but splits the pureclaw footprint across two locations.
-2. **Agent loading at startup**: Should all agent defs be loaded eagerly, or lazily when referenced? (Recommend: eagerly, they're tiny files)
-
----
-
-## Design Review Gate — Iteration 1 Results
-
-**Date**: 2026-03-15
-**Overall**: NEEDS_REVISION (4 of 5 agents flagged blockers)
-
-### Blocker Summary (deduplicated, prioritized)
-
-#### CRITICAL: Security
-
-1. **User allow-list never enforced** (Security B1): `_cfg_allowedUsers` exists in `Config` but the agent loop (`Loop.hs`) never checks `_im_userId` against it. With `autonomy = "full"` + Signal/Telegram, ANY user who messages the bot gets unrestricted shell execution. **Must add userId authorization check in agent loop immediately after `_ch_receive`, before any message processing. Mandatory for all non-CLI channels.**
-
-2. **Shell `env` parameter enables injection** (Security B2): The proposed `env :: Map Text Text` on the shell tool is controlled by the LLM. A prompt injection via Signal/Telegram could set `LD_PRELOAD`, `PATH`, etc., bypassing `safeEnv`. **Must specify: env vars merge UNDER safeEnv (safeEnv wins), or restrict to an allowlist, or limit to `autonomy = "full"` + CLI only.**
-
-3. **Shell `cwd` parameter enables workspace escape** (Security B3): No containment validation. `cwd = "/etc"` would work. **Must validate through `mkSafePath` or equivalent workspace check. Relax only when `autonomy = "full"`.**
-
-#### HIGH: Design Gaps
-
-4. **Bot token in plaintext config** (Designer B2, CTO B5, Security S1): Telegram `bot_token` is a secret but shown in `config.toml`. Must be vault-stored. **Define `bot_token_vault = "telegram_bot_token"` convention that resolves from vault at startup. Import command should prompt to store in vault.**
-
-5. **Agent selection mechanism missing** (Designer B3): Agent def files are written to `~/.pureclaw/agents/` but no config field or CLI flag selects which one to use. **Must add `agent = "coder"` config field and `--agent` CLI flag.**
-
-6. **`dm_policy` enum undefined** (Designer B4): Different values shown for Signal vs Telegram with no type definition. **Must define `DmPolicy = Pairing | AllowList | Open | Disabled` ADT and document it.**
-
-7. **`channel` → `default_channel`** (Designer B1): Current naming is ambiguous. **Rename to `default_channel` to clarify it's a selector, not a channel object.**
-
-#### MEDIUM: Scope & Process
-
-8. **Epic 1 scope creep** (CTO B1): Bundles unrestricted mode (trivial) with 5 shell enhancements (complex). **Split: Epic 1a = wire autonomy config + AllowAll (small). Epic 1b = background exec, timeout, cwd, env, streaming (separate epic or fast follow).**
-
-9. **No TDD breakdown per epic** (CTO B3): File scopes listed but no red/green/refactor sequence. **Add "TDD Sequence" subsection to each epic with first failing test.**
-
-10. **Missing testability seams** (CTO B2): No mock strategy for signal-cli process or Telegram API. **Specify handle boundaries: Signal gets a process abstraction (replaceable with in-memory queues in tests), Telegram uses mock `NetworkHandle`.**
-
-11. **Channel failure modes unspecified** (CTO B4, Architect S3): What happens when signal-cli crashes or Telegram polling drops? **For MVP: propagate exception, let process die with clear error. No reconnection. Must be stated explicitly.**
-
-#### LOW: Product Completeness
-
-12. **No use cases in WHO/WANTS/SO THAT format** (PM B1): Design describes WHAT, not WHO or WHY.
-
-13. **No success metrics** (PM B2): No measurable criteria for "feature parity."
-
-14. **Import error UX missing** (PM B3): Epic 4 doesn't specify what users see when fields can't be mapped.
-
-15. **Migration path vague** (PM B4): Discovery, side-by-side operation, and explicit exclusions absent.
-
-### Non-Blocking Suggestions (consolidated)
-
-- Architect S1: `ShellHandle` becomes multi-field record (not newtype) — state this explicitly
-- Architect S2: Keep `SignalChannel` name for internal state, reserve `*Handle` for capability records
-- Architect S5: JSON5 preprocessor limitations (comments in strings) — document as known limitation
-- Architect S7: `AgentEnv` may need `SecurityPolicy` field for startup warning
-- Designer S1: Rename `background_ms` → `background_check_interval_ms`
-- Designer S3: `text_chunk_limit` should be platform constants, not user config
-- Designer S5: Add `pureclaw import --dry-run`
-- CTO S3: JSON5 preprocessor — consider a state machine for outside-string comment stripping
-- CTO S4: `$include` cycle detection (visited-set check)
-- CTO S5: Telegram `chat_id` should be `Int64` not `Int`
-- Security S2: Curate signal-cli child process environment (don't inherit full parent env)
-- Security S4: Per-user rate limiting for remote channels
-- Security S5: Bound max concurrent background processes
-- Security S6: Require explicit flag for `autonomy=full` + remote channel combination
+| TOML frontmatter parsing edge cases | Explicit fence extraction step; `tomland` handles TOML body; thorough parser tests |
+| `AgentEnv` construction site churn | Both fields added in WU1 (with `mkNoOpSessionHandle` for `_env_session`); construction sites enumerated upfront |
+| `/transcript` handler breakage during transcript migration | Explicit TDD step (WU2 step 23) covers this |
+| Session resume context reload hits token limit | 100K token budget enforced with oldest-first truncation |
+| Backward compat with existing `loadIdentity` | Explicit no-agent test (WU1 step 20) |
+| Smart constructor bypass via corrupted JSON | Custom `FromJSON` for `AgentName`, `SessionPrefix`, `SessionId` that calls smart constructor |
+| Bootstrap callback hard to test in agent loop | Injectable callback as `IO ()` action + direct unit test of `markBootstrapConsumed` |
+| Denylist branch coverage | Exhaustive test table hitting every denylist entry |
+| symlink TOCTOU in workspace validation | `canonicalizePath` before denylist check (documented limitation; not a full fix but matches v1 security model) |

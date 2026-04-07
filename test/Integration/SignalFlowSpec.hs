@@ -21,6 +21,7 @@ import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Session.Handle (noOpSessionHandle)
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
@@ -63,6 +64,8 @@ mkTestEnv p ch = do
     , _env_harnesses    = harnessRef
     , _env_target       = targetRef
     , _env_nextWindowIdx = windowIdxRef
+    , _env_agentDef      = Nothing
+    , _env_session       = noOpSessionHandle
     }
 
 spec :: Spec
