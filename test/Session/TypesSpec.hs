@@ -6,6 +6,7 @@ import Data.Aeson qualified as Aeson
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), picosecondsToDiffTime)
 import Data.Time.Calendar (Day (ModifiedJulianDay))
+import PureClaw.Agent.AgentDef (mkAgentName)
 import PureClaw.Core.Types
 import PureClaw.Session.Types
 
@@ -105,3 +106,44 @@ spec = do
 
     it "fails to decode an unknown string" $
       (Aeson.decode "\"banana\"" :: Maybe RuntimeType) `shouldBe` Nothing
+
+  describe "SessionMeta JSON" $ do
+    let zoeAgent = case mkAgentName "zoe" of
+          Right n -> n
+          Left e  -> error ("test fixture: " ++ show e)
+        t0 = UTCTime (ModifiedJulianDay 60759) (picosecondsToDiffTime 0)
+        t1 = UTCTime (ModifiedJulianDay 60759) (picosecondsToDiffTime 1)
+        sample = SessionMeta
+          { _sm_id                = parseSessionId "zoe-60759-0"
+          , _sm_agent             = Just zoeAgent
+          , _sm_runtime           = RTProvider
+          , _sm_model             = "claude-3-opus"
+          , _sm_channel           = "cli"
+          , _sm_createdAt         = t0
+          , _sm_lastActive        = t1
+          , _sm_bootstrapConsumed = False
+          }
+
+    it "round-trips a fully-populated SessionMeta" $
+      Aeson.decode (Aeson.encode sample) `shouldBe` Just sample
+
+    it "round-trips a SessionMeta with no agent set" $ do
+      let s = sample { _sm_agent = Nothing }
+      Aeson.decode (Aeson.encode s) `shouldBe` Just s
+
+    it "round-trips a harness runtime" $ do
+      let s = sample { _sm_runtime = RTHarness "claude-code" }
+      Aeson.decode (Aeson.encode s) `shouldBe` Just s
+
+    it "round-trips bootstrap_consumed = True" $ do
+      let s = sample { _sm_bootstrapConsumed = True }
+      Aeson.decode (Aeson.encode s) `shouldBe` Just s
+
+    it "decodes JSON missing the optional agent field" $ do
+      let json =
+            "{\"id\":\"zoe-60759-0\",\"runtime\":\"provider\","
+            <> "\"model\":\"claude-3-opus\",\"channel\":\"cli\","
+            <> "\"created_at\":\"2025-04-13T00:00:00Z\","
+            <> "\"last_active\":\"2025-04-13T00:00:00Z\","
+            <> "\"bootstrap_consumed\":false}"
+      fmap _sm_agent (Aeson.decode json :: Maybe SessionMeta) `shouldBe` Just Nothing
