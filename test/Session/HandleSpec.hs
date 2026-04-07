@@ -1,8 +1,8 @@
 module Session.HandleSpec (spec) where
 
-import Control.Exception (bracket)
 import Data.Aeson qualified as Aeson
 import Data.Bits ((.&.))
+import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -16,8 +16,6 @@ import Data.Time
 import System.Directory
   ( createDirectoryIfMissing
   , doesFileExist
-  , listDirectory
-  , removeFile
   )
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -57,6 +55,7 @@ import PureClaw.Transcript.Types
   , encodePayload
   )
 
+
 -- ----------------------------------------------------------------------------
 -- Helpers
 -- ----------------------------------------------------------------------------
@@ -88,8 +87,8 @@ mkEntry eid ts = TranscriptEntry
   , _te_timestamp     = ts
   , _te_harness       = Nothing
   , _te_model         = Just "test"
-  , _te_direction     = Outgoing
-  , _te_payload       = encodePayload ("hi" :: Text)
+  , _te_direction     = Request
+  , _te_payload       = encodePayload ("hi" :: BS.ByteString)
   , _te_durationMs    = Nothing
   , _te_correlationId = "corr"
   , _te_metadata      = Map.empty
@@ -170,7 +169,8 @@ spec = do
       result <- resumeSession mkNoOpLogHandle base (parseSessionId "ghost")
       case result of
         Left (ResumeMissingMetadata p) -> p `shouldBe` (base </> "ghost" </> "session.json")
-        other -> expectationFailure ("expected MissingMetadata, got: " <> show other)
+        Right _ -> expectationFailure "expected MissingMetadata, got: Right _"
+        Left e -> expectationFailure ("expected MissingMetadata, got: " <> show e)
 
     it "returns ResumeCorruptedMetadata when session.json is malformed" $ withTmp $ \base -> do
       let dir = base </> "broken"
@@ -179,7 +179,8 @@ spec = do
       result <- resumeSession mkNoOpLogHandle base (parseSessionId "broken")
       case result of
         Left (ResumeCorruptedMetadata p _) -> p `shouldBe` (dir </> "session.json")
-        other -> expectationFailure ("expected CorruptedMetadata, got: " <> show other)
+        Right _ -> expectationFailure "expected CorruptedMetadata, got: Right _"
+        Left e  -> expectationFailure ("expected CorruptedMetadata, got: " <> show e)
 
   describe "mkNoOpSessionHandle" $ do
     it "is safe to save and record into" $ do
