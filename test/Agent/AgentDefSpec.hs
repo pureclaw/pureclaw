@@ -207,3 +207,24 @@ spec = do
           , "--- TOOLS ---\nt"
           , "--- BOOTSTRAP ---\nb"
           ]
+
+  describe "composeAgentPromptWithBootstrap" $ do
+    let log_ = mkNoOpLogHandle
+
+    it "includes BOOTSTRAP.md when consumed=False" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "a"
+        createDirectory dir
+        TIO.writeFile (dir </> "SOUL.md") "s"
+        TIO.writeFile (dir </> "BOOTSTRAP.md") "b"
+        out <- composeAgentPromptWithBootstrap log_ (fixtureAgentDef "a" dir) 8000 False
+        out `shouldBe` "--- SOUL ---\ns\n\n--- BOOTSTRAP ---\nb"
+
+    it "skips BOOTSTRAP.md when consumed=True" $
+      withSystemTempDirectory "pureclaw-agent-" $ \tmp -> do
+        let dir = tmp </> "a"
+        createDirectory dir
+        TIO.writeFile (dir </> "SOUL.md") "s"
+        TIO.writeFile (dir </> "BOOTSTRAP.md") "b"
+        out <- composeAgentPromptWithBootstrap log_ (fixtureAgentDef "a" dir) 8000 True
+        out `shouldBe` "--- SOUL ---\ns"
