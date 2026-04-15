@@ -68,19 +68,21 @@ spec = do
         `shouldBe` Just "zoe"
 
   describe "newSessionId" $ do
+    -- 2025-03-25 14:30:45.678 UTC
     let fixedTime =
-          UTCTime (ModifiedJulianDay 60759) (picosecondsToDiffTime 12345000000)
+          UTCTime (ModifiedJulianDay 60759)
+                  (picosecondsToDiffTime 52245678000000000)
         zoePrefix = case mkSessionPrefix "zoe" of
           Right p -> p
           Left e  -> error ("test fixture: " ++ show e)
 
-    it "produces \"<prefix>-<mjd>-<picos>\" when a prefix is supplied" $
+    it "produces \"<prefix>-YYYYMMDD-HHMMSS-mmm\" when a prefix is supplied" $
       newSessionId (Just zoePrefix) fixedTime
-        `shouldBe` parseSessionId "zoe-60759-12345000000"
+        `shouldBe` parseSessionId "zoe-20250325-143045-678"
 
     it "omits the prefix and leading hyphen when Nothing is supplied" $
       newSessionId Nothing fixedTime
-        `shouldBe` parseSessionId "60759-12345000000"
+        `shouldBe` parseSessionId "20250325-143045-678"
 
   describe "RuntimeType JSON" $ do
     it "encodes RTProvider as the bare string \"provider\"" $

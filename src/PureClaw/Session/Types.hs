@@ -22,7 +22,7 @@ import Data.Char qualified as Char
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), diffTimeToPicoseconds)
-import Data.Time.Calendar (toModifiedJulianDay)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import GHC.Generics (Generic)
 
 import PureClaw.Agent.AgentDef (AgentName, unAgentName)
@@ -85,14 +85,16 @@ instance Aeson.FromJSON SessionPrefix where
       Left e -> fail ("invalid SessionPrefix: " ++ show e)
 
 -- | Pure session ID generator. Encodes a 'UTCTime' as
--- @\<modified-julian-day\>-\<picoseconds-since-midnight\>@ (matching the
--- format used by 'PureClaw.Transcript.Provider.generateId') and prefixes
--- it with the optional 'SessionPrefix' separated by a hyphen.
+-- @YYYYMMDD-HHMMSS-mmm@ (milliseconds zero-padded to three digits)
+-- and prefixes it with the optional 'SessionPrefix' separated by a
+-- hyphen.
 newSessionId :: Maybe SessionPrefix -> UTCTime -> SessionId
 newSessionId mPrefix time =
-  let mjd     = toModifiedJulianDay (utctDay time)
-      picos   = diffTimeToPicoseconds (utctDayTime time)
-      timeStr = T.pack (show mjd) <> "-" <> T.pack (show picos)
+  let hms     = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" time
+      -- Extract milliseconds from the fractional second.
+      picoDay = diffTimeToPicoseconds (utctDayTime time)
+      millis  = (picoDay `div` 1000000000) `mod` 1000
+      timeStr = T.pack hms <> "-" <> T.justifyRight 3 '0' (T.pack (show millis))
       full    = case mPrefix of
         Nothing -> timeStr
         Just p  -> unSessionPrefix p <> "-" <> timeStr
