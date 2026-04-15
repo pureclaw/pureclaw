@@ -1,5 +1,6 @@
 module Agent.SlashCommandsSpec (spec) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception
 import Data.ByteString (ByteString)
 import Data.IORef
@@ -20,7 +21,8 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
-import PureClaw.Session.Handle (noOpSessionHandle)
+import PureClaw.Session.Handle (SessionHandle (..), mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
+import PureClaw.Session.Types (SessionMeta (..))
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
@@ -244,10 +246,10 @@ spec = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
-          transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
+          sessionRef <- newIORef =<< mkNoOpSessionHandle
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -258,13 +260,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -347,10 +349,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -361,13 +363,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -386,10 +388,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -400,13 +402,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -422,10 +424,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -435,13 +437,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -457,10 +459,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -470,13 +472,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -504,10 +506,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -517,13 +519,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -542,10 +544,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -555,13 +557,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget Nothing) ctx
@@ -576,10 +578,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -589,13 +591,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
@@ -621,10 +623,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef (Map.singleton "claude-code" mkNoOpHarnessHandle)
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -634,13 +636,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "claude-code")) ctx
@@ -667,10 +669,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef (Map.singleton "claude-code-0" mockHarness)
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 1
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -681,13 +683,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "claude-code-0" "list TODOs") ctx
@@ -705,10 +707,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -719,13 +721,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "nonexistent" "hello") ctx
@@ -743,10 +745,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef (Map.singleton "cc-0" mockHarness)
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 1
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -757,13 +759,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "cc-0" "test") ctx
@@ -776,10 +778,10 @@ spec = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
-          transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
+          sessionRef <- newIORef =<< mkNoOpSessionHandle
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -790,13 +792,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -825,10 +827,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -838,13 +840,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -869,10 +871,10 @@ spec = do
       vaultRef    <- newIORef (Just vaultWithRealisticRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -882,13 +884,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -905,10 +907,10 @@ spec = do
           vaultRef    <- newIORef (Just vault)
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef    <- newIORef (ModelId "test")
-          transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
+          sessionRef <- newIORef =<< mkNoOpSessionHandle
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -919,13 +921,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -934,10 +936,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -947,13 +949,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -968,10 +970,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let yubikey = AgePlugin
             { _ap_name   = "yubikey"
             , _ap_binary = "age-plugin-yubikey"
@@ -986,13 +988,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [yubikey] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1018,10 +1020,10 @@ spec = do
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1031,13 +1033,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1065,10 +1067,10 @@ spec = do
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1078,13 +1080,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1099,10 +1101,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let ch = mkMockChannelAll allSentRef msgsRef
           env = AgentEnv
             { _env_provider     = providerRef
@@ -1114,13 +1116,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1203,10 +1205,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1216,13 +1218,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -1242,10 +1244,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1255,13 +1257,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -1279,10 +1281,10 @@ spec = do
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1295,13 +1297,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -1357,10 +1359,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1371,13 +1373,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1393,10 +1395,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1407,13 +1409,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1430,10 +1432,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1444,13 +1446,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -1534,15 +1536,15 @@ spec = do
       parseSlashCommand "/transcript search Ollama" `shouldBe` Just (CmdTranscript (TranscriptSearch "Ollama"))
 
   describe "executeSlashCommand — /transcript" $ do
-    it "/transcript with no transcript configured shows helpful message" $ do
+    it "/transcript recent on a no-op session reports no entries" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1553,25 +1555,27 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
       sent <- readIORef sentRef
       case sent of
-        Just t -> T.unpack t `shouldContain` "No transcript configured"
+        Just t -> T.unpack t `shouldContain` "No entries found"
         Nothing -> expectationFailure "Expected message"
 
     it "/transcript path returns the file path" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let th = mkNoOpTranscriptHandle { _th_getPath = pure "/tmp/test-transcript.jsonl" }
-      transcriptRef <- newIORef (Just th)
+      sessionRef <- do
+        base <- mkNoOpSessionHandle
+        newIORef base { _sh_transcript = th }
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1588,13 +1592,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1618,7 +1622,9 @@ spec = do
             , _te_metadata      = Map.empty
             }
           th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [entry] }
-      transcriptRef <- newIORef (Just th)
+      sessionRef <- do
+        base <- mkNoOpSessionHandle
+        newIORef base { _sh_transcript = th }
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1635,13 +1641,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1656,7 +1662,9 @@ spec = do
     it "/transcript recent with empty results shows message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [] }
-      transcriptRef <- newIORef (Just th)
+      sessionRef <- do
+        base <- mkNoOpSessionHandle
+        newIORef base { _sh_transcript = th }
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1673,13 +1681,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1716,7 +1724,9 @@ spec = do
           th = mkNoOpTranscriptHandle
             { _th_query = \_ -> pure [matchEntry, noMatchEntry]
             }
-      transcriptRef <- newIORef (Just th)
+      sessionRef <- do
+        base <- mkNoOpSessionHandle
+        newIORef base { _sh_transcript = th }
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1733,13 +1743,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -1753,7 +1763,9 @@ spec = do
     it "/transcript unknown shows error message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let th = mkNoOpTranscriptHandle
-      transcriptRef <- newIORef (Just th)
+      sessionRef <- do
+        base <- mkNoOpSessionHandle
+        newIORef base { _sh_transcript = th }
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1770,13 +1782,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -1789,13 +1801,13 @@ spec = do
 
     it "/transcript path with no transcript configured shows helpful message" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (ModelId "test")
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1806,13 +1818,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1826,10 +1838,10 @@ spec = do
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef    <- newIORef (ModelId "test")
-      transcriptRef <- newIORef Nothing
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1840,13 +1852,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1870,7 +1882,9 @@ spec = do
             , _te_metadata      = Map.empty
             }
           th = mkNoOpTranscriptHandle { _th_query = \_ -> pure [entry] }
-      transcriptRef <- newIORef (Just th)
+      sessionRef <- do
+        base <- mkNoOpSessionHandle
+        newIORef base { _sh_transcript = th }
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1887,13 +1901,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1936,10 +1950,10 @@ spec = do
           vaultRef      <- newIORef Nothing
           providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef      <- newIORef (ModelId "test")
-          transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
+          sessionRef <- newIORef =<< mkNoOpSessionHandle
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1950,13 +1964,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/agent list lists discovered agent names" $ withTempHome $ do
@@ -1989,10 +2003,10 @@ spec = do
           vaultRef      <- newIORef Nothing
           providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef      <- newIORef (ModelId "test")
-          transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
+          sessionRef <- newIORef =<< mkNoOpSessionHandle
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -2003,13 +2017,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/agent info <name> shows files and frontmatter" $ withTempHome $ do
@@ -2059,10 +2073,10 @@ spec = do
           vaultRef      <- newIORef Nothing
           providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
           modelRef      <- newIORef (ModelId "test")
-          transcriptRef <- newIORef Nothing
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
+          sessionRef <- newIORef =<< mkNoOpSessionHandle
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -2073,13 +2087,13 @@ spec = do
             , _env_registry     = emptyRegistry
             , _env_vault        = vaultRef
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_transcript   = transcriptRef
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
-            , _env_session       = noOpSessionHandle
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
             }
 
     it "/agent start <name> returns a placeholder message in WU1" $ withTempHome $ do
@@ -2125,3 +2139,291 @@ spec = do
 
     it "agentNameMatches returns empty for empty candidate list" $
       agentNameMatches [] "z" `shouldBe` []
+
+  describe "parseSlashCommand — /session" $ do
+    it "parses /session new" $
+      parseSlashCommand "/session new" `shouldBe` Just (CmdSession SessionNew)
+
+    it "parses /session list (no arg)" $
+      parseSlashCommand "/session list" `shouldBe` Just (CmdSession (SessionList Nothing))
+
+    it "parses /session list <agent>" $
+      parseSlashCommand "/session list zoe" `shouldBe` Just (CmdSession (SessionList (Just "zoe")))
+
+    it "parses /session resume <id>" $
+      parseSlashCommand "/session resume abc-123" `shouldBe` Just (CmdSession (SessionResume "abc-123"))
+
+    it "rejects /session resume with no argument (falls through to unknown)" $
+      parseSlashCommand "/session resume" `shouldBe` Just (CmdSession (SessionUnknown "resume"))
+
+    it "parses /session last" $
+      parseSlashCommand "/session last" `shouldBe` Just (CmdSession SessionLast)
+
+    it "parses /last as /session last alias" $
+      parseSlashCommand "/last" `shouldBe` Just (CmdSession SessionLast)
+
+    it "parses /session info" $
+      parseSlashCommand "/session info" `shouldBe` Just (CmdSession SessionInfo)
+
+    it "parses /session reset" $
+      parseSlashCommand "/session reset" `shouldBe` Just (CmdSession SessionReset)
+
+    it "parses /session compact" $
+      parseSlashCommand "/session compact" `shouldBe` Just (CmdSession SessionCompact)
+
+    it "parses /session case-insensitively" $
+      parseSlashCommand "/SESSION NEW" `shouldBe` Just (CmdSession SessionNew)
+
+    it "parses bare /session as unknown" $
+      parseSlashCommand "/session" `shouldBe` Just (CmdSession (SessionUnknown ""))
+
+    it "parses /session foo as unknown subcommand" $
+      parseSlashCommand "/session foo" `shouldBe` Just (CmdSession (SessionUnknown "foo"))
+
+    it "/new still parses to CmdNew (backward compat)" $
+      parseSlashCommand "/new" `shouldBe` Just CmdNew
+
+    it "/reset still parses to CmdReset (backward compat)" $
+      parseSlashCommand "/reset" `shouldBe` Just CmdReset
+
+    it "/status still parses to CmdStatus (backward compat)" $
+      parseSlashCommand "/status" `shouldBe` Just CmdStatus
+
+    it "/compact still parses to CmdCompact (backward compat)" $
+      parseSlashCommand "/compact" `shouldBe` Just CmdCompact
+
+  describe "executeSlashCommand — /session" $ do
+    let mkSessionEnv sentRef = do
+          vaultRef      <- newIORef Nothing
+          providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
+          modelRef      <- newIORef (ModelId "test")
+          harnessRef    <- newIORef Map.empty
+          targetRef     <- newIORef TargetProvider
+          windowIdxRef  <- newIORef 0
+          sessionRef <- newIORef =<< mkNoOpSessionHandle
+          pure AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            }
+
+    it "/session new writes session.json on disk and returns a confirmation" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "New session created:"
+        Nothing -> expectationFailure "Expected new-session confirmation"
+      -- Verify a session.json was written under the sessions dir
+      home <- getEnv "HOME"
+      let sessionsDir = home </> ".pureclaw" </> "sessions"
+      entries <- Dir.listDirectory sessionsDir
+      entries `shouldSatisfy` (not . null)
+
+    it "/session new clears messages" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = addMessage (textMessage User "hello") (emptyContext (Just "sys"))
+      ctx' <- executeSlashCommand env (CmdSession SessionNew) ctx
+      contextMessages ctx' `shouldBe` []
+
+    it "/session list with empty dir shows 'No sessions found.'" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession (SessionList Nothing)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "No sessions found."
+        Nothing -> expectationFailure "Expected empty-list message"
+
+    it "/session list lists existing sessions" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create two sessions
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      writeIORef sentRef Nothing
+      _ <- executeSlashCommand env (CmdSession (SessionList Nothing)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "Sessions:"
+        Nothing -> expectationFailure "Expected list output"
+
+    it "/session resume missing returns not-found message" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession (SessionResume "ghost")) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "No session matching ghost found."
+        Nothing -> expectationFailure "Expected not-found message"
+
+    it "/session resume <exact-id> returns a Resumed message" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create a session
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      home <- getEnv "HOME"
+      let sessionsDir = home </> ".pureclaw" </> "sessions"
+      entries <- Dir.listDirectory sessionsDir
+      case entries of
+        (sid : _) -> do
+          writeIORef sentRef Nothing
+          _ <- executeSlashCommand env (CmdSession (SessionResume (T.pack sid))) (emptyContext Nothing)
+          sent <- readIORef sentRef
+          case sent of
+            Just t  -> T.unpack t `shouldContain` "Resumed session"
+            Nothing -> expectationFailure "Expected resume confirmation"
+        [] -> expectationFailure "Expected at least one session dir"
+
+    it "/session last with no sessions reports none" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession SessionLast) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "No sessions found."
+        Nothing -> expectationFailure "Expected empty message"
+
+    it "/session last resumes most recent after creating" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      writeIORef sentRef Nothing
+      _ <- executeSlashCommand env (CmdSession SessionLast) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "Resumed session"
+        Nothing -> expectationFailure "Expected resume confirmation"
+
+    it "/session new swaps the active session in _env_session IORef" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Read the initial session id (from the no-op handle)
+      initialHandle <- readIORef (_env_session env)
+      initialMeta   <- readIORef (_sh_meta initialHandle)
+      let initialId = _sm_id initialMeta
+      -- Run /session new
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      -- The active session handle should now point at a different SessionMeta
+      -- with a fresh ID. If the implementation used `_ <- mkSessionHandle ...`
+      -- (discard), this assertion fails because _env_session still holds the
+      -- no-op handle with id "noop".
+      newHandle <- readIORef (_env_session env)
+      newMeta   <- readIORef (_sh_meta newHandle)
+      let newId = _sm_id newMeta
+      newId `shouldNotBe` initialId
+      unSessionId newId `shouldNotBe` "noop"
+
+    it "/session resume swaps the active session to the resumed one" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create two sessions via /session new so we have two on disk.
+      -- Delay between creates so the millisecond-resolution session IDs differ.
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      threadDelay 2000  -- 2 ms
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      -- After the second /session new, the active session is the second one.
+      activeAfterSecond <- readIORef (_env_session env)
+      metaAfterSecond   <- readIORef (_sh_meta activeAfterSecond)
+      let secondId = _sm_id metaAfterSecond
+      -- Enumerate sessions on disk and pick one that is NOT the current active.
+      home <- getEnv "HOME"
+      let sessionsDir = home </> ".pureclaw" </> "sessions"
+      entries <- Dir.listDirectory sessionsDir
+      let otherIds = filter (/= T.unpack (unSessionId secondId)) entries
+      case otherIds of
+        (otherSid : _) -> do
+          _ <- executeSlashCommand env
+                 (CmdSession (SessionResume (T.pack otherSid)))
+                 (emptyContext Nothing)
+          -- Verify the active session is now `otherSid`.
+          afterHandle <- readIORef (_env_session env)
+          afterMeta   <- readIORef (_sh_meta afterHandle)
+          T.unpack (unSessionId (_sm_id afterMeta)) `shouldBe` otherSid
+          _sm_id afterMeta `shouldNotBe` secondId
+        [] -> expectationFailure "Expected at least two sessions on disk"
+
+    it "/session last swaps the active session to the most recent on disk" $ withTempHome $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      -- Create a session and capture its id.
+      _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      createdHandle <- readIORef (_env_session env)
+      createdMeta   <- readIORef (_sh_meta createdHandle)
+      let createdId = _sm_id createdMeta
+      -- Replace the active handle with a fresh no-op so we can observe the swap.
+      noop <- mkNoOpSessionHandle
+      writeIORef (_env_session env) noop
+      -- /session last should swap the active handle back to the recent session.
+      _ <- executeSlashCommand env (CmdSession SessionLast) (emptyContext Nothing)
+      afterHandle <- readIORef (_env_session env)
+      afterMeta   <- readIORef (_sh_meta afterHandle)
+      _sm_id afterMeta `shouldBe` createdId
+      unSessionId (_sm_id afterMeta) `shouldNotBe` "noop"
+
+    it "/session info shows session fields" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = recordUsage (Just (Usage 42 17))
+              $ addMessage (textMessage User "hello")
+              $ emptyContext Nothing
+      _ <- executeSlashCommand env (CmdSession SessionInfo) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t -> do
+          T.unpack t `shouldContain` "Session info:"
+          T.unpack t `shouldContain` "Session:"
+          T.unpack t `shouldContain` "Runtime:"
+          T.unpack t `shouldContain` "Messages:"
+          T.unpack t `shouldContain` "42"
+          T.unpack t `shouldContain` "17"
+        Nothing -> expectationFailure "Expected session info output"
+
+    it "/session reset clears context (aliases /reset)" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = recordUsage (Just (Usage 100 50))
+              $ addMessage (textMessage User "hello")
+              $ emptyContext (Just "sys")
+      ctx' <- executeSlashCommand env (CmdSession SessionReset) ctx
+      contextMessages ctx' `shouldBe` []
+      contextTotalInputTokens ctx' `shouldBe` 0
+      contextSystemPrompt ctx' `shouldBe` Just "sys"
+
+    it "/session compact routes through compact handler" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env <- mkSessionEnv sentRef
+      let ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession SessionCompact) ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "few messages"
+        Nothing -> expectationFailure "Expected compact message"
+
+  describe "session id tab completion" $ do
+    it "sessionIdMatches returns all on empty prefix" $
+      sessionIdMatches ["a-1", "b-2", "c-3"] "" `shouldMatchList` ["a-1", "b-2", "c-3"]
+
+    it "sessionIdMatches filters by prefix" $
+      sessionIdMatches ["zoe-1", "ops-2", "zoe-3"] "zoe" `shouldMatchList` ["zoe-1", "zoe-3"]
+
+    it "sessionIdMatches is case-insensitive" $
+      sessionIdMatches ["Zoe-1", "Ops-2"] "z" `shouldMatchList` ["Zoe-1"]
+
+    it "sessionIdMatches on empty candidate list is empty" $
+      sessionIdMatches [] "x" `shouldBe` []

@@ -18,7 +18,7 @@ import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle (mkNoOpSessionHandle)
+import PureClaw.Session.Handle (mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
@@ -99,11 +99,10 @@ mkTestEnv p ch = do
   vaultRef      <- newIORef Nothing
   providerRef   <- newIORef (Just (MkProvider p))
   modelRef      <- newIORef (ModelId "mock")
-  transcriptRef <- newIORef Nothing
   harnessRef    <- newIORef Map.empty
   targetRef     <- newIORef TargetProvider
   windowIdxRef  <- newIORef 0
-  sessionHandle <- mkNoOpSessionHandle
+  sessionRef <- newIORef =<< mkNoOpSessionHandle
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -113,13 +112,13 @@ mkTestEnv p ch = do
     , _env_registry     = emptyRegistry
     , _env_vault        = vaultRef
     , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-    , _env_transcript   = transcriptRef
     , _env_policy       = defaultPolicy
     , _env_harnesses    = harnessRef
     , _env_target       = targetRef
     , _env_nextWindowIdx = windowIdxRef
     , _env_agentDef      = Nothing
-    , _env_session       = sessionHandle
+    , _env_session       = sessionRef
+    , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
     }
 
 spec :: Spec
@@ -138,6 +137,33 @@ spec = do
       runAgentLoop env
       sent <- readIORef sentRef
       length sent `shouldBe` 2
+
+    it "fires _env_onFirstStreamDone exactly once across multiple turns" $ do
+      -- Drive the loop with TWO user messages so completeStream is
+      -- invoked twice, then assert the one-shot callback ran exactly once.
+      (channel, _sentRef) <- mkMockChannel ["first", "second"]
+      baseEnv <- mkTestEnv (MockProvider "reply") channel
+      counter <- newIORef (0 :: Int)
+      onceRef <- newIORef (Just (modifyIORef' counter (+1)))
+      let env = baseEnv { _env_onFirstStreamDone = onceRef }
+      runAgentLoop env
+      finalCount <- readIORef counter
+      finalCount `shouldBe` 1
+      -- After firing, the slot is cleared so a resume cannot re-arm.
+      mAfter <- readIORef onceRef
+      case mAfter of
+        Nothing -> pure ()
+        Just _  -> expectationFailure "expected callback slot to be cleared"
+
+    it "does not fire the callback when no StreamDone is observed (empty input)" $ do
+      (channel, _sentRef) <- mkMockChannel []
+      baseEnv <- mkTestEnv (MockProvider "reply") channel
+      counter <- newIORef (0 :: Int)
+      onceRef <- newIORef (Just (modifyIORef' counter (+1)))
+      let env = baseEnv { _env_onFirstStreamDone = onceRef }
+      runAgentLoop env
+      finalCount <- readIORef counter
+      finalCount `shouldBe` 0
 
     it "skips empty messages" $ do
       (channel, sentRef) <- mkMockChannel ["", "  ", "hello"]

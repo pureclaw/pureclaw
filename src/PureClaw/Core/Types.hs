@@ -7,6 +7,14 @@ module PureClaw.Core.Types
   , CommandName (..)
   , ToolCallId (..)
   , MemoryId (..)
+    -- * Session ID
+    -- The data constructor 'SessionId' is exported because session IDs are
+    -- opaque strings with no validation invariant. 'parseSessionId' is just
+    -- the constructor under a friendlier name.
+  , SessionId (..)
+  , parseSessionId
+    -- * Message target
+  , MessageTarget (..)
     -- * Workspace
   , WorkspaceRoot (..)
     -- * Autonomy
@@ -16,6 +24,7 @@ module PureClaw.Core.Types
   , isAllowed
   ) where
 
+import Data.Aeson qualified as Aeson
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -48,6 +57,31 @@ newtype ToolCallId = ToolCallId { unToolCallId :: Text }
 -- | Memory entry identifier
 newtype MemoryId = MemoryId { unMemoryId :: Text }
   deriving stock (Show, Eq, Ord, Generic)
+
+-- | Opaque session identifier. The string format is produced by
+-- 'PureClaw.Session.Types.newSessionId' but is not validated on parse —
+-- 'SessionId' is treated as an opaque label so that on-disk session
+-- directories created by older or newer code remain readable.
+newtype SessionId = SessionId { unSessionId :: Text }
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving newtype (Aeson.ToJSON)
+
+instance Aeson.FromJSON SessionId where
+  parseJSON = Aeson.withText "SessionId" (pure . SessionId)
+
+-- | Friendly alias for the 'SessionId' constructor. Provided for
+-- symmetry with smart constructors elsewhere; performs no validation.
+parseSessionId :: Text -> SessionId
+parseSessionId = SessionId
+
+-- | Where incoming user messages are routed. Lives in 'Core.Types'
+-- (rather than 'PureClaw.Agent.Env') so that 'PureClaw.Session.Types'
+-- can refer to it without creating an import cycle through
+-- 'PureClaw.Session.Handle'.
+data MessageTarget
+  = TargetProvider          -- ^ Send to the configured LLM provider + model
+  | TargetHarness Text      -- ^ Send to a named running harness
+  deriving stock (Show, Eq)
 
 -- | Workspace root directory — anchors all SafePath resolution
 newtype WorkspaceRoot = WorkspaceRoot { unWorkspaceRoot :: FilePath }

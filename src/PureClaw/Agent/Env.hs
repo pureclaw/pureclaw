@@ -1,7 +1,9 @@
 module PureClaw.Agent.Env
   ( -- * Agent environment
     AgentEnv (..)
-    -- * Message target
+    -- * Accessors
+  , envTranscript
+    -- * Message target (re-exported from "PureClaw.Core.Types")
   , MessageTarget (..)
   ) where
 
@@ -14,19 +16,13 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
-import PureClaw.Handles.Transcript
+import PureClaw.Handles.Transcript (TranscriptHandle)
 import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle (SessionHandle)
+import PureClaw.Session.Handle (SessionHandle (..))
 import PureClaw.Tools.Registry
-
--- | Where incoming user messages are routed.
-data MessageTarget
-  = TargetProvider          -- ^ Send to the configured LLM provider + model
-  | TargetHarness Text      -- ^ Send to a named running harness
-  deriving stock (Show, Eq)
 
 -- | All runtime dependencies for the agent loop, gathered into a single record.
 -- This replaces the multi-parameter signature of 'runAgentLoop' and
@@ -50,9 +46,6 @@ data AgentEnv = AgentEnv
     -- ^ Optional secrets vault. 'Nothing' if no vault is configured.
   , _env_pluginHandle :: PluginHandle
     -- ^ Handle for detecting and generating age plugin identities.
-  , _env_transcript :: IORef (Maybe TranscriptHandle)
-    -- ^ Optional transcript handle. When 'Just', the provider is wrapped
-    -- with 'mkTranscriptProvider' to log all completions.
   , _env_policy :: SecurityPolicy
     -- ^ Security policy for command authorization. Needed by harness management.
   , _env_harnesses :: IORef (Map Text HarnessHandle)
@@ -67,7 +60,23 @@ data AgentEnv = AgentEnv
     -- ^ Currently-selected agent, if any. Populated by the @--agent@ flag
     -- or the @default_agent@ config field. Used by agent-aware slash
     -- commands; 'Nothing' in the backward-compat no-agent path.
-  , _env_session :: SessionHandle
-    -- ^ Current conversation session. In WU1 this is always a no-op
-    -- placeholder; WU2 promotes it to a real on-disk session.
+  , _env_session :: IORef SessionHandle
+    -- ^ Current conversation session. Mutable so @\/session new@ and
+    -- @\/session resume@ can swap the active session in place.
+  , _env_onFirstStreamDone :: IORef (Maybe (IO ()))
+    -- ^ One-shot callback fired by 'runAgentLoop' after the first
+    -- 'StreamDone' it observes. The loop atomically consumes the
+    -- action (setting the field back to 'Nothing') so a second
+    -- 'StreamDone' does not re-fire it. In production this is
+    -- populated with @'markBootstrapConsumed' session@ so the agent
+    -- marks its bootstrap as consumed exactly once per process start.
   }
+
+-- | Read the active session's transcript handle.
+--
+-- The transcript lives inside the session directory (@transcript.jsonl@)
+-- and is swapped automatically when @\/session new@ or
+-- @\/session resume@ replaces the active session. Callers that previously
+-- read @_env_transcript@ should use this accessor instead.
+envTranscript :: AgentEnv -> IO TranscriptHandle
+envTranscript env = _sh_transcript <$> readIORef (_env_session env)

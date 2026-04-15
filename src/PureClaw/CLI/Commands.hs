@@ -22,7 +22,6 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (getCurrentTime)
-import Data.Time.Format (defaultTimeLocale, formatTime)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
@@ -42,8 +41,16 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Agent.SlashCommands
-import PureClaw.Session.Handle (mkNoOpSessionHandle)
-import PureClaw.Handles.Transcript
+import PureClaw.Session.Handle
+  ( ResumeError (..)
+  , SessionHandle (..)
+  , loadRecentMessages
+  , markBootstrapConsumed
+  , mkSessionHandle
+  , resolveResumedTarget
+  , resumeSession
+  )
+import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -113,6 +120,8 @@ data ChatOptions = ChatOptions
   , _co_noVault       :: Bool
   , _co_oauth         :: Bool
   , _co_agent         :: Maybe String
+  , _co_session       :: Maybe String
+  , _co_prefix        :: Maybe String
   }
   deriving stock (Show, Eq)
 
@@ -175,6 +184,14 @@ chatOptionsParser = ChatOptions
   <*> optional (strOption
       ( long "agent"
      <> help "Load a named agent from ~/.pureclaw/agents/<name>/ as the system prompt"
+      ))
+  <*> optional (strOption
+      ( long "session"
+     <> help "Resume an existing session by exact ID (mutually exclusive with --prefix)"
+      ))
+  <*> optional (strOption
+      ( long "prefix"
+     <> help "Prefix for the new session ID (mutually exclusive with --session)"
       ))
 
 -- | Parse a provider type from a CLI string.
@@ -338,6 +355,15 @@ runChat :: ChatOptions -> IO ()
 runChat opts = do
   let logger = mkStderrLogHandle
 
+  -- --session and --prefix are mutually exclusive. We enforce this
+  -- post-parse because optparse-applicative's <|> would make one
+  -- flag shadow the other rather than producing a clear error.
+  case (_co_session opts, _co_prefix opts) of
+    (Just _, Just _) -> do
+      _lh_logWarn logger "--session and --prefix are mutually exclusive"
+      exitFailure
+    _ -> pure ()
+
   -- Load config file: --config flag overrides default search locations
   configResult <- maybe loadConfigDiag loadFileConfigDiag (_co_config opts)
   let fileCfg = configFileConfig configResult
@@ -470,15 +496,72 @@ runChat opts = do
           "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
           _     -> putStrLn $ "Channel: " <> effectiveChannel
         putStrLn ""
-        -- Create transcript handle
-        let transcriptDir = pureclawDir </> "transcripts"
-        createDirectoryIfMissing True transcriptDir
-        timestamp <- getCurrentTime
-        let transcriptFile = transcriptDir
-              </> formatTime defaultTimeLocale "%Y%m%d-%H%M%S" timestamp
-                  <> "-" <> effectiveChannel <> ".jsonl"
-        th <- mkFileTranscriptHandle logger transcriptFile
-        transcriptRef <- newIORef (Just th)
+        -- Build a real on-disk session. The transcript now lives inside
+        -- the session directory at @~/.pureclaw/sessions/<id>/transcript.jsonl@;
+        -- the legacy @~/.pureclaw/transcripts/@ directory is no longer written to.
+        let sessionsDir = pureclawDir </> "sessions"
+        createDirectoryIfMissing True sessionsDir
+        now <- getCurrentTime
+        -- Validate and construct the optional session prefix. Invalid
+        -- prefixes (path traversal, reserved words, bad chars) are
+        -- rejected before any on-disk state is touched.
+        -- Prefix resolution: explicit --prefix flag > agent name > Nothing.
+        -- The agent name is already validated (AgentName smart constructor),
+        -- but we still route it through mkSessionPrefix in case the two
+        -- character sets diverge in the future.
+        let rawPrefix = fmap T.pack (_co_prefix opts)
+                    <|> fmap (AgentDef.unAgentName . AgentDef._ad_name) mAgentDef
+                    <|> _fc_sessionPrefix fileCfg
+        mPrefix <- case rawPrefix of
+          Nothing  -> pure Nothing
+          Just raw -> case SessionTypes.mkSessionPrefix raw of
+            Right p -> pure (Just p)
+            Left  e -> do
+              _lh_logWarn logger $ "invalid --prefix: " <> T.pack (show e)
+              exitFailure
+        -- If --session is supplied, resume that session; otherwise
+        -- create a fresh one.
+        sessionHandle <- case _co_session opts of
+          Just sidRaw -> do
+            _lh_logInfo logger $ "Resuming session " <> T.pack sidRaw
+            result <- resumeSession logger sessionsDir
+                        (parseSessionId (T.pack sidRaw))
+            case result of
+              Right resumed -> pure resumed
+              Left (ResumeMissingMetadata _) -> do
+                _lh_logWarn logger $
+                  "Session not found: " <> T.pack sidRaw
+                exitFailure
+              Left (ResumeCorruptedMetadata _ msg) -> do
+                _lh_logWarn logger $
+                  "Session not found (corrupted metadata): " <> T.pack msg
+                exitFailure
+          Nothing -> do
+            let sid = SessionTypes.newSessionId mPrefix now
+                initialMeta = SessionTypes.SessionMeta
+                  { SessionTypes._sm_id                = sid
+                  , SessionTypes._sm_agent             =
+                      fmap AgentDef._ad_name mAgentDef
+                  , SessionTypes._sm_runtime           = SessionTypes.RTProvider
+                  , SessionTypes._sm_model             = T.pack effectiveModel
+                  , SessionTypes._sm_channel           = T.pack effectiveChannel
+                  , SessionTypes._sm_createdAt         = now
+                  , SessionTypes._sm_lastActive        = now
+                  , SessionTypes._sm_bootstrapConsumed = False
+                  }
+            mkSessionHandle logger sessionsDir initialMeta
+        -- Log the active session ID so tests and humans can find it.
+        do
+          currentMeta <- readIORef (_sh_meta sessionHandle)
+          _lh_logInfo logger $ "Session: "
+            <> unSessionId (SessionTypes._sm_id currentMeta)
+        -- After resume, load a bounded window of recent messages so
+        -- the agent has context to continue. Budget: 50 messages or
+        -- ~100K estimated tokens, whichever is smaller.
+        reloadedMessages <- case _co_session opts of
+          Just _  -> loadRecentMessages (_sh_transcript sessionHandle) 50 100000
+          Nothing -> pure []
+        let th = _sh_transcript sessionHandle
         -- Discover any harnesses still running from a previous session
         (discoveredHarnesses, nextWindowIdx) <- discoverHarnesses th
         unless (Map.null discoveredHarnesses) $
@@ -488,9 +571,25 @@ runChat opts = do
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef model
-        targetRef   <- newIORef TargetProvider
+        -- Runtime validation on resume: if the session's recorded
+        -- runtime was an RTHarness, validate that the harness is still
+        -- running (it may have been discovered by 'discoverHarnesses'
+        -- above). Missing harness falls back to TargetProvider with a
+        -- warning; fresh sessions simply start at TargetProvider.
+        initialTarget <- case _co_session opts of
+          Just _  -> do
+            resumedMeta <- readIORef (_sh_meta sessionHandle)
+            resolveResumedTarget logger discoveredHarnesses
+              (SessionTypes._sm_runtime resumedMeta)
+          Nothing -> pure TargetProvider
+        targetRef   <- newIORef initialTarget
         windowIdxRef <- newIORef nextWindowIdx
-        sessionHandle <- mkNoOpSessionHandle
+        sessionRef <- newIORef sessionHandle
+        -- Install a one-shot "bootstrap consumed" callback that fires
+        -- after the first StreamDone. Only arm it if the agent has a
+        -- BOOTSTRAP.md and its consumed flag is currently False.
+        onFirstStreamDoneRef <- newIORef
+          =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         let env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -500,17 +599,17 @@ runChat opts = do
               , _env_registry     = registry
               , _env_vault        = vaultRef
               , _env_pluginHandle = mkPluginHandle
-              , _env_transcript   = transcriptRef
               , _env_policy       = policy
               , _env_harnesses    = harnessRef
               , _env_target       = targetRef
               , _env_nextWindowIdx = windowIdxRef
               , _env_agentDef     = mAgentDef
-              , _env_session      = sessionHandle
+              , _env_session      = sessionRef
+              , _env_onFirstStreamDone = onFirstStreamDoneRef
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
-        runAgentLoop env
+        runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of
     "signal" -> do
@@ -535,6 +634,30 @@ runChat opts = do
     other -> do
       _lh_logWarn logger $ "Unknown channel: " <> T.pack other <> ". Using CLI."
       mkCLIChannelHandle (Just slashCompleter) >>= startWithChannel
+
+-- | Decide whether the first streamed completion should trigger
+-- 'markBootstrapConsumed' on the active session.
+--
+-- Returns @Just action@ only if there is an active agent, the agent
+-- directory contains a non-empty @BOOTSTRAP.md@, and the session's
+-- current metadata has @_sm_bootstrapConsumed == False@. Otherwise
+-- returns 'Nothing' so the loop performs no work on first
+-- 'StreamDone'.
+resolveBootstrapCallback
+  :: LogHandle
+  -> Maybe AgentDef.AgentDef
+  -> SessionHandle
+  -> IO (Maybe (IO ()))
+resolveBootstrapCallback _ Nothing _ = pure Nothing
+resolveBootstrapCallback _ (Just def) sh = do
+  let bootstrapPath = AgentDef._ad_dir def </> "BOOTSTRAP.md"
+  hasBootstrap <- doesFileExist bootstrapPath
+  meta <- readIORef (_sh_meta sh)
+  if hasBootstrap && not (SessionTypes._sm_bootstrapConsumed meta)
+    then pure (Just (markBootstrapConsumedShim sh))
+    else pure Nothing
+  where
+    markBootstrapConsumedShim = markBootstrapConsumed
 
 -- | Parse a provider type from a text value (used for config file).
 parseProviderMaybe :: Maybe T.Text -> Maybe ProviderType

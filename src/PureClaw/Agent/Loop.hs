@@ -1,6 +1,7 @@
 module PureClaw.Agent.Loop
   ( -- * Agent loop
     runAgentLoop
+  , runAgentLoopWith
     -- * Re-exports from Handles.Harness (for backward compatibility)
   , sanitizeHarnessOutput
   ) where
@@ -8,6 +9,7 @@ module PureClaw.Agent.Loop
 import Control.Exception
 import Control.Monad
 import Data.IORef
+import Data.Foldable (for_)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -40,9 +42,17 @@ import PureClaw.Transcript.Provider
 -- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
 -- Provider errors are logged and a 'PublicError' is sent to the channel.
 runAgentLoop :: AgentEnv -> IO ()
-runAgentLoop env = do
+runAgentLoop env = runAgentLoopWith env []
+
+-- | Like 'runAgentLoop' but seeds the initial 'Context' with the given
+-- messages (in chronological, oldest-first order). Used by the resume
+-- path to replay recent transcript entries so the agent has memory of
+-- prior turns.
+runAgentLoopWith :: AgentEnv -> [Message] -> IO ()
+runAgentLoopWith env initialMessages = do
   _lh_logInfo logger "Agent loop started"
-  go (emptyContext (_env_systemPrompt env))
+  let ctx0 = replaceMessages initialMessages (emptyContext (_env_systemPrompt env))
+  go ctx0
   where
     channel  = _env_channel env
     logger   = _env_logger env
@@ -100,12 +110,10 @@ runAgentLoop env = do
                           ctx' = addMessage userMsg ctx
                       _lh_logDebug logger $
                         "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-                      -- Wrap provider with transcript logging if configured
-                      mTranscript <- readIORef (_env_transcript env)
+                      -- Wrap provider with transcript logging (session owns the transcript)
+                      th <- envTranscript env
                       model <- readIORef (_env_model env)
-                      let provider' = case mTranscript of
-                            Just th -> mkTranscriptProvider th (unModelId model) provider
-                            Nothing -> provider
+                      let provider' = mkTranscriptProvider th (unModelId model) provider
                       handleCompletion provider' ctx'
           where stripped = T.strip (_im_content msg)
 
@@ -133,8 +141,15 @@ runAgentLoop env = do
               writeIORef prefixSentRef True
             _ch_sendChunk channel (ChunkText t)
             writeIORef streamedRef True
-          StreamDone resp ->
+          StreamDone resp -> do
             writeIORef responseRef (Just resp)
+            -- Fire and clear the one-shot "first StreamDone" callback
+            -- atomically so concurrent StreamDone deliveries cannot
+            -- race and invoke it twice. In production this is used to
+            -- mark the active session's bootstrap as consumed.
+            mAction <- atomicModifyIORef' (_env_onFirstStreamDone env)
+                         (Nothing,)
+            for_ mAction id
           _ -> pure ()
       case providerResult of
         Left e -> do
