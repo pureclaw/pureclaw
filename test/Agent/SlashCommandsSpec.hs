@@ -1,5 +1,6 @@
 module Agent.SlashCommandsSpec (spec) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception
 import Data.ByteString (ByteString)
 import Data.IORef
@@ -2331,8 +2332,10 @@ spec = do
     it "/session resume swaps the active session to the resumed one" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
-      -- Create two sessions via /session new so we have two on disk
+      -- Create two sessions via /session new so we have two on disk.
+      -- Delay between creates so the millisecond-resolution session IDs differ.
       _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
+      threadDelay 2000  -- 2 ms
       _ <- executeSlashCommand env (CmdSession SessionNew) (emptyContext Nothing)
       -- After the second /session new, the active session is the second one.
       activeAfterSecond <- readIORef (_env_session env)
