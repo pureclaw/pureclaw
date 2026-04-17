@@ -372,6 +372,57 @@ spec = do
       length ms `shouldSatisfy` (>= 1)
       _th_close th
 
+    it "preserves compaction summary across session resume" $ withTmp $ \base -> do
+      -- Set up a session with several messages in the transcript
+      let meta = mkMeta "compact-resume-1" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      -- Record 5 request/response pairs — simulating a conversation
+      mapM_ (\i -> do
+        _th_record th (mkTextEntry (T.pack ("req" <> show i)) t0 Request
+                        (T.pack ("user message " <> show i)))
+        _th_record th (mkTextEntry (T.pack ("res" <> show i)) t0 Response
+                        (T.pack ("assistant reply " <> show i)))
+        ) [1 .. 5 :: Int]
+      _th_flush th
+      -- Now simulate what compaction does: it replaces the in-memory
+      -- context with a summary message + the most recent messages.
+      -- The summary should be persisted so that on resume the agent
+      -- gets the compacted view, not just the raw transcript entries.
+      --
+      -- Record a compaction summary entry to the transcript, as
+      -- compaction SHOULD do (but currently does not).
+      let summaryPayload = "[Context summary] The user discussed topics 1-3. Key decisions were made about X."
+      _th_record th (mkTextEntry "compaction-summary" t0 Request summaryPayload)
+      _th_flush th
+      _th_close th
+      -- Resume the session and load recent messages
+      Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "compact-resume-1")
+      ms <- loadRecentMessages (_sh_transcript sh') 50 100000
+      -- The resumed context should contain the compaction summary.
+      -- Currently, loadRecentMessages replays ALL raw transcript
+      -- entries (the original 10 + the summary = 11), rather than
+      -- understanding that compaction replaced entries 1-6 with a
+      -- summary.  This means the pre-compaction messages are
+      -- double-counted: they appear both as raw entries AND their
+      -- content is folded into the summary.
+      --
+      -- The correct behaviour: on resume after compaction, the agent
+      -- should see only the compacted view (summary + recent messages),
+      -- not the full raw history.
+      let summaryMessages = filter (\m -> case m of
+            Message User [TextBlock t] -> "[Context summary]" `T.isPrefixOf` t
+            _                          -> False) ms
+      -- There should be exactly one summary, and earlier messages that
+      -- were compacted should NOT appear.
+      length summaryMessages `shouldBe` 1
+      -- The total message count should be the summary + the messages
+      -- that were kept after compaction, NOT the full raw history.
+      -- With 5 pairs (10 entries) compacted down to 1 summary + say
+      -- the last 4 kept messages = 5 total, not 11.
+      length ms `shouldSatisfy` (<= 6)
+      _th_close (_sh_transcript sh')
+
     it "returns [] on an empty transcript" $ withTmp $ \base -> do
       let meta = mkMeta "lr-4" t0
       sh <- mkSessionHandle mkNoOpLogHandle base meta

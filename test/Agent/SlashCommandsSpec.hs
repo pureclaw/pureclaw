@@ -147,8 +147,8 @@ spec = do
     it "parses /new" $ do
       parseSlashCommand "/new" `shouldBe` Just CmdNew
 
-    it "parses /reset" $ do
-      parseSlashCommand "/reset" `shouldBe` Just CmdReset
+    it "rejects /reset (removed)" $ do
+      parseSlashCommand "/reset" `shouldBe` Nothing
 
     it "parses /status" $ do
       parseSlashCommand "/status" `shouldBe` Just CmdStatus
@@ -290,17 +290,6 @@ spec = do
       env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdNew ctx
       contextTotalInputTokens ctx' `shouldBe` 100
-
-    it "/reset clears everything except system prompt" $ do
-      sentRef <- newIORef (Nothing :: Maybe Text)
-      let ctx = recordUsage (Just (Usage 100 50))
-              $ addMessage (textMessage User "hello")
-              $ emptyContext (Just "sys")
-      env <- mkEnv sentRef
-      ctx' <- executeSlashCommand env CmdReset ctx
-      contextMessages ctx' `shouldBe` []
-      contextTotalInputTokens ctx' `shouldBe` 0
-      contextSystemPrompt ctx' `shouldBe` Just "sys"
 
     it "/status shows session info" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
@@ -1462,7 +1451,7 @@ spec = do
     it "has Show and Eq instances" $ do
       show CmdNew `shouldContain` "CmdNew"
       CmdNew `shouldBe` CmdNew
-      CmdNew `shouldNotBe` CmdReset
+      CmdNew `shouldNotBe` CmdHelp
 
     it "CmdHelp has Show and Eq instances" $ do
       show CmdHelp `shouldContain` "CmdHelp"
@@ -2165,8 +2154,8 @@ spec = do
     it "parses /session info" $
       parseSlashCommand "/session info" `shouldBe` Just (CmdSession SessionInfo)
 
-    it "parses /session reset" $
-      parseSlashCommand "/session reset" `shouldBe` Just (CmdSession SessionReset)
+    it "/session reset falls through to unknown (removed — sessions are immutable)" $
+      parseSlashCommand "/session reset" `shouldBe` Just (CmdSession (SessionUnknown "reset"))
 
     it "parses /session compact" $
       parseSlashCommand "/session compact" `shouldBe` Just (CmdSession SessionCompact)
@@ -2183,8 +2172,8 @@ spec = do
     it "/new still parses to CmdNew (backward compat)" $
       parseSlashCommand "/new" `shouldBe` Just CmdNew
 
-    it "/reset still parses to CmdReset (backward compat)" $
-      parseSlashCommand "/reset" `shouldBe` Just CmdReset
+    it "/reset is no longer recognised (sessions are immutable)" $
+      parseSlashCommand "/reset" `shouldBe` Nothing
 
     it "/status still parses to CmdStatus (backward compat)" $
       parseSlashCommand "/status" `shouldBe` Just CmdStatus
@@ -2393,17 +2382,6 @@ spec = do
           T.unpack t `shouldContain` "42"
           T.unpack t `shouldContain` "17"
         Nothing -> expectationFailure "Expected session info output"
-
-    it "/session reset clears context (aliases /reset)" $ do
-      sentRef <- newIORef (Nothing :: Maybe Text)
-      env <- mkSessionEnv sentRef
-      let ctx = recordUsage (Just (Usage 100 50))
-              $ addMessage (textMessage User "hello")
-              $ emptyContext (Just "sys")
-      ctx' <- executeSlashCommand env (CmdSession SessionReset) ctx
-      contextMessages ctx' `shouldBe` []
-      contextTotalInputTokens ctx' `shouldBe` 0
-      contextSystemPrompt ctx' `shouldBe` Just "sys"
 
     it "/session compact routes through compact handler" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
