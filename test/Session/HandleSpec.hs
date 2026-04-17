@@ -410,9 +410,9 @@ spec = do
       -- The correct behaviour: on resume after compaction, the agent
       -- should see only the compacted view (summary + recent messages),
       -- not the full raw history.
-      let summaryMessages = filter (\case
-            Message User [TextBlock t] -> "[Context summary]" `T.isPrefixOf` t
-            _                          -> False) ms
+      let isSummary (Message User [TextBlock t]) = "[Context summary]" `T.isPrefixOf` t
+          isSummary _                              = False
+          summaryMessages = filter isSummary ms
       -- There should be exactly one summary, and earlier messages that
       -- were compacted should NOT appear.
       length summaryMessages `shouldBe` 1
