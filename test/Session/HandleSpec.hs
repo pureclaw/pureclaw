@@ -24,6 +24,7 @@ import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
 
 import PureClaw.Agent.AgentDef (mkAgentName)
+import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
   , SessionId (..)
@@ -371,6 +372,46 @@ spec = do
       length ms `shouldSatisfy` (<= 3)
       length ms `shouldSatisfy` (>= 1)
       _th_close th
+
+    it "preserves compaction summary across session resume" $ withTmp $ \base -> do
+      -- Set up a session with several messages in the transcript
+      let meta = mkMeta "compact-resume-1" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      -- Record 5 request/response pairs — simulating a conversation
+      mapM_ (\i -> do
+        _th_record th (mkTextEntry (T.pack ("req" <> show i)) t0 Request
+                        (T.pack ("user message " <> show i)))
+        _th_record th (mkTextEntry (T.pack ("res" <> show i)) t0 Response
+                        (T.pack ("assistant reply " <> show i)))
+        ) [1 .. 5 :: Int]
+      _th_flush th
+      -- Simulate compaction: record a compaction boundary entry with
+      -- the summary text and the compaction metadata marker, then
+      -- record the kept-recent messages (last 2 pairs) after it.
+      let summaryPayload = "[Context summary] The user discussed topics 1-3. Key decisions were made about X."
+          compactionEntry = (mkTextEntry "compaction-summary" t0 Request summaryPayload)
+            { _te_metadata = Map.singleton compactionMetadataKey (Aeson.Bool True) }
+      _th_record th compactionEntry
+      -- The 2 most recent pairs would continue as normal conversation
+      -- entries after the compaction point — they were already in the
+      -- transcript before compaction.  New messages after compaction
+      -- would be appended here too.
+      _th_flush th
+      _th_close th
+      -- Resume the session and load recent messages
+      Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "compact-resume-1")
+      ms <- loadRecentMessages (_sh_transcript sh') 50 100000
+      -- The resumed context should contain the compaction summary
+      -- plus only entries AFTER the compaction boundary.
+      let isSummary (Message User [TextBlock t]) = "[Context summary]" `T.isPrefixOf` t
+          isSummary _                              = False
+          summaryMessages = filter isSummary ms
+      -- Exactly one summary message
+      length summaryMessages `shouldBe` 1
+      -- Only the compaction entry itself (no pre-compaction messages)
+      length ms `shouldBe` 1
+      _th_close (_sh_transcript sh')
 
     it "returns [] on an empty transcript" $ withTmp $ \base -> do
       let meta = mkMeta "lr-4" t0

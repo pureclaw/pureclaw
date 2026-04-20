@@ -50,6 +50,7 @@ import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
 
 import PureClaw.Agent.AgentDef (AgentName)
+import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
   , SessionId (..)
@@ -410,6 +411,14 @@ markBootstrapConsumed sh = do
 -- @T.length payload `div` 4@ — a rough heuristic, not a true tokenizer).
 -- Once the budget is exhausted no further messages are added.
 --
+-- If the transcript contains a compaction boundary (an entry whose
+-- metadata includes the 'compactionMetadataKey'), only entries from the
+-- last such boundary onward are considered.  The compaction entry itself
+-- is included — its payload carries the summary text that replaces the
+-- earlier conversation.  This ensures that after a gateway restart the
+-- agent resumes with the compacted view rather than double-counting
+-- messages that were folded into the summary.
+--
 -- Returns the surviving messages in chronological (oldest-first) order
 -- so they can be replayed directly into the context.
 loadRecentMessages :: TranscriptHandle -> Int -> Int -> IO [Message]
@@ -421,10 +430,12 @@ loadRecentMessages th maxCount maxTokens = do
     , _tf_timeRange = Nothing
     , _tf_limit     = Nothing
     }
-  let total     = length entries
+  let -- Trim to entries from the last compaction boundary onward.
+      postCompaction = trimToLastCompaction entries
+      total     = length postCompaction
       countWin  = if total > maxCount
-                    then drop (total - maxCount) entries
-                    else entries
+                    then drop (total - maxCount) postCompaction
+                    else postCompaction
       -- Walk newest→oldest, adding to the budget; stop at the first
       -- entry that would push us OVER the limit. Always include at
       -- least one entry if the window is non-empty, so a single
@@ -445,4 +456,20 @@ loadRecentMessages th maxCount maxTokens = do
             Request  -> User
             Response -> Assistant
       in Message role [TextBlock (_te_payload e)]
+
+-- | If any entry carries the compaction metadata key, return entries
+-- from the last such entry onward (inclusive).  Otherwise return the
+-- full list unchanged.
+trimToLastCompaction :: [TranscriptEntry] -> [TranscriptEntry]
+trimToLastCompaction entries =
+  case lastCompactionIdx of
+    Nothing -> entries
+    Just i  -> drop i entries
+  where
+    isCompaction e = Map.member compactionMetadataKey (_te_metadata e)
+    lastCompactionIdx = go Nothing 0 entries
+    go acc _ []     = acc
+    go acc n (e:es)
+      | isCompaction e = go (Just n) (n + 1) es
+      | otherwise      = go acc      (n + 1) es
 

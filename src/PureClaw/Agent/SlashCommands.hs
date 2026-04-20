@@ -50,6 +50,7 @@ import System.Exit
 import System.IO (Handle, hGetLine)
 import System.Process.Typed qualified as P
 
+import Data.Aeson qualified as Aeson
 import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
@@ -168,7 +169,6 @@ data SessionSubCommand
   | SessionResume Text                 -- ^ Resume a session by id or prefix
   | SessionLast                        -- ^ Resume the most recent session
   | SessionInfo                        -- ^ Show info for the current session
-  | SessionReset                       -- ^ Full reset (alias for CmdReset behaviour)
   | SessionCompact                     -- ^ Compact the current session (alias for CmdCompact)
   | SessionUnknown Text                -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
@@ -189,7 +189,6 @@ data AgentSubCommand
 data SlashCommand
   = CmdHelp                         -- ^ Show command reference
   | CmdNew                          -- ^ Clear conversation, keep configuration
-  | CmdReset                        -- ^ Full reset including usage counters
   | CmdStatus                       -- ^ Show session status
   | CmdCompact                      -- ^ Summarise conversation to save context
   | CmdTarget (Maybe Text)            -- ^ Show or switch message target
@@ -221,13 +220,12 @@ sessionCommandSpecs =
   [ CommandSpec "/help"    "Show this command reference"               GroupSession (exactP "/help"    CmdHelp)
   , CommandSpec "/status"  "Session status (messages, tokens used)"   GroupSession (exactP "/status"  CmdStatus)
   , CommandSpec "/new"     "Clear conversation, keep configuration"   GroupSession (exactP "/new"     CmdNew)
-  , CommandSpec "/reset"   "Full reset including usage counters"      GroupSession (exactP "/reset"   CmdReset)
   , CommandSpec "/compact" "Summarise conversation to save context"   GroupSession (exactP "/compact" CmdCompact)
   , CommandSpec "/last"    "Resume the most recent session"           GroupSession (exactP "/last"    (CmdSession SessionLast))
   ]
 
 -- | The '/session' command family. Subcommands manage the on-disk session
--- lifecycle (create, list, resume, info, reset, compact).
+-- lifecycle (create, list, resume, info, compact).
 sessionFamilyCommandSpecs :: [CommandSpec]
 sessionFamilyCommandSpecs =
   [ CommandSpec "/session new"              "Create a new session (clears context)"          GroupSession (sessionExactP "new"     SessionNew)
@@ -235,7 +233,6 @@ sessionFamilyCommandSpecs =
   , CommandSpec "/session resume <id>"      "Resume a session by id or unambiguous prefix"   GroupSession sessionResumeP
   , CommandSpec "/session last"             "Resume the most recent session"                 GroupSession (sessionExactP "last"    SessionLast)
   , CommandSpec "/session info"             "Show current session info"                      GroupSession (sessionExactP "info"    SessionInfo)
-  , CommandSpec "/session reset"            "Full reset of current session"                  GroupSession (sessionExactP "reset"   SessionReset)
   , CommandSpec "/session compact"          "Compact current session"                        GroupSession (sessionExactP "compact" SessionCompact)
   ]
 
@@ -605,10 +602,6 @@ executeSlashCommand env CmdNew ctx = do
   _ch_send (_env_channel env) (OutgoingMessage "Session cleared. Starting fresh.")
   pure (clearMessages ctx)
 
-executeSlashCommand env CmdReset _ctx = do
-  _ch_send (_env_channel env) (OutgoingMessage "Full reset. Context and usage cleared.")
-  pure (emptyContext (contextSystemPrompt _ctx))
-
 executeSlashCommand env CmdStatus ctx = do
   model <- readIORef (_env_model env)
   target <- readIORef (_env_target env)
@@ -713,13 +706,38 @@ executeSlashCommand env CmdCompact ctx = do
         0
         defaultKeepRecent
         ctx
-      let msg = case result of
-            NotNeeded         -> "Nothing to compact (too few messages)."
-            Compacted o n     -> "Compacted: " <> T.pack (show o)
-                              <> " messages \x2192 " <> T.pack (show n)
-            CompactionError e -> "Compaction failed: " <> e
-      _ch_send (_env_channel env) (OutgoingMessage msg)
-      pure ctx'
+      case result of
+        Compacted o n summaryText -> do
+          -- Record the compaction summary to the transcript so it
+          -- survives a gateway restart.  The metadata key marks this
+          -- entry as a compaction boundary; loadRecentMessages will
+          -- only replay entries from the last such boundary forward.
+          th <- envTranscript env
+          now <- Time.getCurrentTime
+          let entry = TranscriptEntry
+                { _te_id            = "compaction-" <> T.pack (show now)
+                , _te_timestamp     = now
+                , _te_harness       = Nothing
+                , _te_model         = Nothing
+                , _te_direction     = Request
+                , _te_payload       = summaryText
+                , _te_durationMs    = Nothing
+                , _te_correlationId = "compaction"
+                , _te_metadata      = Map.singleton compactionMetadataKey
+                                        (Aeson.Bool True)
+                }
+          _th_record th entry
+          _th_flush th
+          let msg = "Compacted: " <> T.pack (show o)
+                    <> " messages \x2192 " <> T.pack (show n)
+          _ch_send (_env_channel env) (OutgoingMessage msg)
+          pure ctx'
+        NotNeeded -> do
+          _ch_send (_env_channel env) (OutgoingMessage "Nothing to compact (too few messages).")
+          pure ctx
+        CompactionError e -> do
+          _ch_send (_env_channel env) (OutgoingMessage ("Compaction failed: " <> e))
+          pure ctx
 
 executeSlashCommand env (CmdProvider sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
@@ -1685,7 +1703,6 @@ executeSessionCommand env sub ctx = do
       send body
       pure ctx
 
-    SessionReset -> executeSlashCommand env CmdReset ctx
     SessionCompact -> executeSlashCommand env CmdCompact ctx
 
     SessionUnknown subcmd
@@ -1697,7 +1714,6 @@ executeSessionCommand env sub ctx = do
             , "  /session resume <id>"
             , "  /session last"
             , "  /session info"
-            , "  /session reset"
             , "  /session compact"
             ])
           pure ctx

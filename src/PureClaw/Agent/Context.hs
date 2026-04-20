@@ -113,7 +113,7 @@ contextTotalInputTokens = _ctx_totalInputTokens
 contextTotalOutputTokens :: Context -> Int
 contextTotalOutputTokens = _ctx_totalOutputTokens
 
--- Context management — for compaction and session reset.
+-- Context management — for compaction.
 
 -- | Get the number of messages in the context.
 contextMessageCount :: Context -> Int
