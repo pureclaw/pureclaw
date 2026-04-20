@@ -24,6 +24,7 @@ import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
 
 import PureClaw.Agent.AgentDef (mkAgentName)
+import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
   , SessionId (..)
@@ -372,9 +373,6 @@ spec = do
       length ms `shouldSatisfy` (>= 1)
       _th_close th
 
-    -- RED: compaction summaries are not persisted — loadRecentMessages
-    -- replays the full raw transcript, double-counting compacted entries.
-    -- This test documents the gap; remove `pending` once the fix lands.
     it "preserves compaction summary across session resume" $ withTmp $ \base -> do
       -- Set up a session with several messages in the transcript
       let meta = mkMeta "compact-resume-1" t0
@@ -388,42 +386,31 @@ spec = do
                         (T.pack ("assistant reply " <> show i)))
         ) [1 .. 5 :: Int]
       _th_flush th
-      -- Now simulate what compaction does: it replaces the in-memory
-      -- context with a summary message + the most recent messages.
-      -- The summary should be persisted so that on resume the agent
-      -- gets the compacted view, not just the raw transcript entries.
-      --
-      -- Record a compaction summary entry to the transcript, as
-      -- compaction SHOULD do (but currently does not).
+      -- Simulate compaction: record a compaction boundary entry with
+      -- the summary text and the compaction metadata marker, then
+      -- record the kept-recent messages (last 2 pairs) after it.
       let summaryPayload = "[Context summary] The user discussed topics 1-3. Key decisions were made about X."
-      _th_record th (mkTextEntry "compaction-summary" t0 Request summaryPayload)
+          compactionEntry = (mkTextEntry "compaction-summary" t0 Request summaryPayload)
+            { _te_metadata = Map.singleton compactionMetadataKey (Aeson.Bool True) }
+      _th_record th compactionEntry
+      -- The 2 most recent pairs would continue as normal conversation
+      -- entries after the compaction point — they were already in the
+      -- transcript before compaction.  New messages after compaction
+      -- would be appended here too.
       _th_flush th
       _th_close th
       -- Resume the session and load recent messages
       Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "compact-resume-1")
       ms <- loadRecentMessages (_sh_transcript sh') 50 100000
-      -- The resumed context should contain the compaction summary.
-      -- Currently, loadRecentMessages replays ALL raw transcript
-      -- entries (the original 10 + the summary = 11), rather than
-      -- understanding that compaction replaced entries 1-6 with a
-      -- summary.  This means the pre-compaction messages are
-      -- double-counted: they appear both as raw entries AND their
-      -- content is folded into the summary.
-      --
-      -- The correct behaviour: on resume after compaction, the agent
-      -- should see only the compacted view (summary + recent messages),
-      -- not the full raw history.
+      -- The resumed context should contain the compaction summary
+      -- plus only entries AFTER the compaction boundary.
       let isSummary (Message User [TextBlock t]) = "[Context summary]" `T.isPrefixOf` t
           isSummary _                              = False
           summaryMessages = filter isSummary ms
-      -- There should be exactly one summary, and earlier messages that
-      -- were compacted should NOT appear.
+      -- Exactly one summary message
       length summaryMessages `shouldBe` 1
-      -- The total message count should be the summary + the messages
-      -- that were kept after compaction, NOT the full raw history.
-      -- With 5 pairs (10 entries) compacted down to 1 summary + say
-      -- the last 4 kept messages = 5 total, not 11.
-      length ms `shouldSatisfy` (<= 6)
+      -- Only the compaction entry itself (no pre-compaction messages)
+      length ms `shouldBe` 1
       _th_close (_sh_transcript sh')
 
     it "returns [] on an empty transcript" $ withTmp $ \base -> do

@@ -50,6 +50,7 @@ import System.Exit
 import System.IO (Handle, hGetLine)
 import System.Process.Typed qualified as P
 
+import Data.Aeson qualified as Aeson
 import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
@@ -705,13 +706,38 @@ executeSlashCommand env CmdCompact ctx = do
         0
         defaultKeepRecent
         ctx
-      let msg = case result of
-            NotNeeded         -> "Nothing to compact (too few messages)."
-            Compacted o n     -> "Compacted: " <> T.pack (show o)
-                              <> " messages \x2192 " <> T.pack (show n)
-            CompactionError e -> "Compaction failed: " <> e
-      _ch_send (_env_channel env) (OutgoingMessage msg)
-      pure ctx'
+      case result of
+        Compacted o n summaryText -> do
+          -- Record the compaction summary to the transcript so it
+          -- survives a gateway restart.  The metadata key marks this
+          -- entry as a compaction boundary; loadRecentMessages will
+          -- only replay entries from the last such boundary forward.
+          th <- envTranscript env
+          now <- Time.getCurrentTime
+          let entry = TranscriptEntry
+                { _te_id            = "compaction-" <> T.pack (show now)
+                , _te_timestamp     = now
+                , _te_harness       = Nothing
+                , _te_model         = Nothing
+                , _te_direction     = Request
+                , _te_payload       = summaryText
+                , _te_durationMs    = Nothing
+                , _te_correlationId = "compaction"
+                , _te_metadata      = Map.singleton compactionMetadataKey
+                                        (Aeson.Bool True)
+                }
+          _th_record th entry
+          _th_flush th
+          let msg = "Compacted: " <> T.pack (show o)
+                    <> " messages \x2192 " <> T.pack (show n)
+          _ch_send (_env_channel env) (OutgoingMessage msg)
+          pure ctx'
+        NotNeeded -> do
+          _ch_send (_env_channel env) (OutgoingMessage "Nothing to compact (too few messages).")
+          pure ctx
+        CompactionError e -> do
+          _ch_send (_env_channel env) (OutgoingMessage ("Compaction failed: " <> e))
+          pure ctx
 
 executeSlashCommand env (CmdProvider sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)

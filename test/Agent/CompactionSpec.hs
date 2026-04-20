@@ -46,9 +46,10 @@ spec = do
           ctx = foldl (flip addMessage) (emptyContext Nothing) msgs
       (ctx', result) <- compactContext (MockProvider "Summary of conversation") model 1 5 ctx
       case result of
-        Compacted old new -> do
+        Compacted old new summary -> do
           old `shouldBe` 20       -- original message count
           new `shouldBe` 6        -- 1 summary + 5 recent
+          T.unpack summary `shouldContain` "Summary of conversation"
         _ -> expectationFailure $ "Expected Compacted, got " ++ show result
       -- Summary should be in first message
       case contextMessages ctx' of
@@ -90,7 +91,7 @@ spec = do
     it "has Show and Eq instances" $ do
       show NotNeeded `shouldContain` "NotNeeded"
       NotNeeded `shouldBe` NotNeeded
-      Compacted 10 3 `shouldBe` Compacted 10 3
+      Compacted 10 3 "s" `shouldBe` Compacted 10 3 "s"
 
   describe "defaultTokenLimit" $ do
     it "is 200k" $ do
