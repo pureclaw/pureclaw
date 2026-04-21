@@ -164,7 +164,7 @@ data HarnessSubCommand
 
 -- | Subcommands of the '/session' family.
 data SessionSubCommand
-  = SessionNew                         -- ^ Create a new session (clear ctx + write on disk)
+  = SessionNew (Maybe Text)            -- ^ Create a new session, optionally targeting a running harness
   | SessionList (Maybe Text)           -- ^ List recent sessions (optionally filter by agent)
   | SessionResume Text                 -- ^ Resume a session by id or prefix
   | SessionLast                        -- ^ Resume the most recent session
@@ -228,7 +228,7 @@ sessionCommandSpecs =
 -- lifecycle (create, list, resume, info, compact).
 sessionFamilyCommandSpecs :: [CommandSpec]
 sessionFamilyCommandSpecs =
-  [ CommandSpec "/session new"              "Create a new session (clears context)"          GroupSession (sessionExactP "new"     SessionNew)
+  [ CommandSpec "/session new [<harness>]"   "Create a new session (optionally targeting a running harness)" GroupSession sessionNewP
   , CommandSpec "/session list [<agent>]"   "List recent sessions (optionally by agent)"     GroupSession sessionListP
   , CommandSpec "/session resume <id>"      "Resume a session by id or unambiguous prefix"   GroupSession sessionResumeP
   , CommandSpec "/session last"             "Resume the most recent session"                 GroupSession (sessionExactP "last"    SessionLast)
@@ -240,6 +240,21 @@ sessionFamilyCommandSpecs =
 sessionExactP :: Text -> SessionSubCommand -> Text -> Maybe SlashCommand
 sessionExactP sub cmd t =
   if T.toLower t == "/session " <> sub then Just (CmdSession cmd) else Nothing
+
+-- | Parse "/session new [<harness>]". With no argument creates a provider-targeted
+-- session; with an argument creates one targeting the named harness.
+sessionNewP :: Text -> Maybe SlashCommand
+sessionNewP t =
+  let pfx   = "/session new"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdSession (SessionNew Nothing))
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdSession (SessionNew Nothing))
+                  else Just (CmdSession (SessionNew (Just arg)))
+          else Nothing
 
 -- | Parse "/session list [<agent>]". With no argument yields @SessionList Nothing@.
 sessionListP :: Text -> Maybe SlashCommand
@@ -1593,26 +1608,18 @@ executeSessionCommand :: AgentEnv -> SessionSubCommand -> Context -> IO Context
 executeSessionCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   case sub of
-    SessionNew -> do
-      sessionsDir <- getSessionsDir
-      Dir.createDirectoryIfMissing True sessionsDir
-      now <- Time.getCurrentTime
-      let sid = SessionTypes.newSessionId Nothing now
-          meta = SessionTypes.SessionMeta
-            { SessionTypes._sm_id                = sid
-            , SessionTypes._sm_agent             = Nothing
-            , SessionTypes._sm_runtime           = SessionTypes.RTProvider
-            , SessionTypes._sm_model             = ""
-            , SessionTypes._sm_channel           = ""
-            , SessionTypes._sm_createdAt         = now
-            , SessionTypes._sm_lastActive        = now
-            , SessionTypes._sm_bootstrapConsumed = False
-            }
-      newHandle <- Session.mkSessionHandle (_env_logger env) sessionsDir meta
-      writeIORef (_env_session env) newHandle
-      send ("New session created: " <> unSessionId sid
-            <> "\nSession cleared. Starting fresh.")
-      pure (clearMessages ctx)
+    SessionNew mHarness -> do
+      -- If a harness name was given, validate it is currently running.
+      case mHarness of
+        Just name -> do
+          harnesses <- readIORef (_env_harnesses env)
+          case Map.lookup name harnesses of
+            Nothing -> do
+              send ("Harness \"" <> name <> "\" is not running. "
+                    <> "Start it first with /harness start " <> name)
+              pure ctx
+            Just _ -> createSession env ctx (SessionTypes.RTHarness name)
+        Nothing -> createSession env ctx SessionTypes.RTProvider
 
     SessionList mAgentFilter -> do
       sessionsDir <- getSessionsDir
@@ -1709,7 +1716,7 @@ executeSessionCommand env sub ctx = do
       | T.null subcmd -> do
           send (T.intercalate "\n"
             [ "Session commands:"
-            , "  /session new"
+            , "  /session new [<harness>]"
             , "  /session list [<agent>]"
             , "  /session resume <id>"
             , "  /session last"
@@ -1725,6 +1732,35 @@ executeSessionCommand env sub ctx = do
     _sm_id = SessionTypes._sm_id
     _sm_agent = SessionTypes._sm_agent
     _sm_runtime = SessionTypes._sm_runtime
+
+    -- | Shared helper: create a new on-disk session with the given runtime,
+    -- swap it into '_env_session', set '_env_target' to match, and return a
+    -- cleared context.
+    createSession envS ctxS runtime = do
+      let sendS = _ch_send (_env_channel envS) . OutgoingMessage
+      sessionsDir <- getSessionsDir
+      Dir.createDirectoryIfMissing True sessionsDir
+      now <- Time.getCurrentTime
+      let sid = SessionTypes.newSessionId Nothing now
+          meta = SessionTypes.SessionMeta
+            { SessionTypes._sm_id                = sid
+            , SessionTypes._sm_agent             = Nothing
+            , SessionTypes._sm_runtime           = runtime
+            , SessionTypes._sm_model             = ""
+            , SessionTypes._sm_channel           = ""
+            , SessionTypes._sm_createdAt         = now
+            , SessionTypes._sm_lastActive        = now
+            , SessionTypes._sm_bootstrapConsumed = False
+            }
+      newHandle <- Session.mkSessionHandle (_env_logger envS) sessionsDir meta
+      writeIORef (_env_session envS) newHandle
+      writeIORef (_env_target envS) (SessionTypes.defaultTarget runtime)
+      let runtimeMsg = case runtime of
+            SessionTypes.RTProvider   -> ""
+            SessionTypes.RTHarness n  -> "\nTarget: harness:" <> n
+      sendS ("New session created: " <> unSessionId sid
+            <> "\nSession cleared. Starting fresh." <> runtimeMsg)
+      pure (clearMessages ctxS)
 
 -- | Known harnesses: (canonical name, aliases, description).
 knownHarnesses :: [(Text, [Text], Text)]
