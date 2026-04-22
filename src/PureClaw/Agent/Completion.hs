@@ -147,10 +147,9 @@ getDynamicCandidates (Just env) cacheRef line = do
       metas <- Session.listSessions sessionsDir Nothing 1000
       let ids = [unSessionId (SessionTypes._sm_id m) | m <- metas]
       pure (map T.unpack (sessionIdMatches ids (T.pack partial)))
-  else if "/agent info " `L.isPrefixOf` lower || "/agent start " `L.isPrefixOf` lower
+  else if "/agent info " `L.isPrefixOf` lower
     then do
-      let prefixLen = if "/agent info " `L.isPrefixOf` lower then 12 else 13
-          partial   = drop prefixLen (dropWhile (== ' ') line)
+      let partial   = drop 12 (dropWhile (== ' ') line)
       agentsDir <- (</> "agents") <$> getPureclawDir
       defs <- AgentDef.discoverAgents mkNoOpLogHandle agentsDir
       let names = map (T.unpack . AgentDef.unAgentName . AgentDef._ad_name) defs

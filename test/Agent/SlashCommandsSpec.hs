@@ -1925,11 +1925,8 @@ spec = do
     it "parses /agent info <name> preserving case" $
       parseSlashCommand "/agent info Zoe" `shouldBe` Just (CmdAgent (AgentInfo (Just "Zoe")))
 
-    it "parses /agent start <name>" $
-      parseSlashCommand "/agent start zoe" `shouldBe` Just (CmdAgent (AgentStart "zoe"))
-
-    it "returns AgentUnknown for /agent start with no name" $
-      parseSlashCommand "/agent start" `shouldBe` Just (CmdAgent (AgentUnknown "start"))
+    it "/agent start is no longer recognised (use /session new)" $
+      parseSlashCommand "/agent start zoe" `shouldBe` Just (CmdAgent (AgentUnknown "start"))
 
     it "returns AgentUnknown for bare /agent" $
       parseSlashCommand "/agent" `shouldBe` Just (CmdAgent (AgentUnknown ""))
@@ -2056,65 +2053,6 @@ spec = do
       case sent of
         Just t -> T.unpack t `shouldContain` "No agent selected. Use --agent <name>."
         Nothing -> expectationFailure "Expected no-agent-selected message"
-
-  describe "executeSlashCommand — /agent start" $ do
-    let mkAgentEnv3 sentRef = do
-          vaultRef      <- newIORef Nothing
-          providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-          modelRef      <- newIORef (ModelId "test")
-          harnessRef    <- newIORef Map.empty
-          targetRef     <- newIORef TargetProvider
-          windowIdxRef  <- newIORef 0
-          sessionRef <- newIORef =<< mkNoOpSessionHandle
-          pure AgentEnv
-            { _env_provider     = providerRef
-            , _env_model        = modelRef
-            , _env_channel      = mkNoOpChannelHandle
-                { _ch_send = writeIORef sentRef . Just . _om_content }
-            , _env_logger       = mkNoOpLogHandle
-            , _env_systemPrompt = Nothing
-            , _env_registry     = emptyRegistry
-            , _env_vault        = vaultRef
-            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
-            , _env_policy       = defaultPolicy
-            , _env_harnesses    = harnessRef
-            , _env_target       = targetRef
-            , _env_nextWindowIdx = windowIdxRef
-            , _env_agentDef      = Nothing
-            , _env_session       = sessionRef
-            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
-            }
-
-    it "/agent start <name> returns a placeholder message in WU1" $ withTempHome $ do
-      home <- getEnv "HOME"
-      let zoeDir = home </> ".pureclaw" </> "agents" </> "zoe"
-      Dir.createDirectoryIfMissing True zoeDir
-      sentRef <- newIORef (Nothing :: Maybe Text)
-      env <- mkAgentEnv3 sentRef
-      _ <- executeSlashCommand env (CmdAgent (AgentStart "zoe")) (emptyContext Nothing)
-      sent <- readIORef sentRef
-      case sent of
-        Just t -> T.unpack t `shouldContain`
-          "Agent start will be fully wired up in a later session"
-        Nothing -> expectationFailure "Expected placeholder message"
-
-    it "/agent start <name> for missing agent reports not-found" $ withTempHome $ do
-      sentRef <- newIORef (Nothing :: Maybe Text)
-      env <- mkAgentEnv3 sentRef
-      _ <- executeSlashCommand env (CmdAgent (AgentStart "ghost")) (emptyContext Nothing)
-      sent <- readIORef sentRef
-      case sent of
-        Just t -> T.unpack t `shouldContain` "Agent \"ghost\" not found"
-        Nothing -> expectationFailure "Expected not-found message"
-
-    it "/agent start <invalid> reports invalid name" $ withTempHome $ do
-      sentRef <- newIORef (Nothing :: Maybe Text)
-      env <- mkAgentEnv3 sentRef
-      _ <- executeSlashCommand env (CmdAgent (AgentStart "../evil")) (emptyContext Nothing)
-      sent <- readIORef sentRef
-      case sent of
-        Just t -> T.unpack t `shouldContain` "invalid agent name"
-        Nothing -> expectationFailure "Expected invalid-name message"
 
   describe "agent name tab completion" $ do
     it "agentNameMatches returns all names on empty prefix" $

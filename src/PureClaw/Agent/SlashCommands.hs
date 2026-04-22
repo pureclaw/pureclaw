@@ -177,7 +177,6 @@ data SessionSubCommand
 data AgentSubCommand
   = AgentList                  -- ^ List discovered agents
   | AgentInfo (Maybe Text)     -- ^ Show info for a named agent (or the current one when 'Nothing')
-  | AgentStart Text            -- ^ Switch to a named agent (placeholder in WU1)
   | AgentUnknown Text          -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
@@ -295,8 +294,8 @@ sessionUnknownFallback t =
 providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
-  , CommandSpec "/target list"      "List available targets (models + harnesses)" GroupProvider (exactP "/target list" CmdTargetList)
-  , CommandSpec "/target [name]"   "Show or switch the message target"           GroupProvider targetArgP
+  , CommandSpec "/target list"      "List available targets (models + harnesses)" GroupSession (exactP "/target list" CmdTargetList)
+  , CommandSpec "/target [name]"   "Show or switch the message target"           GroupSession targetArgP
   ]
 
 channelCommandSpecs :: [CommandSpec]
@@ -336,7 +335,6 @@ agentCommandSpecs :: [CommandSpec]
 agentCommandSpecs =
   [ CommandSpec "/agent list"          "List discovered agents in ~/.pureclaw/agents/" GroupAgent (agentExactP "list" AgentList)
   , CommandSpec "/agent info [<name>]" "Show files and frontmatter for an agent"       GroupAgent agentInfoP
-  , CommandSpec "/agent start <name>"  "Switch to a named agent"                       GroupAgent agentStartP
   ]
 
 -- | Case-insensitive exact match for "/agent <sub>" with no argument.
@@ -357,19 +355,6 @@ agentInfoP t =
                   then Just (CmdAgent (AgentInfo Nothing))
                   else Just (CmdAgent (AgentInfo (Just arg)))
           else Nothing
-
--- | Parse "/agent start <name>". The name is required; a bare "/agent start"
--- falls through to the unknown fallback ("start").
-agentStartP :: Text -> Maybe SlashCommand
-agentStartP t =
-  let pfx   = "/agent start"
-      lower = T.toLower t
-  in if (pfx <> " ") `T.isPrefixOf` lower
-     then let arg = T.strip (T.drop (T.length pfx) t)
-          in if T.null arg
-             then Nothing
-             else Just (CmdAgent (AgentStart arg))
-     else Nothing
 
 -- | Catch-all for any "/agent <X>" not matched by 'allCommandSpecs'.
 agentUnknownFallback :: Text -> Maybe SlashCommand
@@ -1528,29 +1513,12 @@ executeAgentCommand env sub ctx = do
               send output
               pure ctx
 
-    AgentStart name -> do
-      agentsDir <- getAgentsDir
-      case AgentDef.mkAgentName name of
-        Left _ -> do
-          send ("invalid agent name: \"" <> name <> "\".")
-          pure ctx
-        Right validName -> do
-          mDef <- AgentDef.loadAgent agentsDir validName
-          case mDef of
-            Nothing -> do
-              send ("Agent \"" <> name <> "\" not found.")
-              pure ctx
-            Just _ -> do
-              send "Agent start will be fully wired up in a later session (requires Session support)."
-              pure ctx
-
     AgentUnknown subcmd
       | T.null subcmd -> do
           send (T.intercalate "\n"
             [ "Agent commands:"
             , "  /agent list"
             , "  /agent info [<name>]"
-            , "  /agent start <name>"
             ])
           pure ctx
       | otherwise -> do
@@ -1574,8 +1542,8 @@ fromMaybeT _   (Just t) = t
 
 -- | Filter a list of agent names by a case-insensitive prefix. Exported as
 -- a pure helper so the tab completer can present matching names for
--- @/agent info@ and @/agent start@ without needing IO. When the prefix is
--- empty, all candidates are returned.
+-- @/agent info@ without needing IO. When the prefix is empty, all
+-- candidates are returned.
 agentNameMatches :: [Text] -> Text -> [Text]
 agentNameMatches candidates prefix =
   let lowerPfx = T.toLower prefix
