@@ -467,6 +467,12 @@ runChat opts = do
     Just d  -> _lh_logInfo logger $
       "Agent: " <> AgentDef.unAgentName (AgentDef._ad_name d)
     Nothing -> pure ()
+  case _fc_defaultAgent fileCfg of
+    Just name -> _lh_logInfo logger $ "Default agent: " <> name
+    Nothing   -> pure ()
+  case _fc_defaultTarget fileCfg of
+    Just name -> _lh_logInfo logger $ "Default target: " <> name
+    Nothing   -> pure ()
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case (_sp_allowedCommands policy, _sp_autonomy policy) of
     (AllowAll, Full) -> do

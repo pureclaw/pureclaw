@@ -164,7 +164,7 @@ data HarnessSubCommand
 
 -- | Subcommands of the '/session' family.
 data SessionSubCommand
-  = SessionNew (Maybe Text)            -- ^ Create a new session, optionally targeting a running harness
+  = SessionNew (Maybe Text) (Maybe Text) -- ^ Create session: (agent, target). Both optional.
   | SessionList (Maybe Text)           -- ^ List recent sessions (optionally filter by agent)
   | SessionResume Text                 -- ^ Resume a session by id or prefix
   | SessionLast                        -- ^ Resume the most recent session
@@ -177,6 +177,7 @@ data SessionSubCommand
 data AgentSubCommand
   = AgentList                  -- ^ List discovered agents
   | AgentInfo (Maybe Text)     -- ^ Show info for a named agent (or the current one when 'Nothing')
+  | AgentDefault (Maybe Text)  -- ^ View or set the default agent
   | AgentUnknown Text          -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
@@ -192,6 +193,7 @@ data SlashCommand
   | CmdCompact                      -- ^ Summarise conversation to save context
   | CmdTarget (Maybe Text)            -- ^ Show or switch message target
   | CmdTargetList                    -- ^ List available targets (models + harnesses)
+  | CmdTargetDefault (Maybe Text)    -- ^ View or set the default target for new sessions
   | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
   | CmdVault VaultSubCommand        -- ^ Vault command family
   | CmdChannel ChannelSubCommand       -- ^ Channel configuration
@@ -227,7 +229,7 @@ sessionCommandSpecs =
 -- lifecycle (create, list, resume, info, compact).
 sessionFamilyCommandSpecs :: [CommandSpec]
 sessionFamilyCommandSpecs =
-  [ CommandSpec "/session new [<harness>]"   "Create a new session (optionally targeting a running harness)" GroupSession sessionNewP
+  [ CommandSpec "/session new [<agent>] [--target <name>]" "Create a new session" GroupSession sessionNewP
   , CommandSpec "/session list [<agent>]"   "List recent sessions (optionally by agent)"     GroupSession sessionListP
   , CommandSpec "/session resume <id>"      "Resume a session by id or unambiguous prefix"   GroupSession sessionResumeP
   , CommandSpec "/session last"             "Resume the most recent session"                 GroupSession (sessionExactP "last"    SessionLast)
@@ -240,20 +242,42 @@ sessionExactP :: Text -> SessionSubCommand -> Text -> Maybe SlashCommand
 sessionExactP sub cmd t =
   if T.toLower t == "/session " <> sub then Just (CmdSession cmd) else Nothing
 
--- | Parse "/session new [<harness>]". With no argument creates a provider-targeted
--- session; with an argument creates one targeting the named harness.
+-- | Parse "/session new [<agent>] [--target <name>]". The positional argument
+-- is the agent name; the @--target@ flag specifies a target.
 sessionNewP :: Text -> Maybe SlashCommand
 sessionNewP t =
   let pfx   = "/session new"
       lower = T.toLower t
   in if lower == pfx
-     then Just (CmdSession (SessionNew Nothing))
+     then Just (CmdSession (SessionNew Nothing Nothing))
      else if (pfx <> " ") `T.isPrefixOf` lower
-          then let arg = T.strip (T.drop (T.length pfx) t)
-               in if T.null arg
-                  then Just (CmdSession (SessionNew Nothing))
-                  else Just (CmdSession (SessionNew (Just arg)))
+          then let rest = T.strip (T.drop (T.length pfx) t)
+                   (mAgent, mTarget) = parseSessionNewArgs rest
+               in Just (CmdSession (SessionNew mAgent mTarget))
           else Nothing
+
+-- | Parse the arguments after "/session new": an optional positional agent name
+-- and an optional @--target <name>@ flag. The flag can appear before or after
+-- the positional argument.
+parseSessionNewArgs :: Text -> (Maybe Text, Maybe Text)
+parseSessionNewArgs rest =
+  let ws = T.words rest
+      (targetVal, otherWords) = extractFlag "--target" ws
+      agentVal = case otherWords of
+        []    -> Nothing
+        (a:_) -> Just a
+  in (agentVal, targetVal)
+
+-- | Extract a flag and its value from a word list. Returns the value (if found)
+-- and the remaining words with the flag and its argument removed.
+extractFlag :: Text -> [Text] -> (Maybe Text, [Text])
+extractFlag _    [] = (Nothing, [])
+extractFlag flag (w:ws)
+  | T.toLower w == flag = case ws of
+      (v:rest) -> (Just v, rest)
+      []       -> (Nothing, [])   -- flag with no value — treat as absent
+  | otherwise = let (val, rest) = extractFlag flag ws
+                in (val, w : rest)
 
 -- | Parse "/session list [<agent>]". With no argument yields @SessionList Nothing@.
 sessionListP :: Text -> Maybe SlashCommand
@@ -295,6 +319,7 @@ providerCommandSpecs :: [CommandSpec]
 providerCommandSpecs =
   [ CommandSpec "/provider [name]" "List or configure a model provider" GroupProvider (providerArgP ProviderList ProviderConfigure)
   , CommandSpec "/target list"      "List available targets (models + harnesses)" GroupSession (exactP "/target list" CmdTargetList)
+  , CommandSpec "/target default [<name>]" "View or set the default target for new sessions" GroupSession targetDefaultP
   , CommandSpec "/target [name]"   "Show or switch the message target"           GroupSession targetArgP
   ]
 
@@ -333,8 +358,9 @@ harnessCommandSpecs =
 
 agentCommandSpecs :: [CommandSpec]
 agentCommandSpecs =
-  [ CommandSpec "/agent list"          "List discovered agents in ~/.pureclaw/agents/" GroupAgent (agentExactP "list" AgentList)
-  , CommandSpec "/agent info [<name>]" "Show files and frontmatter for an agent"       GroupAgent agentInfoP
+  [ CommandSpec "/agent list"              "List discovered agents in ~/.pureclaw/agents/" GroupAgent (agentExactP "list" AgentList)
+  , CommandSpec "/agent info [<name>]"   "Show files and frontmatter for an agent"       GroupAgent agentInfoP
+  , CommandSpec "/agent default [<name>]" "View or set the default agent"               GroupAgent agentDefaultP
   ]
 
 -- | Case-insensitive exact match for "/agent <sub>" with no argument.
@@ -354,6 +380,20 @@ agentInfoP t =
                in if T.null arg
                   then Just (CmdAgent (AgentInfo Nothing))
                   else Just (CmdAgent (AgentInfo (Just arg)))
+          else Nothing
+
+-- | Parse "/agent default [<name>]". With no argument, shows the current default.
+agentDefaultP :: Text -> Maybe SlashCommand
+agentDefaultP t =
+  let pfx   = "/agent default"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdAgent (AgentDefault Nothing))
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdAgent (AgentDefault Nothing))
+                  else Just (CmdAgent (AgentDefault (Just arg)))
           else Nothing
 
 -- | Catch-all for any "/agent <X>" not matched by 'allCommandSpecs'.
@@ -439,6 +479,20 @@ providerArgP listCmd mkCfgCmd t =
                in if T.null arg
                   then Just (CmdProvider listCmd)
                   else Just (CmdProvider (mkCfgCmd arg))
+          else Nothing
+
+-- | Parse "/target default [<name>]". With no argument, shows the current default.
+targetDefaultP :: Text -> Maybe SlashCommand
+targetDefaultP t =
+  let pfx   = "/target default"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdTargetDefault Nothing)
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then let arg = T.strip (T.drop (T.length pfx) t)
+               in if T.null arg
+                  then Just (CmdTargetDefault Nothing)
+                  else Just (CmdTargetDefault (Just arg))
           else Nothing
 
 -- | Case-insensitive match for "/target" with optional argument.
@@ -642,6 +696,28 @@ executeSlashCommand env CmdStatus ctx = do
         , "  Total output tokens: " <> T.pack (show (contextTotalOutputTokens ctx))
         ]
   _ch_send (_env_channel env) (OutgoingMessage status)
+  pure ctx
+
+executeSlashCommand env (CmdTargetDefault Nothing) ctx = do
+  fileCfg <- loadConfig
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  case _fc_defaultTarget fileCfg of
+    Nothing -> send "No default target set (defaults to provider)."
+    Just name -> send ("Default target: " <> name)
+  pure ctx
+
+executeSlashCommand env (CmdTargetDefault (Just name)) ctx = do
+  let send = _ch_send (_env_channel env) . OutgoingMessage
+  pureclawDir <- getPureclawDir
+  let configPath = pureclawDir </> "config.toml"
+  Dir.createDirectoryIfMissing True pureclawDir
+  if name == "provider"
+    then do
+      updateDefaultsConfig configPath Keep Clear
+      send "Default target cleared (will use provider)."
+    else do
+      updateDefaultsConfig configPath Keep (Set name)
+      send ("Default target set to: " <> name)
   pure ctx
 
 executeSlashCommand env (CmdTarget Nothing) ctx = do
@@ -1513,12 +1589,41 @@ executeAgentCommand env sub ctx = do
               send output
               pure ctx
 
+    AgentDefault Nothing -> do
+      fileCfg <- loadConfig
+      case _fc_defaultAgent fileCfg of
+        Nothing -> send "No default agent set. Use /agent default <name> to set one."
+        Just name -> send ("Default agent: " <> name)
+      pure ctx
+
+    AgentDefault (Just name) -> do
+      -- Validate that the agent exists before persisting.
+      case AgentDef.mkAgentName name of
+        Left _ -> do
+          send ("Invalid agent name: \"" <> name <> "\".")
+          pure ctx
+        Right validName -> do
+          agentsDir <- getAgentsDir
+          mDef <- AgentDef.loadAgent agentsDir validName
+          case mDef of
+            Nothing -> do
+              send ("Agent \"" <> name <> "\" not found.")
+              pure ctx
+            Just _ -> do
+              pureclawDir <- getPureclawDir
+              let configPath = pureclawDir </> "config.toml"
+              Dir.createDirectoryIfMissing True pureclawDir
+              updateDefaultsConfig configPath (Set name) Keep
+              send ("Default agent set to: " <> name)
+              pure ctx
+
     AgentUnknown subcmd
       | T.null subcmd -> do
           send (T.intercalate "\n"
             [ "Agent commands:"
             , "  /agent list"
             , "  /agent info [<name>]"
+            , "  /agent default [<name>]"
             ])
           pure ctx
       | otherwise -> do
@@ -1576,18 +1681,25 @@ executeSessionCommand :: AgentEnv -> SessionSubCommand -> Context -> IO Context
 executeSessionCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   case sub of
-    SessionNew mHarness -> do
-      -- If a harness name was given, validate it is currently running.
-      case mHarness of
-        Just name -> do
+    SessionNew mAgent mTargetName -> do
+      -- Resolve agent: explicit arg > config default > None
+      fileCfg <- loadConfig
+      let agentName = mAgent <|> _fc_defaultAgent fileCfg
+      -- Resolve target: --target flag > config default > provider
+      let effectiveTarget = case mTargetName of
+            Just t  -> Just t
+            Nothing -> _fc_defaultTarget fileCfg
+      -- Validate harness if targeting one
+      case effectiveTarget of
+        Just name | name /= "provider" -> do
           harnesses <- readIORef (_env_harnesses env)
           case Map.lookup name harnesses of
             Nothing -> do
-              send ("Harness \"" <> name <> "\" is not running. "
+              send ("Target \"" <> name <> "\" is not running. "
                     <> "Start it first with /harness start " <> name)
               pure ctx
-            Just _ -> createSession env ctx (SessionTypes.RTHarness name)
-        Nothing -> createSession env ctx SessionTypes.RTProvider
+            Just _ -> createSession env ctx agentName (SessionTypes.RTHarness name)
+        _ -> createSession env ctx agentName SessionTypes.RTProvider
 
     SessionList mAgentFilter -> do
       sessionsDir <- getSessionsDir
@@ -1684,7 +1796,7 @@ executeSessionCommand env sub ctx = do
       | T.null subcmd -> do
           send (T.intercalate "\n"
             [ "Session commands:"
-            , "  /session new [<harness>]"
+            , "  /session new [<agent>] [--target <name>]"
             , "  /session list [<agent>]"
             , "  /session resume <id>"
             , "  /session last"
@@ -1703,32 +1815,64 @@ executeSessionCommand env sub ctx = do
 
     -- | Shared helper: create a new on-disk session with the given runtime,
     -- swap it into '_env_session', set '_env_target' to match, and return a
-    -- cleared context.
-    createSession envS ctxS runtime = do
+    -- fresh context. When an agent name is given, validates it, records it
+    -- in session metadata, and loads its system prompt into the new context.
+    createSession envS ctxS mAgentText runtime = do
       let sendS = _ch_send (_env_channel envS) . OutgoingMessage
-      sessionsDir <- getSessionsDir
-      Dir.createDirectoryIfMissing True sessionsDir
-      now <- Time.getCurrentTime
-      let sid = SessionTypes.newSessionId Nothing now
-          meta = SessionTypes.SessionMeta
-            { SessionTypes._sm_id                = sid
-            , SessionTypes._sm_agent             = Nothing
-            , SessionTypes._sm_runtime           = runtime
-            , SessionTypes._sm_model             = ""
-            , SessionTypes._sm_channel           = ""
-            , SessionTypes._sm_createdAt         = now
-            , SessionTypes._sm_lastActive        = now
-            , SessionTypes._sm_bootstrapConsumed = False
-            }
-      newHandle <- Session.mkSessionHandle (_env_logger envS) sessionsDir meta
-      writeIORef (_env_session envS) newHandle
-      writeIORef (_env_target envS) (SessionTypes.defaultTarget runtime)
-      let runtimeMsg = case runtime of
-            SessionTypes.RTProvider   -> ""
-            SessionTypes.RTHarness n  -> "\nTarget: harness:" <> n
-      sendS ("New session created: " <> unSessionId sid
-            <> "\nSession cleared. Starting fresh." <> runtimeMsg)
-      pure (clearMessages ctxS)
+      -- Resolve the agent name, if given.
+      mValidAgent <- case mAgentText of
+        Nothing -> pure (Right Nothing)
+        Just raw -> case AgentDef.mkAgentName raw of
+          Left _ -> pure (Left ("Invalid agent name: \"" <> raw <> "\"."))
+          Right validName -> do
+            agentsDir <- getAgentsDir
+            mDef <- AgentDef.loadAgent agentsDir validName
+            case mDef of
+              Nothing -> pure (Left ("Agent \"" <> raw <> "\" not found."))
+              Just _def -> pure (Right (Just validName))
+      case mValidAgent of
+        Left err -> do
+          sendS err
+          pure ctxS
+        Right mAgent -> do
+          -- Compose the agent's system prompt if an agent was resolved.
+          mSysPrompt <- case mAgent of
+            Nothing -> pure Nothing
+            Just agentName -> do
+              agentsDir <- getAgentsDir
+              mDef <- AgentDef.loadAgent agentsDir agentName
+              case mDef of
+                Nothing -> pure Nothing
+                Just def -> Just <$> AgentDef.composeAgentPrompt (_env_logger envS) def 8000
+          sessionsDir <- getSessionsDir
+          Dir.createDirectoryIfMissing True sessionsDir
+          now <- Time.getCurrentTime
+          let sid = SessionTypes.newSessionId Nothing now
+              meta = SessionTypes.SessionMeta
+                { SessionTypes._sm_id                = sid
+                , SessionTypes._sm_agent             = mAgent
+                , SessionTypes._sm_runtime           = runtime
+                , SessionTypes._sm_model             = ""
+                , SessionTypes._sm_channel           = ""
+                , SessionTypes._sm_createdAt         = now
+                , SessionTypes._sm_lastActive        = now
+                , SessionTypes._sm_bootstrapConsumed = False
+                }
+          newHandle <- Session.mkSessionHandle (_env_logger envS) sessionsDir meta
+          writeIORef (_env_session envS) newHandle
+          writeIORef (_env_target envS) (SessionTypes.defaultTarget runtime)
+          let agentMsg = case mAgent of
+                Nothing -> ""
+                Just a  -> "\nAgent: " <> AgentDef.unAgentName a
+              runtimeMsg = case runtime of
+                SessionTypes.RTProvider   -> ""
+                SessionTypes.RTHarness n  -> "\nTarget: harness:" <> n
+              -- Use the agent's system prompt if available, otherwise
+              -- carry forward the existing context's system prompt.
+              newSysPrompt = mSysPrompt <|> contextSystemPrompt ctxS
+          sendS ("New session created: " <> unSessionId sid
+                <> "\nSession cleared. Starting fresh." <> agentMsg <> runtimeMsg)
+          pure (emptyContext newSysPrompt)
 
 -- | Known harnesses: (canonical name, aliases, description).
 knownHarnesses :: [(Text, [Text], Text)]

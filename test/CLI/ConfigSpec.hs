@@ -237,6 +237,7 @@ spec = do
       _fc_vault_identity  emptyFileConfig `shouldBe` Nothing
       _fc_vault_path      emptyFileConfig `shouldBe` Nothing
       _fc_vault_unlock    emptyFileConfig `shouldBe` Nothing
+      _fc_defaultTarget   emptyFileConfig `shouldBe` Nothing
 
   describe "updateVaultConfig" $ do
     it "round-trips vault fields" $

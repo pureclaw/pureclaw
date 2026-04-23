@@ -204,6 +204,12 @@ spec = do
     it "parses /target with trailing space as show" $ do
       parseSlashCommand "/target " `shouldBe` Just (CmdTarget Nothing)
 
+    it "parses /target default (no arg)" $ do
+      parseSlashCommand "/target default" `shouldBe` Just (CmdTargetDefault Nothing)
+
+    it "parses /target default <name>" $ do
+      parseSlashCommand "/target default claude-code-0" `shouldBe` Just (CmdTargetDefault (Just "claude-code-0"))
+
     it "is case-insensitive" $ do
       parseSlashCommand "/NEW" `shouldBe` Just CmdNew
       parseSlashCommand "/Status" `shouldBe` Just CmdStatus
@@ -1928,6 +1934,12 @@ spec = do
     it "/agent start is no longer recognised (use /session new)" $
       parseSlashCommand "/agent start zoe" `shouldBe` Just (CmdAgent (AgentUnknown "start"))
 
+    it "parses /agent default (no arg)" $
+      parseSlashCommand "/agent default" `shouldBe` Just (CmdAgent (AgentDefault Nothing))
+
+    it "parses /agent default <name>" $
+      parseSlashCommand "/agent default zoe" `shouldBe` Just (CmdAgent (AgentDefault (Just "zoe")))
+
     it "returns AgentUnknown for bare /agent" $
       parseSlashCommand "/agent" `shouldBe` Just (CmdAgent (AgentUnknown ""))
 
@@ -2069,15 +2081,23 @@ spec = do
 
   describe "parseSlashCommand — /session" $ do
     it "parses /session new" $
-      parseSlashCommand "/session new" `shouldBe` Just (CmdSession (SessionNew Nothing))
+      parseSlashCommand "/session new" `shouldBe` Just (CmdSession (SessionNew Nothing Nothing))
 
-    it "parses /session new <harness>" $
-      parseSlashCommand "/session new claude-code-0"
-        `shouldBe` Just (CmdSession (SessionNew (Just "claude-code-0")))
+    it "parses /session new <agent>" $
+      parseSlashCommand "/session new zoe"
+        `shouldBe` Just (CmdSession (SessionNew (Just "zoe") Nothing))
 
-    it "parses /session new case-insensitively with harness" $
-      parseSlashCommand "/SESSION NEW claude-code-0"
-        `shouldBe` Just (CmdSession (SessionNew (Just "claude-code-0")))
+    it "parses /session new <agent> --target <name>" $
+      parseSlashCommand "/session new zoe --target claude-code-0"
+        `shouldBe` Just (CmdSession (SessionNew (Just "zoe") (Just "claude-code-0")))
+
+    it "parses /session new --target <name> (no agent)" $
+      parseSlashCommand "/session new --target claude-code-0"
+        `shouldBe` Just (CmdSession (SessionNew Nothing (Just "claude-code-0")))
+
+    it "parses /session new case-insensitively" $
+      parseSlashCommand "/SESSION NEW zoe --TARGET claude-code-0"
+        `shouldBe` Just (CmdSession (SessionNew (Just "zoe") (Just "claude-code-0")))
 
     it "parses /session list (no arg)" $
       parseSlashCommand "/session list" `shouldBe` Just (CmdSession (SessionList Nothing))
@@ -2107,7 +2127,7 @@ spec = do
       parseSlashCommand "/session compact" `shouldBe` Just (CmdSession SessionCompact)
 
     it "parses /session case-insensitively" $
-      parseSlashCommand "/SESSION NEW" `shouldBe` Just (CmdSession (SessionNew Nothing))
+      parseSlashCommand "/SESSION NEW" `shouldBe` Just (CmdSession (SessionNew Nothing Nothing))
 
     it "parses bare /session as unknown" $
       parseSlashCommand "/session" `shouldBe` Just (CmdSession (SessionUnknown ""))
@@ -2158,7 +2178,7 @@ spec = do
     it "/session new writes session.json on disk and returns a confirmation" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       sent <- readIORef sentRef
       case sent of
         Just t  -> T.unpack t `shouldContain` "New session created:"
@@ -2173,57 +2193,53 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
       let ctx = addMessage (textMessage User "hello") (emptyContext (Just "sys"))
-      ctx' <- executeSlashCommand env (CmdSession (SessionNew Nothing)) ctx
+      ctx' <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) ctx
       contextMessages ctx' `shouldBe` []
 
-    it "/session new <harness> rejects when harness is not running" $ withTempHome $ do
+    it "/session new --target rejects when target is not running" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
       let ctx = emptyContext Nothing
-      ctx' <- executeSlashCommand env (CmdSession (SessionNew (Just "ghost-0"))) ctx
+      ctx' <- executeSlashCommand env (CmdSession (SessionNew Nothing (Just "ghost-0"))) ctx
       sent <- readIORef sentRef
       case sent of
         Just t  -> T.unpack t `shouldContain` "not running"
-        Nothing -> expectationFailure "Expected error about harness not running"
+        Nothing -> expectationFailure "Expected error about target not running"
       -- Context should be unchanged (no clear)
       contextMessages ctx' `shouldBe` contextMessages ctx
 
-    it "/session new <harness> creates session with RTHarness when harness exists" $ withTempHome $ do
+    it "/session new --target creates session with RTHarness when harness exists" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
-      -- Insert a mock harness into the env
       let harnessName = "claude-code-0"
           mockHarness = mkNoOpHarnessHandle { _hh_name = harnessName }
       writeIORef (_env_harnesses env) (Map.singleton harnessName mockHarness)
-      _ <- executeSlashCommand env (CmdSession (SessionNew (Just harnessName))) (emptyContext Nothing)
-      -- Check the confirmation message mentions the harness
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing (Just harnessName))) (emptyContext Nothing)
       sent <- readIORef sentRef
       case sent of
         Just t  -> do
           T.unpack t `shouldContain` "New session created:"
           T.unpack t `shouldContain` "harness:claude-code-0"
         Nothing -> expectationFailure "Expected session creation confirmation"
-      -- Check that session metadata has RTHarness
       activeHandle <- readIORef (_env_session env)
       meta <- readIORef (_sh_meta activeHandle)
       _sm_runtime meta `shouldBe` RTHarness harnessName
 
-    it "/session new <harness> sets target to TargetHarness" $ withTempHome $ do
+    it "/session new --target sets target to TargetHarness" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
       let harnessName = "claude-code-0"
           mockHarness = mkNoOpHarnessHandle { _hh_name = harnessName }
       writeIORef (_env_harnesses env) (Map.singleton harnessName mockHarness)
-      _ <- executeSlashCommand env (CmdSession (SessionNew (Just harnessName))) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing (Just harnessName))) (emptyContext Nothing)
       target <- readIORef (_env_target env)
       target `shouldBe` TargetHarness harnessName
 
-    it "/session new (no harness) sets target to TargetProvider" $ withTempHome $ do
+    it "/session new (no target) sets target to TargetProvider" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
-      -- First switch target away from provider to verify it gets reset
       writeIORef (_env_target env) (TargetHarness "something")
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       target <- readIORef (_env_target env)
       target `shouldBe` TargetProvider
 
@@ -2240,8 +2256,8 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
       -- Create two sessions
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       writeIORef sentRef Nothing
       _ <- executeSlashCommand env (CmdSession (SessionList Nothing)) (emptyContext Nothing)
       sent <- readIORef sentRef
@@ -2262,7 +2278,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
       -- Create a session
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       home <- getEnv "HOME"
       let sessionsDir = home </> ".pureclaw" </> "sessions"
       entries <- Dir.listDirectory sessionsDir
@@ -2288,7 +2304,7 @@ spec = do
     it "/session last resumes most recent after creating" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       writeIORef sentRef Nothing
       _ <- executeSlashCommand env (CmdSession SessionLast) (emptyContext Nothing)
       sent <- readIORef sentRef
@@ -2304,7 +2320,7 @@ spec = do
       initialMeta   <- readIORef (_sh_meta initialHandle)
       let initialId = _sm_id initialMeta
       -- Run /session new
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       -- The active session handle should now point at a different SessionMeta
       -- with a fresh ID. If the implementation used `_ <- mkSessionHandle ...`
       -- (discard), this assertion fails because _env_session still holds the
@@ -2320,9 +2336,9 @@ spec = do
       env <- mkSessionEnv sentRef
       -- Create two sessions via /session new so we have two on disk.
       -- Delay between creates so the millisecond-resolution session IDs differ.
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       threadDelay 2000  -- 2 ms
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       -- After the second /session new, the active session is the second one.
       activeAfterSecond <- readIORef (_env_session env)
       metaAfterSecond   <- readIORef (_sh_meta activeAfterSecond)
@@ -2348,7 +2364,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
       -- Create a session and capture its id.
-      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing)) (emptyContext Nothing)
+      _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       createdHandle <- readIORef (_env_session env)
       createdMeta   <- readIORef (_sh_meta createdHandle)
       let createdId = _sm_id createdMeta

@@ -18,6 +18,7 @@ module PureClaw.CLI.Config
   , writeFileConfig
   , FieldUpdate (..)
   , updateVaultConfig
+  , updateDefaultsConfig
     -- * Directory helpers
   , getPureclawDir
   ) where
@@ -54,6 +55,7 @@ data FileConfig = FileConfig
   , _fc_defaultAgent   :: Maybe Text  -- ^ Name of the agent loaded when @--agent@ is omitted
   , _fc_agentTruncateLimit :: Maybe Int -- ^ Per-file truncation limit (chars) for composed prompts; default 8000
   , _fc_sessionPrefix  :: Maybe Text  -- ^ Default session prefix when @--prefix@ and @--agent@ are both omitted
+  , _fc_defaultTarget  :: Maybe Text  -- ^ Default target for new sessions (@"provider"@ or a harness name)
   } deriving stock (Show, Eq)
 
 -- | Signal channel configuration from the @[signal]@ TOML table.
@@ -69,7 +71,7 @@ emptyFileConfig =
   FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
              Nothing Nothing Nothing Nothing Nothing Nothing Nothing
              Nothing Nothing Nothing Nothing Nothing
-             Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing
 
 emptyFileSignalConfig :: FileSignalConfig
 emptyFileSignalConfig = FileSignalConfig Nothing Nothing Nothing Nothing
@@ -107,6 +109,7 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.text "default_agent")             .= _fc_defaultAgent
   <*> Toml.dioptional (Toml.int  "agent_truncate_limit")      .= _fc_agentTruncateLimit
   <*> Toml.dioptional (Toml.text "session_prefix")            .= _fc_sessionPrefix
+  <*> Toml.dioptional (Toml.text "default_target")            .= _fc_defaultTarget
 
 fileSignalConfigCodec :: TomlCodec FileSignalConfig
 fileSignalConfigCodec = FileSignalConfig
@@ -230,5 +233,21 @@ updateVaultConfig path vaultPath vaultRecipient vaultIdentity vaultUnlock = do
         , _fc_vault_recipient = applyUpdate vaultRecipient  (_fc_vault_recipient existing)
         , _fc_vault_identity  = applyUpdate vaultIdentity   (_fc_vault_identity existing)
         , _fc_vault_unlock    = applyUpdate vaultUnlock     (_fc_vault_unlock existing)
+        }
+  TIO.writeFile path (Toml.encode fileConfigCodec updated)
+
+-- | Update default agent and\/or default target in a config file,
+-- preserving all other settings.
+updateDefaultsConfig
+  :: FilePath             -- ^ Config file path
+  -> FieldUpdate Text     -- ^ default_agent
+  -> FieldUpdate Text     -- ^ default_target
+  -> IO ()
+updateDefaultsConfig _ Keep Keep = pure ()
+updateDefaultsConfig path agent target = do
+  existing <- loadFileConfig path
+  let updated = existing
+        { _fc_defaultAgent  = applyUpdate agent  (_fc_defaultAgent existing)
+        , _fc_defaultTarget = applyUpdate target  (_fc_defaultTarget existing)
         }
   TIO.writeFile path (Toml.encode fileConfigCodec updated)
