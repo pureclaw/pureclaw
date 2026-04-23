@@ -45,6 +45,7 @@ instance Provider MockProvider where
     , _crsp_model   = ModelId "mock"
     , _crsp_usage   = Nothing
     }
+  listModels _ = pure [ModelId "llama3", ModelId "test", ModelId "mock"]
 
 -- | Build a mock VaultHandle backed by IORef state.
 -- Starts unlocked with no secrets.

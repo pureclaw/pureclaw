@@ -737,15 +737,29 @@ executeSlashCommand env (CmdTarget (Just name)) ctx = do
       writeIORef (_env_target env) (TargetHarness name)
       send $ "Target switched to harness: " <> name
     else do
-      writeIORef (_env_target env) TargetProvider
-      writeIORef (_env_model env) (ModelId name)
-      -- Persist to config.toml
-      pureclawDir <- getPureclawDir
-      let configPath = pureclawDir </> "config.toml"
-      existing <- loadFileConfig configPath
-      Dir.createDirectoryIfMissing True pureclawDir
-      writeFileConfig configPath (existing { _fc_model = Just name })
-      send $ "Target switched to model: " <> name
+      -- Validate the name is a known model before accepting it.
+      mProvider <- readIORef (_env_provider env)
+      models <- case mProvider of
+        Nothing -> pure []
+        Just provider -> listModels provider
+      if ModelId name `elem` models
+        then do
+          writeIORef (_env_target env) TargetProvider
+          writeIORef (_env_model env) (ModelId name)
+          pureclawDir <- getPureclawDir
+          let configPath = pureclawDir </> "config.toml"
+          existing <- loadFileConfig configPath
+          Dir.createDirectoryIfMissing True pureclawDir
+          writeFileConfig configPath (existing { _fc_model = Just name })
+          send $ "Target switched to model: " <> name
+        else do
+          let harnessNames = if Map.null harnesses
+                then ""
+                else "\nRunning harnesses: " <> T.intercalate ", " (Map.keys harnesses)
+              modelNames = if null models
+                then "\nNo models available (provider not configured?)"
+                else "\nAvailable models: " <> T.intercalate ", " (map unModelId models)
+          send $ "Unknown target: \"" <> name <> "\"." <> harnessNames <> modelNames
   pure ctx
 
 executeSlashCommand env CmdTargetList ctx = do

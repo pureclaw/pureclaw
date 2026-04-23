@@ -462,7 +462,6 @@ runChat opts = do
     Just _  -> _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
     Nothing -> _lh_logInfo logger
       "No providers configured \x2014 use /provider to get started"
-  _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
   _lh_logInfo logger $ "Default agent: "
     <> maybe "(none)" id (_fc_defaultAgent fileCfg)
   _lh_logInfo logger $ "Default target: "
