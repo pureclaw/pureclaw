@@ -222,7 +222,8 @@ spec = do
         bin ["--agent", "zoe", "--no-vault"] "" 5000000
         (\tmp -> setupFixtureAgent tmp "zoe" "You are Zoe, a helpful agent.")
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      err `shouldContain` "Agent: zoe"
+      -- Agent loaded from --agent flag; config has no default set
+      err `shouldContain` "Default agent: (none)"
 
     it "rejects an invalid agent name with a helpful error" $ do
       bin <- findPureclaw
@@ -248,7 +249,7 @@ spec = do
            createDirectoryIfMissing True cfgDir
            writeFile (cfgDir </> "config.toml") "default_agent = \"zoe\"\n")
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      err `shouldContain` "Agent: zoe"
+      err `shouldContain` "Default agent: zoe"
 
     it "--agent flag overrides default_agent in config" $ do
       bin <- findPureclaw
@@ -261,21 +262,21 @@ spec = do
            createDirectoryIfMissing True cfgDir
            writeFile (cfgDir </> "config.toml") "default_agent = \"zoe\"\n")
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      err `shouldContain` "Agent: bob"
+      err `shouldContain` "Default agent: zoe"
 
     it "backward-compat: no agent, no SOUL.md → no system prompt, no crash" $ do
       bin <- findPureclaw
       (exitCode, out, err) <- runPureclaw bin "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "PureClaw"
-      err `shouldNotContain` "Agent:"
+      err `shouldContain` "Default agent: (none)"
 
     it "backward-compat: --system is honored when no agent is selected" $ do
       bin <- findPureclaw
       (exitCode, _out, err) <- runPureclawWithArgs
         bin ["--system", "custom-prompt", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      err `shouldNotContain` "Agent:"
+      err `shouldContain` "Default agent: (none)"
 
   describe "--prefix CLI flag" $ do
     it "creates a session whose dir starts with the given prefix" $ do

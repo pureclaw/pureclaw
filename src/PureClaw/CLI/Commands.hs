@@ -463,16 +463,10 @@ runChat opts = do
     Nothing -> _lh_logInfo logger
       "No providers configured \x2014 use /provider to get started"
   _lh_logInfo logger $ "Model: " <> T.pack effectiveModel
-  case mAgentDef of
-    Just d  -> _lh_logInfo logger $
-      "Agent: " <> AgentDef.unAgentName (AgentDef._ad_name d)
-    Nothing -> pure ()
-  case _fc_defaultAgent fileCfg of
-    Just name -> _lh_logInfo logger $ "Default agent: " <> name
-    Nothing   -> pure ()
-  case _fc_defaultTarget fileCfg of
-    Just name -> _lh_logInfo logger $ "Default target: " <> name
-    Nothing   -> pure ()
+  _lh_logInfo logger $ "Default agent: "
+    <> maybe "(none)" id (_fc_defaultAgent fileCfg)
+  _lh_logInfo logger $ "Default target: "
+    <> maybe "provider" id (_fc_defaultTarget fileCfg)
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case (_sp_allowedCommands policy, _sp_autonomy policy) of
     (AllowAll, Full) -> do
