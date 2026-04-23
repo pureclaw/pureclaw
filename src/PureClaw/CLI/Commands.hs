@@ -466,7 +466,7 @@ runChat opts = do
   _lh_logInfo logger $ "Default agent: "
     <> maybe "(none)" id (_fc_defaultAgent fileCfg)
   _lh_logInfo logger $ "Default target: "
-    <> maybe "provider" id (_fc_defaultTarget fileCfg)
+    <> maybe "(none)" id (_fc_defaultTarget fileCfg)
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case (_sp_allowedCommands policy, _sp_autonomy policy) of
     (AllowAll, Full) -> do
