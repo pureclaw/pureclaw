@@ -1,0 +1,196 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Providers.Class
+<span class="lineno">    2 </span>  ( -- * Message types
+<span class="lineno">    3 </span>    Role (..)
+<span class="lineno">    4 </span>  , ContentBlock (..)
+<span class="lineno">    5 </span>  , Message (..)
+<span class="lineno">    6 </span>  , roleToText
+<span class="lineno">    7 </span>    -- * Tool result content
+<span class="lineno">    8 </span>  , ToolResultPart (..)
+<span class="lineno">    9 </span>    -- * Convenience constructors
+<span class="lineno">   10 </span>  , textMessage
+<span class="lineno">   11 </span>  , toolResultMessage
+<span class="lineno">   12 </span>    -- * Content block queries
+<span class="lineno">   13 </span>  , responseText
+<span class="lineno">   14 </span>  , toolUseCalls
+<span class="lineno">   15 </span>    -- * Tool definitions
+<span class="lineno">   16 </span>  , ToolDefinition (..)
+<span class="lineno">   17 </span>  , ToolChoice (..)
+<span class="lineno">   18 </span>    -- * Request and response
+<span class="lineno">   19 </span>  , CompletionRequest (..)
+<span class="lineno">   20 </span>  , CompletionResponse (..)
+<span class="lineno">   21 </span>  , Usage (..)
+<span class="lineno">   22 </span>    -- * Streaming
+<span class="lineno">   23 </span>  , StreamEvent (..)
+<span class="lineno">   24 </span>    -- * Provider typeclass
+<span class="lineno">   25 </span>  , Provider (..)
+<span class="lineno">   26 </span>    -- * Existential wrapper
+<span class="lineno">   27 </span>  , SomeProvider (..)
+<span class="lineno">   28 </span>  ) where
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>import Data.Aeson (Value)
+<span class="lineno">   31 </span>import Data.ByteString (ByteString)
+<span class="lineno">   32 </span>import Data.Text (Text)
+<span class="lineno">   33 </span>import Data.Text qualified as T
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>import PureClaw.Core.Types
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Role in a conversation. System prompts are handled separately
+<span class="lineno">   38 </span>-- via 'CompletionRequest._cr_systemPrompt' rather than as messages,
+<span class="lineno">   39 </span>-- since providers differ on how they handle system content.
+<span class="lineno">   40 </span>data Role = User | Assistant
+<span class="lineno">   41 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   42 </span>
+<span class="lineno">   43 </span>-- | A single content block within a message. Messages contain one or
+<span class="lineno">   44 </span>-- more content blocks, allowing mixed text and tool interactions.
+<span class="lineno">   45 </span>data ContentBlock
+<span class="lineno">   46 </span>  = TextBlock Text
+<span class="lineno">   47 </span>  | ImageBlock
+<span class="lineno">   48 </span>      { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ib_mediaType</span></span></span> :: Text       -- ^ MIME type (e.g. &quot;image/png&quot;)
+<span class="lineno">   49 </span>      , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ib_data</span></span></span>      :: ByteString -- ^ base64-encoded image data
+<span class="lineno">   50 </span>      }
+<span class="lineno">   51 </span>  | ToolUseBlock
+<span class="lineno">   52 </span>      { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tub_id</span></span></span>    :: ToolCallId
+<span class="lineno">   53 </span>      , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tub_name</span></span></span>  :: Text
+<span class="lineno">   54 </span>      , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tub_input</span></span></span> :: Value
+<span class="lineno">   55 </span>      }
+<span class="lineno">   56 </span>  | ToolResultBlock
+<span class="lineno">   57 </span>      { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_trb_toolUseId</span></span></span> :: ToolCallId
+<span class="lineno">   58 </span>      , <span class="istickedoff"><span class="decl"><span class="istickedoff">_trb_content</span></span></span>   :: [ToolResultPart]
+<span class="lineno">   59 </span>      , <span class="istickedoff"><span class="decl"><span class="istickedoff">_trb_isError</span></span></span>   :: Bool
+<span class="lineno">   60 </span>      }
+<span class="lineno">   61 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   62 </span>
+<span class="lineno">   63 </span>-- | Content within a tool result. Supports text and images so that
+<span class="lineno">   64 </span>-- vision tools can return image data alongside descriptions.
+<span class="lineno">   65 </span>data ToolResultPart
+<span class="lineno">   66 </span>  = TRPText Text
+<span class="lineno">   67 </span>  | TRPImage Text ByteString  -- ^ (mediaType, base64Data)
+<span class="lineno">   68 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   69 </span>
+<span class="lineno">   70 </span>-- | A single message in a conversation. Content is a list of blocks
+<span class="lineno">   71 </span>-- to support tool use/result interleaving with text.
+<span class="lineno">   72 </span>data Message = Message
+<span class="lineno">   73 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_msg_role</span></span></span>    :: Role
+<span class="lineno">   74 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_msg_content</span></span></span> :: [ContentBlock]
+<span class="lineno">   75 </span>  }
+<span class="lineno">   76 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- | Convert a role to its API text representation.
+<span class="lineno">   79 </span>roleToText :: Role -&gt; Text
+<span class="lineno">   80 </span><span class="decl"><span class="istickedoff">roleToText User      = &quot;user&quot;</span>
+<span class="lineno">   81 </span><span class="spaces"></span><span class="istickedoff">roleToText Assistant  = &quot;assistant&quot;</span></span>
+<span class="lineno">   82 </span>
+<span class="lineno">   83 </span>-- | Create a simple text message (the common case).
+<span class="lineno">   84 </span>textMessage :: Role -&gt; Text -&gt; Message
+<span class="lineno">   85 </span><span class="decl"><span class="istickedoff">textMessage role txt = Message role [TextBlock txt]</span></span>
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>-- | Create a tool result message (user role with tool results).
+<span class="lineno">   88 </span>toolResultMessage :: [(ToolCallId, [ToolResultPart], Bool)] -&gt; Message
+<span class="lineno">   89 </span><span class="decl"><span class="istickedoff">toolResultMessage results = Message <span class="nottickedoff">User</span></span>
+<span class="lineno">   90 </span><span class="spaces">  </span><span class="istickedoff">[ ToolResultBlock <span class="nottickedoff">callId</span> <span class="nottickedoff">content</span> <span class="nottickedoff">isErr</span></span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">| (callId, content, isErr) &lt;- results</span>
+<span class="lineno">   92 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>-- | Extract concatenated text from a response's content blocks.
+<span class="lineno">   95 </span>responseText :: CompletionResponse -&gt; Text
+<span class="lineno">   96 </span><span class="decl"><span class="istickedoff">responseText resp =</span>
+<span class="lineno">   97 </span><span class="spaces">  </span><span class="istickedoff">let texts = [t | TextBlock t &lt;- _crsp_content resp]</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="istickedoff">in T.intercalate &quot;\n&quot; texts</span></span>
+<span class="lineno">   99 </span>
+<span class="lineno">  100 </span>-- | Extract tool use calls from a response's content blocks.
+<span class="lineno">  101 </span>toolUseCalls :: CompletionResponse -&gt; [(ToolCallId, Text, Value)]
+<span class="lineno">  102 </span><span class="decl"><span class="istickedoff">toolUseCalls resp =</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">[ (<span class="nottickedoff">_tub_id b</span>, _tub_name b, <span class="nottickedoff">_tub_input b</span>)</span>
+<span class="lineno">  104 </span><span class="spaces">  </span><span class="istickedoff">| b@ToolUseBlock {} &lt;- _crsp_content resp</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  106 </span>
+<span class="lineno">  107 </span>-- | Tool definition for offering tools to the provider.
+<span class="lineno">  108 </span>data ToolDefinition = ToolDefinition
+<span class="lineno">  109 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_name</span></span></span>        :: Text
+<span class="lineno">  110 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_description</span></span></span> :: Text
+<span class="lineno">  111 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_inputSchema</span></span></span> :: Value
+<span class="lineno">  112 </span>  }
+<span class="lineno">  113 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  114 </span>
+<span class="lineno">  115 </span>-- | Tool choice constraint for the provider.
+<span class="lineno">  116 </span>data ToolChoice
+<span class="lineno">  117 </span>  = AutoTool
+<span class="lineno">  118 </span>  | AnyTool
+<span class="lineno">  119 </span>  | SpecificTool Text
+<span class="lineno">  120 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  121 </span>
+<span class="lineno">  122 </span>-- | Request to an LLM provider.
+<span class="lineno">  123 </span>data CompletionRequest = CompletionRequest
+<span class="lineno">  124 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_cr_model</span></span></span>        :: ModelId
+<span class="lineno">  125 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cr_messages</span></span></span>     :: [Message]
+<span class="lineno">  126 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cr_systemPrompt</span></span></span> :: Maybe Text
+<span class="lineno">  127 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cr_maxTokens</span></span></span>    :: Maybe Int
+<span class="lineno">  128 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cr_tools</span></span></span>        :: [ToolDefinition]
+<span class="lineno">  129 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cr_toolChoice</span></span></span>   :: Maybe ToolChoice
+<span class="lineno">  130 </span>  }
+<span class="lineno">  131 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- | Token usage information.
+<span class="lineno">  134 </span>data Usage = Usage
+<span class="lineno">  135 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_usage_inputTokens</span></span></span>  :: Int
+<span class="lineno">  136 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_usage_outputTokens</span></span></span> :: Int
+<span class="lineno">  137 </span>  }
+<span class="lineno">  138 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | Response from an LLM provider.
+<span class="lineno">  141 </span>data CompletionResponse = CompletionResponse
+<span class="lineno">  142 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_crsp_content</span></span></span> :: [ContentBlock]
+<span class="lineno">  143 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_crsp_model</span></span></span>   :: ModelId
+<span class="lineno">  144 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_crsp_usage</span></span></span>   :: Maybe Usage
+<span class="lineno">  145 </span>  }
+<span class="lineno">  146 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  147 </span>
+<span class="lineno">  148 </span>-- | Events emitted during streaming completion.
+<span class="lineno">  149 </span>data StreamEvent
+<span class="lineno">  150 </span>  = StreamText Text                -- ^ Partial text content
+<span class="lineno">  151 </span>  | StreamToolUse ToolCallId Text  -- ^ Tool call started (id, name)
+<span class="lineno">  152 </span>  | StreamToolInput Text           -- ^ Partial tool input JSON
+<span class="lineno">  153 </span>  | StreamDone CompletionResponse  -- ^ Stream finished with full response
+<span class="lineno">  154 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  155 </span>
+<span class="lineno">  156 </span>-- | LLM provider interface. Each provider (Anthropic, OpenAI, etc.)
+<span class="lineno">  157 </span>-- implements this typeclass.
+<span class="lineno">  158 </span>class Provider p where
+<span class="lineno">  159 </span>  complete :: p -&gt; CompletionRequest -&gt; IO CompletionResponse
+<span class="lineno">  160 </span>  -- | Stream a completion, calling the callback for each event.
+<span class="lineno">  161 </span>  -- Default falls back to non-streaming 'complete'.
+<span class="lineno">  162 </span>  completeStream :: p -&gt; CompletionRequest -&gt; (StreamEvent -&gt; IO ()) -&gt; IO ()
+<span class="lineno">  163 </span>  <span class="decl"><span class="istickedoff">completeStream p req callback = do</span>
+<span class="lineno">  164 </span><span class="spaces">    </span><span class="istickedoff">resp &lt;- complete p req</span>
+<span class="lineno">  165 </span><span class="spaces">    </span><span class="istickedoff">callback (StreamDone resp)</span></span>
+<span class="lineno">  166 </span>
+<span class="lineno">  167 </span>-- | Existential wrapper for runtime provider selection (e.g. from config).
+<span class="lineno">  168 </span>data SomeProvider where
+<span class="lineno">  169 </span>  MkProvider :: Provider p =&gt; p -&gt; SomeProvider
+<span class="lineno">  170 </span>
+<span class="lineno">  171 </span>instance Provider SomeProvider where
+<span class="lineno">  172 </span>  <span class="decl"><span class="istickedoff">complete (MkProvider p) = complete p</span></span>
+<span class="lineno">  173 </span>  <span class="decl"><span class="istickedoff">completeStream (MkProvider p) = completeStream p</span></span>
+
+</pre>
+</body>
+</html>

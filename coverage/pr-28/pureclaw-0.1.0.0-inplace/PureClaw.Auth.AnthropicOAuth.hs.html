@@ -1,0 +1,342 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Auth.AnthropicOAuth
+<span class="lineno">    2 </span>  ( -- * Configuration
+<span class="lineno">    3 </span>    OAuthConfig (..)
+<span class="lineno">    4 </span>  , defaultOAuthConfig
+<span class="lineno">    5 </span>    -- * Redirect URIs (exported for testing)
+<span class="lineno">    6 </span>  , cliRedirectUri
+<span class="lineno">    7 </span>    -- * Tokens and handle
+<span class="lineno">    8 </span>  , OAuthTokens (..)
+<span class="lineno">    9 </span>  , OAuthHandle (..)
+<span class="lineno">   10 </span>  , mkOAuthHandle
+<span class="lineno">   11 </span>    -- * PKCE (exported for testing)
+<span class="lineno">   12 </span>  , generateCodeVerifier
+<span class="lineno">   13 </span>  , computeCodeChallenge
+<span class="lineno">   14 </span>    -- * URL building (exported for testing)
+<span class="lineno">   15 </span>  , buildAuthorizationUrl
+<span class="lineno">   16 </span>    -- * Code parsing (exported for testing)
+<span class="lineno">   17 </span>  , stripCodeFragment
+<span class="lineno">   18 </span>    -- * Token parsing (exported for testing)
+<span class="lineno">   19 </span>  , parseTokenResponse
+<span class="lineno">   20 </span>    -- * Vault serialization (exported for testing)
+<span class="lineno">   21 </span>  , serializeTokens
+<span class="lineno">   22 </span>  , deserializeTokens
+<span class="lineno">   23 </span>    -- * OAuth flows
+<span class="lineno">   24 </span>  , runOAuthFlow
+<span class="lineno">   25 </span>  , refreshOAuthToken
+<span class="lineno">   26 </span>    -- * Error type
+<span class="lineno">   27 </span>  , OAuthError (..)
+<span class="lineno">   28 </span>  ) where
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>import Control.Exception (Exception, throwIO, try, SomeException)
+<span class="lineno">   31 </span>import Crypto.Hash (Digest, SHA256, hash)
+<span class="lineno">   32 </span>import Crypto.Random qualified as CR
+<span class="lineno">   33 </span>import Data.Aeson
+<span class="lineno">   34 </span>import Data.Aeson.Types (parseEither)
+<span class="lineno">   35 </span>import Data.ByteArray (convert)
+<span class="lineno">   36 </span>import Data.ByteString (ByteString)
+<span class="lineno">   37 </span>import Data.ByteString qualified as BS
+<span class="lineno">   38 </span>import Data.ByteString.Base64.URL qualified as B64URL
+<span class="lineno">   39 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   40 </span>import Data.IORef
+<span class="lineno">   41 </span>import Data.Text (Text)
+<span class="lineno">   42 </span>import Data.Text qualified as T
+<span class="lineno">   43 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   44 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   45 </span>import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+<span class="lineno">   46 </span>import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+<span class="lineno">   47 </span>import Network.HTTP.Client qualified as HTTP
+<span class="lineno">   48 </span>import Network.HTTP.Types (Header, renderSimpleQuery)
+<span class="lineno">   49 </span>import Network.HTTP.Types.Status qualified as Status
+<span class="lineno">   50 </span>import System.Info (os)
+<span class="lineno">   51 </span>import System.IO (hFlush, stdout)
+<span class="lineno">   52 </span>import System.Process.Typed qualified as P
+<span class="lineno">   53 </span>
+<span class="lineno">   54 </span>import PureClaw.Security.Secrets
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>-- | Configuration for the Anthropic OAuth 2.0 PKCE flow.
+<span class="lineno">   57 </span>data OAuthConfig = OAuthConfig
+<span class="lineno">   58 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_oac_clientId</span></span></span>  :: Text   -- ^ OAuth client ID
+<span class="lineno">   59 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oac_authUrl</span></span></span>   :: String -- ^ Authorization endpoint URL
+<span class="lineno">   60 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_oac_tokenUrl</span></span></span>  :: String -- ^ Token endpoint URL
+<span class="lineno">   61 </span>  }
+<span class="lineno">   62 </span>
+<span class="lineno">   63 </span>-- | Default config matching Claude Code's OAuth endpoints and client ID.
+<span class="lineno">   64 </span>defaultOAuthConfig :: OAuthConfig
+<span class="lineno">   65 </span><span class="decl"><span class="istickedoff">defaultOAuthConfig = OAuthConfig</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">{ _oac_clientId  = &quot;9d1c250a-e61b-44d9-88ed-5944d1962f5e&quot;</span>
+<span class="lineno">   67 </span><span class="spaces">  </span><span class="istickedoff">, _oac_authUrl   = &quot;https://claude.ai/oauth/authorize&quot;</span>
+<span class="lineno">   68 </span><span class="spaces">  </span><span class="istickedoff">, _oac_tokenUrl  = <span class="nottickedoff">&quot;https://console.anthropic.com/v1/oauth/token&quot;</span></span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>-- | Redirect URI for the CLI paste-code flow. Anthropic hosts a page at this
+<span class="lineno">   72 </span>-- URL that displays the authorization code for the user to copy and paste
+<span class="lineno">   73 </span>-- back into the CLI.
+<span class="lineno">   74 </span>cliRedirectUri :: ByteString
+<span class="lineno">   75 </span><span class="decl"><span class="istickedoff">cliRedirectUri = &quot;https://console.anthropic.com/oauth/code/callback&quot;</span></span>
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>-- | OAuth tokens returned from a successful flow or refresh.
+<span class="lineno">   78 </span>data OAuthTokens = OAuthTokens
+<span class="lineno">   79 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_oat_accessToken</span></span></span>  :: BearerToken -- ^ Access token for API calls
+<span class="lineno">   80 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oat_refreshToken</span></span></span> :: ByteString  -- ^ Refresh token (opaque, stored for renewal)
+<span class="lineno">   81 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oat_expiresAt</span></span></span>    :: UTCTime     -- ^ When the access token expires
+<span class="lineno">   82 </span>  }
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show OAuthTokens</span></span></span></span> where
+<span class="lineno">   85 </span>  <span class="decl"><span class="nottickedoff">show t = &quot;OAuthTokens { expiresAt = &quot; &lt;&gt; show (_oat_expiresAt t) &lt;&gt; &quot;, &lt;tokens redacted&gt; }&quot;</span></span>
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>-- | Handle wrapping a mutable token store and a refresh function.
+<span class="lineno">   88 </span>-- Passed to 'mkAnthropicProviderOAuth' so the provider can refresh tokens
+<span class="lineno">   89 </span>-- automatically when they expire.
+<span class="lineno">   90 </span>data OAuthHandle = OAuthHandle
+<span class="lineno">   91 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_oah_tokensRef</span></span></span> :: IORef OAuthTokens
+<span class="lineno">   92 </span>    -- ^ Mutable reference — updated after each successful refresh.
+<span class="lineno">   93 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oah_refresh</span></span></span>   :: ByteString -&gt; IO OAuthTokens
+<span class="lineno">   94 </span>    -- ^ Given a refresh token, obtain fresh tokens.
+<span class="lineno">   95 </span>  }
+<span class="lineno">   96 </span>
+<span class="lineno">   97 </span>-- | Construct an 'OAuthHandle' from an initial token set.
+<span class="lineno">   98 </span>mkOAuthHandle :: OAuthConfig -&gt; HTTP.Manager -&gt; OAuthTokens -&gt; IO OAuthHandle
+<span class="lineno">   99 </span><span class="decl"><span class="istickedoff">mkOAuthHandle cfg manager initialTokens = do</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">ref &lt;- newIORef initialTokens</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">pure OAuthHandle</span>
+<span class="lineno">  102 </span><span class="spaces">    </span><span class="istickedoff">{ _oah_tokensRef = ref</span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">, _oah_refresh   = <span class="nottickedoff">refreshOAuthToken cfg manager</span></span>
+<span class="lineno">  104 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  105 </span>
+<span class="lineno">  106 </span>-- | OAuth errors.
+<span class="lineno">  107 </span>newtype OAuthError = OAuthError Text
+<span class="lineno">  108 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  109 </span>
+<span class="lineno">  110 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Exception OAuthError</span></span></span></span></span></span></span></span>
+<span class="lineno">  111 </span>
+<span class="lineno">  112 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  113 </span>-- PKCE helpers
+<span class="lineno">  114 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  115 </span>
+<span class="lineno">  116 </span>-- | Generate a PKCE code verifier: 32 random bytes encoded as URL-safe
+<span class="lineno">  117 </span>-- base64 without padding (43 characters).
+<span class="lineno">  118 </span>generateCodeVerifier :: IO ByteString
+<span class="lineno">  119 </span><span class="decl"><span class="istickedoff">generateCodeVerifier = do</span>
+<span class="lineno">  120 </span><span class="spaces">  </span><span class="istickedoff">bytes &lt;- CR.getRandomBytes 32</span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">pure (stripPadding (B64URL.encode bytes))</span></span>
+<span class="lineno">  122 </span>
+<span class="lineno">  123 </span>-- | Compute the PKCE code challenge: BASE64URL(SHA256(verifier)).
+<span class="lineno">  124 </span>-- The verifier is treated as raw bytes (it is already ASCII-safe base64url).
+<span class="lineno">  125 </span>computeCodeChallenge :: ByteString -&gt; ByteString
+<span class="lineno">  126 </span><span class="decl"><span class="istickedoff">computeCodeChallenge verifier =</span>
+<span class="lineno">  127 </span><span class="spaces">  </span><span class="istickedoff">let digest   = hash verifier :: Digest SHA256</span>
+<span class="lineno">  128 </span><span class="spaces">      </span><span class="istickedoff">digestBs = convert digest :: ByteString</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">in stripPadding (B64URL.encode digestBs)</span></span>
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>-- | Strip '=' padding from a base64url-encoded string.
+<span class="lineno">  132 </span>stripPadding :: ByteString -&gt; ByteString
+<span class="lineno">  133 </span><span class="decl"><span class="istickedoff">stripPadding = BS.filter (/= 0x3d)</span></span>
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  136 </span>-- Authorization URL
+<span class="lineno">  137 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  138 </span>
+<span class="lineno">  139 </span>-- | Build the authorization URL.
+<span class="lineno">  140 </span>-- 'redirectUri' is included verbatim — callers choose the redirect strategy
+<span class="lineno">  141 </span>-- Use 'cliRedirectUri' for the paste-code flow.
+<span class="lineno">  142 </span>buildAuthorizationUrl :: OAuthConfig -&gt; ByteString -&gt; ByteString -&gt; ByteString -&gt; Text
+<span class="lineno">  143 </span><span class="decl"><span class="istickedoff">buildAuthorizationUrl cfg verifier state redirectUri =</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">let challenge = computeCodeChallenge verifier</span>
+<span class="lineno">  145 </span><span class="spaces">      </span><span class="istickedoff">qs = renderSimpleQuery True</span>
+<span class="lineno">  146 </span><span class="spaces">             </span><span class="istickedoff">[ (&quot;response_type&quot;,         &quot;code&quot;)</span>
+<span class="lineno">  147 </span><span class="spaces">             </span><span class="istickedoff">, (&quot;client_id&quot;,             TE.encodeUtf8 (_oac_clientId cfg))</span>
+<span class="lineno">  148 </span><span class="spaces">             </span><span class="istickedoff">, (&quot;redirect_uri&quot;,          redirectUri)</span>
+<span class="lineno">  149 </span><span class="spaces">             </span><span class="istickedoff">, (&quot;scope&quot;,                 &quot;org:create_api_key user:profile user:inference&quot;)</span>
+<span class="lineno">  150 </span><span class="spaces">             </span><span class="istickedoff">, (&quot;state&quot;,                 state)</span>
+<span class="lineno">  151 </span><span class="spaces">             </span><span class="istickedoff">, (&quot;code_challenge&quot;,        challenge)</span>
+<span class="lineno">  152 </span><span class="spaces">             </span><span class="istickedoff">, (&quot;code_challenge_method&quot;, &quot;S256&quot;)</span>
+<span class="lineno">  153 </span><span class="spaces">             </span><span class="istickedoff">]</span>
+<span class="lineno">  154 </span><span class="spaces">  </span><span class="istickedoff">in T.pack (_oac_authUrl cfg) &lt;&gt; TE.decodeUtf8 qs</span></span>
+<span class="lineno">  155 </span>
+<span class="lineno">  156 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  157 </span>-- Token response parsing
+<span class="lineno">  158 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  159 </span>
+<span class="lineno">  160 </span>-- | Parse a token response from the Anthropic token endpoint.
+<span class="lineno">  161 </span>-- 'now' is the current time, used to compute the absolute expiry.
+<span class="lineno">  162 </span>parseTokenResponse :: UTCTime -&gt; BL.ByteString -&gt; Either Text OAuthTokens
+<span class="lineno">  163 </span><span class="decl"><span class="istickedoff">parseTokenResponse now bs =</span>
+<span class="lineno">  164 </span><span class="spaces">  </span><span class="istickedoff">case eitherDecode bs of</span>
+<span class="lineno">  165 </span><span class="spaces">    </span><span class="istickedoff">Left err  -&gt; Left <span class="nottickedoff">(T.pack err)</span></span>
+<span class="lineno">  166 </span><span class="spaces">    </span><span class="istickedoff">Right val -&gt; case parseEither parseTokens val of</span>
+<span class="lineno">  167 </span><span class="spaces">      </span><span class="istickedoff">Left err -&gt; Left <span class="nottickedoff">(T.pack err)</span></span>
+<span class="lineno">  168 </span><span class="spaces">      </span><span class="istickedoff">Right t  -&gt; Right t</span>
+<span class="lineno">  169 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  170 </span><span class="spaces">    </span><span class="istickedoff">parseTokens = withObject <span class="nottickedoff">&quot;TokenResponse&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  171 </span><span class="spaces">      </span><span class="istickedoff">accessText  &lt;- o .: &quot;access_token&quot;</span>
+<span class="lineno">  172 </span><span class="spaces">      </span><span class="istickedoff">refreshText &lt;- o .: &quot;refresh_token&quot;</span>
+<span class="lineno">  173 </span><span class="spaces">      </span><span class="istickedoff">expiresIn   &lt;- o .: &quot;expires_in&quot;</span>
+<span class="lineno">  174 </span><span class="spaces">      </span><span class="istickedoff">let expiresAt = addUTCTime (fromIntegral (expiresIn :: Int)) now</span>
+<span class="lineno">  175 </span><span class="spaces">      </span><span class="istickedoff">pure OAuthTokens</span>
+<span class="lineno">  176 </span><span class="spaces">        </span><span class="istickedoff">{ _oat_accessToken  = mkBearerToken (TE.encodeUtf8 accessText)</span>
+<span class="lineno">  177 </span><span class="spaces">        </span><span class="istickedoff">, _oat_refreshToken = TE.encodeUtf8 refreshText</span>
+<span class="lineno">  178 </span><span class="spaces">        </span><span class="istickedoff">, _oat_expiresAt    = expiresAt</span>
+<span class="lineno">  179 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  182 </span>-- Vault serialization
+<span class="lineno">  183 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  184 </span>
+<span class="lineno">  185 </span>-- | Serialize tokens to JSON bytes for vault storage.
+<span class="lineno">  186 </span>serializeTokens :: OAuthTokens -&gt; ByteString
+<span class="lineno">  187 </span><span class="decl"><span class="istickedoff">serializeTokens tokens = BL.toStrict $ encode $ object</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;access_token&quot;  .= TE.decodeUtf8 (withBearerToken (_oat_accessToken  tokens) id)</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="istickedoff">, &quot;refresh_token&quot; .= TE.decodeUtf8 (_oat_refreshToken tokens)</span>
+<span class="lineno">  190 </span><span class="spaces">  </span><span class="istickedoff">, &quot;expires_at&quot;    .= (round (utcTimeToPOSIXSeconds (_oat_expiresAt tokens)) :: Int)</span>
+<span class="lineno">  191 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  192 </span>
+<span class="lineno">  193 </span>-- | Deserialize tokens from vault-stored JSON bytes.
+<span class="lineno">  194 </span>deserializeTokens :: ByteString -&gt; Either Text OAuthTokens
+<span class="lineno">  195 </span><span class="decl"><span class="istickedoff">deserializeTokens bs =</span>
+<span class="lineno">  196 </span><span class="spaces">  </span><span class="istickedoff">case eitherDecodeStrict bs of</span>
+<span class="lineno">  197 </span><span class="spaces">    </span><span class="istickedoff">Left err  -&gt; Left <span class="nottickedoff">(T.pack err)</span></span>
+<span class="lineno">  198 </span><span class="spaces">    </span><span class="istickedoff">Right val -&gt; case parseEither parseStored val of</span>
+<span class="lineno">  199 </span><span class="spaces">      </span><span class="istickedoff">Left err -&gt; Left <span class="nottickedoff">(T.pack err)</span></span>
+<span class="lineno">  200 </span><span class="spaces">      </span><span class="istickedoff">Right t  -&gt; Right t</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  202 </span><span class="spaces">    </span><span class="istickedoff">parseStored = withObject <span class="nottickedoff">&quot;StoredTokens&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  203 </span><span class="spaces">      </span><span class="istickedoff">accessText  &lt;- o .: &quot;access_token&quot;</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="istickedoff">refreshText &lt;- o .: &quot;refresh_token&quot;</span>
+<span class="lineno">  205 </span><span class="spaces">      </span><span class="istickedoff">expiresInt  &lt;- o .: &quot;expires_at&quot;</span>
+<span class="lineno">  206 </span><span class="spaces">      </span><span class="istickedoff">let expiresAt = posixSecondsToUTCTime (fromIntegral (expiresInt :: Int))</span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="istickedoff">pure OAuthTokens</span>
+<span class="lineno">  208 </span><span class="spaces">        </span><span class="istickedoff">{ _oat_accessToken  = mkBearerToken (TE.encodeUtf8 accessText)</span>
+<span class="lineno">  209 </span><span class="spaces">        </span><span class="istickedoff">, _oat_refreshToken = TE.encodeUtf8 refreshText</span>
+<span class="lineno">  210 </span><span class="spaces">        </span><span class="istickedoff">, _oat_expiresAt    = expiresAt</span>
+<span class="lineno">  211 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  212 </span>
+<span class="lineno">  213 </span>-- | Headers required for all requests to the Anthropic OAuth token endpoint.
+<span class="lineno">  214 </span>oauthRequestHeaders :: [Header]
+<span class="lineno">  215 </span><span class="decl"><span class="nottickedoff">oauthRequestHeaders =</span>
+<span class="lineno">  216 </span><span class="spaces">  </span><span class="nottickedoff">[ (&quot;content-type&quot;,      &quot;application/json&quot;)</span>
+<span class="lineno">  217 </span><span class="spaces">  </span><span class="nottickedoff">, (&quot;anthropic-version&quot;, &quot;2023-06-01&quot;)</span>
+<span class="lineno">  218 </span><span class="spaces">  </span><span class="nottickedoff">, (&quot;anthropic-beta&quot;,    &quot;oauth-2025-04-20&quot;)</span>
+<span class="lineno">  219 </span><span class="spaces">  </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  220 </span>
+<span class="lineno">  221 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  222 </span>-- OAuth flows
+<span class="lineno">  223 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  224 </span>
+<span class="lineno">  225 </span>-- | Run the OAuth 2.0 PKCE out-of-band flow:
+<span class="lineno">  226 </span>--   1. Generate PKCE verifier + state
+<span class="lineno">  227 </span>--   2. Print the authorization URL (and try to open the browser)
+<span class="lineno">  228 </span>--   3. Prompt the user to paste the authorization code displayed by the browser
+<span class="lineno">  229 </span>--   4. Exchange the code for tokens
+<span class="lineno">  230 </span>runOAuthFlow :: OAuthConfig -&gt; HTTP.Manager -&gt; IO OAuthTokens
+<span class="lineno">  231 </span><span class="decl"><span class="nottickedoff">runOAuthFlow cfg manager = do</span>
+<span class="lineno">  232 </span><span class="spaces">  </span><span class="nottickedoff">verifier &lt;- generateCodeVerifier</span>
+<span class="lineno">  233 </span><span class="spaces">  </span><span class="nottickedoff">-- Use verifier as state (matching the pi-ai / Claude Code convention)</span>
+<span class="lineno">  234 </span><span class="spaces">  </span><span class="nottickedoff">let authUrl = buildAuthorizationUrl cfg verifier verifier cliRedirectUri</span>
+<span class="lineno">  235 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn &quot;Anthropic OAuth login required.&quot;</span>
+<span class="lineno">  236 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn &quot;Visit this URL to authenticate:&quot;</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="nottickedoff">TIO.putStrLn authUrl</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="nottickedoff">putStr &quot;(Attempting to open browser...) &quot; &gt;&gt; hFlush stdout</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="nottickedoff">tryOpenBrowser (T.unpack authUrl)</span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn &quot;&quot;</span>
+<span class="lineno">  241 </span><span class="spaces">  </span><span class="nottickedoff">putStr &quot;Paste the authorization code shown in your browser: &quot; &gt;&gt; hFlush stdout</span>
+<span class="lineno">  242 </span><span class="spaces">  </span><span class="nottickedoff">rawInput &lt;- T.strip . T.pack &lt;$&gt; getLine</span>
+<span class="lineno">  243 </span><span class="spaces">  </span><span class="nottickedoff">let code  = T.takeWhile (/= '#') rawInput</span>
+<span class="lineno">  244 </span><span class="spaces">      </span><span class="nottickedoff">state = T.drop 1 (T.dropWhile (/= '#') rawInput)</span>
+<span class="lineno">  245 </span><span class="spaces">  </span><span class="nottickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  246 </span><span class="spaces">  </span><span class="nottickedoff">exchangeCodeForTokens cfg manager verifier code state now</span></span>
+<span class="lineno">  247 </span>
+<span class="lineno">  248 </span>-- | Strip whitespace and any trailing @#fragment@ from a pasted authorization
+<span class="lineno">  249 </span>-- code. The @platform.claude.com@ callback page appends @#state@ to the
+<span class="lineno">  250 </span>-- displayed code.
+<span class="lineno">  251 </span>stripCodeFragment :: Text -&gt; Text
+<span class="lineno">  252 </span><span class="decl"><span class="istickedoff">stripCodeFragment = T.takeWhile (/= '#') . T.strip</span></span>
+<span class="lineno">  253 </span>
+<span class="lineno">  254 </span>-- | Exchange an authorization code for tokens.
+<span class="lineno">  255 </span>-- 'state' is extracted from the @#fragment@ of the pasted callback code
+<span class="lineno">  256 </span>-- (Anthropic's token endpoint requires it to match the value sent in the
+<span class="lineno">  257 </span>-- authorisation URL).
+<span class="lineno">  258 </span>exchangeCodeForTokens
+<span class="lineno">  259 </span>  :: OAuthConfig -&gt; HTTP.Manager -&gt; ByteString -&gt; Text -&gt; Text -&gt; UTCTime -&gt; IO OAuthTokens
+<span class="lineno">  260 </span><span class="decl"><span class="nottickedoff">exchangeCodeForTokens cfg manager verifier code state now = do</span>
+<span class="lineno">  261 </span><span class="spaces">  </span><span class="nottickedoff">let body = encode $ object</span>
+<span class="lineno">  262 </span><span class="spaces">               </span><span class="nottickedoff">[ &quot;grant_type&quot;    .= (&quot;authorization_code&quot; :: Text)</span>
+<span class="lineno">  263 </span><span class="spaces">               </span><span class="nottickedoff">, &quot;client_id&quot;     .= _oac_clientId cfg</span>
+<span class="lineno">  264 </span><span class="spaces">               </span><span class="nottickedoff">, &quot;code&quot;          .= code</span>
+<span class="lineno">  265 </span><span class="spaces">               </span><span class="nottickedoff">, &quot;state&quot;         .= state</span>
+<span class="lineno">  266 </span><span class="spaces">               </span><span class="nottickedoff">, &quot;redirect_uri&quot;  .= TE.decodeUtf8 cliRedirectUri</span>
+<span class="lineno">  267 </span><span class="spaces">               </span><span class="nottickedoff">, &quot;code_verifier&quot; .= TE.decodeUtf8 verifier</span>
+<span class="lineno">  268 </span><span class="spaces">               </span><span class="nottickedoff">]</span>
+<span class="lineno">  269 </span><span class="spaces">  </span><span class="nottickedoff">req &lt;- HTTP.parseRequest (_oac_tokenUrl cfg)</span>
+<span class="lineno">  270 </span><span class="spaces">  </span><span class="nottickedoff">let httpReq = req</span>
+<span class="lineno">  271 </span><span class="spaces">        </span><span class="nottickedoff">{ HTTP.method         = &quot;POST&quot;</span>
+<span class="lineno">  272 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestBody    = HTTP.RequestBodyLBS body</span>
+<span class="lineno">  273 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestHeaders = oauthRequestHeaders</span>
+<span class="lineno">  274 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  275 </span><span class="spaces">  </span><span class="nottickedoff">resp &lt;- HTTP.httpLbs httpReq manager</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="nottickedoff">let statusCode = Status.statusCode (HTTP.responseStatus resp)</span>
+<span class="lineno">  277 </span><span class="spaces">  </span><span class="nottickedoff">if statusCode /= 200</span>
+<span class="lineno">  278 </span><span class="spaces">    </span><span class="nottickedoff">then throwIO (OAuthError (&quot;Token exchange failed with HTTP &quot; &lt;&gt; T.pack (show statusCode)</span>
+<span class="lineno">  279 </span><span class="spaces">                              </span><span class="nottickedoff">&lt;&gt; &quot;: &quot; &lt;&gt; TE.decodeUtf8 (BL.toStrict (HTTP.responseBody resp))))</span>
+<span class="lineno">  280 </span><span class="spaces">    </span><span class="nottickedoff">else case parseTokenResponse now (HTTP.responseBody resp) of</span>
+<span class="lineno">  281 </span><span class="spaces">      </span><span class="nottickedoff">Left err     -&gt; throwIO (OAuthError (&quot;Token parse error: &quot; &lt;&gt; err))</span>
+<span class="lineno">  282 </span><span class="spaces">      </span><span class="nottickedoff">Right tokens -&gt; pure tokens</span></span>
+<span class="lineno">  283 </span>
+<span class="lineno">  284 </span>-- | Refresh an access token using a stored refresh token.
+<span class="lineno">  285 </span>refreshOAuthToken :: OAuthConfig -&gt; HTTP.Manager -&gt; ByteString -&gt; IO OAuthTokens
+<span class="lineno">  286 </span><span class="decl"><span class="nottickedoff">refreshOAuthToken cfg manager refreshTok = do</span>
+<span class="lineno">  287 </span><span class="spaces">  </span><span class="nottickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  288 </span><span class="spaces">  </span><span class="nottickedoff">let body = encode $ object</span>
+<span class="lineno">  289 </span><span class="spaces">               </span><span class="nottickedoff">[ &quot;grant_type&quot;    .= (&quot;refresh_token&quot; :: Text)</span>
+<span class="lineno">  290 </span><span class="spaces">               </span><span class="nottickedoff">, &quot;client_id&quot;     .= _oac_clientId cfg</span>
+<span class="lineno">  291 </span><span class="spaces">               </span><span class="nottickedoff">, &quot;refresh_token&quot; .= TE.decodeUtf8 refreshTok</span>
+<span class="lineno">  292 </span><span class="spaces">               </span><span class="nottickedoff">]</span>
+<span class="lineno">  293 </span><span class="spaces">  </span><span class="nottickedoff">req &lt;- HTTP.parseRequest (_oac_tokenUrl cfg)</span>
+<span class="lineno">  294 </span><span class="spaces">  </span><span class="nottickedoff">let httpReq = req</span>
+<span class="lineno">  295 </span><span class="spaces">        </span><span class="nottickedoff">{ HTTP.method         = &quot;POST&quot;</span>
+<span class="lineno">  296 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestBody    = HTTP.RequestBodyLBS body</span>
+<span class="lineno">  297 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestHeaders = oauthRequestHeaders</span>
+<span class="lineno">  298 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  299 </span><span class="spaces">  </span><span class="nottickedoff">resp &lt;- HTTP.httpLbs httpReq manager</span>
+<span class="lineno">  300 </span><span class="spaces">  </span><span class="nottickedoff">let statusCode = Status.statusCode (HTTP.responseStatus resp)</span>
+<span class="lineno">  301 </span><span class="spaces">  </span><span class="nottickedoff">if statusCode /= 200</span>
+<span class="lineno">  302 </span><span class="spaces">    </span><span class="nottickedoff">then throwIO (OAuthError (&quot;Token refresh failed with HTTP &quot; &lt;&gt; T.pack (show statusCode)))</span>
+<span class="lineno">  303 </span><span class="spaces">    </span><span class="nottickedoff">else case parseTokenResponse now (HTTP.responseBody resp) of</span>
+<span class="lineno">  304 </span><span class="spaces">      </span><span class="nottickedoff">Left err     -&gt; throwIO (OAuthError (&quot;Token parse error: &quot; &lt;&gt; err))</span>
+<span class="lineno">  305 </span><span class="spaces">      </span><span class="nottickedoff">Right tokens -&gt; pure tokens</span></span>
+<span class="lineno">  306 </span>
+<span class="lineno">  307 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  308 </span>-- Browser helper
+<span class="lineno">  309 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  310 </span>
+<span class="lineno">  311 </span>-- | Try to open a URL in the default browser. Ignores failures silently.
+<span class="lineno">  312 </span>tryOpenBrowser :: String -&gt; IO ()
+<span class="lineno">  313 </span><span class="decl"><span class="nottickedoff">tryOpenBrowser url = do</span>
+<span class="lineno">  314 </span><span class="spaces">  </span><span class="nottickedoff">let cmd = case os of</span>
+<span class="lineno">  315 </span><span class="spaces">        </span><span class="nottickedoff">&quot;darwin&quot;  -&gt; &quot;open&quot;</span>
+<span class="lineno">  316 </span><span class="spaces">        </span><span class="nottickedoff">&quot;mingw32&quot; -&gt; &quot;start&quot;</span>
+<span class="lineno">  317 </span><span class="spaces">        </span><span class="nottickedoff">_         -&gt; &quot;xdg-open&quot;</span>
+<span class="lineno">  318 </span><span class="spaces">  </span><span class="nottickedoff">_ &lt;- try @SomeException (P.runProcess_ (P.proc cmd [url]))</span>
+<span class="lineno">  319 </span><span class="spaces">  </span><span class="nottickedoff">pure ()</span></span>
+
+</pre>
+</body>
+</html>

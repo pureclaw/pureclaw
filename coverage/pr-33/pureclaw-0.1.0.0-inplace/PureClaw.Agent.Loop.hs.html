@@ -1,0 +1,214 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.Loop
+<span class="lineno">    2 </span>  ( -- * Agent loop
+<span class="lineno">    3 </span>    runAgentLoop
+<span class="lineno">    4 </span>    -- * Re-exports from Handles.Harness (for backward compatibility)
+<span class="lineno">    5 </span>  , sanitizeHarnessOutput
+<span class="lineno">    6 </span>  ) where
+<span class="lineno">    7 </span>
+<span class="lineno">    8 </span>import Control.Exception
+<span class="lineno">    9 </span>import Control.Monad
+<span class="lineno">   10 </span>import Data.IORef
+<span class="lineno">   11 </span>import Data.Text (Text)
+<span class="lineno">   12 </span>import Data.Text qualified as T
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   15 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import PureClaw.Agent.Context
+<span class="lineno">   18 </span>import PureClaw.Core.Types
+<span class="lineno">   19 </span>import PureClaw.Agent.Env
+<span class="lineno">   20 </span>import PureClaw.Agent.SlashCommands
+<span class="lineno">   21 </span>import PureClaw.Core.Errors
+<span class="lineno">   22 </span>import PureClaw.Handles.Channel
+<span class="lineno">   23 </span>import PureClaw.Handles.Harness
+<span class="lineno">   24 </span>import PureClaw.Handles.Log
+<span class="lineno">   25 </span>import PureClaw.Providers.Class
+<span class="lineno">   26 </span>import PureClaw.Tools.Registry
+<span class="lineno">   27 </span>import PureClaw.Transcript.Provider
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | Run the main agent loop. Reads messages from the channel, sends
+<span class="lineno">   30 </span>-- them to the provider (with tool definitions), handles tool call/result
+<span class="lineno">   31 </span>-- cycles, and writes responses back.
+<span class="lineno">   32 </span>--
+<span class="lineno">   33 </span>-- Slash commands (messages starting with '/') are intercepted and
+<span class="lineno">   34 </span>-- handled before being sent to the provider.
+<span class="lineno">   35 </span>--
+<span class="lineno">   36 </span>-- If no provider is configured ('Nothing' in the IORef), chat messages
+<span class="lineno">   37 </span>-- produce a helpful error directing the user to configure credentials.
+<span class="lineno">   38 </span>-- Slash commands always work regardless of provider state.
+<span class="lineno">   39 </span>--
+<span class="lineno">   40 </span>-- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
+<span class="lineno">   41 </span>-- Provider errors are logged and a 'PublicError' is sent to the channel.
+<span class="lineno">   42 </span>runAgentLoop :: AgentEnv -&gt; IO ()
+<span class="lineno">   43 </span><span class="decl"><span class="istickedoff">runAgentLoop env = do</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="istickedoff">_lh_logInfo logger <span class="nottickedoff">&quot;Agent loop started&quot;</span></span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="istickedoff">go (emptyContext (_env_systemPrompt env))</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   47 </span><span class="spaces">    </span><span class="istickedoff">channel  = _env_channel env</span>
+<span class="lineno">   48 </span><span class="spaces">    </span><span class="istickedoff">logger   = _env_logger env</span>
+<span class="lineno">   49 </span><span class="spaces">    </span><span class="istickedoff">registry = _env_registry env</span>
+<span class="lineno">   50 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">tools    = registryDefinitions registry</span></span>
+<span class="lineno">   51 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   52 </span><span class="spaces">    </span><span class="istickedoff">go ctx = do</span>
+<span class="lineno">   53 </span><span class="spaces">      </span><span class="istickedoff">receiveResult &lt;- try @IOException (_ch_receive channel)</span>
+<span class="lineno">   54 </span><span class="spaces">      </span><span class="istickedoff">case receiveResult of</span>
+<span class="lineno">   55 </span><span class="spaces">        </span><span class="istickedoff">Left _ -&gt; _lh_logInfo logger <span class="nottickedoff">&quot;Session ended&quot;</span></span>
+<span class="lineno">   56 </span><span class="spaces">        </span><span class="istickedoff">Right msg</span>
+<span class="lineno">   57 </span><span class="spaces">          </span><span class="istickedoff">| T.null stripped -&gt; go <span class="nottickedoff">ctx</span></span>
+<span class="lineno">   58 </span><span class="spaces">          </span><span class="istickedoff">-- INVARIANT: any message beginning with '/' is handled locally and</span>
+<span class="lineno">   59 </span><span class="spaces">          </span><span class="istickedoff">-- NEVER forwarded to the provider. Unknown slash commands get an</span>
+<span class="lineno">   60 </span><span class="spaces">          </span><span class="istickedoff">-- error response rather than silently routing to the LLM.</span>
+<span class="lineno">   61 </span><span class="spaces">          </span><span class="istickedoff">| &quot;/&quot; `T.isPrefixOf` stripped -&gt;</span>
+<span class="lineno">   62 </span><span class="spaces">              </span><span class="istickedoff">case parseSlashCommand stripped of</span>
+<span class="lineno">   63 </span><span class="spaces">                </span><span class="istickedoff">Just cmd -&gt; do</span>
+<span class="lineno">   64 </span><span class="spaces">                  </span><span class="istickedoff">_lh_logInfo logger $ <span class="nottickedoff">&quot;Slash command: &quot; &lt;&gt; stripped</span></span>
+<span class="lineno">   65 </span><span class="spaces">                  </span><span class="istickedoff">ctx' &lt;- executeSlashCommand env cmd ctx</span>
+<span class="lineno">   66 </span><span class="spaces">                  </span><span class="istickedoff">go <span class="nottickedoff">ctx'</span></span>
+<span class="lineno">   67 </span><span class="spaces">                </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">   68 </span><span class="spaces">                  </span><span class="istickedoff">_lh_logWarn logger $ <span class="nottickedoff">&quot;Unrecognized slash command: &quot; &lt;&gt; stripped</span></span>
+<span class="lineno">   69 </span><span class="spaces">                  </span><span class="istickedoff">_ch_send channel</span>
+<span class="lineno">   70 </span><span class="spaces">                    </span><span class="istickedoff">(OutgoingMessage (&quot;Unknown command: &quot; &lt;&gt; stripped</span>
+<span class="lineno">   71 </span><span class="spaces">                      </span><span class="istickedoff">&lt;&gt; &quot;\nType /status for session info, /help for available commands.&quot;))</span>
+<span class="lineno">   72 </span><span class="spaces">                  </span><span class="istickedoff">go <span class="nottickedoff">ctx</span></span>
+<span class="lineno">   73 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; do</span>
+<span class="lineno">   74 </span><span class="spaces">              </span><span class="istickedoff">target &lt;- readIORef (_env_target env)</span>
+<span class="lineno">   75 </span><span class="spaces">              </span><span class="istickedoff">case target of</span>
+<span class="lineno">   76 </span><span class="spaces">                </span><span class="istickedoff">TargetHarness name -&gt; do</span>
+<span class="lineno">   77 </span><span class="spaces">                  </span><span class="istickedoff">harnesses &lt;- readIORef (_env_harnesses env)</span>
+<span class="lineno">   78 </span><span class="spaces">                  </span><span class="istickedoff">case Map.lookup name harnesses of</span>
+<span class="lineno">   79 </span><span class="spaces">                    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">   80 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">_ch_send channel (OutgoingMessage</span></span>
+<span class="lineno">   81 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">(&quot;Harness \&quot;&quot; &lt;&gt; name &lt;&gt; &quot;\&quot; is not running. Use /harness start &quot;</span></span>
+<span class="lineno">   82 </span><span class="spaces">                          </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; name &lt;&gt; &quot; or /target to switch targets.&quot;))</span></span>
+<span class="lineno">   83 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">go ctx</span></span>
+<span class="lineno">   84 </span><span class="spaces">                    </span><span class="istickedoff">Just hh -&gt; do</span>
+<span class="lineno">   85 </span><span class="spaces">                      </span><span class="istickedoff">_lh_logInfo logger $ <span class="nottickedoff">&quot;Routing to harness: &quot; &lt;&gt; name</span></span>
+<span class="lineno">   86 </span><span class="spaces">                      </span><span class="istickedoff">_hh_send hh <span class="nottickedoff">(TE.encodeUtf8 stripped)</span></span>
+<span class="lineno">   87 </span><span class="spaces">                      </span><span class="istickedoff">output &lt;- _hh_receive hh</span>
+<span class="lineno">   88 </span><span class="spaces">                      </span><span class="istickedoff">let response = sanitizeHarnessOutput (TE.decodeUtf8 output)</span>
+<span class="lineno">   89 </span><span class="spaces">                      </span><span class="istickedoff">unless (T.null (T.strip response)) $</span>
+<span class="lineno">   90 </span><span class="spaces">                        </span><span class="istickedoff">_ch_send channel (OutgoingMessage (prefixHarnessOutput name response))</span>
+<span class="lineno">   91 </span><span class="spaces">                      </span><span class="istickedoff">go <span class="nottickedoff">ctx</span></span>
+<span class="lineno">   92 </span><span class="spaces">                </span><span class="istickedoff">TargetProvider -&gt; do</span>
+<span class="lineno">   93 </span><span class="spaces">                  </span><span class="istickedoff">mProvider &lt;- readIORef (_env_provider env)</span>
+<span class="lineno">   94 </span><span class="spaces">                  </span><span class="istickedoff">case mProvider of</span>
+<span class="lineno">   95 </span><span class="spaces">                    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">   96 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">_ch_send channel (OutgoingMessage noProviderMessage)</span></span>
+<span class="lineno">   97 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">go ctx</span></span>
+<span class="lineno">   98 </span><span class="spaces">                    </span><span class="istickedoff">Just provider -&gt; do</span>
+<span class="lineno">   99 </span><span class="spaces">                      </span><span class="istickedoff">let userMsg = textMessage User stripped</span>
+<span class="lineno">  100 </span><span class="spaces">                          </span><span class="istickedoff">ctx' = addMessage userMsg ctx</span>
+<span class="lineno">  101 </span><span class="spaces">                      </span><span class="istickedoff">_lh_logDebug logger $</span>
+<span class="lineno">  102 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">&quot;Sending &quot; &lt;&gt; T.pack (show (length (contextMessages ctx'))) &lt;&gt; &quot; messages&quot;</span></span>
+<span class="lineno">  103 </span><span class="spaces">                      </span><span class="istickedoff">-- Wrap provider with transcript logging if configured</span>
+<span class="lineno">  104 </span><span class="spaces">                      </span><span class="istickedoff">mTranscript &lt;- readIORef (_env_transcript env)</span>
+<span class="lineno">  105 </span><span class="spaces">                      </span><span class="istickedoff">model &lt;- readIORef (_env_model env)</span>
+<span class="lineno">  106 </span><span class="spaces">                      </span><span class="istickedoff">let provider' = case mTranscript of</span>
+<span class="lineno">  107 </span><span class="spaces">                            </span><span class="istickedoff">Just th -&gt; <span class="nottickedoff">mkTranscriptProvider th (unModelId model) provider</span></span>
+<span class="lineno">  108 </span><span class="spaces">                            </span><span class="istickedoff">Nothing -&gt; provider</span>
+<span class="lineno">  109 </span><span class="spaces">                      </span><span class="istickedoff">handleCompletion provider' ctx'</span>
+<span class="lineno">  110 </span><span class="spaces">          </span><span class="istickedoff">where stripped = T.strip (_im_content msg)</span>
+<span class="lineno">  111 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  112 </span><span class="spaces">    </span><span class="istickedoff">handleCompletion provider ctx = do</span>
+<span class="lineno">  113 </span><span class="spaces">      </span><span class="istickedoff">model &lt;- readIORef (_env_model env)</span>
+<span class="lineno">  114 </span><span class="spaces">      </span><span class="istickedoff">let modelName = unModelId model</span>
+<span class="lineno">  115 </span><span class="spaces">          </span><span class="istickedoff">req = CompletionRequest</span>
+<span class="lineno">  116 </span><span class="spaces">            </span><span class="istickedoff">{ _cr_model        = <span class="nottickedoff">model</span></span>
+<span class="lineno">  117 </span><span class="spaces">            </span><span class="istickedoff">, _cr_messages     = contextMessages ctx</span>
+<span class="lineno">  118 </span><span class="spaces">            </span><span class="istickedoff">, _cr_systemPrompt = <span class="nottickedoff">contextSystemPrompt ctx</span></span>
+<span class="lineno">  119 </span><span class="spaces">            </span><span class="istickedoff">, _cr_maxTokens    = <span class="nottickedoff">Just 4096</span></span>
+<span class="lineno">  120 </span><span class="spaces">            </span><span class="istickedoff">, _cr_tools        = <span class="nottickedoff">tools</span></span>
+<span class="lineno">  121 </span><span class="spaces">            </span><span class="istickedoff">, _cr_toolChoice   = <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  122 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  123 </span><span class="spaces">      </span><span class="istickedoff">responseRef &lt;- newIORef <span class="nottickedoff">(Nothing :: Maybe CompletionResponse)</span></span>
+<span class="lineno">  124 </span><span class="spaces">      </span><span class="istickedoff">streamedRef &lt;- newIORef False</span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">prefixSentRef &lt;- newIORef False</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">providerResult &lt;- try @SomeException $</span>
+<span class="lineno">  127 </span><span class="spaces">        </span><span class="istickedoff">completeStream provider req $ \case</span>
+<span class="lineno">  128 </span><span class="spaces">          </span><span class="istickedoff">StreamText t -&gt; do</span>
+<span class="lineno">  129 </span><span class="spaces">            </span><span class="istickedoff">-- Emit origin prefix before the first streamed chunk</span>
+<span class="lineno">  130 </span><span class="spaces">            </span><span class="istickedoff">prefixSent &lt;- readIORef prefixSentRef</span>
+<span class="lineno">  131 </span><span class="spaces">            </span><span class="istickedoff">unless prefixSent $ do</span>
+<span class="lineno">  132 </span><span class="spaces">              </span><span class="istickedoff">_ch_sendChunk channel (ChunkText (modelName &lt;&gt; &quot;&gt; &quot;))</span>
+<span class="lineno">  133 </span><span class="spaces">              </span><span class="istickedoff">writeIORef prefixSentRef True</span>
+<span class="lineno">  134 </span><span class="spaces">            </span><span class="istickedoff">_ch_sendChunk channel <span class="nottickedoff">(ChunkText t)</span></span>
+<span class="lineno">  135 </span><span class="spaces">            </span><span class="istickedoff">writeIORef streamedRef True</span>
+<span class="lineno">  136 </span><span class="spaces">          </span><span class="istickedoff">StreamDone resp -&gt;</span>
+<span class="lineno">  137 </span><span class="spaces">            </span><span class="istickedoff">writeIORef responseRef (Just resp)</span>
+<span class="lineno">  138 </span><span class="spaces">          </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  139 </span><span class="spaces">      </span><span class="istickedoff">case providerResult of</span>
+<span class="lineno">  140 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt; do</span>
+<span class="lineno">  141 </span><span class="spaces">          </span><span class="istickedoff">_lh_logError logger $ <span class="nottickedoff">&quot;Provider error: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  142 </span><span class="spaces">          </span><span class="istickedoff">_ch_sendError channel <span class="nottickedoff">(TemporaryError &quot;Something went wrong. Please try again.&quot;)</span></span>
+<span class="lineno">  143 </span><span class="spaces">          </span><span class="istickedoff">go <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  144 </span><span class="spaces">        </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  145 </span><span class="spaces">          </span><span class="istickedoff">wasStreaming &lt;- readIORef streamedRef</span>
+<span class="lineno">  146 </span><span class="spaces">          </span><span class="istickedoff">when wasStreaming $ _ch_sendChunk channel ChunkDone</span>
+<span class="lineno">  147 </span><span class="spaces">          </span><span class="istickedoff">mResp &lt;- readIORef responseRef</span>
+<span class="lineno">  148 </span><span class="spaces">          </span><span class="istickedoff">case mResp of</span>
+<span class="lineno">  149 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">go ctx</span>  -- shouldn't happen</span>
+<span class="lineno">  150 </span><span class="spaces">            </span><span class="istickedoff">Just response -&gt; do</span>
+<span class="lineno">  151 </span><span class="spaces">              </span><span class="istickedoff">let calls = toolUseCalls response</span>
+<span class="lineno">  152 </span><span class="spaces">                  </span><span class="istickedoff">text = responseText response</span>
+<span class="lineno">  153 </span><span class="spaces">                  </span><span class="istickedoff">ctx' = recordUsage (_crsp_usage response)</span>
+<span class="lineno">  154 </span><span class="spaces">                       </span><span class="istickedoff">$ addMessage (Message Assistant (_crsp_content response)) ctx</span>
+<span class="lineno">  155 </span><span class="spaces">              </span><span class="istickedoff">-- Send the full text. For streaming channels, the text was already</span>
+<span class="lineno">  156 </span><span class="spaces">              </span><span class="istickedoff">-- displayed chunk-by-chunk so we skip the full send to avoid duplicates.</span>
+<span class="lineno">  157 </span><span class="spaces">              </span><span class="istickedoff">unless (wasStreaming &amp;&amp; _ch_streaming channel || T.null (T.strip text)) $</span>
+<span class="lineno">  158 </span><span class="spaces">                </span><span class="istickedoff">_ch_send channel (OutgoingMessage (prefixHarnessOutput modelName text))</span>
+<span class="lineno">  159 </span><span class="spaces">              </span><span class="istickedoff">-- If there are tool calls, execute them and continue</span>
+<span class="lineno">  160 </span><span class="spaces">              </span><span class="istickedoff">if null calls</span>
+<span class="lineno">  161 </span><span class="spaces">                </span><span class="istickedoff">then go ctx'</span>
+<span class="lineno">  162 </span><span class="spaces">                </span><span class="istickedoff">else do</span>
+<span class="lineno">  163 </span><span class="spaces">                  </span><span class="istickedoff">results &lt;- mapM executeCall calls</span>
+<span class="lineno">  164 </span><span class="spaces">                  </span><span class="istickedoff">let resultMsg = toolResultMessage results</span>
+<span class="lineno">  165 </span><span class="spaces">                      </span><span class="istickedoff">ctx'' = addMessage resultMsg ctx'</span>
+<span class="lineno">  166 </span><span class="spaces">                  </span><span class="istickedoff">_lh_logDebug logger $</span>
+<span class="lineno">  167 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">&quot;Executed &quot; &lt;&gt; T.pack (show (length results)) &lt;&gt; &quot; tool calls, continuing&quot;</span></span>
+<span class="lineno">  168 </span><span class="spaces">                  </span><span class="istickedoff">handleCompletion provider ctx''</span>
+<span class="lineno">  169 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  170 </span><span class="spaces">    </span><span class="istickedoff">executeCall (callId, name, input) = do</span>
+<span class="lineno">  171 </span><span class="spaces">      </span><span class="istickedoff">_lh_logInfo logger $ <span class="nottickedoff">&quot;Tool call: &quot; &lt;&gt; name</span></span>
+<span class="lineno">  172 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- executeTool registry name <span class="nottickedoff">input</span></span>
+<span class="lineno">  173 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  174 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  175 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">_lh_logWarn logger $ &quot;Unknown tool: &quot; &lt;&gt; name</span></span>
+<span class="lineno">  176 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure (callId, [TRPText (&quot;Unknown tool: &quot; &lt;&gt; name)], True)</span></span>
+<span class="lineno">  177 </span><span class="spaces">        </span><span class="istickedoff">Just (parts, isErr) -&gt; do</span>
+<span class="lineno">  178 </span><span class="spaces">          </span><span class="istickedoff">when isErr $ <span class="nottickedoff">_lh_logWarn logger $ &quot;Tool error in &quot; &lt;&gt; name &lt;&gt; &quot;: &quot; &lt;&gt; partsToText parts</span></span>
+<span class="lineno">  179 </span><span class="spaces">          </span><span class="istickedoff">pure (<span class="nottickedoff">callId</span>, <span class="nottickedoff">parts</span>, <span class="nottickedoff">isErr</span>)</span>
+<span class="lineno">  180 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  181 </span><span class="spaces">    </span><span class="istickedoff">partsToText :: [ToolResultPart] -&gt; Text</span>
+<span class="lineno">  182 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">partsToText parts = T.intercalate &quot;\n&quot; [t | TRPText t &lt;- parts]</span></span></span>
+<span class="lineno">  183 </span>
+<span class="lineno">  184 </span>-- | Message shown when user sends a chat message but no provider is configured.
+<span class="lineno">  185 </span>noProviderMessage :: Text
+<span class="lineno">  186 </span><span class="decl"><span class="nottickedoff">noProviderMessage = T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="nottickedoff">[ &quot;No provider configured. To start chatting, configure your provider with:&quot;</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;  /provider &lt;PROVIDER&gt;&quot;</span>
+<span class="lineno">  190 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  191 </span><span class="spaces">  </span><span class="nottickedoff">]</span></span>
+
+</pre>
+</body>
+</html>

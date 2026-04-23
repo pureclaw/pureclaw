@@ -1,0 +1,73 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.Memory
+<span class="lineno">    2 </span>  ( -- * Memory integration
+<span class="lineno">    3 </span>    autoRecall
+<span class="lineno">    4 </span>  , autoSave
+<span class="lineno">    5 </span>  ) where
+<span class="lineno">    6 </span>
+<span class="lineno">    7 </span>import Data.Text (Text)
+<span class="lineno">    8 </span>import Data.Text qualified as T
+<span class="lineno">    9 </span>
+<span class="lineno">   10 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import PureClaw.Core.Types
+<span class="lineno">   13 </span>import PureClaw.Handles.Log
+<span class="lineno">   14 </span>import PureClaw.Handles.Memory
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>-- | Minimum message length to trigger auto-save (characters).
+<span class="lineno">   17 </span>minSaveLength :: Int
+<span class="lineno">   18 </span><span class="decl"><span class="istickedoff">minSaveLength = 50</span></span>
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>-- | Automatically recall relevant memories for a user message.
+<span class="lineno">   21 </span>-- Returns formatted context to prepend to the system prompt, or
+<span class="lineno">   22 </span>-- Nothing if no relevant memories are found.
+<span class="lineno">   23 </span>autoRecall :: MemoryHandle -&gt; LogHandle -&gt; Text -&gt; IO (Maybe Text)
+<span class="lineno">   24 </span><span class="decl"><span class="istickedoff">autoRecall mh logger query = do</span>
+<span class="lineno">   25 </span><span class="spaces">  </span><span class="istickedoff">results &lt;- _mh_search mh <span class="nottickedoff">query</span> <span class="nottickedoff">defaultSearchConfig { _sc_maxResults = 3 }</span></span>
+<span class="lineno">   26 </span><span class="spaces">  </span><span class="istickedoff">if null results</span>
+<span class="lineno">   27 </span><span class="spaces">    </span><span class="istickedoff">then pure Nothing</span>
+<span class="lineno">   28 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">   29 </span><span class="spaces">      </span><span class="istickedoff">_lh_logDebug logger $ <span class="nottickedoff">&quot;Recalled &quot; &lt;&gt; T.pack (show (length results)) &lt;&gt; &quot; memories&quot;</span></span>
+<span class="lineno">   30 </span><span class="spaces">      </span><span class="istickedoff">let formatted = T.unlines</span>
+<span class="lineno">   31 </span><span class="spaces">            </span><span class="istickedoff">[ &quot;## Relevant memories&quot;</span>
+<span class="lineno">   32 </span><span class="spaces">            </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">   33 </span><span class="spaces">            </span><span class="istickedoff">, T.intercalate <span class="nottickedoff">&quot;\n\n&quot;</span> [ _sr_content r | r &lt;- results ]</span>
+<span class="lineno">   34 </span><span class="spaces">            </span><span class="istickedoff">]</span>
+<span class="lineno">   35 </span><span class="spaces">      </span><span class="istickedoff">pure (Just formatted)</span></span>
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Automatically save an assistant response to memory if it's
+<span class="lineno">   38 </span>-- long enough to be worth remembering.
+<span class="lineno">   39 </span>autoSave :: MemoryHandle -&gt; LogHandle -&gt; Text -&gt; IO ()
+<span class="lineno">   40 </span><span class="decl"><span class="istickedoff">autoSave mh logger content</span>
+<span class="lineno">   41 </span><span class="spaces">  </span><span class="istickedoff">| T.length content &lt; minSaveLength = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
+<span class="lineno">   43 </span><span class="spaces">      </span><span class="istickedoff">let <span class="nottickedoff">source = MemorySource</span></span>
+<span class="lineno">   44 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">{ _ms_content  = content</span></span>
+<span class="lineno">   45 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, _ms_metadata = Map.empty</span></span>
+<span class="lineno">   46 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">   47 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- _mh_save mh <span class="nottickedoff">source</span></span>
+<span class="lineno">   48 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">   49 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">   50 </span><span class="spaces">        </span><span class="istickedoff">Just mid -&gt; _lh_logDebug logger $ <span class="nottickedoff">&quot;Auto-saved memory: &quot; &lt;&gt; unMemoryId mid</span></span></span>
+
+</pre>
+</body>
+</html>
