@@ -12,6 +12,11 @@ module PureClaw.Providers.Anthropic
   , decodeResponse
     -- * SSE parsing (exported for testing)
   , parseSSELine
+    -- * Stream accumulation (exported for testing)
+  , StreamState
+  , newStreamState
+  , processStreamLine
+  , finalizeStream
   ) where
 
 import Control.Exception
@@ -258,30 +263,20 @@ anthropicCompleteStream provider req callback = do
         body <- BL.toStrict <$> HTTP.brReadSome (HTTP.responseBody resp) (1024 * 1024)
         throwIO (AnthropicAPIError status body)
       else do
-        -- Accumulate content blocks and usage as events arrive
-        blocksRef <- newIORef ([] :: [ContentBlock])
-        modelRef <- newIORef (ModelId "")
-        usageRef <- newIORef (Nothing :: Maybe Usage)
+        st <- newStreamState
         bufRef <- newIORef BS.empty
         let readChunks = do
               chunk <- HTTP.brRead (HTTP.responseBody resp)
               if BS.null chunk
                 then do
-                  -- Stream ended — emit final response
-                  blocks <- readIORef blocksRef
-                  model <- readIORef modelRef
-                  usage <- readIORef usageRef
-                  callback $ StreamDone CompletionResponse
-                    { _crsp_content = reverse blocks
-                    , _crsp_model   = model
-                    , _crsp_usage   = usage
-                    }
+                  finalResp <- finalizeStream st
+                  callback (StreamDone finalResp)
                 else do
                   buf <- readIORef bufRef
                   let fullBuf = buf <> chunk
                       (lines', remaining) = splitSSELines fullBuf
                   writeIORef bufRef remaining
-                  mapM_ (processSSELine blocksRef modelRef usageRef callback) lines'
+                  mapM_ (processStreamLine st callback) lines'
                   readChunks
         readChunks
 
@@ -293,9 +288,38 @@ splitSSELines bs =
     [] -> ([], BS.empty)
     _ -> (init parts, last parts)
 
--- | Process a single SSE line.
-processSSELine :: IORef [ContentBlock] -> IORef ModelId -> IORef (Maybe Usage) -> (StreamEvent -> IO ()) -> ByteString -> IO ()
-processSSELine blocksRef modelRef usageRef callback line =
+-- | Mutable accumulator for streaming SSE responses. Tracks the
+-- evolving list of content blocks, the model id, usage stats, and any
+-- tool_use block currently being assembled (whose JSON input arrives
+-- across multiple deltas).
+data StreamState = StreamState
+  { _ss_blocksRef :: IORef [ContentBlock]   -- ^ Reversed: head is most-recent block
+  , _ss_modelRef  :: IORef ModelId
+  , _ss_usageRef  :: IORef (Maybe Usage)
+  , _ss_toolRef   :: IORef (Maybe ToolBuilder)
+  }
+
+-- | A tool_use block being assembled mid-stream. Inputs arrive as
+-- a sequence of @input_json_delta@ fragments which must be concatenated
+-- and parsed once @content_block_stop@ closes the block.
+data ToolBuilder = ToolBuilder
+  { _tb_id    :: ToolCallId
+  , _tb_name  :: Text
+  , _tb_input :: ByteString
+  }
+
+newStreamState :: IO StreamState
+newStreamState = StreamState
+  <$> newIORef []
+  <*> newIORef (ModelId "")
+  <*> newIORef Nothing
+  <*> newIORef Nothing
+
+-- | Process a single SSE 'data:' line, updating state and emitting
+-- 'StreamEvent' callbacks. Non-data lines, unparseable JSON, and
+-- unknown event types are silently ignored.
+processStreamLine :: StreamState -> (StreamEvent -> IO ()) -> ByteString -> IO ()
+processStreamLine st callback line =
   case parseSSELine line of
     Nothing -> pure ()
     Just json -> case parseEither parseStreamEvent json of
@@ -306,16 +330,55 @@ processSSELine blocksRef modelRef usageRef callback line =
           -- Accumulate streamed text into a single TextBlock rather than
           -- creating one per chunk (which would insert spurious newlines
           -- when responseText joins them with "\n").
-          modifyIORef blocksRef $ \blocks -> case blocks of
+          modifyIORef (_ss_blocksRef st) $ \blocks -> case blocks of
             (TextBlock prev : rest) -> TextBlock (prev <> t) : rest
             _                       -> TextBlock t : blocks
-        SSEToolStart callId name ->
+        SSEToolStart callId name -> do
+          -- Defensive: close any tool that didn't get an explicit stop.
+          finalizeCurrentTool st
+          writeIORef (_ss_toolRef st)
+            (Just (ToolBuilder callId name BS.empty))
           callback (StreamToolUse callId name)
-        SSEToolDelta t ->
+        SSEToolDelta t -> do
+          modifyIORef (_ss_toolRef st) $ fmap $ \tb ->
+            tb { _tb_input = _tb_input tb <> TE.encodeUtf8 t }
           callback (StreamToolInput t)
-        SSEMessageStart model -> writeIORef modelRef model
-        SSEUsage usage -> writeIORef usageRef (Just usage)
+        SSEContentBlockStop -> finalizeCurrentTool st
+        SSEMessageStart model -> writeIORef (_ss_modelRef st) model
+        SSEUsage usage -> writeIORef (_ss_usageRef st) (Just usage)
         SSEMessageStop -> pure ()
+
+-- | Close out any in-progress tool_use block: parse the accumulated
+-- JSON input and push the completed 'ToolUseBlock' onto blocks.
+-- A malformed or empty buffer falls back to an empty object so the
+-- block isn't lost — downstream tool execution will surface any
+-- schema mismatch as a normal tool error.
+finalizeCurrentTool :: StreamState -> IO ()
+finalizeCurrentTool st = do
+  mTool <- readIORef (_ss_toolRef st)
+  case mTool of
+    Nothing -> pure ()
+    Just tb -> do
+      let input = case decode (BL.fromStrict (_tb_input tb)) of
+            Just v  -> v
+            Nothing -> object []
+      modifyIORef (_ss_blocksRef st)
+        (ToolUseBlock (_tb_id tb) (_tb_name tb) input :)
+      writeIORef (_ss_toolRef st) Nothing
+
+-- | Finalize the accumulator into a 'CompletionResponse'. Any
+-- still-open tool block is closed defensively.
+finalizeStream :: StreamState -> IO CompletionResponse
+finalizeStream st = do
+  finalizeCurrentTool st
+  blocks <- readIORef (_ss_blocksRef st)
+  model  <- readIORef (_ss_modelRef st)
+  usage  <- readIORef (_ss_usageRef st)
+  pure CompletionResponse
+    { _crsp_content = reverse blocks
+    , _crsp_model   = model
+    , _crsp_usage   = usage
+    }
 
 -- | Parse an SSE "data: ..." line into a JSON value.
 parseSSELine :: ByteString -> Maybe Value
@@ -330,6 +393,7 @@ data SSEEvent
   = SSEContentText Text
   | SSEToolStart ToolCallId Text
   | SSEToolDelta Text
+  | SSEContentBlockStop
   | SSEMessageStart ModelId
   | SSEUsage Usage
   | SSEMessageStop
@@ -359,6 +423,7 @@ parseStreamEvent = withObject "SSEEvent" $ \o -> do
           name <- block .: "name"
           pure (SSEToolStart (ToolCallId callId) name)
         _ -> fail "Ignored block start"
+    "content_block_stop" -> pure SSEContentBlockStop
     "message_delta" -> do
       usage <- o .:? "usage"
       case usage of

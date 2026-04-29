@@ -2,9 +2,11 @@ module Providers.AnthropicSpec (spec) where
 
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Either (isLeft)
 import Data.IORef
+import Data.Text (Text)
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime (..), addUTCTime)
 import Network.HTTP.Client.TLS qualified as TLS
@@ -204,6 +206,50 @@ spec = do
       let line = "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\",\"content\":[]}}"
       parseSSELine line `shouldSatisfy` isJust
 
+  describe "stream accumulation" $ do
+    it "accumulates a tool_use block from streamed events" $ do
+      st <- newStreamState
+      mapM_ (processStreamLine st (\_ -> pure ())) toolOnlyStream
+      resp <- finalizeStream st
+      let calls = toolUseCalls resp
+      length calls `shouldBe` 1
+      case calls of
+        [(_, name, input)] -> do
+          name `shouldBe` "file_write"
+          input `shouldBe` object
+            [ "path"    .= ("/tmp/test.txt" :: Text)
+            , "content" .= ("Hello" :: Text)
+            ]
+        _ -> expectationFailure "expected exactly one tool call"
+
+    it "preserves text and tool blocks in stream order" $ do
+      st <- newStreamState
+      mapM_ (processStreamLine st (\_ -> pure ())) mixedStream
+      resp <- finalizeStream st
+      responseText resp `shouldBe` "Let me create the file."
+      length (toolUseCalls resp) `shouldBe` 1
+
+    it "accumulates multiple sequential tool blocks" $ do
+      st <- newStreamState
+      mapM_ (processStreamLine st (\_ -> pure ())) twoToolsStream
+      resp <- finalizeStream st
+      length (toolUseCalls resp) `shouldBe` 2
+
+    it "emits StreamToolUse and StreamToolInput callbacks" $ do
+      st <- newStreamState
+      eventsRef <- newIORef ([] :: [StreamEvent])
+      let cb e = modifyIORef eventsRef (e :)
+      mapM_ (processStreamLine st cb) toolOnlyStream
+      events <- reverse <$> readIORef eventsRef
+      events `shouldSatisfy` any isToolUseEvent
+      events `shouldSatisfy` any isToolInputEvent
+
+    it "captures the final usage record" $ do
+      st <- newStreamState
+      mapM_ (processStreamLine st (\_ -> pure ())) toolOnlyStream
+      resp <- finalizeStream st
+      _crsp_usage resp `shouldBe` Just (Usage 0 7)
+
   describe "buildAuthHeaders (API key)" $ do
     it "uses x-api-key header for ApiKey auth" $ do
       manager <- TLS.newTlsManager
@@ -289,4 +335,53 @@ hasKey _ _ = False
 isJust :: Maybe a -> Bool
 isJust (Just _) = True
 isJust Nothing = False
+
+isToolUseEvent :: StreamEvent -> Bool
+isToolUseEvent (StreamToolUse _ _) = True
+isToolUseEvent _                   = False
+
+isToolInputEvent :: StreamEvent -> Bool
+isToolInputEvent (StreamToolInput _) = True
+isToolInputEvent _                   = False
+
+-- | Realistic Anthropic SSE stream containing a single tool_use block
+-- whose JSON input is split across two partial_json deltas.
+toolOnlyStream :: [ByteString]
+toolOnlyStream =
+  [ "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\",\"content\":[]}}"
+  , "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"file_write\"}}"
+  , "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}"
+  , "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"/tmp/test.txt\\\",\\\"content\\\":\\\"Hello\\\"}\"}}"
+  , "data: {\"type\":\"content_block_stop\",\"index\":0}"
+  , "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}"
+  , "data: {\"type\":\"message_stop\"}"
+  ]
+
+-- | Stream containing a text block followed by a tool_use block —
+-- the most common shape when the model narrates before acting.
+mixedStream :: [ByteString]
+mixedStream =
+  [ "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"content\":[]}}"
+  , "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}"
+  , "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Let me create the file.\"}}"
+  , "data: {\"type\":\"content_block_stop\",\"index\":0}"
+  , "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"file_write\"}}"
+  , "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"/tmp/test.txt\\\"}\"}}"
+  , "data: {\"type\":\"content_block_stop\",\"index\":1}"
+  , "data: {\"type\":\"message_stop\"}"
+  ]
+
+-- | Stream containing two sequential tool_use blocks — exercises the
+-- builder being reset cleanly between blocks.
+twoToolsStream :: [ByteString]
+twoToolsStream =
+  [ "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"content\":[]}}"
+  , "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"first\"}}"
+  , "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"a\\\":1}\"}}"
+  , "data: {\"type\":\"content_block_stop\",\"index\":0}"
+  , "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_02\",\"name\":\"second\"}}"
+  , "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"b\\\":2}\"}}"
+  , "data: {\"type\":\"content_block_stop\",\"index\":1}"
+  , "data: {\"type\":\"message_stop\"}"
+  ]
 
