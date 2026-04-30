@@ -4,6 +4,8 @@ import Options.Applicative
 import Test.Hspec
 
 import PureClaw.CLI.Commands
+import PureClaw.Core.Types
+import PureClaw.Security.Policy
 
 -- Helper to parse CLI args.
 parseArgs :: [String] -> Maybe ChatOptions
@@ -32,11 +34,6 @@ spec = do
     it "parses --api-key flag" $ do
       case parseArgs ["--api-key", "sk-test"] of
         Just opts -> _co_apiKey opts `shouldBe` Just "sk-test"
-        Nothing -> expectationFailure "parse failed"
-
-    it "api-key defaults to Nothing" $ do
-      case parseArgs [] of
-        Just opts -> _co_apiKey opts `shouldBe` Nothing
         Nothing -> expectationFailure "parse failed"
 
     it "parses --system flag" $ do
@@ -140,22 +137,11 @@ spec = do
         Just opts -> _co_noVault opts `shouldBe` False
         Nothing -> expectationFailure "parse failed"
 
-    it "parses --oauth flag" $ do
-      case parseArgs ["--oauth"] of
-        Just opts -> _co_oauth opts `shouldBe` True
-        Nothing -> expectationFailure "parse failed"
-
-    it "oauth defaults to False" $ do
-      case parseArgs [] of
-        Just opts -> _co_oauth opts `shouldBe` False
-        Nothing -> expectationFailure "parse failed"
-
     it "parses all flags together" $ do
-      case parseArgs ["-p", "openai", "-m", "gpt-4", "--api-key", "sk-x", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml", "--no-vault"] of
+      case parseArgs ["-p", "openai", "-m", "gpt-4", "--allow", "git", "--memory", "sqlite", "--soul", "SOUL.md", "-s", "Be brief", "-c", "my.toml", "--no-vault"] of
         Just opts -> do
           _co_provider opts `shouldBe` Just OpenAI
           _co_model opts `shouldBe` Just "gpt-4"
-          _co_apiKey opts `shouldBe` Just "sk-x"
           _co_allowCommands opts `shouldBe` ["git"]
           _co_memory opts `shouldBe` Just SQLiteMemory
           _co_soul opts `shouldBe` Just "SOUL.md"
@@ -181,3 +167,80 @@ spec = do
     it "has all three variants" $ do
       let allVariants = [NoMemory, SQLiteMemory, MarkdownMemory]
       length allVariants `shouldBe` 3
+
+  describe "--channel flag" $ do
+    it "parses --channel signal" $ do
+      case parseArgs ["--channel", "signal"] of
+        Just opts -> _co_channel opts `shouldBe` Just "signal"
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses --channel cli" $ do
+      case parseArgs ["--channel", "cli"] of
+        Just opts -> _co_channel opts `shouldBe` Just "cli"
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses --channel telegram" $ do
+      case parseArgs ["--channel", "telegram"] of
+        Just opts -> _co_channel opts `shouldBe` Just "telegram"
+        Nothing -> expectationFailure "parse failed"
+
+    it "defaults to Nothing" $ do
+      case parseArgs [] of
+        Just opts -> _co_channel opts `shouldBe` Nothing
+        Nothing -> expectationFailure "parse failed"
+
+  describe "--autonomy flag" $ do
+    it "parses --autonomy full" $ do
+      case parseArgs ["--autonomy", "full"] of
+        Just opts -> _co_autonomy opts `shouldBe` Just Full
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses --autonomy supervised" $ do
+      case parseArgs ["--autonomy", "supervised"] of
+        Just opts -> _co_autonomy opts `shouldBe` Just Supervised
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses --autonomy deny" $ do
+      case parseArgs ["--autonomy", "deny"] of
+        Just opts -> _co_autonomy opts `shouldBe` Just Deny
+        Nothing -> expectationFailure "parse failed"
+
+    it "rejects invalid autonomy level" $
+      parseArgs ["--autonomy", "invalid"] `shouldBe` Nothing
+
+    it "defaults to Nothing" $ do
+      case parseArgs [] of
+        Just opts -> _co_autonomy opts `shouldBe` Nothing
+        Nothing -> expectationFailure "parse failed"
+
+  describe "buildPolicy" $ do
+    it "defaults to deny-all when no allow list and no autonomy" $ do
+      let policy = buildPolicy Nothing []
+      _sp_autonomy policy `shouldBe` Deny
+      isCommandAllowed policy (CommandName "git") `shouldBe` False
+
+    it "allows specific commands with Full autonomy (backward compat)" $ do
+      let policy = buildPolicy Nothing ["git", "ls"]
+      _sp_autonomy policy `shouldBe` Full
+      isCommandAllowed policy (CommandName "git") `shouldBe` True
+      isCommandAllowed policy (CommandName "rm") `shouldBe` False
+
+    it "unrestricted mode: autonomy full with no allow list gives AllowAll" $ do
+      let policy = buildPolicy (Just Full) []
+      _sp_autonomy policy `shouldBe` Full
+      _sp_allowedCommands policy `shouldBe` AllowAll
+
+    it "autonomy full with explicit allow list restricts to that list" $ do
+      let policy = buildPolicy (Just Full) ["git"]
+      _sp_autonomy policy `shouldBe` Full
+      isCommandAllowed policy (CommandName "git") `shouldBe` True
+      isCommandAllowed policy (CommandName "rm") `shouldBe` False
+
+    it "autonomy supervised with allow list gives Supervised" $ do
+      let policy = buildPolicy (Just Supervised) ["git"]
+      _sp_autonomy policy `shouldBe` Supervised
+      isCommandAllowed policy (CommandName "git") `shouldBe` True
+
+    it "autonomy deny overrides allow list" $ do
+      let policy = buildPolicy (Just Deny) ["git"]
+      _sp_autonomy policy `shouldBe` Deny

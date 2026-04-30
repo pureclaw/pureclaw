@@ -27,10 +27,15 @@ module PureClaw.Providers.Class
   , SomeProvider (..)
   ) where
 
-import Data.Aeson (Value)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, (.:), (.:?), (.=))
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Types qualified as Aeson
 import Data.ByteString (ByteString)
+import Data.ByteString.Base64 qualified as B64
+import Data.Maybe qualified
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 
 import PureClaw.Core.Types
 
@@ -153,6 +158,171 @@ data StreamEvent
   | StreamDone CompletionResponse  -- ^ Stream finished with full response
   deriving stock (Show, Eq)
 
+---------------------------------------------------------------------------
+-- JSON instances
+---------------------------------------------------------------------------
+
+instance ToJSON Role where
+  toJSON User      = Aeson.String "user"
+  toJSON Assistant  = Aeson.String "assistant"
+
+instance FromJSON Role where
+  parseJSON = Aeson.withText "Role" $ \case
+    "user"      -> pure User
+    "assistant" -> pure Assistant
+    other       -> fail ("unknown Role: " <> T.unpack other)
+
+-- | Encode a ByteString as base64 text for JSON.
+bsToJSON :: ByteString -> Value
+bsToJSON = Aeson.String . TE.decodeUtf8 . B64.encode
+
+-- | Decode base64 text from JSON to a ByteString.
+bsFromJSON :: Value -> Aeson.Parser ByteString
+bsFromJSON = Aeson.withText "Base64ByteString" $ \t ->
+  case B64.decode (TE.encodeUtf8 t) of
+    Right bs -> pure bs
+    Left err -> fail ("invalid base64: " <> err)
+
+instance ToJSON ToolResultPart where
+  toJSON (TRPText t) = Aeson.object
+    [ "type" .= ("text" :: Text), "text" .= t ]
+  toJSON (TRPImage mt bs) = Aeson.object
+    [ "type" .= ("image" :: Text), "media_type" .= mt, "data" .= bsToJSON bs ]
+
+instance FromJSON ToolResultPart where
+  parseJSON = Aeson.withObject "ToolResultPart" $ \o -> do
+    tag <- o .: "type" :: Aeson.Parser Text
+    case tag of
+      "text"  -> TRPText <$> o .: "text"
+      "image" -> TRPImage <$> o .: "media_type" <*> (o .: "data" >>= bsFromJSON)
+      _       -> fail ("unknown ToolResultPart type: " <> T.unpack tag)
+
+instance ToJSON ContentBlock where
+  toJSON (TextBlock t) = Aeson.object
+    [ "type" .= ("text" :: Text), "text" .= t ]
+  toJSON (ImageBlock mt bs) = Aeson.object
+    [ "type" .= ("image" :: Text), "media_type" .= mt, "data" .= bsToJSON bs ]
+  toJSON (ToolUseBlock callId name input) = Aeson.object
+    [ "type" .= ("tool_use" :: Text)
+    , "id"   .= unToolCallId callId
+    , "name" .= name
+    , "input" .= input
+    ]
+  toJSON (ToolResultBlock callId content isErr) = Aeson.object
+    [ "type"        .= ("tool_result" :: Text)
+    , "tool_use_id" .= unToolCallId callId
+    , "content"     .= content
+    , "is_error"    .= isErr
+    ]
+
+instance FromJSON ContentBlock where
+  parseJSON = Aeson.withObject "ContentBlock" $ \o -> do
+    tag <- o .: "type" :: Aeson.Parser Text
+    case tag of
+      "text" -> TextBlock <$> o .: "text"
+      "image" -> ImageBlock <$> o .: "media_type" <*> (o .: "data" >>= bsFromJSON)
+      "tool_use" -> (ToolUseBlock . ToolCallId
+        <$> (o .: "id"))
+        <*> o .: "name"
+        <*> o .: "input"
+      "tool_result" -> (ToolResultBlock . ToolCallId
+        <$> (o .: "tool_use_id"))
+        <*> o .: "content"
+        <*> o .: "is_error"
+      _ -> fail ("unknown ContentBlock type: " <> T.unpack tag)
+
+instance ToJSON Message where
+  toJSON (Message role content) = Aeson.object
+    [ "role" .= role, "content" .= content ]
+
+instance FromJSON Message where
+  parseJSON = Aeson.withObject "Message" $ \o ->
+    Message <$> o .: "role" <*> o .: "content"
+
+instance ToJSON ToolDefinition where
+  toJSON (ToolDefinition name desc schema) = Aeson.object
+    [ "name" .= name, "description" .= desc, "input_schema" .= schema ]
+
+instance FromJSON ToolDefinition where
+  parseJSON = Aeson.withObject "ToolDefinition" $ \o ->
+    ToolDefinition <$> o .: "name" <*> o .: "description" <*> o .: "input_schema"
+
+instance ToJSON ToolChoice where
+  toJSON AutoTool          = Aeson.object [ "type" .= ("auto" :: Text) ]
+  toJSON AnyTool           = Aeson.object [ "type" .= ("any" :: Text) ]
+  toJSON (SpecificTool t)  = Aeson.object [ "type" .= ("tool" :: Text), "name" .= t ]
+
+instance FromJSON ToolChoice where
+  parseJSON = Aeson.withObject "ToolChoice" $ \o -> do
+    tag <- o .: "type" :: Aeson.Parser Text
+    case tag of
+      "auto" -> pure AutoTool
+      "any"  -> pure AnyTool
+      "tool" -> SpecificTool <$> o .: "name"
+      _      -> fail ("unknown ToolChoice type: " <> T.unpack tag)
+
+instance ToJSON Usage where
+  toJSON (Usage inp outp) = Aeson.object
+    [ "input_tokens" .= inp, "output_tokens" .= outp ]
+
+instance FromJSON Usage where
+  parseJSON = Aeson.withObject "Usage" $ \o ->
+    Usage <$> o .: "input_tokens" <*> o .: "output_tokens"
+
+instance ToJSON CompletionRequest where
+  toJSON req = Aeson.object
+    [ "model"         .= unModelId (_cr_model req)
+    , "messages"      .= _cr_messages req
+    , "system_prompt" .= _cr_systemPrompt req
+    , "max_tokens"    .= _cr_maxTokens req
+    , "tools"         .= _cr_tools req
+    , "tool_choice"   .= _cr_toolChoice req
+    ]
+
+instance FromJSON CompletionRequest where
+  parseJSON = Aeson.withObject "CompletionRequest" $ \o ->
+    (CompletionRequest . ModelId
+      <$> (o .: "model"))
+      <*> o .: "messages"
+      <*> o .:? "system_prompt"
+      <*> o .:? "max_tokens"
+      <*> (Data.Maybe.fromMaybe [] <$> o .:? "tools")
+      <*> o .:? "tool_choice"
+
+instance ToJSON CompletionResponse where
+  toJSON resp = Aeson.object
+    [ "content" .= _crsp_content resp
+    , "model"   .= unModelId (_crsp_model resp)
+    , "usage"   .= _crsp_usage resp
+    ]
+
+instance FromJSON CompletionResponse where
+  parseJSON = Aeson.withObject "CompletionResponse" $ \o ->
+    CompletionResponse
+      <$> o .: "content"
+      <*> (ModelId <$> o .: "model")
+      <*> o .:? "usage"
+
+instance ToJSON StreamEvent where
+  toJSON (StreamText t)          = Aeson.object
+    [ "type" .= ("text" :: Text), "text" .= t ]
+  toJSON (StreamToolUse cid name) = Aeson.object
+    [ "type" .= ("tool_use" :: Text), "id" .= unToolCallId cid, "name" .= name ]
+  toJSON (StreamToolInput t)     = Aeson.object
+    [ "type" .= ("tool_input" :: Text), "input" .= t ]
+  toJSON (StreamDone resp)       = Aeson.object
+    [ "type" .= ("done" :: Text), "response" .= resp ]
+
+instance FromJSON StreamEvent where
+  parseJSON = Aeson.withObject "StreamEvent" $ \o -> do
+    tag <- o .: "type" :: Aeson.Parser Text
+    case tag of
+      "text"       -> StreamText <$> o .: "text"
+      "tool_use"   -> (StreamToolUse . ToolCallId <$> (o .: "id")) <*> o .: "name"
+      "tool_input" -> StreamToolInput <$> o .: "input"
+      "done"       -> StreamDone <$> o .: "response"
+      _            -> fail ("unknown StreamEvent type: " <> T.unpack tag)
+
 -- | LLM provider interface. Each provider (Anthropic, OpenAI, etc.)
 -- implements this typeclass.
 class Provider p where
@@ -163,6 +333,10 @@ class Provider p where
   completeStream p req callback = do
     resp <- complete p req
     callback (StreamDone resp)
+  -- | List available models from the provider.
+  -- Default returns @[]@ (no model listing support).
+  listModels :: p -> IO [ModelId]
+  listModels _ = pure []
 
 -- | Existential wrapper for runtime provider selection (e.g. from config).
 data SomeProvider where
@@ -171,3 +345,4 @@ data SomeProvider where
 instance Provider SomeProvider where
   complete (MkProvider p) = complete p
   completeStream (MkProvider p) = completeStream p
+  listModels (MkProvider p) = listModels p

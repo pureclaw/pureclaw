@@ -6,12 +6,13 @@ PureClaw is a Haskell-native AI agent runtime. The goal is not feature parity wi
 
 ## Core Design Philosophy
 
-### Security through types, not discipline
+### Security by construction, not discipline
 
 Every severe security issue in existing agent runtimes (see `docs/SECURITY_PRACTICES.md`) shares a root cause: the insecure path was as easy to write as the secure path. The fix was always "remember to call the right function."
 
 PureClaw's answer: make the insecure path a type error.
 
+- Secrets are encrypted at rest by default.
 - You cannot execute a shell command without an `AuthorizedCommand` value.
 - You cannot obtain an `AuthorizedCommand` without passing through `SecurityPolicy`.
 - You cannot read a file without a `SafePath`.

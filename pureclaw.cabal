@@ -51,6 +51,7 @@ library
     PureClaw.Security.Vault
     PureClaw.Security.Vault.Age
     PureClaw.Security.Vault.Passphrase
+    PureClaw.Security.Vault.Plugin
     -- Handles (capability interfaces + real implementations)
     PureClaw.Handles.File
     PureClaw.Handles.Shell
@@ -59,6 +60,12 @@ library
     PureClaw.Handles.Channel
     PureClaw.Handles.Process
     PureClaw.Handles.Log
+    PureClaw.Handles.Transcript
+    PureClaw.Handles.Harness
+    -- Harness (tmux lifecycle)
+    PureClaw.Harness
+    PureClaw.Harness.ClaudeCode
+    PureClaw.Harness.Tmux
     -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
     PureClaw.Tools.Shell
@@ -74,13 +81,19 @@ library
     PureClaw.Tools.Cron
     PureClaw.Tools.Image
     -- Agent
+    PureClaw.Agent.AgentDef
+    PureClaw.Agent.Completion
     PureClaw.Agent.Env
     PureClaw.Agent.Loop
     PureClaw.Agent.Context
     PureClaw.Agent.Memory
     PureClaw.Agent.Compaction
+    PureClaw.Agent.ContextTracker
     PureClaw.Agent.Identity
     PureClaw.Agent.SlashCommands
+    -- Session
+    PureClaw.Session.Handle
+    PureClaw.Session.Types
     -- Providers
     PureClaw.Providers.Class
     PureClaw.Providers.Anthropic
@@ -92,6 +105,7 @@ library
     PureClaw.Channels.CLI
     PureClaw.Channels.Telegram
     PureClaw.Channels.Signal
+    PureClaw.Channels.Signal.Transport
     -- Memory backends
     PureClaw.Memory.SQLite
     PureClaw.Memory.Markdown
@@ -105,11 +119,18 @@ library
     PureClaw.Scheduler.Heartbeat
     -- Frontend
     PureClaw.Frontend.Server
+    -- Transcript
+    PureClaw.Transcript
+    PureClaw.Transcript.Combinator
+    PureClaw.Transcript.Provider
+    PureClaw.Transcript.Types
     -- CLI
     PureClaw.CLI.Config
+    PureClaw.CLI.Import
     PureClaw.CLI.Commands
   build-depends:
     base              >= 4.20,
+    age,
     aeson,
     async,
     base16-bytestring,
@@ -119,6 +140,7 @@ library
     crypton,
     directory,
     filepath,
+    haskeline,
     http-client,
     http-client-tls,
     http-types,
@@ -127,12 +149,14 @@ library
     optparse-applicative,
     sqlite-simple,
     stm,
+    temporary,
     text,
     time,
     tomland,
     transformers,
     unix,
     typed-process,
+    uuid,
     vector,
     wai,
     wai-extra,
@@ -178,12 +202,15 @@ test-suite pureclaw-test
     Handles.MemorySpec
     Handles.ChannelSpec
     Providers.ClassSpec
+    Agent.AgentDefSpec
     Agent.ContextSpec
     Providers.AnthropicSpec
+    Agent.CompletionSpec
     Agent.LoopSpec
     Channels.CLISpec
     CLI.CommandsSpec
     CLI.ConfigSpec
+    CLI.ImportSpec
     Tools.RegistrySpec
     Tools.ShellSpec
     Tools.FileReadSpec
@@ -201,6 +228,7 @@ test-suite pureclaw-test
     Memory.NoneSpec
     Agent.MemorySpec
     Agent.CompactionSpec
+    Agent.ContextTrackerSpec
     Agent.SlashCommandsSpec
     Providers.OpenAISpec
     Providers.OllamaSpec
@@ -209,6 +237,7 @@ test-suite pureclaw-test
     Security.PairingSpec
     Security.VaultAgeSpec
     Security.VaultPassphraseSpec
+    Security.VaultPluginSpec
     Security.VaultSpec
     Gateway.AuthSpec
     Gateway.RoutesSpec
@@ -216,11 +245,25 @@ test-suite pureclaw-test
     Channels.ClassSpec
     Channels.TelegramSpec
     Channels.SignalSpec
+    Channels.SignalTransportSpec
     Agent.IdentitySpec
     Scheduler.CronSpec
     Scheduler.HeartbeatSpec
     Integration.SignalFlowSpec
+    Integration.CLISpec
+    Integration.ImportRoundTripSpec
+    Transcript.TypesSpec
+    Transcript.CombinatorSpec
+    Transcript.ProviderSpec
+    Session.TypesSpec
+    Session.HandleSpec
+    Handles.TranscriptSpec
+    Handles.HarnessSpec
+    Harness.ClaudeCodeSpec
+    Harness.TmuxSpec
   hs-source-dirs:   test
+  build-tool-depends:
+    pureclaw:pureclaw
   build-depends:
     base,
     pureclaw,
@@ -243,6 +286,9 @@ test-suite pureclaw-test
     wai,
     warp,
     hspec,
+    typed-process,
+    unix,
+    uuid,
     QuickCheck,
   default-language: GHC2021
   default-extensions:

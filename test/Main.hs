@@ -17,12 +17,15 @@ import qualified Handles.NetworkSpec
 import qualified Handles.MemorySpec
 import qualified Handles.ChannelSpec
 import qualified Providers.ClassSpec
+import qualified Agent.AgentDefSpec
+import qualified Agent.CompletionSpec
 import qualified Agent.ContextSpec
 import qualified Providers.AnthropicSpec
 import qualified Agent.LoopSpec
 import qualified Channels.CLISpec
 import qualified CLI.CommandsSpec
 import qualified CLI.ConfigSpec
+import qualified CLI.ImportSpec
 import qualified Tools.RegistrySpec
 import qualified Tools.ShellSpec
 import qualified Tools.FileReadSpec
@@ -40,6 +43,7 @@ import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
 import qualified Agent.MemorySpec
 import qualified Agent.CompactionSpec
+import qualified Agent.ContextTrackerSpec
 import qualified Agent.SlashCommandsSpec
 import qualified Providers.OpenAISpec
 import qualified Providers.OllamaSpec
@@ -48,6 +52,7 @@ import qualified Security.CryptoSpec
 import qualified Security.PairingSpec
 import qualified Security.VaultAgeSpec
 import qualified Security.VaultPassphraseSpec
+import qualified Security.VaultPluginSpec
 import qualified Security.VaultSpec
 import qualified Gateway.AuthSpec
 import qualified Gateway.RoutesSpec
@@ -55,10 +60,22 @@ import qualified Gateway.ServerSpec
 import qualified Channels.ClassSpec
 import qualified Channels.TelegramSpec
 import qualified Channels.SignalSpec
+import qualified Channels.SignalTransportSpec
 import qualified Agent.IdentitySpec
 import qualified Scheduler.CronSpec
 import qualified Scheduler.HeartbeatSpec
 import qualified Integration.SignalFlowSpec
+import qualified Integration.CLISpec
+import qualified Integration.ImportRoundTripSpec
+import qualified Transcript.TypesSpec
+import qualified Handles.TranscriptSpec
+import qualified Handles.HarnessSpec
+import qualified Harness.ClaudeCodeSpec
+import qualified Harness.TmuxSpec
+import qualified Transcript.CombinatorSpec
+import qualified Transcript.ProviderSpec
+import qualified Session.TypesSpec
+import qualified Session.HandleSpec
 
 main :: IO ()
 main = hspec $ do
@@ -77,12 +94,15 @@ main = hspec $ do
   describe "Handles.Memory" Handles.MemorySpec.spec
   describe "Handles.Channel" Handles.ChannelSpec.spec
   describe "Providers.Class" Providers.ClassSpec.spec
+  describe "Agent.AgentDef" Agent.AgentDefSpec.spec
   describe "Agent.Context" Agent.ContextSpec.spec
+  describe "Agent.Completion" Agent.CompletionSpec.spec
   describe "Providers.Anthropic" Providers.AnthropicSpec.spec
   describe "Agent.Loop" Agent.LoopSpec.spec
   describe "Channels.CLI" Channels.CLISpec.spec
   describe "CLI.Commands" CLI.CommandsSpec.spec
   describe "CLI.Config" CLI.ConfigSpec.spec
+  describe "CLI.Import" CLI.ImportSpec.spec
   describe "Tools.Registry" Tools.RegistrySpec.spec
   describe "Tools.Shell" Tools.ShellSpec.spec
   describe "Tools.FileRead" Tools.FileReadSpec.spec
@@ -100,6 +120,7 @@ main = hspec $ do
   describe "Memory.SQLite" Memory.SQLiteSpec.spec
   describe "Agent.Memory" Agent.MemorySpec.spec
   describe "Agent.Compaction" Agent.CompactionSpec.spec
+  describe "Agent.ContextTracker" Agent.ContextTrackerSpec.spec
   describe "Agent.SlashCommands" Agent.SlashCommandsSpec.spec
   describe "Providers.OpenAI" Providers.OpenAISpec.spec
   describe "Providers.Ollama" Providers.OllamaSpec.spec
@@ -108,6 +129,7 @@ main = hspec $ do
   describe "Security.Pairing" Security.PairingSpec.spec
   describe "Security.VaultAge" Security.VaultAgeSpec.spec
   describe "Security.VaultPassphrase" Security.VaultPassphraseSpec.spec
+  describe "Security.VaultPlugin" Security.VaultPluginSpec.spec
   describe "Security.Vault" Security.VaultSpec.spec
   describe "Gateway.Auth" Gateway.AuthSpec.spec
   describe "Gateway.Routes" Gateway.RoutesSpec.spec
@@ -115,7 +137,19 @@ main = hspec $ do
   describe "Channels.Class" Channels.ClassSpec.spec
   describe "Channels.Telegram" Channels.TelegramSpec.spec
   describe "Channels.Signal" Channels.SignalSpec.spec
+  describe "Channels.Signal.Transport" Channels.SignalTransportSpec.spec
   describe "Agent.Identity" Agent.IdentitySpec.spec
   describe "Scheduler.Cron" Scheduler.CronSpec.spec
   describe "Scheduler.Heartbeat" Scheduler.HeartbeatSpec.spec
   describe "Integration.SignalFlow" Integration.SignalFlowSpec.spec
+  describe "Integration.CLI" Integration.CLISpec.spec
+  describe "Integration.ImportRoundTrip" Integration.ImportRoundTripSpec.spec
+  describe "Transcript.Types" Transcript.TypesSpec.spec
+  describe "Handles.Transcript" Handles.TranscriptSpec.spec
+  describe "Handles.Harness" Handles.HarnessSpec.spec
+  describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
+  describe "Harness.Tmux" Harness.TmuxSpec.spec
+  describe "Transcript.Combinator" Transcript.CombinatorSpec.spec
+  describe "Transcript.Provider" Transcript.ProviderSpec.spec
+  describe "Session.Types" Session.TypesSpec.spec
+  describe "Session.Handle" Session.HandleSpec.spec

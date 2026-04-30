@@ -13,7 +13,7 @@
           pureclaw-project =
             final.haskell-nix.cabalProject' {
               src = ./.;
-              compiler-nix-name = "ghc9121";
+              compiler-nix-name = "ghc9123";
               modules = [
                   {
                       enableProfiling = true;
@@ -29,6 +29,12 @@
                 hlint = {};
                 # haskell-language-server = {};
               };
+              shell.buildInputs = with final; [
+                age
+                age-plugin-yubikey
+                signal-cli
+                tmux
+              ];
             };
         })
       ];

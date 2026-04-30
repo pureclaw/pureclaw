@@ -1,0 +1,7 @@
+---
+# HLint configuration
+# Suppress noisy suggestions that don't improve code quality
+
+- ignore:
+    name: "Use newtype instead of data"
+    # Single-field records are kept as `data` for flexibility to add fields in the future

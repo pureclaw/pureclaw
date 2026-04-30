@@ -5,6 +5,8 @@ module PureClaw.Agent.Compaction
     -- * Configuration
   , defaultTokenLimit
   , defaultKeepRecent
+    -- * Metadata
+  , compactionMetadataKey
   ) where
 
 import Control.Exception
@@ -17,10 +19,16 @@ import PureClaw.Providers.Class
 
 -- | Result of a compaction attempt.
 data CompactionResult
-  = Compacted Int Int     -- ^ old message count, new message count
-  | NotNeeded             -- ^ context is below threshold
-  | CompactionError Text -- ^ provider error during summarization
+  = Compacted Int Int Text  -- ^ old count, new count, summary text
+  | NotNeeded               -- ^ context is below threshold
+  | CompactionError Text    -- ^ provider error during summarization
   deriving stock (Show, Eq)
+
+-- | Metadata key used to mark compaction entries in the transcript.
+-- 'loadRecentMessages' looks for the last entry carrying this key and
+-- only replays entries from that point forward.
+compactionMetadataKey :: Text
+compactionMetadataKey = "compaction"
 
 -- | Default context window token limit (200k for Claude).
 defaultTokenLimit :: Int
@@ -57,10 +65,11 @@ compactContext provider model threshold keepRecent ctx
       case summaryResult of
         Left err -> pure (ctx, CompactionError err)
         Right summaryText ->
-          let summaryMsg = textMessage User ("[Context summary] " <> summaryText)
+          let prefixed = "[Context summary] " <> summaryText
+              summaryMsg = textMessage User prefixed
               newMsgs = summaryMsg : recentMsgs
               ctx' = replaceMessages newMsgs ctx
-          in pure (ctx', Compacted (length msgs) (length newMsgs))
+          in pure (ctx', Compacted (length msgs) (length newMsgs) prefixed)
 
 -- | Build a prompt asking the provider to summarize conversation history.
 buildSummaryPrompt :: [Message] -> Text

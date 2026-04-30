@@ -2,11 +2,14 @@ module PureClaw.Providers.Ollama
   ( -- * Provider type
     OllamaProvider
   , mkOllamaProvider
+  , mkOllamaProviderWithUrl
     -- * Errors
   , OllamaError (..)
     -- * Request/response encoding (exported for testing)
   , encodeRequest
   , decodeResponse
+    -- * Model listing (exported for testing)
+  , parseModelNames
   ) where
 
 import Control.Exception
@@ -14,6 +17,7 @@ import Data.Aeson
 import Data.Aeson.Types
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
+import Data.Maybe qualified
 import Data.Text (Text)
 import Data.Text qualified as T
 import Network.HTTP.Client qualified as HTTP
@@ -26,15 +30,23 @@ import PureClaw.Providers.Class
 -- | Ollama provider for local model inference.
 data OllamaProvider = OllamaProvider
   { _ol_manager :: HTTP.Manager
-  , _ol_baseUrl :: String
+  , _ol_baseUrl :: String    -- ^ Base URL without endpoint path (e.g. "http://localhost:11434")
   }
 
 -- | Create an Ollama provider. Defaults to localhost:11434.
 mkOllamaProvider :: HTTP.Manager -> OllamaProvider
-mkOllamaProvider mgr = OllamaProvider mgr "http://localhost:11434/api/chat"
+mkOllamaProvider mgr = OllamaProvider mgr "http://localhost:11434"
+
+-- | Create an Ollama provider with a custom base URL.
+-- The URL should be the base (e.g. @http://myhost:11434@).
+mkOllamaProviderWithUrl :: HTTP.Manager -> String -> OllamaProvider
+mkOllamaProviderWithUrl mgr url =
+  let trimmed = reverse (dropWhile (== '/') (reverse url))
+  in OllamaProvider mgr trimmed
 
 instance Provider OllamaProvider where
   complete = ollamaComplete
+  listModels = ollamaListModels
 
 -- | Errors from the Ollama API.
 data OllamaError
@@ -49,11 +61,12 @@ instance ToPublicError OllamaError where
 
 ollamaComplete :: OllamaProvider -> CompletionRequest -> IO CompletionResponse
 ollamaComplete provider req = do
-  initReq <- HTTP.parseRequest (_ol_baseUrl provider)
+  initReq <- HTTP.parseRequest (_ol_baseUrl provider ++ "/api/chat")
   let httpReq = initReq
         { HTTP.method = "POST"
         , HTTP.requestBody = HTTP.RequestBodyLBS (encodeRequest req)
         , HTTP.requestHeaders = [("content-type", "application/json")]
+        , HTTP.responseTimeout = HTTP.responseTimeoutMicro (5 * 60 * 1000000)  -- 5 minutes
         }
   resp <- HTTP.httpLbs httpReq (_ol_manager provider)
   let status = Status.statusCode (HTTP.responseStatus resp)
@@ -130,3 +143,31 @@ decodeResponse bs = eitherDecode bs >>= parseEither parseResp
       args <- fn .: "arguments"
       -- Ollama doesn't return a call ID, so generate a placeholder
       pure (ToolUseBlock (ToolCallId ("ollama-" <> name)) name args)
+
+-- | List available models via Ollama's /api/tags endpoint.
+-- Returns an empty list on any error (network, parse, etc.).
+ollamaListModels :: OllamaProvider -> IO [ModelId]
+ollamaListModels provider = do
+  result <- try @SomeException $ do
+    initReq <- HTTP.parseRequest (_ol_baseUrl provider ++ "/api/tags")
+    let tagsReq = initReq { HTTP.responseTimeout = HTTP.responseTimeoutMicro (30 * 1000000) }  -- 30 seconds
+    resp <- HTTP.httpLbs tagsReq (_ol_manager provider)
+    let status = Status.statusCode (HTTP.responseStatus resp)
+    if status /= 200
+      then pure []
+      else case eitherDecode (HTTP.responseBody resp) of
+        Left _    -> pure []
+        Right val -> pure (parseModelNames val)
+  case result of
+    Left _  -> pure []
+    Right models -> pure models
+
+-- | Parse model names from Ollama /api/tags response.
+-- Expected format: { "models": [{ "name": "llama3:latest", ... }, ...] }
+parseModelNames :: Value -> [ModelId]
+parseModelNames = Data.Maybe.fromMaybe [] . parseMaybe parseModels
+  where
+    parseModels :: Value -> Parser [ModelId]
+    parseModels = withObject "OllamaTagsResponse" $ \o -> do
+      models <- o .: "models"
+      mapM (withObject "Model" (\m -> ModelId <$> m .: "name")) models

@@ -13,11 +13,18 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Loop
 import PureClaw.Channels.Class
 import PureClaw.Channels.Signal
+import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Security.Policy
+import PureClaw.Security.Vault.Age
+import PureClaw.Security.Vault.Plugin
+import PureClaw.Session.Handle (mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
 import PureClaw.Tools.Registry
+
+import Data.Map.Strict qualified as Map
 
 -- | Mock provider that echoes user messages with a prefix.
 newtype EchoProvider = EchoProvider Text
@@ -34,36 +41,53 @@ instance Provider EchoProvider where
       }
 
 -- | Build a test AgentEnv from a provider and channel.
-mkTestEnv :: Provider p => p -> ChannelHandle -> AgentEnv
-mkTestEnv p ch = AgentEnv
-  { _env_provider     = MkProvider p
-  , _env_model        = ModelId "mock"
-  , _env_channel      = ch
-  , _env_logger       = mkNoOpLogHandle
-  , _env_systemPrompt = Nothing
-  , _env_registry     = emptyRegistry
-  , _env_vault        = Nothing
-  }
+mkTestEnv :: Provider p => p -> ChannelHandle -> IO AgentEnv
+mkTestEnv p ch = do
+  vaultRef      <- newIORef Nothing
+  providerRef   <- newIORef (Just (MkProvider p))
+  modelRef      <- newIORef (ModelId "mock")
+  harnessRef    <- newIORef Map.empty
+  targetRef     <- newIORef TargetProvider
+  windowIdxRef  <- newIORef 0
+  sessionRef <- newIORef =<< mkNoOpSessionHandle
+  pure AgentEnv
+    { _env_provider     = providerRef
+    , _env_model        = modelRef
+    , _env_channel      = ch
+    , _env_logger       = mkNoOpLogHandle
+    , _env_systemPrompt = Nothing
+    , _env_registry     = emptyRegistry
+    , _env_vault        = vaultRef
+    , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+    , _env_policy       = defaultPolicy
+    , _env_harnesses    = harnessRef
+    , _env_target       = targetRef
+    , _env_nextWindowIdx = windowIdxRef
+    , _env_agentDef      = Nothing
+    , _env_session       = sessionRef
+    , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+    }
 
 spec :: Spec
 spec = do
   describe "Signal end-to-end flow" $ do
     it "receives a Signal message, processes via agent, and produces a response" $ do
       -- Set up Signal channel
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
-          env = (mkTestEnv (EchoProvider "Echo: ") handle)
-            { _env_systemPrompt = Just "You are a test agent." }
+      baseEnv <- mkTestEnv (EchoProvider "Echo: ") handle
+      let env = baseEnv { _env_systemPrompt = Just "You are a test agent." }
 
       -- Run agent loop in a separate thread
       agentThread <- async $ runAgentLoop env
 
       -- Push a Signal envelope into the inbox
       let envelope = SignalEnvelope
-            { _se_source    = "+9876543210"
-            , _se_timestamp = 1000
+            { _se_sourceUuid = Nothing
+            , _se_source    = "+9876543210"
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage
                 { _sdm_message = "Hello from Signal!"
                 , _sdm_timestamp = 1000
@@ -87,17 +111,19 @@ spec = do
         _ -> expectationFailure "expected at least one message"
 
     it "handles multiple Signal messages in sequence" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
 
-      agentThread <- async $ runAgentLoop (mkTestEnv (EchoProvider "Re: ") handle)
+      env2 <- mkTestEnv (EchoProvider "Re: ") handle
+      agentThread <- async $ runAgentLoop env2
 
       -- Push two messages
       let mkEnvelope txt ts = SignalEnvelope
             { _se_source = "+111"
-            , _se_timestamp = ts
+            , _se_sourceUuid = Nothing
+            , _se_timestamp = Just ts
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = txt, _sdm_timestamp = ts }
             }
       atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "First" 1000)
@@ -112,17 +138,19 @@ spec = do
       length sent `shouldBe` 2
 
     it "uses slash commands through Signal" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
 
-      agentThread <- async $ runAgentLoop (mkTestEnv (EchoProvider "Echo: ") handle)
+      env3 <- mkTestEnv (EchoProvider "Echo: ") handle
+      agentThread <- async $ runAgentLoop env3
 
       -- Send /status slash command
       let statusEnvelope = SignalEnvelope
             { _se_source = "+111"
-            , _se_timestamp = 1000
+            , _se_sourceUuid = Nothing
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "/status", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) statusEnvelope
@@ -138,7 +166,7 @@ spec = do
         _ -> expectationFailure "expected at least one message"
 
     it "executes tool calls end-to-end" $ do
-      sc <- mkSignalChannel (SignalConfig "+1234567890") mkNoOpLogHandle
+      sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
       let handle = (toHandle sc)
             { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
@@ -147,13 +175,15 @@ spec = do
       let testHandler = ToolHandler $ \_ -> pure ("tool result", False)
           testDef = ToolDefinition "test_tool" "A test tool" (object [])
           registry = registerTool testDef testHandler emptyRegistry
-          env = (mkTestEnv ToolCallThenTextProvider handle) { _env_registry = registry }
+      baseEnv4 <- mkTestEnv ToolCallThenTextProvider handle
+      let env = baseEnv4 { _env_registry = registry }
 
       agentThread <- async $ runAgentLoop env
 
       let envelope = SignalEnvelope
             { _se_source = "+111"
-            , _se_timestamp = 1000
+            , _se_sourceUuid = Nothing
+            , _se_timestamp = Just 1000
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "do it", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) envelope
@@ -189,3 +219,12 @@ instance Provider ToolCallThenTextProvider where
     where
       isResult (ToolResultBlock {}) = True
       isResult _ = False
+
+-- | Create a test SignalChannel with mock transport.
+mkTestSignalChannelForFlow :: IO SignalChannel
+mkTestSignalChannelForFlow = do
+  inQ  <- newTQueueIO
+  outQ <- newTQueueIO
+  let transport = mkMockSignalTransport inQ outQ
+      config = SignalConfig { _sc_account = "+1234567890", _sc_textChunkLimit = 6000, _sc_allowFrom = AllowAll }
+  mkSignalChannel config transport mkNoOpLogHandle

@@ -41,20 +41,35 @@ data StreamChunk
 -- traces or model names cannot be sent to channel users. This is enforced
 -- at the type level.
 data ChannelHandle = ChannelHandle
-  { _ch_receive    :: IO IncomingMessage
-  , _ch_send       :: OutgoingMessage -> IO ()
-  , _ch_sendError  :: PublicError -> IO ()
-  , _ch_sendChunk  :: StreamChunk -> IO ()
-  , _ch_readSecret :: IO Text    -- ^ Read a line without echo (CLI only)
+  { _ch_receive      :: IO IncomingMessage
+  , _ch_send         :: OutgoingMessage -> IO ()
+  , _ch_sendError    :: PublicError -> IO ()
+  , _ch_sendChunk    :: StreamChunk -> IO ()
+  , _ch_streaming    :: Bool
+    -- ^ Whether this channel supports streaming output. When 'True',
+    -- the agent loop sends text via '_ch_sendChunk' during generation
+    -- and skips the full '_ch_send'. When 'False', only '_ch_send'
+    -- is used for the final complete response.
+  , _ch_readSecret   :: IO Text    -- ^ Read a line without echo (CLI only)
+  , _ch_prompt       :: Text -> IO Text
+    -- ^ Display a prompt and read input on the same line (no trailing
+    -- newline after the prompt text). For non-interactive channels this
+    -- falls back to send-then-receive.
+  , _ch_promptSecret :: Text -> IO Text
+    -- ^ Like '_ch_prompt' but with echo disabled (for passwords / API keys).
+    -- For non-interactive channels this falls back to '_ch_readSecret'.
   }
 
 -- | No-op channel handle. Receive returns an empty message, send and
 -- sendError are silent. readSecret returns empty text.
 mkNoOpChannelHandle :: ChannelHandle
 mkNoOpChannelHandle = ChannelHandle
-  { _ch_receive    = pure (IncomingMessage (UserId "") "")
-  , _ch_send       = \_ -> pure ()
-  , _ch_sendError  = \_ -> pure ()
-  , _ch_sendChunk  = \_ -> pure ()
-  , _ch_readSecret = pure ""
+  { _ch_receive      = pure (IncomingMessage (UserId "") "")
+  , _ch_send         = \_ -> pure ()
+  , _ch_sendError    = \_ -> pure ()
+  , _ch_sendChunk    = \_ -> pure ()
+  , _ch_streaming    = False
+  , _ch_readSecret   = pure ""
+  , _ch_prompt       = \_ -> pure ""
+  , _ch_promptSecret = \_ -> pure ""
   }

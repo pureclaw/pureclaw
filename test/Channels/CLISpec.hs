@@ -11,4 +11,4 @@ spec = do
       -- mkCLIChannelHandle reads from stdin, so we can only test
       -- that it constructs without error. Interactive tests would
       -- require stdin/stdout redirection.
-      mkCLIChannelHandle `seq` pure () :: IO ()
+      mkCLIChannelHandle Nothing `seq` pure () :: IO ()
