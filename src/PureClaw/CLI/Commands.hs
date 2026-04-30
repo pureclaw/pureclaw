@@ -4,6 +4,12 @@ module PureClaw.CLI.Commands
     -- * Options (exported for testing)
   , ChatOptions (..)
   , chatOptionsParser
+    -- * Serve options (exported for testing)
+  , ServeOptions (..)
+  , serveOptionsParser
+    -- * Command (exported for testing)
+  , Command (..)
+  , commandParser
     -- * Enums (exported for testing)
   , ProviderType (..)
   , MemoryBackend (..)
@@ -26,6 +32,7 @@ import System.IO
 
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
+import PureClaw.Frontend.Server
 
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
@@ -87,6 +94,44 @@ data ChatOptions = ChatOptions
   , _co_oauth         :: Bool
   }
   deriving stock (Show, Eq)
+
+-- | Top-level CLI command.
+data Command
+  = ChatCmd ChatOptions
+  | ServeCmd ServeOptions
+  deriving stock (Show, Eq)
+
+-- | Options for the @serve@ subcommand.
+data ServeOptions = ServeOptions
+  { _so_port :: Int
+  , _so_dir  :: FilePath
+  }
+  deriving stock (Show, Eq)
+
+-- | Parser for serve options.
+serveOptionsParser :: Parser ServeOptions
+serveOptionsParser = ServeOptions
+  <$> option auto
+      ( long "port"
+     <> value 8080
+     <> showDefault
+     <> help "Port to serve on"
+      )
+  <*> strOption
+      ( long "dir"
+     <> value "frontend/dist"
+     <> showDefault
+     <> help "Directory containing built frontend files"
+      )
+
+-- | Parser for top-level command: @serve@ subcommand or default chat.
+commandParser :: Parser Command
+commandParser =
+  hsubparser
+    ( command "serve" (info (ServeCmd <$> serveOptionsParser) (progDesc "Serve the web frontend"))
+   <> command "chat" (info (ChatCmd <$> chatOptionsParser) (progDesc "Interactive chat session"))
+    )
+  <|> (ChatCmd <$> chatOptionsParser)
 
 -- | Parser for chat options.
 chatOptionsParser :: Parser ChatOptions
@@ -168,8 +213,8 @@ memoryToText SQLiteMemory   = "sqlite"
 memoryToText MarkdownMemory = "markdown"
 
 -- | Full CLI parser with help and version.
-cliParserInfo :: ParserInfo ChatOptions
-cliParserInfo = info (chatOptionsParser <**> helper)
+cliParserInfo :: ParserInfo Command
+cliParserInfo = info (commandParser <**> helper)
   ( fullDesc
  <> progDesc "Interactive AI chat with tool use"
  <> header "pureclaw — Haskell-native AI agent runtime"
@@ -178,8 +223,18 @@ cliParserInfo = info (chatOptionsParser <**> helper)
 -- | Main CLI entry point.
 runCLI :: IO ()
 runCLI = do
-  opts <- execParser cliParserInfo
-  runChat opts
+  cmd <- execParser cliParserInfo
+  case cmd of
+    ChatCmd opts  -> runChat opts
+    ServeCmd opts -> runServe opts
+
+-- | Run the frontend server.
+runServe :: ServeOptions -> IO ()
+runServe opts =
+  runFrontend FrontendConfig
+    { _fsc_port      = _so_port opts
+    , _fsc_staticDir = _so_dir opts
+    }
 
 -- | Run an interactive chat session.
 runChat :: ChatOptions -> IO ()

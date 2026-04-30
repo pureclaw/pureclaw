@@ -103,6 +103,8 @@ library
     -- Scheduler
     PureClaw.Scheduler.Cron
     PureClaw.Scheduler.Heartbeat
+    -- Frontend
+    PureClaw.Frontend.Server
     -- CLI
     PureClaw.CLI.Config
     PureClaw.CLI.Commands
