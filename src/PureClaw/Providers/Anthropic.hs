@@ -12,14 +12,17 @@ module PureClaw.Providers.Anthropic
   , decodeResponse
     -- * SSE parsing (exported for testing)
   , parseSSELine
+  , splitSSELines
     -- * Stream accumulation (exported for testing)
   , StreamState
-  , newStreamState
+  , initialStreamState
+  , runStreamLine
   , processStreamLine
-  , finalizeStream
+  , finalizeStreamState
   ) where
 
 import Control.Exception
+import Control.Monad (foldM)
 import Data.Aeson
 import Data.Aeson.Types
 import Data.ByteString (ByteString)
@@ -130,11 +133,16 @@ anthropicComplete provider req = do
 
 -- | Encode a completion request as JSON for the Anthropic API.
 encodeRequest :: CompletionRequest -> BL.ByteString
-encodeRequest req = encode $ object $
+encodeRequest = encodeRequestWith False
+
+-- | Internal: shared encoder for streaming and non-streaming requests.
+encodeRequestWith :: Bool -> CompletionRequest -> BL.ByteString
+encodeRequestWith stream req = encode $ object $
   [ "model"      .= unModelId (_cr_model req)
   , "max_tokens" .= fromMaybe 4096 (_cr_maxTokens req)
   , "messages"   .= map encodeMsg (_cr_messages req)
   ]
+  ++ ["stream" .= True | stream]
   ++ maybe [] (\s -> ["system" .= s]) (_cr_systemPrompt req)
   ++ if null (_cr_tools req)
      then maybe [] (\tc -> ["tool_choice" .= encodeToolChoice tc]) (_cr_toolChoice req)
@@ -232,17 +240,7 @@ decodeResponse bs = eitherDecode bs >>= parseEither parseResp
 
 -- | Encode a streaming completion request (adds "stream": true).
 encodeStreamRequest :: CompletionRequest -> BL.ByteString
-encodeStreamRequest req = encode $ object $
-  [ "model"      .= unModelId (_cr_model req)
-  , "max_tokens" .= fromMaybe 4096 (_cr_maxTokens req)
-  , "messages"   .= map encodeMsg (_cr_messages req)
-  , "stream"     .= True
-  ]
-  ++ maybe [] (\s -> ["system" .= s]) (_cr_systemPrompt req)
-  ++ if null (_cr_tools req)
-     then maybe [] (\tc -> ["tool_choice" .= encodeToolChoice tc]) (_cr_toolChoice req)
-     else ("tools" .= map encodeTool (_cr_tools req))
-        : maybe [] (\tc -> ["tool_choice" .= encodeToolChoice tc]) (_cr_toolChoice req)
+encodeStreamRequest = encodeRequestWith True
 
 -- | Stream a completion from the Anthropic API.
 -- Processes SSE events and emits StreamEvent callbacks. Accumulates
@@ -262,42 +260,47 @@ anthropicCompleteStream provider req callback = do
       then do
         body <- BL.toStrict <$> HTTP.brReadSome (HTTP.responseBody resp) (1024 * 1024)
         throwIO (AnthropicAPIError status body)
-      else do
-        st <- newStreamState
-        bufRef <- newIORef BS.empty
-        let readChunks = do
-              chunk <- HTTP.brRead (HTTP.responseBody resp)
+      else
+        let body = HTTP.responseBody resp
+            go st buf = do
+              chunk <- HTTP.brRead body
               if BS.null chunk
-                then do
-                  finalResp <- finalizeStream st
-                  callback (StreamDone finalResp)
+                then callback (StreamDone (finalizeStreamState st))
                 else do
-                  buf <- readIORef bufRef
-                  let fullBuf = buf <> chunk
-                      (lines', remaining) = splitSSELines fullBuf
-                  writeIORef bufRef remaining
-                  mapM_ (processStreamLine st callback) lines'
-                  readChunks
-        readChunks
+                  let (lines', remaining) = splitSSELines (buf <> chunk)
+                  st' <- foldM (processStreamLine callback) st lines'
+                  go st' remaining
+        in go initialStreamState BS.empty
 
 -- | Split a buffer into complete SSE lines and remaining partial data.
+-- Strips a trailing CR from each complete line so CRLF-delimited
+-- streams parse identically to LF-delimited ones.
+--
+-- The last element of 'BS.split' is everything after the final newline
+-- (possibly empty) — that becomes the carry-forward partial line. The
+-- preceding elements are complete lines.
 splitSSELines :: ByteString -> ([ByteString], ByteString)
-splitSSELines bs =
-  let parts = BS.splitWith (== 0x0a) bs  -- split on newline
-  in case parts of
-    [] -> ([], BS.empty)
-    _ -> (init parts, last parts)
+splitSSELines bs = go [] (BS.split 0x0a bs)
+  where
+    go acc []     = (reverse acc, BS.empty)
+    go acc [tl]   = (reverse acc, tl)
+    go acc (l:ls) = go (stripCR l : acc) ls
+    stripCR b = case BS.unsnoc b of
+      Just (rest, 0x0d) -> rest
+      _                 -> b
 
--- | Mutable accumulator for streaming SSE responses. Tracks the
--- evolving list of content blocks, the model id, usage stats, and any
--- tool_use block currently being assembled (whose JSON input arrives
--- across multiple deltas).
+-- | Pure accumulator for streaming SSE responses. Tracks the evolving
+-- list of content blocks, the model id, token counts (which arrive in
+-- separate events), and any tool_use block currently being assembled
+-- (whose JSON input arrives across multiple deltas).
 data StreamState = StreamState
-  { _ss_blocksRef :: IORef [ContentBlock]   -- ^ Reversed: head is most-recent block
-  , _ss_modelRef  :: IORef ModelId
-  , _ss_usageRef  :: IORef (Maybe Usage)
-  , _ss_toolRef   :: IORef (Maybe ToolBuilder)
+  { _ss_blocks       :: [ContentBlock]    -- ^ Reversed: head is most-recent block
+  , _ss_model        :: ModelId
+  , _ss_inputTokens  :: Maybe Int         -- ^ From @message_start@
+  , _ss_outputTokens :: Maybe Int         -- ^ From @message_delta@
+  , _ss_tool         :: Maybe ToolBuilder
   }
+  deriving stock (Show, Eq)
 
 -- | A tool_use block being assembled mid-stream. Inputs arrive as
 -- a sequence of @input_json_delta@ fragments which must be concatenated
@@ -307,86 +310,97 @@ data ToolBuilder = ToolBuilder
   , _tb_name  :: Text
   , _tb_input :: ByteString
   }
+  deriving stock (Show, Eq)
 
-newStreamState :: IO StreamState
-newStreamState = StreamState
-  <$> newIORef []
-  <*> newIORef (ModelId "")
-  <*> newIORef Nothing
-  <*> newIORef Nothing
+-- | Initial state at the start of a stream.
+initialStreamState :: StreamState
+initialStreamState = StreamState [] (ModelId "") Nothing Nothing Nothing
 
--- | Process a single SSE 'data:' line, updating state and emitting
--- 'StreamEvent' callbacks. Non-data lines, unparseable JSON, and
--- unknown event types are silently ignored.
-processStreamLine :: StreamState -> (StreamEvent -> IO ()) -> ByteString -> IO ()
-processStreamLine st callback line =
-  case parseSSELine line of
-    Nothing -> pure ()
-    Just json -> case parseEither parseStreamEvent json of
-      Left _ -> pure ()
-      Right evt -> case evt of
-        SSEContentText t -> do
-          callback (StreamText t)
-          -- Accumulate streamed text into a single TextBlock rather than
-          -- creating one per chunk (which would insert spurious newlines
-          -- when responseText joins them with "\n").
-          modifyIORef (_ss_blocksRef st) $ \blocks -> case blocks of
-            (TextBlock prev : rest) -> TextBlock (prev <> t) : rest
-            _                       -> TextBlock t : blocks
-        SSEToolStart callId name -> do
-          -- Defensive: close any tool that didn't get an explicit stop.
-          finalizeCurrentTool st
-          writeIORef (_ss_toolRef st)
-            (Just (ToolBuilder callId name BS.empty))
-          callback (StreamToolUse callId name)
-        SSEToolDelta t -> do
-          modifyIORef (_ss_toolRef st) $ fmap $ \tb ->
-            tb { _tb_input = _tb_input tb <> TE.encodeUtf8 t }
-          callback (StreamToolInput t)
-        SSEContentBlockStop -> finalizeCurrentTool st
-        SSEMessageStart model -> writeIORef (_ss_modelRef st) model
-        SSEUsage usage -> writeIORef (_ss_usageRef st) (Just usage)
-        SSEMessageStop -> pure ()
+-- | Pure step: apply one parsed SSE event to the state and return any
+-- 'StreamEvent's that should be emitted to the caller's callback.
+stepStreamState :: SSEEvent -> StreamState -> (StreamState, [StreamEvent])
+stepStreamState evt st = case evt of
+  SSEContentText t ->
+    -- Accumulate streamed text into a single TextBlock rather than
+    -- creating one per chunk (which would insert spurious newlines
+    -- when 'responseText' joins them with "\n").
+    let blocks' = case _ss_blocks st of
+          (TextBlock prev : rest) -> TextBlock (prev <> t) : rest
+          _                       -> TextBlock t : _ss_blocks st
+    in (st { _ss_blocks = blocks' }, [StreamText t])
+  SSEToolStart callId name ->
+    -- Defensive: close any tool that didn't get an explicit stop.
+    let st' = closeOpenTool st
+    in (st' { _ss_tool = Just (ToolBuilder callId name BS.empty) },
+        [StreamToolUse callId name])
+  SSEToolDelta t ->
+    let st' = st { _ss_tool = fmap (appendToolInput t) (_ss_tool st) }
+    in (st', [StreamToolInput t])
+  SSEContentBlockStop -> (closeOpenTool st, [])
+  SSEMessageStart model mInTokens ->
+    (st { _ss_model = model, _ss_inputTokens = mInTokens }, [])
+  SSEOutputUsage outToks ->
+    (st { _ss_outputTokens = Just outToks }, [])
+  SSEMessageStop -> (st, [])
 
--- | Close out any in-progress tool_use block: parse the accumulated
--- JSON input and push the completed 'ToolUseBlock' onto blocks.
--- A malformed or empty buffer falls back to an empty object so the
--- block isn't lost — downstream tool execution will surface any
+appendToolInput :: Text -> ToolBuilder -> ToolBuilder
+appendToolInput t tb = tb { _tb_input = _tb_input tb <> TE.encodeUtf8 t }
+
+-- | Close the in-progress tool block (if any), parsing its accumulated
+-- JSON input. A malformed or empty buffer falls back to 'object []' so
+-- the block isn't lost — downstream tool execution will surface any
 -- schema mismatch as a normal tool error.
-finalizeCurrentTool :: StreamState -> IO ()
-finalizeCurrentTool st = do
-  mTool <- readIORef (_ss_toolRef st)
-  case mTool of
-    Nothing -> pure ()
-    Just tb -> do
-      let input = case decode (BL.fromStrict (_tb_input tb)) of
-            Just v  -> v
-            Nothing -> object []
-      modifyIORef (_ss_blocksRef st)
-        (ToolUseBlock (_tb_id tb) (_tb_name tb) input :)
-      writeIORef (_ss_toolRef st) Nothing
+closeOpenTool :: StreamState -> StreamState
+closeOpenTool st = case _ss_tool st of
+  Nothing -> st
+  Just tb ->
+    let input = fromMaybe (object []) (decode (BL.fromStrict (_tb_input tb)))
+        block = ToolUseBlock (_tb_id tb) (_tb_name tb) input
+    in st { _ss_blocks = block : _ss_blocks st, _ss_tool = Nothing }
+
+-- | Pure: parse a single SSE line and step the state. Non-data lines,
+-- unparseable JSON, and unknown event types yield no state change and
+-- no events.
+runStreamLine :: ByteString -> StreamState -> (StreamState, [StreamEvent])
+runStreamLine line st = case parseSSELine line of
+  Nothing   -> (st, [])
+  Just json -> case parseEither parseStreamEvent json of
+    Left _    -> (st, [])
+    Right evt -> stepStreamState evt st
+
+-- | IO wrapper around 'runStreamLine': step the state, emit any
+-- resulting 'StreamEvent's via the callback.
+processStreamLine :: (StreamEvent -> IO ()) -> StreamState -> ByteString -> IO StreamState
+processStreamLine cb st line = do
+  let (st', evs) = runStreamLine line st
+  mapM_ cb evs
+  pure st'
 
 -- | Finalize the accumulator into a 'CompletionResponse'. Any
--- still-open tool block is closed defensively.
-finalizeStream :: StreamState -> IO CompletionResponse
-finalizeStream st = do
-  finalizeCurrentTool st
-  blocks <- readIORef (_ss_blocksRef st)
-  model  <- readIORef (_ss_modelRef st)
-  usage  <- readIORef (_ss_usageRef st)
-  pure CompletionResponse
-    { _crsp_content = reverse blocks
-    , _crsp_model   = model
-    , _crsp_usage   = usage
-    }
+-- still-open tool block is closed defensively. Usage is reported only
+-- if at least one of input/output tokens was observed.
+finalizeStreamState :: StreamState -> CompletionResponse
+finalizeStreamState st0 =
+  let st = closeOpenTool st0
+      mUsage = case (_ss_inputTokens st, _ss_outputTokens st) of
+        (Nothing, Nothing) -> Nothing
+        (mi, mo)           -> Just (Usage (fromMaybe 0 mi) (fromMaybe 0 mo))
+  in CompletionResponse
+       { _crsp_content = reverse (_ss_blocks st)
+       , _crsp_model   = _ss_model st
+       , _crsp_usage   = mUsage
+       }
 
--- | Parse an SSE "data: ..." line into a JSON value.
+-- | Parse an SSE "data: ..." line into a JSON value. Tolerates a
+-- trailing CR for callers that didn't pre-strip CRLF.
 parseSSELine :: ByteString -> Maybe Value
-parseSSELine bs
-  | BS.isPrefixOf "data: " bs =
-      let jsonBs = BS.drop 6 bs
-      in decode (BL.fromStrict jsonBs)
-  | otherwise = Nothing
+parseSSELine bs0
+  | BS.isPrefixOf "data: " bs = decode (BL.fromStrict (BS.drop 6 bs))
+  | otherwise                 = Nothing
+  where
+    bs = case BS.unsnoc bs0 of
+      Just (rest, 0x0d) -> rest
+      _                 -> bs0
 
 -- | Internal SSE event types.
 data SSEEvent
@@ -394,9 +408,10 @@ data SSEEvent
   | SSEToolStart ToolCallId Text
   | SSEToolDelta Text
   | SSEContentBlockStop
-  | SSEMessageStart ModelId
-  | SSEUsage Usage
+  | SSEMessageStart ModelId (Maybe Int)  -- ^ model, input_tokens (if present)
+  | SSEOutputUsage Int                   -- ^ output_tokens from @message_delta@
   | SSEMessageStop
+  deriving stock (Show, Eq)
 
 -- | Parse a JSON SSE event.
 parseStreamEvent :: Value -> Parser SSEEvent
@@ -404,9 +419,13 @@ parseStreamEvent = withObject "SSEEvent" $ \o -> do
   eventType <- o .: "type"
   case (eventType :: Text) of
     "message_start" -> do
-      msg <- o .: "message"
-      model <- msg .: "model"
-      pure (SSEMessageStart (ModelId model))
+      msg     <- o .: "message"
+      model   <- msg .: "model"
+      mUsage  <- msg .:? "usage"
+      mInToks <- case mUsage of
+        Nothing -> pure Nothing
+        Just u  -> u .:? "input_tokens"
+      pure (SSEMessageStart (ModelId model) mInToks)
     "content_block_delta" -> do
       delta <- o .: "delta"
       deltaType <- delta .: "type"
@@ -427,9 +446,7 @@ parseStreamEvent = withObject "SSEEvent" $ \o -> do
     "message_delta" -> do
       usage <- o .:? "usage"
       case usage of
-        Just u -> do
-          outToks <- u .: "output_tokens"
-          pure (SSEUsage (Usage 0 outToks))
+        Just u  -> SSEOutputUsage <$> u .: "output_tokens"
         Nothing -> pure SSEMessageStop
     "message_stop" -> pure SSEMessageStop
     _ -> fail $ "Unknown event type: " <> T.unpack eventType
