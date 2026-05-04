@@ -265,7 +265,10 @@ anthropicCompleteStream provider req callback = do
             go st buf = do
               chunk <- HTTP.brRead body
               if BS.null chunk
-                then callback (StreamDone (finalizeStreamState st))
+                then do
+                  let (final, finalEvs) = finalizeStreamState st
+                  mapM_ callback finalEvs
+                  callback (StreamDone final)
                 else do
                   let (lines', remaining) = splitSSELines (buf <> chunk)
                   st' <- foldM (processStreamLine callback) st lines'
@@ -330,18 +333,27 @@ stepStreamState evt st = case evt of
     in (st { _ss_blocks = blocks' }, [StreamText t])
   SSEToolStart callId name ->
     -- Defensive: close any tool that didn't get an explicit stop.
-    let st' = closeOpenTool st
+    let (st', mWarn) = closeOpenTool st
     in (st' { _ss_tool = Just (ToolBuilder callId name BS.empty) },
-        [StreamToolUse callId name])
+        warningEvents mWarn ++ [StreamToolUse callId name])
   SSEToolDelta t ->
     let st' = st { _ss_tool = fmap (appendToolInput t) (_ss_tool st) }
     in (st', [StreamToolInput t])
-  SSEContentBlockStop -> (closeOpenTool st, [])
+  SSEContentBlockStop ->
+    let (st', mWarn) = closeOpenTool st
+    in (st', warningEvents mWarn)
   SSEMessageStart model mInTokens ->
+    -- 'message_start' carries an initial @output_tokens: 1@ that we
+    -- intentionally drop: the authoritative output_tokens count arrives
+    -- in 'message_delta' at end-of-stream, and overwriting it here would
+    -- only confuse the accumulator.
     (st { _ss_model = model, _ss_inputTokens = mInTokens }, [])
   SSEOutputUsage outToks ->
     (st { _ss_outputTokens = Just outToks }, [])
   SSEMessageStop -> (st, [])
+
+warningEvents :: Maybe Text -> [StreamEvent]
+warningEvents = maybe [] (\t -> [StreamWarning t])
 
 appendToolInput :: Text -> ToolBuilder -> ToolBuilder
 appendToolInput t tb = tb { _tb_input = _tb_input tb <> TE.encodeUtf8 t }
@@ -349,14 +361,25 @@ appendToolInput t tb = tb { _tb_input = _tb_input tb <> TE.encodeUtf8 t }
 -- | Close the in-progress tool block (if any), parsing its accumulated
 -- JSON input. A malformed or empty buffer falls back to 'object []' so
 -- the block isn't lost — downstream tool execution will surface any
--- schema mismatch as a normal tool error.
-closeOpenTool :: StreamState -> StreamState
+-- schema mismatch as a normal tool error. The second component is a
+-- diagnostic warning carrying the tool name and id so callers can log
+-- it; otherwise a broken stream looks like a valid call with no args.
+closeOpenTool :: StreamState -> (StreamState, Maybe Text)
 closeOpenTool st = case _ss_tool st of
-  Nothing -> st
+  Nothing -> (st, Nothing)
   Just tb ->
-    let input = fromMaybe (object []) (decode (BL.fromStrict (_tb_input tb)))
-        block = ToolUseBlock (_tb_id tb) (_tb_name tb) input
-    in st { _ss_blocks = block : _ss_blocks st, _ss_tool = Nothing }
+    let mParsed = decode (BL.fromStrict (_tb_input tb))
+        input   = fromMaybe (object []) mParsed
+        block   = ToolUseBlock (_tb_id tb) (_tb_name tb) input
+        st'     = st { _ss_blocks = block : _ss_blocks st, _ss_tool = Nothing }
+        mWarn   = case mParsed of
+          Just _  -> Nothing
+          Nothing -> Just $
+            "Anthropic stream: malformed tool input JSON for tool "
+              <> _tb_name tb
+              <> " (id=" <> unToolCallId (_tb_id tb)
+              <> "); falling back to empty object"
+    in (st', mWarn)
 
 -- | Pure: parse a single SSE line and step the state. Non-data lines,
 -- unparseable JSON, and unknown event types yield no state change and
@@ -377,19 +400,21 @@ processStreamLine cb st line = do
   pure st'
 
 -- | Finalize the accumulator into a 'CompletionResponse'. Any
--- still-open tool block is closed defensively. Usage is reported only
+-- still-open tool block is closed defensively (yielding an optional
+-- warning to be emitted before 'StreamDone'). Usage is reported only
 -- if at least one of input/output tokens was observed.
-finalizeStreamState :: StreamState -> CompletionResponse
+finalizeStreamState :: StreamState -> (CompletionResponse, [StreamEvent])
 finalizeStreamState st0 =
-  let st = closeOpenTool st0
+  let (st, mWarn) = closeOpenTool st0
       mUsage = case (_ss_inputTokens st, _ss_outputTokens st) of
         (Nothing, Nothing) -> Nothing
         (mi, mo)           -> Just (Usage (fromMaybe 0 mi) (fromMaybe 0 mo))
-  in CompletionResponse
-       { _crsp_content = reverse (_ss_blocks st)
-       , _crsp_model   = _ss_model st
-       , _crsp_usage   = mUsage
-       }
+      resp = CompletionResponse
+        { _crsp_content = reverse (_ss_blocks st)
+        , _crsp_model   = _ss_model st
+        , _crsp_usage   = mUsage
+        }
+  in (resp, warningEvents mWarn)
 
 -- | Parse an SSE "data: ..." line into a JSON value. Tolerates a
 -- trailing CR for callers that didn't pre-strip CRLF.

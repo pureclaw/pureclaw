@@ -9,6 +9,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Either (isLeft)
 import Data.IORef
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime (..), addUTCTime)
 import Network.HTTP.Client.TLS qualified as TLS
@@ -262,7 +263,7 @@ spec = do
             let (ls, rest) = splitSSELines (buf <> chunk)
             in (foldl (\s l -> fst (runStreamLine l s)) st ls, rest)
           (final, _) = foldl drive (initialStreamState, BS.empty) chunks
-          resp = finalizeStreamState final
+          (resp, _) = finalizeStreamState final
       length (toolUseCalls resp) `shouldBe` 1
       _crsp_usage resp `shouldBe` Just (Usage 12 7)
 
@@ -272,6 +273,23 @@ spec = do
       case toolUseCalls (runStream malformedToolStream) of
         [(_, _, input)] -> input `shouldBe` object []
         _               -> expectationFailure "expected one tool call"
+
+    it "emits a StreamWarning when tool input JSON is malformed" $ do
+      -- A silent fallback to empty input would let the agent loop run a
+      -- tool call with bogus arguments and produce a confusing schema
+      -- error. The warning carries the tool name and id so operators can
+      -- correlate the failure with the request.
+      eventsRef <- newIORef ([] :: [StreamEvent])
+      let cb e = modifyIORef eventsRef (e :)
+      foldM_ (processStreamLine cb) initialStreamState malformedToolStream
+      events <- reverse <$> readIORef eventsRef
+      let warnings = [t | StreamWarning t <- events]
+      length warnings `shouldBe` 1
+      case warnings of
+        [w] -> do
+          w `shouldSatisfy` (\t -> "toolu_01" `T.isInfixOf` t)
+          w `shouldSatisfy` (\t -> "file_write" `T.isInfixOf` t)
+        _   -> expectationFailure "expected exactly one warning"
 
   describe "buildAuthHeaders (API key)" $ do
     it "uses x-api-key header for ApiKey auth" $ do
@@ -371,7 +389,8 @@ isToolInputEvent _                   = False
 -- and return the finalized completion response. No IO, no IORefs.
 runStream :: [ByteString] -> CompletionResponse
 runStream =
-  finalizeStreamState
+  fst
+    . finalizeStreamState
     . foldl' (\s line -> fst (runStreamLine line s)) initialStreamState
 
 -- | Split a ByteString into fixed-size chunks (last chunk may be smaller).
