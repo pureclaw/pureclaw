@@ -150,6 +150,7 @@ runAgentLoopWith env initialMessages = do
             mAction <- atomicModifyIORef' (_env_onFirstStreamDone env)
                          (Nothing,)
             for_ mAction id
+          StreamWarning w -> _lh_logWarn logger w
           _ -> pure ()
       case providerResult of
         Left e -> do

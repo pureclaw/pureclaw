@@ -155,6 +155,7 @@ data StreamEvent
   = StreamText Text                -- ^ Partial text content
   | StreamToolUse ToolCallId Text  -- ^ Tool call started (id, name)
   | StreamToolInput Text           -- ^ Partial tool input JSON
+  | StreamWarning Text             -- ^ Non-fatal provider-side anomaly (e.g. malformed tool input recovered via fallback). Surfaced so callers can log it.
   | StreamDone CompletionResponse  -- ^ Stream finished with full response
   deriving stock (Show, Eq)
 
@@ -310,6 +311,8 @@ instance ToJSON StreamEvent where
     [ "type" .= ("tool_use" :: Text), "id" .= unToolCallId cid, "name" .= name ]
   toJSON (StreamToolInput t)     = Aeson.object
     [ "type" .= ("tool_input" :: Text), "input" .= t ]
+  toJSON (StreamWarning t)       = Aeson.object
+    [ "type" .= ("warning" :: Text), "message" .= t ]
   toJSON (StreamDone resp)       = Aeson.object
     [ "type" .= ("done" :: Text), "response" .= resp ]
 
@@ -320,6 +323,7 @@ instance FromJSON StreamEvent where
       "text"       -> StreamText <$> o .: "text"
       "tool_use"   -> (StreamToolUse . ToolCallId <$> (o .: "id")) <*> o .: "name"
       "tool_input" -> StreamToolInput <$> o .: "input"
+      "warning"    -> StreamWarning <$> o .: "message"
       "done"       -> StreamDone <$> o .: "response"
       _            -> fail ("unknown StreamEvent type: " <> T.unpack tag)
 
