@@ -32,7 +32,7 @@ defaultFrontendConfig = FrontendConfig
 -- | Start the frontend static file server.
 runFrontend :: FrontendConfig -> IO ()
 runFrontend cfg = do
-  putStrLn $ "PureClaw frontend server"
+  putStrLn "PureClaw frontend server"
   putStrLn $ "  Serving: " <> _fsc_staticDir cfg
   putStrLn $ "  URL:     http://localhost:" <> show (_fsc_port cfg)
   Warp.run (_fsc_port cfg) (staticApp (_fsc_staticDir cfg))
