@@ -503,9 +503,9 @@ runChat opts = do
     Nothing -> _lh_logInfo logger
       "No providers configured \x2014 use /provider to get started"
   _lh_logInfo logger $ "Default agent: "
-    <> maybe "(none)" id (_fc_defaultAgent fileCfg)
+    <> fromMaybe "(none)" (_fc_defaultAgent fileCfg)
   _lh_logInfo logger $ "Default target: "
-    <> maybe "(none)" id (_fc_defaultTarget fileCfg)
+    <> fromMaybe "(none)" (_fc_defaultTarget fileCfg)
   _lh_logInfo logger $ "Memory: " <> T.pack (memoryToText effectiveMemory)
   case (_sp_allowedCommands policy, _sp_autonomy policy) of
     (AllowAll, Full) -> do
