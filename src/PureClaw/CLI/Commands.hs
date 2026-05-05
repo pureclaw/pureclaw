@@ -5,6 +5,10 @@ module PureClaw.CLI.Commands
   , Command (..)
   , ChatOptions (..)
   , chatOptionsParser
+    -- * Serve options (exported for testing)
+  , ServeOptions (..)
+  , serveOptionsParser
+  , commandParser
     -- * Enums (exported for testing)
   , ProviderType (..)
   , MemoryBackend (..)
@@ -34,6 +38,7 @@ import System.Process.Typed qualified as P
 
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
+import PureClaw.Frontend.Server
 
 import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Completion
@@ -124,6 +129,37 @@ data ChatOptions = ChatOptions
   , _co_prefix        :: Maybe String
   }
   deriving stock (Show, Eq)
+
+-- | Top-level CLI command.
+data Command
+  = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
+  | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
+  | CmdImport ImportOptions (Maybe FilePath)  -- ^ Import an OpenClaw state directory
+  | ServeCmd ServeOptions    -- ^ Serve the web frontend
+  deriving stock (Show, Eq)
+
+-- | Options for the @serve@ subcommand.
+data ServeOptions = ServeOptions
+  { _so_port :: Int
+  , _so_dir  :: FilePath
+  }
+  deriving stock (Show, Eq)
+
+-- | Parser for serve options.
+serveOptionsParser :: Parser ServeOptions
+serveOptionsParser = ServeOptions
+  <$> option auto
+      ( long "port"
+     <> value 8080
+     <> showDefault
+     <> help "Port to serve on"
+      )
+  <*> strOption
+      ( long "dir"
+     <> value "frontend/dist"
+     <> showDefault
+     <> help "Directory containing built frontend files"
+      )
 
 -- | Parser for chat options.
 chatOptionsParser :: Parser ChatOptions
@@ -224,13 +260,6 @@ memoryToText NoMemory       = "none"
 memoryToText SQLiteMemory   = "sqlite"
 memoryToText MarkdownMemory = "markdown"
 
--- | Top-level CLI command.
-data Command
-  = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
-  | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
-  | CmdImport ImportOptions (Maybe FilePath)  -- ^ Import an OpenClaw state directory
-  deriving stock (Show, Eq)
-
 -- | Full CLI parser with subcommands.
 cliParserInfo :: ParserInfo Command
 cliParserInfo = info (commandParser <**> helper)
@@ -254,6 +283,8 @@ commandParser = subparser
         (progDesc "PureClaw Gateway"))
    <> command "import" (info (importParser <**> helper)
         (progDesc "Import an OpenClaw state directory"))
+   <> command "serve" (info (ServeCmd <$> serveOptionsParser <**> helper)
+        (progDesc "Serve the web frontend"))
     )
   <|> (CmdTui <$> chatOptionsParser)  -- default to tui when no subcommand
 
@@ -279,6 +310,15 @@ runCLI = do
     CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
     CmdGateway opts -> runChat opts
     CmdImport opts mPos -> runImport opts mPos
+    ServeCmd opts -> runServe opts
+
+-- | Run the frontend server.
+runServe :: ServeOptions -> IO ()
+runServe opts =
+  runFrontend FrontendConfig
+    { _fsc_port      = _so_port opts
+    , _fsc_staticDir = _so_dir opts
+    }
 
 -- | Import an OpenClaw state directory.
 runImport :: ImportOptions -> Maybe FilePath -> IO ()

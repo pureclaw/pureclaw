@@ -1,0 +1,89 @@
+/* ==========================================================================
+   PureClaw Design Tokens
+   Purple-Blue, Linear-inspired, Geist Sans, dark-first
+   ========================================================================== */
+
+:root {
+
+  /* ── Backgrounds (3-layer depth model + sunken) ─────────────────────── */
+  --bg-base:        #0F1117;    /* App canvas, deepest layer */
+  --bg-sunken:      #0B0D13;    /* Recessed areas: text inputs, code blocks */
+  --bg-surface:     #161922;    /* Sidebar, panels */
+  --bg-elevated:    #1E2235;    /* Elevated elements: pills, tooltips, hover cards */
+
+  /* ── Accent ─────────────────────────────────────────────────────────── */
+  --accent-primary:   #7C6CF6;  /* Purple — primary actions, active states */
+  --accent-secondary: #4F8EF7;  /* Blue — secondary accents, links, info */
+  --accent-gradient:  linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+
+  /* ── Text ───────────────────────────────────────────────────────────── */
+  --text-primary:   #E8E9F0;   /* Headings, body text */
+  --text-muted:     #6B7094;   /* Secondary text, labels */
+  --text-faint:     rgba(107, 112, 148, 0.5); /* Timestamps, tertiary info */
+
+  /* ── Borders ────────────────────────────────────────────────────────── */
+  --border:         #252A40;
+
+  /* ── Semantic: Status ───────────────────────────────────────────────── */
+  --needs-input:      #FF6B6B;
+  --needs-input-glow: rgba(255, 107, 107, 0.35);
+  --success:          #34D399;
+  --warning:          #FBBF24;
+
+  /* ── Surfaces ───────────────────────────────────────────────────────── */
+  --surface-hover:  rgba(255, 255, 255, 0.03);
+
+  /* ── Typography ─────────────────────────────────────────────────────── */
+  --font-sans:  'Geist Sans', system-ui, -apple-system, sans-serif;
+  --font-mono:  'Geist Mono', 'SF Mono', 'Fira Code', monospace;
+
+  --text-xs:    0.75rem;   /* 12px — labels, pills, timestamps */
+  --text-sm:    0.875rem;  /* 14px — body, agent names, chat messages */
+
+  --font-regular:   400;
+  --font-medium:    500;
+  --font-semibold:  600;
+
+  --tracking-tighter: -0.02em;  /* Brand name */
+  --tracking-tight:   -0.01em;  /* Agent names */
+
+  --leading-tight:    1.2;      /* Single-line labels, status text */
+  --leading-normal:   1.5;      /* Code blocks, pills */
+  --leading-relaxed:  1.6;      /* Chat message body */
+
+  /* ── Spacing (4px grid) ─────────────────────────────────────────────── */
+  --space-1:    4px;
+  --space-2:    8px;
+  --space-3:    12px;
+  --space-4:    16px;
+  --space-5:    20px;
+  --space-6:    24px;
+
+  /* ── Layout ─────────────────────────────────────────────────────────── */
+  --sidebar-width:      240px;
+  --topbar-height:       52px;
+  --bottombar-height:    36px;
+  --logo-size:           28px;
+  --chat-max-width:     720px;
+
+  /* ── Border Radius ──────────────────────────────────────────────────── */
+  --radius-sm:    4px;
+  --radius-md:    6px;
+  --radius-lg:    8px;
+  --radius-full:  9999px;
+
+  /* ── Status Dots ────────────────────────────────────────────────────── */
+  --dot-size:       8px;
+  --dot-size-sm:    6px;
+
+  /* ── Animation ──────────────────────────────────────────────────────── */
+  --duration-fast:    150ms;
+  --duration-normal:  200ms;
+  --duration-slow:    300ms;
+  --ease-out:         cubic-bezier(0.16, 1, 0.3, 1);
+
+  --pulse-duration:    1.5s;   /* needs-input dot */
+  --gradient-duration: 2s;     /* thinking dot */
+  --shimmer-duration:  2.5s;   /* thinking row */
+  --blink-duration:    1s;     /* cursor */
+}
