@@ -1,0 +1,193 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.Completion
+<span class="lineno">    2 </span>  ( -- * Completion function builder
+<span class="lineno">    3 </span>    buildCompleter
+<span class="lineno">    4 </span>    -- * Pure completion logic (exported for testing)
+<span class="lineno">    5 </span>  , slashCompletions
+<span class="lineno">    6 </span>  ) where
+<span class="lineno">    7 </span>
+<span class="lineno">    8 </span>import Control.Exception
+<span class="lineno">    9 </span>import Data.Char qualified as Char
+<span class="lineno">   10 </span>import Data.IORef
+<span class="lineno">   11 </span>import Data.List qualified as L
+<span class="lineno">   12 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   13 </span>import Data.Text qualified as T
+<span class="lineno">   14 </span>import Data.Time.Clock qualified as Time
+<span class="lineno">   15 </span>import System.Console.Haskeline qualified as HL
+<span class="lineno">   16 </span>import System.Timeout qualified as Timeout
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import PureClaw.Agent.Env
+<span class="lineno">   19 </span>import PureClaw.Agent.SlashCommands
+<span class="lineno">   20 </span>import PureClaw.Core.Types
+<span class="lineno">   21 </span>import PureClaw.Providers.Class
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>-- | TTL cache for model listing results (30 seconds).
+<span class="lineno">   24 </span>data ModelCache = ModelCache
+<span class="lineno">   25 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_mc_models</span></span></span> :: [ModelId]
+<span class="lineno">   26 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_mc_expiry</span></span></span> :: Time.UTCTime
+<span class="lineno">   27 </span>  }
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | Build a haskeline 'CompletionFunc' from a live 'AgentEnv' reference.
+<span class="lineno">   30 </span>-- Creates an internal cache for model listing results.
+<span class="lineno">   31 </span>-- The IORef is read at completion time, so it reflects hot-swapped providers.
+<span class="lineno">   32 </span>buildCompleter :: IORef (Maybe AgentEnv) -&gt; IO (HL.CompletionFunc IO)
+<span class="lineno">   33 </span><span class="decl"><span class="nottickedoff">buildCompleter envRef = do</span>
+<span class="lineno">   34 </span><span class="spaces">  </span><span class="nottickedoff">cacheRef &lt;- newIORef Nothing</span>
+<span class="lineno">   35 </span><span class="spaces">  </span><span class="nottickedoff">pure (completerImpl envRef cacheRef)</span></span>
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>completerImpl :: IORef (Maybe AgentEnv) -&gt; IORef (Maybe ModelCache) -&gt; HL.CompletionFunc IO
+<span class="lineno">   38 </span><span class="decl"><span class="nottickedoff">completerImpl envRef cacheRef (leftOfCursor, _rightOfCursor) = do</span>
+<span class="lineno">   39 </span><span class="spaces">  </span><span class="nottickedoff">let line = reverse leftOfCursor</span>
+<span class="lineno">   40 </span><span class="spaces">  </span><span class="nottickedoff">mEnv &lt;- readIORef envRef</span>
+<span class="lineno">   41 </span><span class="spaces">  </span><span class="nottickedoff">dynamicCandidates &lt;- getDynamicCandidates mEnv cacheRef line</span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="nottickedoff">let static = slashCompletions line</span>
+<span class="lineno">   43 </span><span class="spaces">      </span><span class="nottickedoff">allCandidates = L.nub (static ++ dynamicCandidates)</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="nottickedoff">let wordStart = lastWord line</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="nottickedoff">if null allCandidates</span>
+<span class="lineno">   46 </span><span class="spaces">    </span><span class="nottickedoff">then pure (leftOfCursor, [])</span>
+<span class="lineno">   47 </span><span class="spaces">    </span><span class="nottickedoff">else do</span>
+<span class="lineno">   48 </span><span class="spaces">      </span><span class="nottickedoff">let completions = map (\c -&gt;</span>
+<span class="lineno">   49 </span><span class="spaces">            </span><span class="nottickedoff">HL.Completion</span>
+<span class="lineno">   50 </span><span class="spaces">              </span><span class="nottickedoff">{ HL.replacement = drop (length wordStart) c</span>
+<span class="lineno">   51 </span><span class="spaces">              </span><span class="nottickedoff">, HL.display = c</span>
+<span class="lineno">   52 </span><span class="spaces">              </span><span class="nottickedoff">, HL.isFinished = not (hasSubcommands c)</span>
+<span class="lineno">   53 </span><span class="spaces">              </span><span class="nottickedoff">}) allCandidates</span>
+<span class="lineno">   54 </span><span class="spaces">      </span><span class="nottickedoff">pure (leftOfCursor, completions)</span></span>
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>-- | Extract the last word being typed.
+<span class="lineno">   57 </span>lastWord :: String -&gt; String
+<span class="lineno">   58 </span><span class="decl"><span class="nottickedoff">lastWord = reverse . takeWhile (/= ' ') . reverse</span></span>
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | Check if a completion target has further subcommands.
+<span class="lineno">   61 </span>hasSubcommands :: String -&gt; Bool
+<span class="lineno">   62 </span><span class="decl"><span class="nottickedoff">hasSubcommands candidate =</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="nottickedoff">let lowerCandidate = map Char.toLower candidate</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="nottickedoff">in any (\spec -&gt;</span>
+<span class="lineno">   65 </span><span class="spaces">    </span><span class="nottickedoff">let syntax = map Char.toLower (T.unpack (_cs_syntax spec))</span>
+<span class="lineno">   66 </span><span class="spaces">    </span><span class="nottickedoff">in syntax /= lowerCandidate &amp;&amp; (lowerCandidate ++ &quot; &quot;) `L.isPrefixOf` syntax</span>
+<span class="lineno">   67 </span><span class="spaces">    </span><span class="nottickedoff">) allCommandSpecs</span></span>
+<span class="lineno">   68 </span>
+<span class="lineno">   69 </span>-- | Pure static completions for slash commands.
+<span class="lineno">   70 </span>slashCompletions :: String -&gt; [String]
+<span class="lineno">   71 </span><span class="decl"><span class="istickedoff">slashCompletions line</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="istickedoff">| not (&quot;/&quot; `L.isPrefixOf` stripped) = []</span>
+<span class="lineno">   73 </span><span class="spaces">  </span><span class="istickedoff">| stripped == &quot;/&quot; = L.nub (map commandName allCommandSpecs)</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="istickedoff">| ' ' `notElem` stripped =</span>
+<span class="lineno">   75 </span><span class="spaces">      </span><span class="istickedoff">filter (matchesCI stripped) (L.nub (map commandName allCommandSpecs))</span>
+<span class="lineno">   76 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">   77 </span><span class="spaces">      </span><span class="istickedoff">let (cmd, rest) = break (== ' ') stripped</span>
+<span class="lineno">   78 </span><span class="spaces">          </span><span class="istickedoff">partial = dropWhile (== ' ') rest</span>
+<span class="lineno">   79 </span><span class="spaces">      </span><span class="istickedoff">in completeSubcommands cmd partial</span>
+<span class="lineno">   80 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   81 </span><span class="spaces">    </span><span class="istickedoff">stripped = dropWhile (== ' ') line</span></span>
+<span class="lineno">   82 </span>
+<span class="lineno">   83 </span>-- | Complete subcommands for a known command prefix.
+<span class="lineno">   84 </span>completeSubcommands :: String -&gt; String -&gt; [String]
+<span class="lineno">   85 </span><span class="decl"><span class="istickedoff">completeSubcommands cmd partial =</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="istickedoff">let lowerCmd = map Char.toLower cmd</span>
+<span class="lineno">   87 </span><span class="spaces">      </span><span class="istickedoff">matchingSpecs = filter (\s -&gt; map Char.toLower (commandName s) == lowerCmd) allCommandSpecs</span>
+<span class="lineno">   88 </span><span class="spaces">      </span><span class="istickedoff">subcommands = concatMap (extractSubcommands lowerCmd) matchingSpecs</span>
+<span class="lineno">   89 </span><span class="spaces">  </span><span class="istickedoff">in filter (matchesCI partial) subcommands</span></span>
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>-- | Extract subcommand names from a CommandSpec syntax string.
+<span class="lineno">   92 </span>extractSubcommands :: String -&gt; CommandSpec -&gt; [String]
+<span class="lineno">   93 </span><span class="decl"><span class="istickedoff">extractSubcommands cmdPrefix spec =</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">let syntax = T.unpack (_cs_syntax spec)</span>
+<span class="lineno">   95 </span><span class="spaces">      </span><span class="istickedoff">rest = dropWhile (== ' ') (drop (length cmdPrefix) syntax)</span>
+<span class="lineno">   96 </span><span class="spaces">  </span><span class="istickedoff">in case words rest of</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">(sub : _)</span>
+<span class="lineno">   98 </span><span class="spaces">      </span><span class="istickedoff">| not (isPlaceholder sub) -&gt; [sub]</span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; []</span></span>
+<span class="lineno">  100 </span>
+<span class="lineno">  101 </span>-- | Check if a word is a placeholder like @\&lt;name\&gt;@ or @[N]@.
+<span class="lineno">  102 </span>isPlaceholder :: String -&gt; Bool
+<span class="lineno">  103 </span><span class="decl"><span class="istickedoff">isPlaceholder ('&lt;' : _) = <span class="nottickedoff">True</span></span>
+<span class="lineno">  104 </span><span class="spaces"></span><span class="istickedoff">isPlaceholder ('[' : _) = True</span>
+<span class="lineno">  105 </span><span class="spaces"></span><span class="istickedoff">isPlaceholder _         = False</span></span>
+<span class="lineno">  106 </span>
+<span class="lineno">  107 </span>-- | Get dynamic completions that require IO.
+<span class="lineno">  108 </span>getDynamicCandidates :: Maybe AgentEnv -&gt; IORef (Maybe ModelCache) -&gt; String -&gt; IO [String]
+<span class="lineno">  109 </span><span class="decl"><span class="nottickedoff">getDynamicCandidates Nothing _ _ = pure []</span>
+<span class="lineno">  110 </span><span class="spaces"></span><span class="nottickedoff">getDynamicCandidates (Just env) cacheRef line = do</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="nottickedoff">let lower = map Char.toLower (dropWhile (== ' ') line)</span>
+<span class="lineno">  112 </span><span class="spaces">  </span><span class="nottickedoff">if &quot;/target &quot; `L.isPrefixOf` lower</span>
+<span class="lineno">  113 </span><span class="spaces">    </span><span class="nottickedoff">then do</span>
+<span class="lineno">  114 </span><span class="spaces">      </span><span class="nottickedoff">let partial = drop 8 (dropWhile (== ' ') line)</span>
+<span class="lineno">  115 </span><span class="spaces">      </span><span class="nottickedoff">-- Complete with running harness names + available model names</span>
+<span class="lineno">  116 </span><span class="spaces">      </span><span class="nottickedoff">harnesses &lt;- readIORef (_env_harnesses env)</span>
+<span class="lineno">  117 </span><span class="spaces">      </span><span class="nottickedoff">let harnessNames = map T.unpack (Map.keys harnesses)</span>
+<span class="lineno">  118 </span><span class="spaces">      </span><span class="nottickedoff">models &lt;- getCachedModels env cacheRef</span>
+<span class="lineno">  119 </span><span class="spaces">      </span><span class="nottickedoff">let modelNames = map (T.unpack . unModelId) models</span>
+<span class="lineno">  120 </span><span class="spaces">      </span><span class="nottickedoff">pure (filter (matchesCI partial) (harnessNames ++ modelNames))</span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="nottickedoff">else if &quot;/harness start &quot; `L.isPrefixOf` lower</span>
+<span class="lineno">  122 </span><span class="spaces">    </span><span class="nottickedoff">then do</span>
+<span class="lineno">  123 </span><span class="spaces">      </span><span class="nottickedoff">let partial = drop 15 (dropWhile (== ' ') line)</span>
+<span class="lineno">  124 </span><span class="spaces">          </span><span class="nottickedoff">names = concatMap (\(canonical, aliases, _) -&gt;</span>
+<span class="lineno">  125 </span><span class="spaces">            </span><span class="nottickedoff">T.unpack canonical : map T.unpack aliases) knownHarnesses</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="nottickedoff">pure (filter (matchesCI partial) names)</span>
+<span class="lineno">  127 </span><span class="spaces">  </span><span class="nottickedoff">else if &quot;/provider &quot; `L.isPrefixOf` lower</span>
+<span class="lineno">  128 </span><span class="spaces">    </span><span class="nottickedoff">then do</span>
+<span class="lineno">  129 </span><span class="spaces">      </span><span class="nottickedoff">let partial = drop 10 (dropWhile (== ' ') line)</span>
+<span class="lineno">  130 </span><span class="spaces">          </span><span class="nottickedoff">names = [&quot;anthropic&quot;, &quot;openai&quot;, &quot;openrouter&quot;, &quot;ollama&quot;]</span>
+<span class="lineno">  131 </span><span class="spaces">      </span><span class="nottickedoff">pure (filter (matchesCI partial) names)</span>
+<span class="lineno">  132 </span><span class="spaces">  </span><span class="nottickedoff">else</span>
+<span class="lineno">  133 </span><span class="spaces">    </span><span class="nottickedoff">pure []</span></span>
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>-- | Get models with a 30-second TTL cache.
+<span class="lineno">  136 </span>getCachedModels :: AgentEnv -&gt; IORef (Maybe ModelCache) -&gt; IO [ModelId]
+<span class="lineno">  137 </span><span class="decl"><span class="nottickedoff">getCachedModels env cacheRef = do</span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="nottickedoff">now &lt;- Time.getCurrentTime</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="nottickedoff">mCache &lt;- readIORef cacheRef</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="nottickedoff">case mCache of</span>
+<span class="lineno">  141 </span><span class="spaces">    </span><span class="nottickedoff">Just cache | _mc_expiry cache &gt; now -&gt; pure (_mc_models cache)</span>
+<span class="lineno">  142 </span><span class="spaces">    </span><span class="nottickedoff">_ -&gt; do</span>
+<span class="lineno">  143 </span><span class="spaces">      </span><span class="nottickedoff">models &lt;- getModelsWithTimeout env</span>
+<span class="lineno">  144 </span><span class="spaces">      </span><span class="nottickedoff">let expiry = Time.addUTCTime 30 now</span>
+<span class="lineno">  145 </span><span class="spaces">      </span><span class="nottickedoff">writeIORef cacheRef (Just (ModelCache models expiry))</span>
+<span class="lineno">  146 </span><span class="spaces">      </span><span class="nottickedoff">pure models</span></span>
+<span class="lineno">  147 </span>
+<span class="lineno">  148 </span>-- | Query the provider for available models with a 3-second timeout.
+<span class="lineno">  149 </span>getModelsWithTimeout :: AgentEnv -&gt; IO [ModelId]
+<span class="lineno">  150 </span><span class="decl"><span class="nottickedoff">getModelsWithTimeout env = do</span>
+<span class="lineno">  151 </span><span class="spaces">  </span><span class="nottickedoff">mProvider &lt;- readIORef (_env_provider env)</span>
+<span class="lineno">  152 </span><span class="spaces">  </span><span class="nottickedoff">case mProvider of</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="nottickedoff">Nothing -&gt; pure []</span>
+<span class="lineno">  154 </span><span class="spaces">    </span><span class="nottickedoff">Just provider -&gt; do</span>
+<span class="lineno">  155 </span><span class="spaces">      </span><span class="nottickedoff">result &lt;- try @SomeException (Timeout.timeout 3000000 (listModels provider))</span>
+<span class="lineno">  156 </span><span class="spaces">      </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  157 </span><span class="spaces">        </span><span class="nottickedoff">Right (Just models) -&gt; pure models</span>
+<span class="lineno">  158 </span><span class="spaces">        </span><span class="nottickedoff">_                   -&gt; pure []</span></span>
+<span class="lineno">  159 </span>
+<span class="lineno">  160 </span>-- | Case-insensitive prefix match.
+<span class="lineno">  161 </span>matchesCI :: String -&gt; String -&gt; Bool
+<span class="lineno">  162 </span><span class="decl"><span class="istickedoff">matchesCI prefix candidate =</span>
+<span class="lineno">  163 </span><span class="spaces">  </span><span class="istickedoff">map Char.toLower prefix `L.isPrefixOf` map Char.toLower candidate</span></span>
+<span class="lineno">  164 </span>
+<span class="lineno">  165 </span>-- | Extract the command name (first word) from a CommandSpec's syntax.
+<span class="lineno">  166 </span>commandName :: CommandSpec -&gt; String
+<span class="lineno">  167 </span><span class="decl"><span class="istickedoff">commandName spec =</span>
+<span class="lineno">  168 </span><span class="spaces">  </span><span class="istickedoff">case words (T.unpack (_cs_syntax spec)) of</span>
+<span class="lineno">  169 </span><span class="spaces">    </span><span class="istickedoff">(cmd : _) -&gt; cmd</span>
+<span class="lineno">  170 </span><span class="spaces">    </span><span class="istickedoff">[]        -&gt; <span class="nottickedoff">T.unpack (_cs_syntax spec)</span></span></span>
+
+</pre>
+</body>
+</html>

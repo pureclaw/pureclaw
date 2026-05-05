@@ -1,0 +1,257 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.CLI.Config
+<span class="lineno">    2 </span>  ( -- * File config
+<span class="lineno">    3 </span>    FileConfig (..)
+<span class="lineno">    4 </span>  , FileSignalConfig (..)
+<span class="lineno">    5 </span>  , FileTelegramConfig (..)
+<span class="lineno">    6 </span>  , emptyFileConfig
+<span class="lineno">    7 </span>  , emptyFileSignalConfig
+<span class="lineno">    8 </span>  , emptyFileTelegramConfig
+<span class="lineno">    9 </span>    -- * Loading
+<span class="lineno">   10 </span>  , loadFileConfig
+<span class="lineno">   11 </span>  , loadConfig
+<span class="lineno">   12 </span>    -- * Diagnostic loading
+<span class="lineno">   13 </span>  , ConfigLoadResult (..)
+<span class="lineno">   14 </span>  , loadFileConfigDiag
+<span class="lineno">   15 </span>  , loadConfigDiag
+<span class="lineno">   16 </span>  , configFileConfig
+<span class="lineno">   17 </span>    -- * Writing
+<span class="lineno">   18 </span>  , writeFileConfig
+<span class="lineno">   19 </span>  , FieldUpdate (..)
+<span class="lineno">   20 </span>  , updateVaultConfig
+<span class="lineno">   21 </span>    -- * Directory helpers
+<span class="lineno">   22 </span>  , getPureclawDir
+<span class="lineno">   23 </span>  ) where
+<span class="lineno">   24 </span>
+<span class="lineno">   25 </span>import Control.Exception
+<span class="lineno">   26 </span>import Data.Text (Text)
+<span class="lineno">   27 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   28 </span>import System.Directory (getHomeDirectory)
+<span class="lineno">   29 </span>import System.FilePath ((&lt;/&gt;))
+<span class="lineno">   30 </span>import Toml (TomlCodec, (.=))
+<span class="lineno">   31 </span>import Toml qualified
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | Configuration that can be read from a TOML file.
+<span class="lineno">   34 </span>-- All fields are optional — missing fields default to Nothing.
+<span class="lineno">   35 </span>data FileConfig = FileConfig
+<span class="lineno">   36 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_apiKey</span></span></span>         :: Maybe Text
+<span class="lineno">   37 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_model</span></span></span>          :: Maybe Text
+<span class="lineno">   38 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_provider</span></span></span>       :: Maybe Text
+<span class="lineno">   39 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_system</span></span></span>         :: Maybe Text
+<span class="lineno">   40 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_memory</span></span></span>         :: Maybe Text
+<span class="lineno">   41 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_allow</span></span></span>          :: Maybe [Text]
+<span class="lineno">   42 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_autonomy</span></span></span>       :: Maybe Text  -- ^ &quot;full&quot;, &quot;supervised&quot;, or &quot;deny&quot;
+<span class="lineno">   43 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_defaultChannel</span></span></span> :: Maybe Text  -- ^ &quot;cli&quot;, &quot;signal&quot;, or &quot;telegram&quot;
+<span class="lineno">   44 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_signal</span></span></span>         :: Maybe FileSignalConfig    -- ^ [signal] TOML table
+<span class="lineno">   45 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_telegram</span></span></span>       :: Maybe FileTelegramConfig  -- ^ [telegram] TOML table
+<span class="lineno">   46 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_reasoningEffort</span></span></span> :: Maybe Text  -- ^ &quot;high&quot;, &quot;medium&quot;, or &quot;low&quot;
+<span class="lineno">   47 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_maxTurns</span></span></span>       :: Maybe Int    -- ^ Maximum tool-call iterations per turn
+<span class="lineno">   48 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_timezone</span></span></span>       :: Maybe Text   -- ^ IANA timezone (e.g. &quot;America/New_York&quot;)
+<span class="lineno">   49 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_baseUrl</span></span></span>          :: Maybe Text  -- ^ Provider base URL override (e.g. Ollama endpoint)
+<span class="lineno">   50 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_vault_path</span></span></span>      :: Maybe Text  -- ^ vault file path (default: ~/.pureclaw/vault.age)
+<span class="lineno">   51 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_vault_recipient</span></span></span> :: Maybe Text  -- ^ age recipient string (required to enable vault)
+<span class="lineno">   52 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_vault_identity</span></span></span>  :: Maybe Text  -- ^ age identity path or plugin string
+<span class="lineno">   53 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_vault_unlock</span></span></span>    :: Maybe Text  -- ^ &quot;startup&quot;, &quot;on_demand&quot;, or &quot;per_access&quot;
+<span class="lineno">   54 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_defaultAgent</span></span></span>   :: Maybe Text  -- ^ Name of the agent loaded when @--agent@ is omitted
+<span class="lineno">   55 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_agentTruncateLimit</span></span></span> :: Maybe Int -- ^ Per-file truncation limit (chars) for composed prompts; default 8000
+<span class="lineno">   56 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fc_sessionPrefix</span></span></span>  :: Maybe Text  -- ^ Default session prefix when @--prefix@ and @--agent@ are both omitted
+<span class="lineno">   57 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   58 </span>
+<span class="lineno">   59 </span>-- | Signal channel configuration from the @[signal]@ TOML table.
+<span class="lineno">   60 </span>data FileSignalConfig = FileSignalConfig
+<span class="lineno">   61 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_fsc_account</span></span></span>        :: Maybe Text    -- ^ E.164 phone number
+<span class="lineno">   62 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fsc_dmPolicy</span></span></span>       :: Maybe Text    -- ^ &quot;pairing&quot;, &quot;allowlist&quot;, &quot;open&quot;, &quot;disabled&quot;
+<span class="lineno">   63 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fsc_allowFrom</span></span></span>      :: Maybe [Text]  -- ^ E.164 numbers or UUIDs
+<span class="lineno">   64 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fsc_textChunkLimit</span></span></span> :: Maybe Int     -- ^ Max chars per message (default: 6000)
+<span class="lineno">   65 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   66 </span>
+<span class="lineno">   67 </span>emptyFileConfig :: FileConfig
+<span class="lineno">   68 </span><span class="decl"><span class="istickedoff">emptyFileConfig =</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="istickedoff">FileConfig Nothing Nothing Nothing Nothing Nothing Nothing</span>
+<span class="lineno">   70 </span><span class="spaces">             </span><span class="istickedoff">Nothing Nothing Nothing Nothing Nothing Nothing Nothing</span>
+<span class="lineno">   71 </span><span class="spaces">             </span><span class="istickedoff">Nothing Nothing Nothing Nothing Nothing</span>
+<span class="lineno">   72 </span><span class="spaces">             </span><span class="istickedoff">Nothing Nothing Nothing</span></span>
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>emptyFileSignalConfig :: FileSignalConfig
+<span class="lineno">   75 </span><span class="decl"><span class="nottickedoff">emptyFileSignalConfig = FileSignalConfig Nothing Nothing Nothing Nothing</span></span>
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>-- | Telegram channel configuration from the @[telegram]@ TOML table.
+<span class="lineno">   78 </span>data FileTelegramConfig = FileTelegramConfig
+<span class="lineno">   79 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ftc_botToken</span></span></span>  :: Maybe Text    -- ^ Bot API token
+<span class="lineno">   80 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ftc_dmPolicy</span></span></span>  :: Maybe Text    -- ^ &quot;pairing&quot;, &quot;allowlist&quot;, &quot;open&quot;, &quot;disabled&quot;
+<span class="lineno">   81 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ftc_allowFrom</span></span></span> :: Maybe [Text]  -- ^ Allowed usernames or IDs
+<span class="lineno">   82 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>emptyFileTelegramConfig :: FileTelegramConfig
+<span class="lineno">   85 </span><span class="decl"><span class="nottickedoff">emptyFileTelegramConfig = FileTelegramConfig Nothing Nothing Nothing</span></span>
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>fileConfigCodec :: TomlCodec FileConfig
+<span class="lineno">   88 </span><span class="decl"><span class="istickedoff">fileConfigCodec = FileConfig</span>
+<span class="lineno">   89 </span><span class="spaces">  </span><span class="istickedoff">&lt;$&gt; Toml.dioptional (Toml.text &quot;api_key&quot;)                   .= _fc_apiKey</span>
+<span class="lineno">   90 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;model&quot;)                     .= _fc_model</span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;provider&quot;)                  .= _fc_provider</span>
+<span class="lineno">   92 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;system&quot;)                    .= _fc_system</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;memory&quot;)                    .= _fc_memory</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.arrayOf Toml._Text &quot;allow&quot;)       .= _fc_allow</span>
+<span class="lineno">   95 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;autonomy&quot;)                  .= _fc_autonomy</span>
+<span class="lineno">   96 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;default_channel&quot;)           .= _fc_defaultChannel</span>
+<span class="lineno">   97 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.table fileSignalConfigCodec &quot;signal&quot;) .= _fc_signal</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.table fileTelegramConfigCodec &quot;telegram&quot;) .= _fc_telegram</span>
+<span class="lineno">   99 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;reasoning_effort&quot;)           .= _fc_reasoningEffort</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.int &quot;max_turns&quot;)                   .= _fc_maxTurns</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;timezone&quot;)                   .= _fc_timezone</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;base_url&quot;)                  .= _fc_baseUrl</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;vault_path&quot;)                .= _fc_vault_path</span>
+<span class="lineno">  104 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;vault_recipient&quot;)           .= _fc_vault_recipient</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;vault_identity&quot;)            .= _fc_vault_identity</span>
+<span class="lineno">  106 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;vault_unlock&quot;)              .= _fc_vault_unlock</span>
+<span class="lineno">  107 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;default_agent&quot;)             .= _fc_defaultAgent</span>
+<span class="lineno">  108 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.int  &quot;agent_truncate_limit&quot;)      .= _fc_agentTruncateLimit</span>
+<span class="lineno">  109 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;session_prefix&quot;)            .= _fc_sessionPrefix</span></span>
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>fileSignalConfigCodec :: TomlCodec FileSignalConfig
+<span class="lineno">  112 </span><span class="decl"><span class="istickedoff">fileSignalConfigCodec = FileSignalConfig</span>
+<span class="lineno">  113 </span><span class="spaces">  </span><span class="istickedoff">&lt;$&gt; Toml.dioptional (Toml.text &quot;account&quot;)                   .= <span class="nottickedoff">_fsc_account</span></span>
+<span class="lineno">  114 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;dm_policy&quot;)                 .= <span class="nottickedoff">_fsc_dmPolicy</span></span>
+<span class="lineno">  115 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.arrayOf Toml._Text &quot;allow_from&quot;)  .= <span class="nottickedoff">_fsc_allowFrom</span></span>
+<span class="lineno">  116 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.int &quot;text_chunk_limit&quot;)           .= <span class="nottickedoff">_fsc_textChunkLimit</span></span></span>
+<span class="lineno">  117 </span>
+<span class="lineno">  118 </span>fileTelegramConfigCodec :: TomlCodec FileTelegramConfig
+<span class="lineno">  119 </span><span class="decl"><span class="istickedoff">fileTelegramConfigCodec = FileTelegramConfig</span>
+<span class="lineno">  120 </span><span class="spaces">  </span><span class="istickedoff">&lt;$&gt; Toml.dioptional (Toml.text &quot;bot_token&quot;)                 .= <span class="nottickedoff">_ftc_botToken</span></span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;dm_policy&quot;)                 .= <span class="nottickedoff">_ftc_dmPolicy</span></span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.arrayOf Toml._Text &quot;allow_from&quot;)  .= <span class="nottickedoff">_ftc_allowFrom</span></span></span>
+<span class="lineno">  123 </span>
+<span class="lineno">  124 </span>-- | Load config from a single file path.
+<span class="lineno">  125 </span>-- Returns 'emptyFileConfig' if the file does not exist or cannot be parsed.
+<span class="lineno">  126 </span>loadFileConfig :: FilePath -&gt; IO FileConfig
+<span class="lineno">  127 </span><span class="decl"><span class="istickedoff">loadFileConfig path = do</span>
+<span class="lineno">  128 </span><span class="spaces">  </span><span class="istickedoff">text &lt;- try @IOError (TIO.readFile path)</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">pure $ case text of</span>
+<span class="lineno">  130 </span><span class="spaces">    </span><span class="istickedoff">Left  _    -&gt; emptyFileConfig</span>
+<span class="lineno">  131 </span><span class="spaces">    </span><span class="istickedoff">Right toml -&gt; case Toml.decode fileConfigCodec toml of</span>
+<span class="lineno">  132 </span><span class="spaces">      </span><span class="istickedoff">Left  _ -&gt; emptyFileConfig</span>
+<span class="lineno">  133 </span><span class="spaces">      </span><span class="istickedoff">Right c -&gt; c</span></span>
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>-- | The PureClaw home directory: @~\/.pureclaw@.
+<span class="lineno">  136 </span>-- This is where config, memory, and vault files are stored by default.
+<span class="lineno">  137 </span>getPureclawDir :: IO FilePath
+<span class="lineno">  138 </span><span class="decl"><span class="istickedoff">getPureclawDir = do</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">home &lt;- getHomeDirectory</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="istickedoff">pure (home &lt;/&gt; &quot;.pureclaw&quot;)</span></span>
+<span class="lineno">  141 </span>
+<span class="lineno">  142 </span>-- | Load config from the default locations, trying each in order:
+<span class="lineno">  143 </span>--
+<span class="lineno">  144 </span>-- 1. @~\/.pureclaw\/config.toml@ (user home)
+<span class="lineno">  145 </span>-- 2. @~\/.config\/pureclaw\/config.toml@ (XDG fallback)
+<span class="lineno">  146 </span>--
+<span class="lineno">  147 </span>-- Returns the first config found, or 'emptyFileConfig' if none exists.
+<span class="lineno">  148 </span>loadConfig :: IO FileConfig
+<span class="lineno">  149 </span><span class="decl"><span class="nottickedoff">loadConfig = configFileConfig &lt;$&gt; loadConfigDiag</span></span>
+<span class="lineno">  150 </span>
+<span class="lineno">  151 </span>-- | Result of attempting to load a config file.
+<span class="lineno">  152 </span>data ConfigLoadResult
+<span class="lineno">  153 </span>  = ConfigLoaded FilePath FileConfig     -- ^ File found and parsed successfully
+<span class="lineno">  154 </span>  | ConfigParseError FilePath Text       -- ^ File exists but contains invalid TOML
+<span class="lineno">  155 </span>  | ConfigFileNotFound FilePath          -- ^ Specific file was not found
+<span class="lineno">  156 </span>  | ConfigNotFound [FilePath]            -- ^ No config found at any default location
+<span class="lineno">  157 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  158 </span>
+<span class="lineno">  159 </span>-- | Extract the 'FileConfig' from a result, defaulting to 'emptyFileConfig' on error.
+<span class="lineno">  160 </span>configFileConfig :: ConfigLoadResult -&gt; FileConfig
+<span class="lineno">  161 </span><span class="decl"><span class="istickedoff">configFileConfig (ConfigLoaded _ fc)    = fc</span>
+<span class="lineno">  162 </span><span class="spaces"></span><span class="istickedoff">configFileConfig (ConfigParseError _ _) = emptyFileConfig</span>
+<span class="lineno">  163 </span><span class="spaces"></span><span class="istickedoff">configFileConfig (ConfigFileNotFound _) = emptyFileConfig</span>
+<span class="lineno">  164 </span><span class="spaces"></span><span class="istickedoff">configFileConfig (ConfigNotFound _)     = emptyFileConfig</span></span>
+<span class="lineno">  165 </span>
+<span class="lineno">  166 </span>-- | Load config from a single file, returning diagnostic information.
+<span class="lineno">  167 </span>-- Unlike 'loadFileConfig', parse errors are not silently discarded.
+<span class="lineno">  168 </span>loadFileConfigDiag :: FilePath -&gt; IO ConfigLoadResult
+<span class="lineno">  169 </span><span class="decl"><span class="istickedoff">loadFileConfigDiag path = do</span>
+<span class="lineno">  170 </span><span class="spaces">  </span><span class="istickedoff">text &lt;- try @IOError (TIO.readFile path)</span>
+<span class="lineno">  171 </span><span class="spaces">  </span><span class="istickedoff">pure $ case text of</span>
+<span class="lineno">  172 </span><span class="spaces">    </span><span class="istickedoff">Left  _ -&gt; ConfigFileNotFound path</span>
+<span class="lineno">  173 </span><span class="spaces">    </span><span class="istickedoff">Right toml -&gt; case Toml.decode fileConfigCodec toml of</span>
+<span class="lineno">  174 </span><span class="spaces">      </span><span class="istickedoff">Left errs -&gt; ConfigParseError path (Toml.prettyTomlDecodeErrors errs)</span>
+<span class="lineno">  175 </span><span class="spaces">      </span><span class="istickedoff">Right c   -&gt; ConfigLoaded path c</span></span>
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>-- | Load config from default locations with diagnostics.
+<span class="lineno">  178 </span>-- Stops at the first file that exists (even if it has errors).
+<span class="lineno">  179 </span>loadConfigDiag :: IO ConfigLoadResult
+<span class="lineno">  180 </span><span class="decl"><span class="nottickedoff">loadConfigDiag = do</span>
+<span class="lineno">  181 </span><span class="spaces">  </span><span class="nottickedoff">home &lt;- try @IOError getHomeDirectory</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="nottickedoff">case home of</span>
+<span class="lineno">  183 </span><span class="spaces">    </span><span class="nottickedoff">Left _ -&gt; pure (ConfigNotFound [])</span>
+<span class="lineno">  184 </span><span class="spaces">    </span><span class="nottickedoff">Right h -&gt; do</span>
+<span class="lineno">  185 </span><span class="spaces">      </span><span class="nottickedoff">let homePath = h &lt;/&gt; &quot;.pureclaw&quot; &lt;/&gt; &quot;config.toml&quot;</span>
+<span class="lineno">  186 </span><span class="spaces">          </span><span class="nottickedoff">xdgPath  = h &lt;/&gt; &quot;.config&quot; &lt;/&gt; &quot;pureclaw&quot; &lt;/&gt; &quot;config.toml&quot;</span>
+<span class="lineno">  187 </span><span class="spaces">      </span><span class="nottickedoff">homeResult &lt;- loadFileConfigDiag homePath</span>
+<span class="lineno">  188 </span><span class="spaces">      </span><span class="nottickedoff">case homeResult of</span>
+<span class="lineno">  189 </span><span class="spaces">        </span><span class="nottickedoff">ConfigFileNotFound _ -&gt; do</span>
+<span class="lineno">  190 </span><span class="spaces">          </span><span class="nottickedoff">xdgResult &lt;- loadFileConfigDiag xdgPath</span>
+<span class="lineno">  191 </span><span class="spaces">          </span><span class="nottickedoff">case xdgResult of</span>
+<span class="lineno">  192 </span><span class="spaces">            </span><span class="nottickedoff">ConfigFileNotFound _ -&gt; pure (ConfigNotFound [homePath, xdgPath])</span>
+<span class="lineno">  193 </span><span class="spaces">            </span><span class="nottickedoff">_                    -&gt; pure xdgResult</span>
+<span class="lineno">  194 </span><span class="spaces">        </span><span class="nottickedoff">_ -&gt; pure homeResult</span></span>
+<span class="lineno">  195 </span>
+<span class="lineno">  196 </span>-- | Write a complete 'FileConfig' to a TOML file.
+<span class="lineno">  197 </span>-- Overwrites the file entirely. Creates the file if it does not exist.
+<span class="lineno">  198 </span>writeFileConfig :: FilePath -&gt; FileConfig -&gt; IO ()
+<span class="lineno">  199 </span><span class="decl"><span class="istickedoff">writeFileConfig path cfg = TIO.writeFile path (Toml.encode fileConfigCodec cfg)</span></span>
+<span class="lineno">  200 </span>
+<span class="lineno">  201 </span>-- | Three-valued update: set a new value, clear the field, or keep the existing value.
+<span class="lineno">  202 </span>data FieldUpdate a
+<span class="lineno">  203 </span>  = Set a    -- ^ Replace with this value
+<span class="lineno">  204 </span>  | Clear    -- ^ Remove the field (set to Nothing)
+<span class="lineno">  205 </span>  | Keep     -- ^ Leave the existing value unchanged
+<span class="lineno">  206 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  207 </span>
+<span class="lineno">  208 </span>-- | Apply a 'FieldUpdate' to an existing 'Maybe' value.
+<span class="lineno">  209 </span>applyUpdate :: FieldUpdate a -&gt; Maybe a -&gt; Maybe a
+<span class="lineno">  210 </span><span class="decl"><span class="istickedoff">applyUpdate (Set x) _ = Just x</span>
+<span class="lineno">  211 </span><span class="spaces"></span><span class="istickedoff">applyUpdate Clear   _ = Nothing</span>
+<span class="lineno">  212 </span><span class="spaces"></span><span class="istickedoff">applyUpdate Keep    v = v</span></span>
+<span class="lineno">  213 </span>
+<span class="lineno">  214 </span>-- | Update vault-related fields in a config file, preserving all other settings.
+<span class="lineno">  215 </span>-- 'Keep' means &quot;leave this field unchanged&quot;, 'Clear' means &quot;remove the field&quot;,
+<span class="lineno">  216 </span>-- 'Set' means &quot;replace with this value&quot;.
+<span class="lineno">  217 </span>-- If all four arguments are 'Keep', this is a no-op (no file write occurs).
+<span class="lineno">  218 </span>updateVaultConfig
+<span class="lineno">  219 </span>  :: FilePath             -- ^ Config file path
+<span class="lineno">  220 </span>  -&gt; FieldUpdate Text     -- ^ vault_path
+<span class="lineno">  221 </span>  -&gt; FieldUpdate Text     -- ^ vault_recipient
+<span class="lineno">  222 </span>  -&gt; FieldUpdate Text     -- ^ vault_identity
+<span class="lineno">  223 </span>  -&gt; FieldUpdate Text     -- ^ vault_unlock
+<span class="lineno">  224 </span>  -&gt; IO ()
+<span class="lineno">  225 </span><span class="decl"><span class="istickedoff">updateVaultConfig _ Keep Keep Keep Keep = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  226 </span><span class="spaces"></span><span class="istickedoff">updateVaultConfig path vaultPath vaultRecipient vaultIdentity vaultUnlock = do</span>
+<span class="lineno">  227 </span><span class="spaces">  </span><span class="istickedoff">existing &lt;- loadFileConfig path</span>
+<span class="lineno">  228 </span><span class="spaces">  </span><span class="istickedoff">let updated = existing</span>
+<span class="lineno">  229 </span><span class="spaces">        </span><span class="istickedoff">{ _fc_vault_path      = applyUpdate vaultPath      <span class="nottickedoff">(_fc_vault_path existing)</span></span>
+<span class="lineno">  230 </span><span class="spaces">        </span><span class="istickedoff">, _fc_vault_recipient = applyUpdate vaultRecipient  (_fc_vault_recipient existing)</span>
+<span class="lineno">  231 </span><span class="spaces">        </span><span class="istickedoff">, _fc_vault_identity  = applyUpdate vaultIdentity   (_fc_vault_identity existing)</span>
+<span class="lineno">  232 </span><span class="spaces">        </span><span class="istickedoff">, _fc_vault_unlock    = applyUpdate vaultUnlock     (_fc_vault_unlock existing)</span>
+<span class="lineno">  233 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  234 </span><span class="spaces">  </span><span class="istickedoff">TIO.writeFile path (Toml.encode fileConfigCodec updated)</span></span>
+
+</pre>
+</body>
+</html>

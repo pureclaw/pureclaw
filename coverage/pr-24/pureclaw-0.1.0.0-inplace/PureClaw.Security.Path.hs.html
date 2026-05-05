@@ -1,0 +1,118 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Path
+<span class="lineno">    2 </span>  ( -- * Safe path type (constructor intentionally NOT exported)
+<span class="lineno">    3 </span>    SafePath
+<span class="lineno">    4 </span>    -- * Path errors
+<span class="lineno">    5 </span>  , PathError (..)
+<span class="lineno">    6 </span>    -- * Construction (the ONLY way to obtain a SafePath)
+<span class="lineno">    7 </span>  , mkSafePath
+<span class="lineno">    8 </span>    -- * Read-only accessor
+<span class="lineno">    9 </span>  , getSafePath
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Data.List
+<span class="lineno">   13 </span>import Data.Set (Set)
+<span class="lineno">   14 </span>import Data.Set qualified as Set
+<span class="lineno">   15 </span>import Data.Text (Text)
+<span class="lineno">   16 </span>import System.Directory
+<span class="lineno">   17 </span>import System.FilePath
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>import PureClaw.Core.Types
+<span class="lineno">   20 </span>
+<span class="lineno">   21 </span>-- | A filesystem path that has been validated to be within the workspace
+<span class="lineno">   22 </span>-- and not on the blocked list. Constructor is intentionally NOT exported —
+<span class="lineno">   23 </span>-- the only way to obtain a 'SafePath' is through 'mkSafePath'.
+<span class="lineno">   24 </span>newtype SafePath = SafePath { <span class="istickedoff"><span class="decl"><span class="istickedoff">getSafePath</span></span></span> :: FilePath }
+<span class="lineno">   25 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   26 </span>
+<span class="lineno">   27 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show SafePath</span></span></span></span> where
+<span class="lineno">   28 </span>  <span class="decl"><span class="nottickedoff">show sp = &quot;SafePath &quot; ++ show (getSafePath sp)</span></span>
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>-- | Errors that can occur during path validation.
+<span class="lineno">   31 </span>data PathError
+<span class="lineno">   32 </span>  = PathEscapesWorkspace FilePath FilePath  -- ^ requested, resolved
+<span class="lineno">   33 </span>  | PathIsBlocked FilePath Text             -- ^ requested, reason
+<span class="lineno">   34 </span>  | PathDoesNotExist FilePath               -- ^ the requested path does not exist
+<span class="lineno">   35 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Paths that must never be readable or writable, regardless of workspace.
+<span class="lineno">   38 </span>-- Checked against the first component of the relative path within the workspace.
+<span class="lineno">   39 </span>blockedPaths :: Set String
+<span class="lineno">   40 </span><span class="decl"><span class="istickedoff">blockedPaths = Set.fromList</span>
+<span class="lineno">   41 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;.env&quot;</span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.env.local&quot;</span>
+<span class="lineno">   43 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.env.production&quot;</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.ssh&quot;</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.gnupg&quot;</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.netrc&quot;</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.pureclaw&quot;  -- protects vault and config from agent file tools</span>
+<span class="lineno">   48 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>-- | The ONLY way to obtain a 'SafePath'. Canonicalizes the path (following
+<span class="lineno">   51 </span>-- symlinks), verifies it stays within the workspace, checks the blocked list,
+<span class="lineno">   52 </span>-- and verifies the path exists.
+<span class="lineno">   53 </span>--
+<span class="lineno">   54 </span>-- Checks run in order, each as an early return:
+<span class="lineno">   55 </span>--  1. Reject @..@ traversal (prevents workspace escape)
+<span class="lineno">   56 </span>--  2. Reject absolute paths outside workspace
+<span class="lineno">   57 </span>--  3. Reject blocked paths (@.env@, @.ssh@, etc.)
+<span class="lineno">   58 </span>--  4. Reject non-existent paths
+<span class="lineno">   59 </span>--  5. Reject symlinks that resolve outside workspace
+<span class="lineno">   60 </span>mkSafePath :: WorkspaceRoot -&gt; FilePath -&gt; IO (Either PathError SafePath)
+<span class="lineno">   61 </span><span class="decl"><span class="istickedoff">mkSafePath (WorkspaceRoot root) requested = do</span>
+<span class="lineno">   62 </span><span class="spaces">  </span><span class="istickedoff">canonRoot &lt;- canonicalizePath root</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="istickedoff">let raw = if isAbsolute requested then requested else canonRoot &lt;/&gt; requested</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">relative = makeRelative canonRoot raw</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">-- Pure checks first (no IO, no filesystem access)</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">let pureCheck</span>
+<span class="lineno">   67 </span><span class="spaces">        </span><span class="istickedoff">| hasParentTraversal requested = Just (PathEscapesWorkspace <span class="nottickedoff">requested</span> <span class="nottickedoff">raw</span>)</span>
+<span class="lineno">   68 </span><span class="spaces">        </span><span class="istickedoff">| isAbsolute requested &amp;&amp; not (canonRoot `isPrefixOf` raw) = Just (PathEscapesWorkspace <span class="nottickedoff">requested</span> <span class="nottickedoff">raw</span>)</span>
+<span class="lineno">   69 </span><span class="spaces">        </span><span class="istickedoff">| isBlockedPath relative = Just (PathIsBlocked <span class="nottickedoff">requested</span> <span class="nottickedoff">&quot;blocked path&quot;</span>)</span>
+<span class="lineno">   70 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Nothing</span>
+<span class="lineno">   71 </span><span class="spaces">  </span><span class="istickedoff">case pureCheck of</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="istickedoff">Just err -&gt; pure (Left err)</span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- doesPathExist raw</span>
+<span class="lineno">   75 </span><span class="spaces">      </span><span class="istickedoff">if not exists</span>
+<span class="lineno">   76 </span><span class="spaces">        </span><span class="istickedoff">then pure $ Left (PathDoesNotExist <span class="nottickedoff">requested</span>)</span>
+<span class="lineno">   77 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">   78 </span><span class="spaces">          </span><span class="istickedoff">-- Canonicalize resolves symlinks — a symlink inside the workspace</span>
+<span class="lineno">   79 </span><span class="spaces">          </span><span class="istickedoff">-- could point outside it, so we re-check containment.</span>
+<span class="lineno">   80 </span><span class="spaces">          </span><span class="istickedoff">canonical &lt;- canonicalizePath raw</span>
+<span class="lineno">   81 </span><span class="spaces">          </span><span class="istickedoff">pure $ if <span class="tickonlytrue">canonRoot `isPrefixOf` canonical</span></span>
+<span class="lineno">   82 </span><span class="spaces">            </span><span class="istickedoff">then Right (SafePath canonical)</span>
+<span class="lineno">   83 </span><span class="spaces">            </span><span class="istickedoff">else <span class="nottickedoff">Left (PathEscapesWorkspace requested canonical)</span></span></span>
+<span class="lineno">   84 </span>
+<span class="lineno">   85 </span>-- | Check if a path contains &quot;..&quot; components that could traverse upward.
+<span class="lineno">   86 </span>hasParentTraversal :: FilePath -&gt; Bool
+<span class="lineno">   87 </span><span class="decl"><span class="istickedoff">hasParentTraversal path = &quot;..&quot; `elem` splitDirectories path</span></span>
+<span class="lineno">   88 </span>
+<span class="lineno">   89 </span>-- | Check if a relative path matches any blocked path.
+<span class="lineno">   90 </span>-- Matches on the first path component (e.g. &quot;.env&quot; matches &quot;.env&quot; and &quot;.env/foo&quot;).
+<span class="lineno">   91 </span>isBlockedPath :: FilePath -&gt; Bool
+<span class="lineno">   92 </span><span class="decl"><span class="istickedoff">isBlockedPath relative =</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">let firstComponent = Prelude.takeWhile (\c -&gt; c /= '/' &amp;&amp; c /= '\\') relative</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">in Set.member firstComponent blockedPaths</span></span>
+<span class="lineno">   95 </span>
+
+</pre>
+</body>
+</html>

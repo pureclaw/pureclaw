@@ -1,0 +1,77 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.HttpRequest
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    httpRequestTool
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Control.Exception
+<span class="lineno">    7 </span>import Data.Aeson
+<span class="lineno">    8 </span>import Data.Aeson.Types
+<span class="lineno">    9 </span>import Data.ByteString.Char8 qualified as BS8
+<span class="lineno">   10 </span>import Data.Text (Text)
+<span class="lineno">   11 </span>import Data.Text qualified as T
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import PureClaw.Core.Types
+<span class="lineno">   14 </span>import PureClaw.Handles.Network
+<span class="lineno">   15 </span>import PureClaw.Providers.Class
+<span class="lineno">   16 </span>import PureClaw.Tools.Registry
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>-- | Create an HTTP request tool that sends requests through URL validation.
+<span class="lineno">   19 </span>httpRequestTool :: AllowList Text -&gt; NetworkHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   20 </span><span class="decl"><span class="nottickedoff">httpRequestTool allowList nh = (def, handler)</span>
+<span class="lineno">   21 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">   22 </span><span class="spaces">    </span><span class="nottickedoff">def = ToolDefinition</span>
+<span class="lineno">   23 </span><span class="spaces">      </span><span class="nottickedoff">{ _td_name        = &quot;http_request&quot;</span>
+<span class="lineno">   24 </span><span class="spaces">      </span><span class="nottickedoff">, _td_description = &quot;Make an HTTP GET request to a URL. The URL must be in the allowed domain list.&quot;</span>
+<span class="lineno">   25 </span><span class="spaces">      </span><span class="nottickedoff">, _td_inputSchema = object</span>
+<span class="lineno">   26 </span><span class="spaces">          </span><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span>
+<span class="lineno">   27 </span><span class="spaces">          </span><span class="nottickedoff">, &quot;properties&quot; .= object</span>
+<span class="lineno">   28 </span><span class="spaces">              </span><span class="nottickedoff">[ &quot;url&quot; .= object</span>
+<span class="lineno">   29 </span><span class="spaces">                  </span><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span>
+<span class="lineno">   30 </span><span class="spaces">                  </span><span class="nottickedoff">, &quot;description&quot; .= (&quot;The URL to request&quot; :: Text)</span>
+<span class="lineno">   31 </span><span class="spaces">                  </span><span class="nottickedoff">]</span>
+<span class="lineno">   32 </span><span class="spaces">              </span><span class="nottickedoff">]</span>
+<span class="lineno">   33 </span><span class="spaces">          </span><span class="nottickedoff">, &quot;required&quot; .= ([&quot;url&quot;] :: [Text])</span>
+<span class="lineno">   34 </span><span class="spaces">          </span><span class="nottickedoff">]</span>
+<span class="lineno">   35 </span><span class="spaces">      </span><span class="nottickedoff">}</span>
+<span class="lineno">   36 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">   37 </span><span class="spaces">    </span><span class="nottickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   38 </span><span class="spaces">      </span><span class="nottickedoff">case parseEither parseInput input of</span>
+<span class="lineno">   39 </span><span class="spaces">        </span><span class="nottickedoff">Left err -&gt; pure (T.pack err, True)</span>
+<span class="lineno">   40 </span><span class="spaces">        </span><span class="nottickedoff">Right url -&gt;</span>
+<span class="lineno">   41 </span><span class="spaces">          </span><span class="nottickedoff">case mkAllowedUrl allowList url of</span>
+<span class="lineno">   42 </span><span class="spaces">            </span><span class="nottickedoff">Left (UrlNotAllowed u) -&gt; pure (&quot;URL domain not allowed: &quot; &lt;&gt; u, True)</span>
+<span class="lineno">   43 </span><span class="spaces">            </span><span class="nottickedoff">Left (UrlMalformed u) -&gt; pure (&quot;Malformed URL: &quot; &lt;&gt; u, True)</span>
+<span class="lineno">   44 </span><span class="spaces">            </span><span class="nottickedoff">Right allowed -&gt; do</span>
+<span class="lineno">   45 </span><span class="spaces">              </span><span class="nottickedoff">result &lt;- try @SomeException (_nh_httpGet nh allowed)</span>
+<span class="lineno">   46 </span><span class="spaces">              </span><span class="nottickedoff">case result of</span>
+<span class="lineno">   47 </span><span class="spaces">                </span><span class="nottickedoff">Left e -&gt; pure (T.pack (show e), True)</span>
+<span class="lineno">   48 </span><span class="spaces">                </span><span class="nottickedoff">Right resp -&gt;</span>
+<span class="lineno">   49 </span><span class="spaces">                  </span><span class="nottickedoff">let status = T.pack (show (_hr_statusCode resp))</span>
+<span class="lineno">   50 </span><span class="spaces">                      </span><span class="nottickedoff">body = T.pack (BS8.unpack (_hr_body resp))</span>
+<span class="lineno">   51 </span><span class="spaces">                  </span><span class="nottickedoff">in pure (&quot;HTTP &quot; &lt;&gt; status &lt;&gt; &quot;\n&quot; &lt;&gt; body, False)</span>
+<span class="lineno">   52 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">   53 </span><span class="spaces">    </span><span class="nottickedoff">parseInput :: Value -&gt; Parser Text</span>
+<span class="lineno">   54 </span><span class="spaces">    </span><span class="nottickedoff">parseInput = withObject &quot;HttpRequestInput&quot; $ \o -&gt; o .: &quot;url&quot;</span></span>
+
+</pre>
+</body>
+</html>

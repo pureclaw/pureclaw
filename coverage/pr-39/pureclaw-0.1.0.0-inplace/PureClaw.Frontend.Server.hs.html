@@ -1,0 +1,104 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Frontend.Server
+<span class="lineno">    2 </span>  ( -- * Server
+<span class="lineno">    3 </span>    runFrontend
+<span class="lineno">    4 </span>    -- * Configuration
+<span class="lineno">    5 </span>  , FrontendConfig (..)
+<span class="lineno">    6 </span>  , defaultFrontendConfig
+<span class="lineno">    7 </span>  ) where
+<span class="lineno">    8 </span>
+<span class="lineno">    9 </span>import Data.ByteString qualified as BS
+<span class="lineno">   10 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   11 </span>import Data.Text qualified as T
+<span class="lineno">   12 </span>import Network.HTTP.Types
+<span class="lineno">   13 </span>import Network.Wai
+<span class="lineno">   14 </span>import Network.Wai.Handler.Warp qualified as Warp
+<span class="lineno">   15 </span>import System.Directory (doesFileExist)
+<span class="lineno">   16 </span>import System.FilePath ((&lt;/&gt;), takeExtension)
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>-- | Frontend server configuration.
+<span class="lineno">   19 </span>data FrontendConfig = FrontendConfig
+<span class="lineno">   20 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fsc_port</span></span></span>      :: Int
+<span class="lineno">   21 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fsc_staticDir</span></span></span> :: FilePath
+<span class="lineno">   22 </span>  }
+<span class="lineno">   23 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   24 </span>
+<span class="lineno">   25 </span>-- | Default: port 8080, serving from @frontend\/dist@.
+<span class="lineno">   26 </span>defaultFrontendConfig :: FrontendConfig
+<span class="lineno">   27 </span><span class="decl"><span class="nottickedoff">defaultFrontendConfig = FrontendConfig</span>
+<span class="lineno">   28 </span><span class="spaces">  </span><span class="nottickedoff">{ _fsc_port      = 8080</span>
+<span class="lineno">   29 </span><span class="spaces">  </span><span class="nottickedoff">, _fsc_staticDir = &quot;frontend/dist&quot;</span>
+<span class="lineno">   30 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">   31 </span>
+<span class="lineno">   32 </span>-- | Start the frontend static file server.
+<span class="lineno">   33 </span>runFrontend :: FrontendConfig -&gt; IO ()
+<span class="lineno">   34 </span><span class="decl"><span class="nottickedoff">runFrontend cfg = do</span>
+<span class="lineno">   35 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn &quot;PureClaw frontend server&quot;</span>
+<span class="lineno">   36 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn $ &quot;  Serving: &quot; &lt;&gt; _fsc_staticDir cfg</span>
+<span class="lineno">   37 </span><span class="spaces">  </span><span class="nottickedoff">putStrLn $ &quot;  URL:     http://localhost:&quot; &lt;&gt; show (_fsc_port cfg)</span>
+<span class="lineno">   38 </span><span class="spaces">  </span><span class="nottickedoff">Warp.run (_fsc_port cfg) (staticApp (_fsc_staticDir cfg))</span></span>
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>-- | WAI application that serves static files with SPA fallback.
+<span class="lineno">   41 </span>staticApp :: FilePath -&gt; Application
+<span class="lineno">   42 </span><span class="decl"><span class="nottickedoff">staticApp dir req respond = do</span>
+<span class="lineno">   43 </span><span class="spaces">  </span><span class="nottickedoff">let segments = pathInfo req</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="nottickedoff">-- Reject path traversal</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="nottickedoff">if any (\s -&gt; s == &quot;..&quot; || s == &quot;.&quot;) segments</span>
+<span class="lineno">   46 </span><span class="spaces">    </span><span class="nottickedoff">then respond $ responseLBS status400 [] &quot;Invalid path&quot;</span>
+<span class="lineno">   47 </span><span class="spaces">    </span><span class="nottickedoff">else do</span>
+<span class="lineno">   48 </span><span class="spaces">      </span><span class="nottickedoff">let relPath  = T.unpack (T.intercalate &quot;/&quot; segments)</span>
+<span class="lineno">   49 </span><span class="spaces">          </span><span class="nottickedoff">filePath = dir &lt;/&gt; if null relPath then &quot;index.html&quot; else relPath</span>
+<span class="lineno">   50 </span><span class="spaces">      </span><span class="nottickedoff">exists &lt;- doesFileExist filePath</span>
+<span class="lineno">   51 </span><span class="spaces">      </span><span class="nottickedoff">if exists</span>
+<span class="lineno">   52 </span><span class="spaces">        </span><span class="nottickedoff">then serveFile filePath respond</span>
+<span class="lineno">   53 </span><span class="spaces">        </span><span class="nottickedoff">else do</span>
+<span class="lineno">   54 </span><span class="spaces">          </span><span class="nottickedoff">-- SPA fallback: serve index.html for client-side routing</span>
+<span class="lineno">   55 </span><span class="spaces">          </span><span class="nottickedoff">let indexPath = dir &lt;/&gt; &quot;index.html&quot;</span>
+<span class="lineno">   56 </span><span class="spaces">          </span><span class="nottickedoff">indexExists &lt;- doesFileExist indexPath</span>
+<span class="lineno">   57 </span><span class="spaces">          </span><span class="nottickedoff">if indexExists</span>
+<span class="lineno">   58 </span><span class="spaces">            </span><span class="nottickedoff">then serveFile indexPath respond</span>
+<span class="lineno">   59 </span><span class="spaces">            </span><span class="nottickedoff">else respond $ responseLBS status404 [] &quot;Not found&quot;</span></span>
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>serveFile :: FilePath -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">   62 </span><span class="decl"><span class="nottickedoff">serveFile path respond = do</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="nottickedoff">contents &lt;- LBS.readFile path</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="nottickedoff">let ct = mimeType (takeExtension path)</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="nottickedoff">respond $ responseLBS status200 [(hContentType, ct)] contents</span></span>
+<span class="lineno">   66 </span>
+<span class="lineno">   67 </span>-- | Map file extensions to MIME types.
+<span class="lineno">   68 </span>mimeType :: String -&gt; BS.ByteString
+<span class="lineno">   69 </span><span class="decl"><span class="nottickedoff">mimeType &quot;.html&quot;  = &quot;text/html; charset=utf-8&quot;</span>
+<span class="lineno">   70 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.js&quot;    = &quot;application/javascript&quot;</span>
+<span class="lineno">   71 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.css&quot;   = &quot;text/css&quot;</span>
+<span class="lineno">   72 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.svg&quot;   = &quot;image/svg+xml&quot;</span>
+<span class="lineno">   73 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.json&quot;  = &quot;application/json&quot;</span>
+<span class="lineno">   74 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.png&quot;   = &quot;image/png&quot;</span>
+<span class="lineno">   75 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.jpg&quot;   = &quot;image/jpeg&quot;</span>
+<span class="lineno">   76 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.jpeg&quot;  = &quot;image/jpeg&quot;</span>
+<span class="lineno">   77 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.ico&quot;   = &quot;image/x-icon&quot;</span>
+<span class="lineno">   78 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.woff&quot;  = &quot;font/woff&quot;</span>
+<span class="lineno">   79 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.woff2&quot; = &quot;font/woff2&quot;</span>
+<span class="lineno">   80 </span><span class="spaces"></span><span class="nottickedoff">mimeType &quot;.map&quot;   = &quot;application/json&quot;</span>
+<span class="lineno">   81 </span><span class="spaces"></span><span class="nottickedoff">mimeType _        = &quot;application/octet-stream&quot;</span></span>
+
+</pre>
+</body>
+</html>

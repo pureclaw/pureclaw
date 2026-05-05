@@ -1,0 +1,130 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Core.Types
+<span class="lineno">    2 </span>  ( -- * Identity types
+<span class="lineno">    3 </span>    ProviderId (..)
+<span class="lineno">    4 </span>  , ModelId (..)
+<span class="lineno">    5 </span>  , Port (..)
+<span class="lineno">    6 </span>  , UserId (..)
+<span class="lineno">    7 </span>  , CommandName (..)
+<span class="lineno">    8 </span>  , ToolCallId (..)
+<span class="lineno">    9 </span>  , MemoryId (..)
+<span class="lineno">   10 </span>    -- * Session ID
+<span class="lineno">   11 </span>    -- The data constructor 'SessionId' is exported because session IDs are
+<span class="lineno">   12 </span>    -- opaque strings with no validation invariant. 'parseSessionId' is just
+<span class="lineno">   13 </span>    -- the constructor under a friendlier name.
+<span class="lineno">   14 </span>  , SessionId (..)
+<span class="lineno">   15 </span>  , parseSessionId
+<span class="lineno">   16 </span>    -- * Message target
+<span class="lineno">   17 </span>  , MessageTarget (..)
+<span class="lineno">   18 </span>    -- * Workspace
+<span class="lineno">   19 </span>  , WorkspaceRoot (..)
+<span class="lineno">   20 </span>    -- * Autonomy
+<span class="lineno">   21 </span>  , AutonomyLevel (..)
+<span class="lineno">   22 </span>    -- * Allow-lists
+<span class="lineno">   23 </span>  , AllowList (..)
+<span class="lineno">   24 </span>  , isAllowed
+<span class="lineno">   25 </span>  ) where
+<span class="lineno">   26 </span>
+<span class="lineno">   27 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   28 </span>import Data.Set (Set)
+<span class="lineno">   29 </span>import Data.Set qualified as Set
+<span class="lineno">   30 </span>import Data.Text (Text)
+<span class="lineno">   31 </span>import GHC.Generics (Generic)
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | Provider identifier (e.g. &quot;anthropic&quot;, &quot;openai&quot;)
+<span class="lineno">   34 </span>newtype ProviderId = ProviderId { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unProviderId</span></span></span> :: Text }
+<span class="lineno">   35 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Model identifier (e.g. &quot;claude-3-opus&quot;)
+<span class="lineno">   38 </span>newtype ModelId = ModelId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unModelId</span></span></span> :: Text }
+<span class="lineno">   39 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   40 </span>
+<span class="lineno">   41 </span>-- | Network port number
+<span class="lineno">   42 </span>newtype Port = Port { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unPort</span></span></span> :: Int }
+<span class="lineno">   43 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   44 </span>
+<span class="lineno">   45 </span>-- | User identifier for allow-list matching
+<span class="lineno">   46 </span>newtype UserId = UserId { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unUserId</span></span></span> :: Text }
+<span class="lineno">   47 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   48 </span>
+<span class="lineno">   49 </span>-- | Command name for policy evaluation (e.g. &quot;git&quot;, &quot;ls&quot;)
+<span class="lineno">   50 </span>newtype CommandName = CommandName { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unCommandName</span></span></span> :: Text }
+<span class="lineno">   51 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Tool call identifier from provider responses
+<span class="lineno">   54 </span>newtype ToolCallId = ToolCallId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unToolCallId</span></span></span> :: Text }
+<span class="lineno">   55 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>-- | Memory entry identifier
+<span class="lineno">   58 </span>newtype MemoryId = MemoryId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unMemoryId</span></span></span> :: Text }
+<span class="lineno">   59 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>-- | Opaque session identifier. The string format is produced by
+<span class="lineno">   62 </span>-- 'PureClaw.Session.Types.newSessionId' but is not validated on parse —
+<span class="lineno">   63 </span>-- 'SessionId' is treated as an opaque label so that on-disk session
+<span class="lineno">   64 </span>-- directories created by older or newer code remain readable.
+<span class="lineno">   65 </span>newtype SessionId = SessionId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unSessionId</span></span></span> :: Text }
+<span class="lineno">   66 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   67 </span>  deriving newtype (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON</span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   68 </span>
+<span class="lineno">   69 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON SessionId</span></span></span></span> where
+<span class="lineno">   70 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;SessionId&quot;</span> (pure . SessionId)</span></span>
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | Friendly alias for the 'SessionId' constructor. Provided for
+<span class="lineno">   73 </span>-- symmetry with smart constructors elsewhere; performs no validation.
+<span class="lineno">   74 </span>parseSessionId :: Text -&gt; SessionId
+<span class="lineno">   75 </span><span class="decl"><span class="istickedoff">parseSessionId = SessionId</span></span>
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>-- | Where incoming user messages are routed. Lives in 'Core.Types'
+<span class="lineno">   78 </span>-- (rather than 'PureClaw.Agent.Env') so that 'PureClaw.Session.Types'
+<span class="lineno">   79 </span>-- can refer to it without creating an import cycle through
+<span class="lineno">   80 </span>-- 'PureClaw.Session.Handle'.
+<span class="lineno">   81 </span>data MessageTarget
+<span class="lineno">   82 </span>  = TargetProvider          -- ^ Send to the configured LLM provider + model
+<span class="lineno">   83 </span>  | TargetHarness Text      -- ^ Send to a named running harness
+<span class="lineno">   84 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   85 </span>
+<span class="lineno">   86 </span>-- | Workspace root directory — anchors all SafePath resolution
+<span class="lineno">   87 </span>newtype WorkspaceRoot = WorkspaceRoot { <span class="istickedoff"><span class="decl"><span class="istickedoff">unWorkspaceRoot</span></span></span> :: FilePath }
+<span class="lineno">   88 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   89 </span>
+<span class="lineno">   90 </span>-- | Agent autonomy level
+<span class="lineno">   91 </span>data AutonomyLevel
+<span class="lineno">   92 </span>  = Full        -- ^ Agent can act without confirmation
+<span class="lineno">   93 </span>  | Supervised  -- ^ Agent must confirm before acting
+<span class="lineno">   94 </span>  | Deny        -- ^ Agent cannot act at all
+<span class="lineno">   95 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   96 </span>
+<span class="lineno">   97 </span>-- | Typed allow-list. @AllowAll@ explicitly opts in to allowing everything.
+<span class="lineno">   98 </span>-- @AllowList s@ restricts to the given set.
+<span class="lineno">   99 </span>data AllowList a
+<span class="lineno">  100 </span>  = AllowAll
+<span class="lineno">  101 </span>  | AllowList (Set a)
+<span class="lineno">  102 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">  103 </span>
+<span class="lineno">  104 </span>-- | Check whether a value is permitted by the allow-list.
+<span class="lineno">  105 </span>isAllowed :: Ord a =&gt; AllowList a -&gt; a -&gt; Bool
+<span class="lineno">  106 </span><span class="decl"><span class="istickedoff">isAllowed AllowAll      _ = True</span>
+<span class="lineno">  107 </span><span class="spaces"></span><span class="istickedoff">isAllowed (AllowList s) x = Set.member x s</span></span>
+
+</pre>
+</body>
+</html>

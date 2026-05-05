@@ -1,0 +1,120 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Vault.Age
+<span class="lineno">    2 </span>  ( -- * Error type
+<span class="lineno">    3 </span>    VaultError (..)
+<span class="lineno">    4 </span>    -- * Age encryptor handle
+<span class="lineno">    5 </span>  , AgeEncryptor (..)
+<span class="lineno">    6 </span>  , AgeRecipient (..)
+<span class="lineno">    7 </span>  , AgeIdentity (..)
+<span class="lineno">    8 </span>  , mkAgeEncryptor
+<span class="lineno">    9 </span>  , mkMockAgeEncryptor
+<span class="lineno">   10 </span>  , mkFailingAgeEncryptor
+<span class="lineno">   11 </span>  ) where
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import Data.Bits (xor)
+<span class="lineno">   14 </span>import Data.ByteString (ByteString)
+<span class="lineno">   15 </span>import Data.ByteString qualified as BS
+<span class="lineno">   16 </span>import Data.Text (Text)
+<span class="lineno">   17 </span>import Data.Text qualified as T
+<span class="lineno">   18 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   19 </span>import System.Process.Typed
+<span class="lineno">   20 </span>
+<span class="lineno">   21 </span>-- | Errors that can arise from vault operations.
+<span class="lineno">   22 </span>data VaultError
+<span class="lineno">   23 </span>  = VaultLocked
+<span class="lineno">   24 </span>  | VaultNotFound
+<span class="lineno">   25 </span>  | VaultCorrupted Text
+<span class="lineno">   26 </span>  | AgeError Text          -- ^ stderr from age subprocess
+<span class="lineno">   27 </span>  | VaultAlreadyExists
+<span class="lineno">   28 </span>  | AgeNotInstalled Text   -- ^ message with install hint
+<span class="lineno">   29 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>-- | An age public-key recipient (e.g. &quot;age1...&quot; or &quot;age-plugin-yubikey-...&quot;).
+<span class="lineno">   32 </span>newtype AgeRecipient = AgeRecipient Text
+<span class="lineno">   33 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>-- | An age identity: a file path or plugin string.
+<span class="lineno">   36 </span>newtype AgeIdentity = AgeIdentity Text
+<span class="lineno">   37 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- | Handle for age encrypt/decrypt operations.
+<span class="lineno">   40 </span>-- Use 'mkAgeEncryptor' for the real subprocess implementation,
+<span class="lineno">   41 </span>-- or 'mkMockAgeEncryptor' in tests.
+<span class="lineno">   42 </span>data AgeEncryptor = AgeEncryptor
+<span class="lineno">   43 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ae_encrypt</span></span></span> :: AgeRecipient -&gt; ByteString -&gt; IO (Either VaultError ByteString)
+<span class="lineno">   44 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ae_decrypt</span></span></span> :: AgeIdentity  -&gt; ByteString -&gt; IO (Either VaultError ByteString)
+<span class="lineno">   45 </span>  }
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>-- | Construct a real 'AgeEncryptor' that shells out to the @age@ binary.
+<span class="lineno">   48 </span>-- Performs a preflight @age --version@ check; returns
+<span class="lineno">   49 </span>-- @Left (AgeNotInstalled hint)@ if the binary is not on PATH.
+<span class="lineno">   50 </span>mkAgeEncryptor :: IO (Either VaultError AgeEncryptor)
+<span class="lineno">   51 </span><span class="decl"><span class="nottickedoff">mkAgeEncryptor = do</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="nottickedoff">versionResult &lt;- runProcess (proc &quot;age&quot; [&quot;--version&quot;])</span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="nottickedoff">case versionResult of</span>
+<span class="lineno">   54 </span><span class="spaces">    </span><span class="nottickedoff">ExitFailure _ -&gt;</span>
+<span class="lineno">   55 </span><span class="spaces">      </span><span class="nottickedoff">pure (Left (AgeNotInstalled &quot;Install age from https://age-encryption.org&quot;))</span>
+<span class="lineno">   56 </span><span class="spaces">    </span><span class="nottickedoff">ExitSuccess   -&gt;</span>
+<span class="lineno">   57 </span><span class="spaces">      </span><span class="nottickedoff">pure (Right enc)</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">   59 </span><span class="spaces">    </span><span class="nottickedoff">enc :: AgeEncryptor</span>
+<span class="lineno">   60 </span><span class="spaces">    </span><span class="nottickedoff">enc = AgeEncryptor</span>
+<span class="lineno">   61 </span><span class="spaces">      </span><span class="nottickedoff">{ _ae_encrypt = \(AgeRecipient recipient) plaintext -&gt; do</span>
+<span class="lineno">   62 </span><span class="spaces">          </span><span class="nottickedoff">let cfg = setStdin (byteStringInput (BS.fromStrict plaintext))</span>
+<span class="lineno">   63 </span><span class="spaces">                  </span><span class="nottickedoff">$ proc &quot;age&quot; [&quot;--encrypt&quot;, &quot;--recipient&quot;, textToStr recipient]</span>
+<span class="lineno">   64 </span><span class="spaces">          </span><span class="nottickedoff">(exitCode, out, err) &lt;- readProcess cfg</span>
+<span class="lineno">   65 </span><span class="spaces">          </span><span class="nottickedoff">case exitCode of</span>
+<span class="lineno">   66 </span><span class="spaces">            </span><span class="nottickedoff">ExitSuccess   -&gt; pure (Right (BS.toStrict out))</span>
+<span class="lineno">   67 </span><span class="spaces">            </span><span class="nottickedoff">ExitFailure _ -&gt; pure (Left (AgeError (TE.decodeUtf8 (BS.toStrict err))))</span>
+<span class="lineno">   68 </span><span class="spaces">      </span><span class="nottickedoff">, _ae_decrypt = \(AgeIdentity identity) ciphertext -&gt; do</span>
+<span class="lineno">   69 </span><span class="spaces">          </span><span class="nottickedoff">let cfg = setStdin (byteStringInput (BS.fromStrict ciphertext))</span>
+<span class="lineno">   70 </span><span class="spaces">                  </span><span class="nottickedoff">$ proc &quot;age&quot; [&quot;--decrypt&quot;, &quot;--identity&quot;, textToStr identity]</span>
+<span class="lineno">   71 </span><span class="spaces">          </span><span class="nottickedoff">(exitCode, out, err) &lt;- readProcess cfg</span>
+<span class="lineno">   72 </span><span class="spaces">          </span><span class="nottickedoff">case exitCode of</span>
+<span class="lineno">   73 </span><span class="spaces">            </span><span class="nottickedoff">ExitSuccess   -&gt; pure (Right (BS.toStrict out))</span>
+<span class="lineno">   74 </span><span class="spaces">            </span><span class="nottickedoff">ExitFailure _ -&gt; pure (Left (AgeError (TE.decodeUtf8 (BS.toStrict err))))</span>
+<span class="lineno">   75 </span><span class="spaces">      </span><span class="nottickedoff">}</span>
+<span class="lineno">   76 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">   77 </span><span class="spaces">    </span><span class="nottickedoff">textToStr :: Text -&gt; String</span>
+<span class="lineno">   78 </span><span class="spaces">    </span><span class="nottickedoff">textToStr = T.unpack</span></span>
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>-- | A mock 'AgeEncryptor' that XORs each byte with @0xAB@.
+<span class="lineno">   81 </span>-- No real @age@ binary required — suitable for unit tests.
+<span class="lineno">   82 </span>mkMockAgeEncryptor :: AgeEncryptor
+<span class="lineno">   83 </span><span class="decl"><span class="istickedoff">mkMockAgeEncryptor = AgeEncryptor</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">{ _ae_encrypt = \_recipient plaintext -&gt; pure (Right (mockXor plaintext))</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">, _ae_decrypt = \_identity  ciphertext -&gt; pure (Right (mockXor ciphertext))</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="istickedoff">}</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   88 </span><span class="spaces">    </span><span class="istickedoff">mockXor :: ByteString -&gt; ByteString</span>
+<span class="lineno">   89 </span><span class="spaces">    </span><span class="istickedoff">mockXor = BS.map (`xor` 0xAB)</span></span>
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>-- | A mock 'AgeEncryptor' that always returns the given error.
+<span class="lineno">   92 </span>-- Useful for testing error-path handling in vault operations.
+<span class="lineno">   93 </span>mkFailingAgeEncryptor :: VaultError -&gt; AgeEncryptor
+<span class="lineno">   94 </span><span class="decl"><span class="istickedoff">mkFailingAgeEncryptor err = AgeEncryptor</span>
+<span class="lineno">   95 </span><span class="spaces">  </span><span class="istickedoff">{ _ae_encrypt = \_ _ -&gt; pure (Left err)</span>
+<span class="lineno">   96 </span><span class="spaces">  </span><span class="istickedoff">, _ae_decrypt = \_ _ -&gt; pure (Left err)</span>
+<span class="lineno">   97 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

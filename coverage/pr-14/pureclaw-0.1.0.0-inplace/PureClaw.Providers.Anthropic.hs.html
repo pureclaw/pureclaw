@@ -1,0 +1,183 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Providers.Anthropic
+<span class="lineno">    2 </span>  ( -- * Provider type (constructor intentionally NOT exported)
+<span class="lineno">    3 </span>    AnthropicProvider
+<span class="lineno">    4 </span>  , mkAnthropicProvider
+<span class="lineno">    5 </span>    -- * Errors
+<span class="lineno">    6 </span>  , AnthropicError (..)
+<span class="lineno">    7 </span>    -- * Request/response encoding (exported for testing)
+<span class="lineno">    8 </span>  , encodeRequest
+<span class="lineno">    9 </span>  , decodeResponse
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Control.Exception
+<span class="lineno">   13 </span>import Data.Aeson
+<span class="lineno">   14 </span>import Data.Aeson.Types
+<span class="lineno">   15 </span>import Data.ByteString (ByteString)
+<span class="lineno">   16 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   17 </span>import Data.Maybe
+<span class="lineno">   18 </span>import Data.Text (Text)
+<span class="lineno">   19 </span>import Data.Text qualified as T
+<span class="lineno">   20 </span>import Network.HTTP.Client qualified as HTTP
+<span class="lineno">   21 </span>import Network.HTTP.Types.Status qualified as Status
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>import PureClaw.Core.Errors
+<span class="lineno">   24 </span>import PureClaw.Core.Types
+<span class="lineno">   25 </span>import PureClaw.Providers.Class
+<span class="lineno">   26 </span>import PureClaw.Security.Secrets
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>-- | Anthropic API provider. Constructor is not exported — use
+<span class="lineno">   29 </span>-- 'mkAnthropicProvider'.
+<span class="lineno">   30 </span>data AnthropicProvider = AnthropicProvider
+<span class="lineno">   31 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ap_manager</span></span></span> :: HTTP.Manager
+<span class="lineno">   32 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ap_apiKey</span></span></span>  :: ApiKey
+<span class="lineno">   33 </span>  }
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>-- | Create an Anthropic provider with an HTTP manager and API key.
+<span class="lineno">   36 </span>mkAnthropicProvider :: HTTP.Manager -&gt; ApiKey -&gt; AnthropicProvider
+<span class="lineno">   37 </span><span class="decl"><span class="nottickedoff">mkAnthropicProvider = AnthropicProvider</span></span>
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>instance Provider AnthropicProvider where
+<span class="lineno">   40 </span>  <span class="decl"><span class="nottickedoff">complete = anthropicComplete</span></span>
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>-- | Errors from the Anthropic API.
+<span class="lineno">   43 </span>data AnthropicError
+<span class="lineno">   44 </span>  = AnthropicAPIError Int ByteString   -- ^ HTTP status code + response body
+<span class="lineno">   45 </span>  | AnthropicParseError Text           -- ^ JSON parse/decode error
+<span class="lineno">   46 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Exception AnthropicError</span></span></span></span></span></span></span></span>
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>instance ToPublicError AnthropicError where
+<span class="lineno">   51 </span>  <span class="decl"><span class="nottickedoff">toPublicError (AnthropicAPIError 429 _) = RateLimitError</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="nottickedoff">toPublicError (AnthropicAPIError 401 _) = NotAllowedError</span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="nottickedoff">toPublicError _                         = TemporaryError &quot;Provider error&quot;</span></span>
+<span class="lineno">   54 </span>
+<span class="lineno">   55 </span>-- | Anthropic Messages API base URL.
+<span class="lineno">   56 </span>anthropicBaseUrl :: String
+<span class="lineno">   57 </span><span class="decl"><span class="nottickedoff">anthropicBaseUrl = &quot;https://api.anthropic.com/v1/messages&quot;</span></span>
+<span class="lineno">   58 </span>
+<span class="lineno">   59 </span>-- | Call the Anthropic Messages API.
+<span class="lineno">   60 </span>anthropicComplete :: AnthropicProvider -&gt; CompletionRequest -&gt; IO CompletionResponse
+<span class="lineno">   61 </span><span class="decl"><span class="nottickedoff">anthropicComplete provider req = do</span>
+<span class="lineno">   62 </span><span class="spaces">  </span><span class="nottickedoff">initReq &lt;- HTTP.parseRequest anthropicBaseUrl</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="nottickedoff">let httpReq = initReq</span>
+<span class="lineno">   64 </span><span class="spaces">        </span><span class="nottickedoff">{ HTTP.method = &quot;POST&quot;</span>
+<span class="lineno">   65 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestBody = HTTP.RequestBodyLBS (encodeRequest req)</span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestHeaders =</span>
+<span class="lineno">   67 </span><span class="spaces">            </span><span class="nottickedoff">[ (&quot;x-api-key&quot;, withApiKey (_ap_apiKey provider) id)</span>
+<span class="lineno">   68 </span><span class="spaces">            </span><span class="nottickedoff">, (&quot;anthropic-version&quot;, &quot;2023-06-01&quot;)</span>
+<span class="lineno">   69 </span><span class="spaces">            </span><span class="nottickedoff">, (&quot;content-type&quot;, &quot;application/json&quot;)</span>
+<span class="lineno">   70 </span><span class="spaces">            </span><span class="nottickedoff">]</span>
+<span class="lineno">   71 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="nottickedoff">resp &lt;- HTTP.httpLbs httpReq (_ap_manager provider)</span>
+<span class="lineno">   73 </span><span class="spaces">  </span><span class="nottickedoff">let status = Status.statusCode (HTTP.responseStatus resp)</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="nottickedoff">if status /= 200</span>
+<span class="lineno">   75 </span><span class="spaces">    </span><span class="nottickedoff">then throwIO (AnthropicAPIError status (BL.toStrict (HTTP.responseBody resp)))</span>
+<span class="lineno">   76 </span><span class="spaces">    </span><span class="nottickedoff">else case decodeResponse (HTTP.responseBody resp) of</span>
+<span class="lineno">   77 </span><span class="spaces">      </span><span class="nottickedoff">Left err -&gt; throwIO (AnthropicParseError (T.pack err))</span>
+<span class="lineno">   78 </span><span class="spaces">      </span><span class="nottickedoff">Right response -&gt; pure response</span></span>
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>-- | Encode a completion request as JSON for the Anthropic API.
+<span class="lineno">   81 </span>encodeRequest :: CompletionRequest -&gt; BL.ByteString
+<span class="lineno">   82 </span><span class="decl"><span class="istickedoff">encodeRequest req = encode $ object $</span>
+<span class="lineno">   83 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;model&quot;      .= unModelId (_cr_model req)</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">, &quot;max_tokens&quot; .= fromMaybe 4096 (_cr_maxTokens req)</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">, &quot;messages&quot;   .= map encodeMsg (_cr_messages req)</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="istickedoff">++ maybe [] (\s -&gt; [&quot;system&quot; .= s]) (_cr_systemPrompt req)</span>
+<span class="lineno">   88 </span><span class="spaces">  </span><span class="istickedoff">++ if null (_cr_tools req)</span>
+<span class="lineno">   89 </span><span class="spaces">     </span><span class="istickedoff">then maybe [] <span class="nottickedoff">(\tc -&gt; [&quot;tool_choice&quot; .= encodeToolChoice tc])</span> (_cr_toolChoice req)</span>
+<span class="lineno">   90 </span><span class="spaces">     </span><span class="istickedoff">else (&quot;tools&quot; .= map encodeTool (_cr_tools req))</span>
+<span class="lineno">   91 </span><span class="spaces">        </span><span class="istickedoff">: maybe [] <span class="nottickedoff">(\tc -&gt; [&quot;tool_choice&quot; .= encodeToolChoice tc])</span> (_cr_toolChoice req)</span></span>
+<span class="lineno">   92 </span>
+<span class="lineno">   93 </span>encodeMsg :: Message -&gt; Value
+<span class="lineno">   94 </span><span class="decl"><span class="istickedoff">encodeMsg msg = object</span>
+<span class="lineno">   95 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;role&quot;    .= roleToText (_msg_role msg)</span>
+<span class="lineno">   96 </span><span class="spaces">  </span><span class="istickedoff">, &quot;content&quot; .= map encodeContentBlock (_msg_content msg)</span>
+<span class="lineno">   97 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   98 </span>
+<span class="lineno">   99 </span>encodeContentBlock :: ContentBlock -&gt; Value
+<span class="lineno">  100 </span><span class="decl"><span class="istickedoff">encodeContentBlock (TextBlock t) = object</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;type&quot; .= (&quot;text&quot; :: Text)</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">, &quot;text&quot; .= t</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  104 </span><span class="spaces"></span><span class="istickedoff">encodeContentBlock (ToolUseBlock callId name input) = <span class="nottickedoff">object</span></span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot;  .= (&quot;tool_use&quot; :: Text)</span></span>
+<span class="lineno">  106 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">, &quot;id&quot;    .= unToolCallId callId</span></span>
+<span class="lineno">  107 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">, &quot;name&quot;  .= name</span></span>
+<span class="lineno">  108 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">, &quot;input&quot; .= input</span></span>
+<span class="lineno">  109 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  110 </span><span class="spaces"></span><span class="istickedoff">encodeContentBlock (ToolResultBlock callId content isErr) = <span class="nottickedoff">object $</span></span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot;        .= (&quot;tool_result&quot; :: Text)</span></span>
+<span class="lineno">  112 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">, &quot;tool_use_id&quot; .= unToolCallId callId</span></span>
+<span class="lineno">  113 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">, &quot;content&quot;     .= content</span></span>
+<span class="lineno">  114 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  115 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">++ [&quot;is_error&quot; .= True | isErr]</span></span></span>
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>encodeTool :: ToolDefinition -&gt; Value
+<span class="lineno">  118 </span><span class="decl"><span class="istickedoff">encodeTool td = object</span>
+<span class="lineno">  119 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;name&quot;         .= _td_name td</span>
+<span class="lineno">  120 </span><span class="spaces">  </span><span class="istickedoff">, &quot;description&quot;  .= _td_description td</span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">, &quot;input_schema&quot; .= _td_inputSchema td</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  123 </span>
+<span class="lineno">  124 </span>encodeToolChoice :: ToolChoice -&gt; Value
+<span class="lineno">  125 </span><span class="decl"><span class="nottickedoff">encodeToolChoice AutoTool = object [&quot;type&quot; .= (&quot;auto&quot; :: Text)]</span>
+<span class="lineno">  126 </span><span class="spaces"></span><span class="nottickedoff">encodeToolChoice AnyTool = object [&quot;type&quot; .= (&quot;any&quot; :: Text)]</span>
+<span class="lineno">  127 </span><span class="spaces"></span><span class="nottickedoff">encodeToolChoice (SpecificTool name) = object</span>
+<span class="lineno">  128 </span><span class="spaces">  </span><span class="nottickedoff">[ &quot;type&quot; .= (&quot;tool&quot; :: Text)</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;name&quot; .= name</span>
+<span class="lineno">  130 </span><span class="spaces">  </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  131 </span>
+<span class="lineno">  132 </span>-- | Decode an Anthropic API response into a 'CompletionResponse'.
+<span class="lineno">  133 </span>decodeResponse :: BL.ByteString -&gt; Either String CompletionResponse
+<span class="lineno">  134 </span><span class="decl"><span class="istickedoff">decodeResponse bs = eitherDecode bs &gt;&gt;= parseEither parseResp</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  136 </span><span class="spaces">    </span><span class="istickedoff">parseResp :: Value -&gt; Parser CompletionResponse</span>
+<span class="lineno">  137 </span><span class="spaces">    </span><span class="istickedoff">parseResp = withObject <span class="nottickedoff">&quot;AnthropicResponse&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  138 </span><span class="spaces">      </span><span class="istickedoff">contentArr &lt;- o .: &quot;content&quot;</span>
+<span class="lineno">  139 </span><span class="spaces">      </span><span class="istickedoff">blocks &lt;- mapM parseBlock contentArr</span>
+<span class="lineno">  140 </span><span class="spaces">      </span><span class="istickedoff">modelText &lt;- o .: &quot;model&quot;</span>
+<span class="lineno">  141 </span><span class="spaces">      </span><span class="istickedoff">usageObj &lt;- o .: &quot;usage&quot;</span>
+<span class="lineno">  142 </span><span class="spaces">      </span><span class="istickedoff">inToks &lt;- usageObj .: &quot;input_tokens&quot;</span>
+<span class="lineno">  143 </span><span class="spaces">      </span><span class="istickedoff">outToks &lt;- usageObj .: &quot;output_tokens&quot;</span>
+<span class="lineno">  144 </span><span class="spaces">      </span><span class="istickedoff">pure CompletionResponse</span>
+<span class="lineno">  145 </span><span class="spaces">        </span><span class="istickedoff">{ _crsp_content = blocks</span>
+<span class="lineno">  146 </span><span class="spaces">        </span><span class="istickedoff">, _crsp_model   = ModelId modelText</span>
+<span class="lineno">  147 </span><span class="spaces">        </span><span class="istickedoff">, _crsp_usage   = Just (Usage inToks outToks)</span>
+<span class="lineno">  148 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  149 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  150 </span><span class="spaces">    </span><span class="istickedoff">parseBlock :: Value -&gt; Parser ContentBlock</span>
+<span class="lineno">  151 </span><span class="spaces">    </span><span class="istickedoff">parseBlock = withObject <span class="nottickedoff">&quot;ContentBlock&quot;</span> $ \b -&gt; do</span>
+<span class="lineno">  152 </span><span class="spaces">      </span><span class="istickedoff">bType &lt;- b .: &quot;type&quot;</span>
+<span class="lineno">  153 </span><span class="spaces">      </span><span class="istickedoff">case (bType :: Text) of</span>
+<span class="lineno">  154 </span><span class="spaces">        </span><span class="istickedoff">&quot;text&quot; -&gt; TextBlock &lt;$&gt; b .: &quot;text&quot;</span>
+<span class="lineno">  155 </span><span class="spaces">        </span><span class="istickedoff">&quot;tool_use&quot; -&gt; do</span>
+<span class="lineno">  156 </span><span class="spaces">          </span><span class="istickedoff">callId &lt;- b .: &quot;id&quot;</span>
+<span class="lineno">  157 </span><span class="spaces">          </span><span class="istickedoff">name &lt;- b .: &quot;name&quot;</span>
+<span class="lineno">  158 </span><span class="spaces">          </span><span class="istickedoff">input &lt;- b .: &quot;input&quot;</span>
+<span class="lineno">  159 </span><span class="spaces">          </span><span class="istickedoff">pure (ToolUseBlock <span class="nottickedoff">(ToolCallId callId)</span> <span class="nottickedoff">name</span> <span class="nottickedoff">input</span>)</span>
+<span class="lineno">  160 </span><span class="spaces">        </span><span class="istickedoff">other -&gt; <span class="nottickedoff">fail $ &quot;Unknown content block type: &quot; &lt;&gt; T.unpack other</span></span></span>
+
+</pre>
+</body>
+</html>

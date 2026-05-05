@@ -1,0 +1,471 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Session.Handle
+<span class="lineno">    2 </span>  ( -- * Session handle
+<span class="lineno">    3 </span>    SessionHandle (..)
+<span class="lineno">    4 </span>  , mkSessionHandle
+<span class="lineno">    5 </span>  , mkNoOpSessionHandle
+<span class="lineno">    6 </span>  , noOpSessionHandle
+<span class="lineno">    7 </span>  , noOpOnFirstStreamDoneRef
+<span class="lineno">    8 </span>    -- * Resume
+<span class="lineno">    9 </span>  , ResumeError (..)
+<span class="lineno">   10 </span>  , resumeSession
+<span class="lineno">   11 </span>    -- * Enumeration and lookup
+<span class="lineno">   12 </span>  , listSessions
+<span class="lineno">   13 </span>  , ResolveError (..)
+<span class="lineno">   14 </span>  , resolveSessionRef
+<span class="lineno">   15 </span>    -- * Runtime validation
+<span class="lineno">   16 </span>  , ResolvedRuntime (..)
+<span class="lineno">   17 </span>  , validateRuntime
+<span class="lineno">   18 </span>  , resolveResumedTarget
+<span class="lineno">   19 </span>    -- * Bootstrap consumption
+<span class="lineno">   20 </span>  , markBootstrapConsumed
+<span class="lineno">   21 </span>    -- * Resume context reload
+<span class="lineno">   22 </span>  , loadRecentMessages
+<span class="lineno">   23 </span>  ) where
+<span class="lineno">   24 </span>
+<span class="lineno">   25 </span>import Control.Exception (IOException, try)
+<span class="lineno">   26 </span>import System.IO.Unsafe (unsafePerformIO)
+<span class="lineno">   27 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   28 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   29 </span>import Data.IORef
+<span class="lineno">   30 </span>  ( IORef
+<span class="lineno">   31 </span>  , atomicModifyIORef'
+<span class="lineno">   32 </span>  , newIORef
+<span class="lineno">   33 </span>  , readIORef
+<span class="lineno">   34 </span>  )
+<span class="lineno">   35 </span>import Data.List (sortOn)
+<span class="lineno">   36 </span>import Data.Map.Strict (Map)
+<span class="lineno">   37 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   38 </span>import Data.Ord (Down (..))
+<span class="lineno">   39 </span>import Data.Text (Text)
+<span class="lineno">   40 </span>import Data.Text qualified as T
+<span class="lineno">   41 </span>import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+<span class="lineno">   42 </span>import System.Directory
+<span class="lineno">   43 </span>  ( createDirectoryIfMissing
+<span class="lineno">   44 </span>  , doesDirectoryExist
+<span class="lineno">   45 </span>  , doesFileExist
+<span class="lineno">   46 </span>  , listDirectory
+<span class="lineno">   47 </span>  , renameFile
+<span class="lineno">   48 </span>  )
+<span class="lineno">   49 </span>import System.FilePath ((&lt;/&gt;))
+<span class="lineno">   50 </span>import System.Posix.Files (setFileMode)
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>import PureClaw.Agent.AgentDef (AgentName)
+<span class="lineno">   53 </span>import PureClaw.Core.Types
+<span class="lineno">   54 </span>  ( MessageTarget (..)
+<span class="lineno">   55 </span>  , SessionId (..)
+<span class="lineno">   56 </span>  , parseSessionId
+<span class="lineno">   57 </span>  )
+<span class="lineno">   58 </span>import PureClaw.Handles.Harness (HarnessHandle)
+<span class="lineno">   59 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">   60 </span>import PureClaw.Handles.Transcript
+<span class="lineno">   61 </span>  ( TranscriptHandle (..)
+<span class="lineno">   62 </span>  , mkFileTranscriptHandle
+<span class="lineno">   63 </span>  , mkNoOpTranscriptHandle
+<span class="lineno">   64 </span>  )
+<span class="lineno">   65 </span>import PureClaw.Providers.Class
+<span class="lineno">   66 </span>  ( ContentBlock (..)
+<span class="lineno">   67 </span>  , Message (..)
+<span class="lineno">   68 </span>  , Role (..)
+<span class="lineno">   69 </span>  )
+<span class="lineno">   70 </span>import PureClaw.Transcript.Types
+<span class="lineno">   71 </span>  ( Direction (..)
+<span class="lineno">   72 </span>  , TranscriptEntry (..)
+<span class="lineno">   73 </span>  , TranscriptFilter (..)
+<span class="lineno">   74 </span>  )
+<span class="lineno">   75 </span>import PureClaw.Session.Types
+<span class="lineno">   76 </span>  ( RuntimeType (..)
+<span class="lineno">   77 </span>  , SessionMeta (..)
+<span class="lineno">   78 </span>  )
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">   81 </span>-- Types
+<span class="lineno">   82 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>-- | Handle for the current conversation session.
+<span class="lineno">   85 </span>--
+<span class="lineno">   86 </span>-- Owns the on-disk session directory (mode @0o700@), the @session.json@
+<span class="lineno">   87 </span>-- metadata file (mode @0o600@), and the per-session transcript handle
+<span class="lineno">   88 </span>-- writing to @transcript.jsonl@ (mode @0o600@).
+<span class="lineno">   89 </span>data SessionHandle = SessionHandle
+<span class="lineno">   90 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_meta</span></span></span>       :: IORef SessionMeta
+<span class="lineno">   91 </span>    -- ^ Mutable session metadata. Updated by callers (e.g. to bump
+<span class="lineno">   92 </span>    -- @last_active@) and persisted by '_sh_save'.
+<span class="lineno">   93 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_transcript</span></span></span> :: TranscriptHandle
+<span class="lineno">   94 </span>    -- ^ Transcript handle owned by the session.
+<span class="lineno">   95 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_dir</span></span></span>        :: FilePath
+<span class="lineno">   96 </span>    -- ^ On-disk session directory, i.e. @&lt;baseDir&gt;/&lt;sessionId&gt;/@.
+<span class="lineno">   97 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_save</span></span></span>       :: IO ()
+<span class="lineno">   98 </span>    -- ^ Persist '_sh_meta' to @session.json@ atomically (write to
+<span class="lineno">   99 </span>    -- @session.json.tmp@ then rename).
+<span class="lineno">  100 </span>  }
+<span class="lineno">  101 </span>
+<span class="lineno">  102 </span>-- | Reasons a resume attempt can fail.
+<span class="lineno">  103 </span>data ResumeError
+<span class="lineno">  104 </span>  = ResumeMissingMetadata FilePath
+<span class="lineno">  105 </span>    -- ^ No @session.json@ at the expected path.
+<span class="lineno">  106 </span>  | ResumeCorruptedMetadata FilePath String
+<span class="lineno">  107 </span>    -- ^ @session.json@ exists but does not parse as 'SessionMeta'.
+<span class="lineno">  108 </span>    -- The second field is a human-readable recovery hint.
+<span class="lineno">  109 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>-- | Lookup result for 'resolveSessionRef'.
+<span class="lineno">  112 </span>data ResolveError
+<span class="lineno">  113 </span>  = NotFound
+<span class="lineno">  114 </span>  | Ambiguous [SessionId]
+<span class="lineno">  115 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>-- | Result of 'validateRuntime'. 'RuntimeFallback' carries the chosen
+<span class="lineno">  118 </span>-- fallback target plus a warning message suitable for logging.
+<span class="lineno">  119 </span>data ResolvedRuntime
+<span class="lineno">  120 </span>  = RuntimeOk MessageTarget
+<span class="lineno">  121 </span>  | RuntimeFallback MessageTarget Text
+<span class="lineno">  122 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  123 </span>
+<span class="lineno">  124 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  125 </span>-- Creation
+<span class="lineno">  126 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  127 </span>
+<span class="lineno">  128 </span>-- | Create a brand-new on-disk session handle.
+<span class="lineno">  129 </span>--
+<span class="lineno">  130 </span>-- Creates @\&lt;baseDir\&gt;/\&lt;sessionId\&gt;/@ with mode @0o700@, writes the
+<span class="lineno">  131 </span>-- initial @session.json@ (mode @0o600@) via 'saveMeta', and opens
+<span class="lineno">  132 </span>-- @transcript.jsonl@ (mode @0o600@) through 'mkFileTranscriptHandle'.
+<span class="lineno">  133 </span>mkSessionHandle :: LogHandle -&gt; FilePath -&gt; SessionMeta -&gt; IO SessionHandle
+<span class="lineno">  134 </span><span class="decl"><span class="istickedoff">mkSessionHandle logger baseDir meta = do</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">let sid  = unSessionId (_sm_id meta)</span>
+<span class="lineno">  136 </span><span class="spaces">      </span><span class="istickedoff">dir  = baseDir &lt;/&gt; T.unpack sid</span>
+<span class="lineno">  137 </span><span class="spaces">      </span><span class="istickedoff">txp  = dir &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="istickedoff">createDirectoryIfMissing True dir</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">setFileMode dir 0o700</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="istickedoff">metaRef &lt;- newIORef meta</span>
+<span class="lineno">  141 </span><span class="spaces">  </span><span class="istickedoff">saveMeta dir metaRef</span>
+<span class="lineno">  142 </span><span class="spaces">  </span><span class="istickedoff">tx &lt;- mkFileTranscriptHandle <span class="nottickedoff">logger</span> txp</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="istickedoff">pure SessionHandle</span>
+<span class="lineno">  144 </span><span class="spaces">    </span><span class="istickedoff">{ _sh_meta       = metaRef</span>
+<span class="lineno">  145 </span><span class="spaces">    </span><span class="istickedoff">, _sh_transcript = tx</span>
+<span class="lineno">  146 </span><span class="spaces">    </span><span class="istickedoff">, _sh_dir        = dir</span>
+<span class="lineno">  147 </span><span class="spaces">    </span><span class="istickedoff">, _sh_save       = saveMeta dir metaRef</span>
+<span class="lineno">  148 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  149 </span>
+<span class="lineno">  150 </span>-- | Atomically persist the metadata IORef to @\&lt;dir\&gt;/session.json@ by
+<span class="lineno">  151 </span>-- writing to a sibling @session.json.tmp@ with mode @0o600@ then
+<span class="lineno">  152 </span>-- 'renameFile'-ing it into place. The rename is atomic on POSIX, so a
+<span class="lineno">  153 </span>-- crash mid-write leaves the previous @session.json@ intact.
+<span class="lineno">  154 </span>saveMeta :: FilePath -&gt; IORef SessionMeta -&gt; IO ()
+<span class="lineno">  155 </span><span class="decl"><span class="istickedoff">saveMeta dir ref = do</span>
+<span class="lineno">  156 </span><span class="spaces">  </span><span class="istickedoff">meta &lt;- readIORef ref</span>
+<span class="lineno">  157 </span><span class="spaces">  </span><span class="istickedoff">let finalP = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  158 </span><span class="spaces">      </span><span class="istickedoff">tmpP   = finalP &lt;&gt; &quot;.tmp&quot;</span>
+<span class="lineno">  159 </span><span class="spaces">  </span><span class="istickedoff">LBS.writeFile tmpP (Aeson.encode meta)</span>
+<span class="lineno">  160 </span><span class="spaces">  </span><span class="istickedoff">setFileMode tmpP 0o600</span>
+<span class="lineno">  161 </span><span class="spaces">  </span><span class="istickedoff">renameFile tmpP finalP</span></span>
+<span class="lineno">  162 </span>
+<span class="lineno">  163 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  164 </span>-- No-op handle
+<span class="lineno">  165 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  166 </span>
+<span class="lineno">  167 </span>-- | A no-op session handle for tests and for the backward-compat
+<span class="lineno">  168 </span>-- no-session path.
+<span class="lineno">  169 </span>mkNoOpSessionHandle :: IO SessionHandle
+<span class="lineno">  170 </span><span class="decl"><span class="istickedoff">mkNoOpSessionHandle = do</span>
+<span class="lineno">  171 </span><span class="spaces">  </span><span class="istickedoff">ref &lt;- newIORef noOpMeta</span>
+<span class="lineno">  172 </span><span class="spaces">  </span><span class="istickedoff">pure SessionHandle</span>
+<span class="lineno">  173 </span><span class="spaces">    </span><span class="istickedoff">{ _sh_meta       = ref</span>
+<span class="lineno">  174 </span><span class="spaces">    </span><span class="istickedoff">, _sh_transcript = mkNoOpTranscriptHandle</span>
+<span class="lineno">  175 </span><span class="spaces">    </span><span class="istickedoff">, _sh_dir        = &quot;&quot;</span>
+<span class="lineno">  176 </span><span class="spaces">    </span><span class="istickedoff">, _sh_save       = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  177 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  178 </span>
+<span class="lineno">  179 </span>-- | Pure no-op session handle placeholder — kept for the many test
+<span class="lineno">  180 </span>-- call sites that need a 'SessionHandle' inside a pure @let@ binding.
+<span class="lineno">  181 </span>-- Prefer 'mkNoOpSessionHandle' anywhere IO is already in scope.
+<span class="lineno">  182 </span>--
+<span class="lineno">  183 </span>-- The '_sh_meta' 'IORef' is created once at module load via
+<span class="lineno">  184 </span>-- 'unsafePerformIO' with 'NOINLINE' so every reference shares the
+<span class="lineno">  185 </span>-- same sentinel cell.
+<span class="lineno">  186 </span>noOpSessionHandle :: SessionHandle
+<span class="lineno">  187 </span><span class="decl"><span class="nottickedoff">noOpSessionHandle = SessionHandle</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="nottickedoff">{ _sh_meta       = noOpMetaRef</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="nottickedoff">, _sh_transcript = mkNoOpTranscriptHandle</span>
+<span class="lineno">  190 </span><span class="spaces">  </span><span class="nottickedoff">, _sh_dir        = &quot;&quot;</span>
+<span class="lineno">  191 </span><span class="spaces">  </span><span class="nottickedoff">, _sh_save       = pure ()</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  193 </span>
+<span class="lineno">  194 </span>{-# NOINLINE noOpMetaRef #-}
+<span class="lineno">  195 </span>noOpMetaRef :: IORef SessionMeta
+<span class="lineno">  196 </span><span class="decl"><span class="nottickedoff">noOpMetaRef = unsafePerformIO (newIORef noOpMeta)</span></span>
+<span class="lineno">  197 </span>
+<span class="lineno">  198 </span>-- | Shared no-op callback slot for tests that do not care about
+<span class="lineno">  199 </span>-- bootstrap consumption. Equivalent in spirit to 'noOpMetaRef': tests
+<span class="lineno">  200 </span>-- that only READ or only set-to-'Nothing' can share the same cell.
+<span class="lineno">  201 </span>-- Tests that need to OBSERVE the callback firing should create their
+<span class="lineno">  202 </span>-- own @IORef (Maybe (IO ()))@ rather than using this sentinel.
+<span class="lineno">  203 </span>{-# NOINLINE noOpOnFirstStreamDoneRef #-}
+<span class="lineno">  204 </span>noOpOnFirstStreamDoneRef :: IORef (Maybe (IO ()))
+<span class="lineno">  205 </span><span class="decl"><span class="istickedoff">noOpOnFirstStreamDoneRef = unsafePerformIO (newIORef Nothing)</span></span>
+<span class="lineno">  206 </span>
+<span class="lineno">  207 </span>-- | Static default metadata for no-op handles.
+<span class="lineno">  208 </span>noOpMeta :: SessionMeta
+<span class="lineno">  209 </span><span class="decl"><span class="istickedoff">noOpMeta = SessionMeta</span>
+<span class="lineno">  210 </span><span class="spaces">  </span><span class="istickedoff">{ _sm_id                = parseSessionId &quot;noop&quot;</span>
+<span class="lineno">  211 </span><span class="spaces">  </span><span class="istickedoff">, _sm_agent             = Nothing</span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">, _sm_runtime           = RTProvider</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">, _sm_model             = <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  214 </span><span class="spaces">  </span><span class="istickedoff">, _sm_channel           = <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  215 </span><span class="spaces">  </span><span class="istickedoff">, _sm_createdAt         = <span class="nottickedoff">epoch</span></span>
+<span class="lineno">  216 </span><span class="spaces">  </span><span class="istickedoff">, _sm_lastActive        = <span class="nottickedoff">epoch</span></span>
+<span class="lineno">  217 </span><span class="spaces">  </span><span class="istickedoff">, _sm_bootstrapConsumed = <span class="nottickedoff">False</span></span>
+<span class="lineno">  218 </span><span class="spaces">  </span><span class="istickedoff">}</span>
+<span class="lineno">  219 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  220 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">epoch = UTCTime (fromGregorian 1970 1 1) (secondsToDiffTime 0)</span></span></span>
+<span class="lineno">  221 </span>
+<span class="lineno">  222 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  223 </span>-- Resume
+<span class="lineno">  224 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  225 </span>
+<span class="lineno">  226 </span>-- | Reopen an existing session by ID. Reads @session.json@, validates
+<span class="lineno">  227 </span>-- the JSON, and reopens @transcript.jsonl@ for append.
+<span class="lineno">  228 </span>resumeSession
+<span class="lineno">  229 </span>  :: LogHandle
+<span class="lineno">  230 </span>  -&gt; FilePath
+<span class="lineno">  231 </span>  -&gt; SessionId
+<span class="lineno">  232 </span>  -&gt; IO (Either ResumeError SessionHandle)
+<span class="lineno">  233 </span><span class="decl"><span class="istickedoff">resumeSession logger baseDir sid = do</span>
+<span class="lineno">  234 </span><span class="spaces">  </span><span class="istickedoff">let dir    = baseDir &lt;/&gt; T.unpack (unSessionId sid)</span>
+<span class="lineno">  235 </span><span class="spaces">      </span><span class="istickedoff">metaP  = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  236 </span><span class="spaces">      </span><span class="istickedoff">txP    = dir &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesFileExist metaP</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  239 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left (ResumeMissingMetadata metaP))</span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  241 </span><span class="spaces">      </span><span class="istickedoff">raw &lt;- LBS.readFile metaP</span>
+<span class="lineno">  242 </span><span class="spaces">      </span><span class="istickedoff">case Aeson.eitherDecode' raw of</span>
+<span class="lineno">  243 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure</span>
+<span class="lineno">  244 </span><span class="spaces">          </span><span class="istickedoff">(Left (ResumeCorruptedMetadata metaP</span>
+<span class="lineno">  245 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">(&quot;failed to parse session metadata: &quot; &lt;&gt; err</span></span>
+<span class="lineno">  246 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; — recovery hint: inspect or remove &quot; &lt;&gt; metaP)</span>))</span>
+<span class="lineno">  247 </span><span class="spaces">        </span><span class="istickedoff">Right meta -&gt; do</span>
+<span class="lineno">  248 </span><span class="spaces">          </span><span class="istickedoff">metaRef &lt;- newIORef (meta :: SessionMeta)</span>
+<span class="lineno">  249 </span><span class="spaces">          </span><span class="istickedoff">tx &lt;- mkFileTranscriptHandle <span class="nottickedoff">logger</span> txP</span>
+<span class="lineno">  250 </span><span class="spaces">          </span><span class="istickedoff">pure (Right SessionHandle</span>
+<span class="lineno">  251 </span><span class="spaces">            </span><span class="istickedoff">{ _sh_meta       = metaRef</span>
+<span class="lineno">  252 </span><span class="spaces">            </span><span class="istickedoff">, _sh_transcript = tx</span>
+<span class="lineno">  253 </span><span class="spaces">            </span><span class="istickedoff">, _sh_dir        = <span class="nottickedoff">dir</span></span>
+<span class="lineno">  254 </span><span class="spaces">            </span><span class="istickedoff">, _sh_save       = <span class="nottickedoff">saveMeta dir metaRef</span></span>
+<span class="lineno">  255 </span><span class="spaces">            </span><span class="istickedoff">})</span></span>
+<span class="lineno">  256 </span>
+<span class="lineno">  257 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  258 </span>-- Enumeration and lookup
+<span class="lineno">  259 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  260 </span>
+<span class="lineno">  261 </span>-- | Read all @session.json@ files under @baseDir@, optionally filtering
+<span class="lineno">  262 </span>-- by agent name, sorted by @last_active@ descending, and capped at
+<span class="lineno">  263 </span>-- @limit@ entries.
+<span class="lineno">  264 </span>--
+<span class="lineno">  265 </span>-- Silently skips entries that fail to decode so that a single corrupted
+<span class="lineno">  266 </span>-- metadata file does not hide the remaining sessions from the user.
+<span class="lineno">  267 </span>listSessions :: FilePath -&gt; Maybe AgentName -&gt; Int -&gt; IO [SessionMeta]
+<span class="lineno">  268 </span><span class="decl"><span class="istickedoff">listSessions baseDir mAgent limit = do</span>
+<span class="lineno">  269 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesDirectoryExist baseDir</span>
+<span class="lineno">  270 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  271 </span><span class="spaces">    </span><span class="istickedoff">then pure []</span>
+<span class="lineno">  272 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  273 </span><span class="spaces">      </span><span class="istickedoff">entries &lt;- listDirectory baseDir</span>
+<span class="lineno">  274 </span><span class="spaces">      </span><span class="istickedoff">metas &lt;- fmap catMaybes' (traverse (tryLoad baseDir) entries)</span>
+<span class="lineno">  275 </span><span class="spaces">      </span><span class="istickedoff">let filtered = case mAgent of</span>
+<span class="lineno">  276 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; metas</span>
+<span class="lineno">  277 </span><span class="spaces">            </span><span class="istickedoff">Just a  -&gt; filter (\m -&gt; _sm_agent m == Just a) metas</span>
+<span class="lineno">  278 </span><span class="spaces">          </span><span class="istickedoff">sorted = sortOn (Down . _sm_lastActive) filtered</span>
+<span class="lineno">  279 </span><span class="spaces">      </span><span class="istickedoff">pure (take limit sorted)</span>
+<span class="lineno">  280 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  281 </span><span class="spaces">    </span><span class="istickedoff">catMaybes' = foldr (\mx acc -&gt; case mx of</span>
+<span class="lineno">  282 </span><span class="spaces">                          </span><span class="istickedoff">Just x  -&gt; x : acc</span>
+<span class="lineno">  283 </span><span class="spaces">                          </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">acc</span>) []</span></span>
+<span class="lineno">  284 </span>
+<span class="lineno">  285 </span>-- | Attempt to load @\&lt;baseDir\&gt;/\&lt;name\&gt;/session.json@. Returns
+<span class="lineno">  286 </span>-- 'Nothing' if the path is not a directory, the metadata file is
+<span class="lineno">  287 </span>-- missing, unreadable, or malformed.
+<span class="lineno">  288 </span>tryLoad :: FilePath -&gt; FilePath -&gt; IO (Maybe SessionMeta)
+<span class="lineno">  289 </span><span class="decl"><span class="istickedoff">tryLoad baseDir name = do</span>
+<span class="lineno">  290 </span><span class="spaces">  </span><span class="istickedoff">let dir   = baseDir &lt;/&gt; name</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">metaP = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  292 </span><span class="spaces">  </span><span class="istickedoff">isDir &lt;- doesDirectoryExist dir</span>
+<span class="lineno">  293 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">not isDir</span></span>
+<span class="lineno">  294 </span><span class="spaces">    </span><span class="istickedoff">then <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  295 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  296 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- doesFileExist metaP</span>
+<span class="lineno">  297 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlyfalse">not exists</span></span>
+<span class="lineno">  298 </span><span class="spaces">        </span><span class="istickedoff">then <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  299 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  300 </span><span class="spaces">          </span><span class="istickedoff">eBytes &lt;- try (LBS.readFile metaP) :: IO (Either IOException LBS.ByteString)</span>
+<span class="lineno">  301 </span><span class="spaces">          </span><span class="istickedoff">case eBytes of</span>
+<span class="lineno">  302 </span><span class="spaces">            </span><span class="istickedoff">Left _     -&gt; <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  303 </span><span class="spaces">            </span><span class="istickedoff">Right raw  -&gt; case Aeson.decode' raw of</span>
+<span class="lineno">  304 </span><span class="spaces">              </span><span class="istickedoff">Just m  -&gt; pure (Just m)</span>
+<span class="lineno">  305 </span><span class="spaces">              </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure Nothing</span></span></span>
+<span class="lineno">  306 </span>
+<span class="lineno">  307 </span>-- | Resolve a user-supplied reference (exact ID or prefix) to a concrete
+<span class="lineno">  308 </span>-- 'SessionId'. Exact matches win outright; otherwise the match set is
+<span class="lineno">  309 </span>-- computed by 'T.isPrefixOf' over the full ID string.
+<span class="lineno">  310 </span>resolveSessionRef
+<span class="lineno">  311 </span>  :: FilePath
+<span class="lineno">  312 </span>  -&gt; Text
+<span class="lineno">  313 </span>  -&gt; IO (Either ResolveError SessionId)
+<span class="lineno">  314 </span><span class="decl"><span class="istickedoff">resolveSessionRef baseDir ref = do</span>
+<span class="lineno">  315 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesDirectoryExist baseDir</span>
+<span class="lineno">  316 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  317 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left NotFound)</span>
+<span class="lineno">  318 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  319 </span><span class="spaces">      </span><span class="istickedoff">entries &lt;- listDirectory baseDir</span>
+<span class="lineno">  320 </span><span class="spaces">      </span><span class="istickedoff">-- Keep only entries that actually have a session.json — avoids</span>
+<span class="lineno">  321 </span><span class="spaces">      </span><span class="istickedoff">-- matching stray directories created by unrelated tests or users.</span>
+<span class="lineno">  322 </span><span class="spaces">      </span><span class="istickedoff">valid &lt;- filterM hasMetadata entries</span>
+<span class="lineno">  323 </span><span class="spaces">      </span><span class="istickedoff">let ids = map (SessionId . T.pack) valid</span>
+<span class="lineno">  324 </span><span class="spaces">      </span><span class="istickedoff">if ref `elem` map (\(SessionId t) -&gt; t) ids</span>
+<span class="lineno">  325 </span><span class="spaces">        </span><span class="istickedoff">then pure (Right (SessionId ref))</span>
+<span class="lineno">  326 </span><span class="spaces">        </span><span class="istickedoff">else case filter (\(SessionId t) -&gt; ref `T.isPrefixOf` t) ids of</span>
+<span class="lineno">  327 </span><span class="spaces">          </span><span class="istickedoff">[]  -&gt; pure (Left NotFound)</span>
+<span class="lineno">  328 </span><span class="spaces">          </span><span class="istickedoff">[x] -&gt; pure (Right x)</span>
+<span class="lineno">  329 </span><span class="spaces">          </span><span class="istickedoff">xs  -&gt; pure (Left (Ambiguous xs))</span>
+<span class="lineno">  330 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">hasMetadata name = do</span>
+<span class="lineno">  332 </span><span class="spaces">      </span><span class="istickedoff">let metaP = baseDir &lt;/&gt; name &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  333 </span><span class="spaces">      </span><span class="istickedoff">doesFileExist metaP</span>
+<span class="lineno">  334 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  335 </span><span class="spaces">    </span><span class="istickedoff">-- Local strict filterM to avoid pulling in Control.Monad just for this.</span>
+<span class="lineno">  336 </span><span class="spaces">    </span><span class="istickedoff">filterM _ []     = pure []</span>
+<span class="lineno">  337 </span><span class="spaces">    </span><span class="istickedoff">filterM p (x:xs) = do</span>
+<span class="lineno">  338 </span><span class="spaces">      </span><span class="istickedoff">keep &lt;- p x</span>
+<span class="lineno">  339 </span><span class="spaces">      </span><span class="istickedoff">rest &lt;- filterM p xs</span>
+<span class="lineno">  340 </span><span class="spaces">      </span><span class="istickedoff">pure (if <span class="tickonlytrue">keep</span> then x : rest else <span class="nottickedoff">rest</span>)</span></span>
+<span class="lineno">  341 </span>
+<span class="lineno">  342 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  343 </span>-- Runtime validation
+<span class="lineno">  344 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  345 </span>
+<span class="lineno">  346 </span>-- | Validate a 'RuntimeType' against the currently-running harnesses.
+<span class="lineno">  347 </span>--
+<span class="lineno">  348 </span>-- * 'RTProvider' always resolves to @RuntimeOk TargetProvider@.
+<span class="lineno">  349 </span>-- * @'RTHarness' name@ resolves to @RuntimeOk (TargetHarness name)@ if
+<span class="lineno">  350 </span>--   a harness with that name is present in the map.
+<span class="lineno">  351 </span>-- * @'RTHarness' name@ resolves to @RuntimeFallback TargetProvider msg@
+<span class="lineno">  352 </span>--   if the harness is absent, where @msg@ explains the fallback for
+<span class="lineno">  353 </span>--   logging at warn level.
+<span class="lineno">  354 </span>validateRuntime :: Map Text HarnessHandle -&gt; RuntimeType -&gt; ResolvedRuntime
+<span class="lineno">  355 </span><span class="decl"><span class="istickedoff">validateRuntime _ RTProvider = RuntimeOk TargetProvider</span>
+<span class="lineno">  356 </span><span class="spaces"></span><span class="istickedoff">validateRuntime harnesses (RTHarness name)</span>
+<span class="lineno">  357 </span><span class="spaces">  </span><span class="istickedoff">| Map.member name harnesses = RuntimeOk (TargetHarness name)</span>
+<span class="lineno">  358 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  359 </span><span class="spaces">      </span><span class="istickedoff">let msg = &quot;harness '&quot; &lt;&gt; name &lt;&gt; &quot;' is not running, falling back to provider&quot;</span>
+<span class="lineno">  360 </span><span class="spaces">       </span><span class="istickedoff">in RuntimeFallback TargetProvider msg</span></span>
+<span class="lineno">  361 </span>
+<span class="lineno">  362 </span>-- | Resolve a resumed session's 'RuntimeType' to a concrete
+<span class="lineno">  363 </span>-- 'MessageTarget' given the currently-running harness map, logging a
+<span class="lineno">  364 </span>-- warning if the recorded runtime is no longer available.
+<span class="lineno">  365 </span>--
+<span class="lineno">  366 </span>-- Wraps 'validateRuntime': on 'RuntimeFallback' the provided warning
+<span class="lineno">  367 </span>-- message is routed to @_lh_logWarn@ and the fallback target (always
+<span class="lineno">  368 </span>-- 'TargetProvider') is returned; on 'RuntimeOk' the target is returned
+<span class="lineno">  369 </span>-- without logging.
+<span class="lineno">  370 </span>resolveResumedTarget
+<span class="lineno">  371 </span>  :: LogHandle
+<span class="lineno">  372 </span>  -&gt; Map Text HarnessHandle
+<span class="lineno">  373 </span>  -&gt; RuntimeType
+<span class="lineno">  374 </span>  -&gt; IO MessageTarget
+<span class="lineno">  375 </span><span class="decl"><span class="istickedoff">resolveResumedTarget logger harnesses rt = case validateRuntime harnesses rt of</span>
+<span class="lineno">  376 </span><span class="spaces">  </span><span class="istickedoff">RuntimeOk tgt -&gt; pure tgt</span>
+<span class="lineno">  377 </span><span class="spaces">  </span><span class="istickedoff">RuntimeFallback tgt warning -&gt; do</span>
+<span class="lineno">  378 </span><span class="spaces">    </span><span class="istickedoff">_lh_logWarn logger warning</span>
+<span class="lineno">  379 </span><span class="spaces">    </span><span class="istickedoff">pure tgt</span></span>
+<span class="lineno">  380 </span>
+<span class="lineno">  381 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  382 </span>-- Bootstrap consumption
+<span class="lineno">  383 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  384 </span>
+<span class="lineno">  385 </span>-- | Flip '_sm_bootstrapConsumed' to 'True' in the session metadata
+<span class="lineno">  386 </span>-- 'IORef' and persist the change to @session.json@ via '_sh_save'.
+<span class="lineno">  387 </span>--
+<span class="lineno">  388 </span>-- Called by the agent loop the first time a provider response completes
+<span class="lineno">  389 </span>-- ('StreamDone'), via the one-shot callback installed on
+<span class="lineno">  390 </span>-- @_env_onFirstStreamDone@. Idempotent: re-invocations re-save the same
+<span class="lineno">  391 </span>-- metadata without error.
+<span class="lineno">  392 </span>markBootstrapConsumed :: SessionHandle -&gt; IO ()
+<span class="lineno">  393 </span><span class="decl"><span class="istickedoff">markBootstrapConsumed sh = do</span>
+<span class="lineno">  394 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' (_sh_meta sh) $ \m -&gt;</span>
+<span class="lineno">  395 </span><span class="spaces">    </span><span class="istickedoff">(m { _sm_bootstrapConsumed = True }, ())</span>
+<span class="lineno">  396 </span><span class="spaces">  </span><span class="istickedoff">_sh_save sh</span></span>
+<span class="lineno">  397 </span>
+<span class="lineno">  398 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  399 </span>-- Resume context reload
+<span class="lineno">  400 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  401 </span>
+<span class="lineno">  402 </span>-- | Load a bounded window of recent 'Message' values from a session's
+<span class="lineno">  403 </span>-- transcript, oldest-first.
+<span class="lineno">  404 </span>--
+<span class="lineno">  405 </span>-- @loadRecentMessages th maxCount maxTokens@ reads every recorded
+<span class="lineno">  406 </span>-- transcript entry via '_th_query', converts each to a text 'Message'
+<span class="lineno">  407 </span>-- (mapping 'Request' → 'User' and 'Response' → 'Assistant'), keeps at
+<span class="lineno">  408 </span>-- most the last @maxCount@, then walks that window from newest back to
+<span class="lineno">  409 </span>-- oldest accumulating an estimated token budget (computed as
+<span class="lineno">  410 </span>-- @T.length payload `div` 4@ — a rough heuristic, not a true tokenizer).
+<span class="lineno">  411 </span>-- Once the budget is exhausted no further messages are added.
+<span class="lineno">  412 </span>--
+<span class="lineno">  413 </span>-- Returns the surviving messages in chronological (oldest-first) order
+<span class="lineno">  414 </span>-- so they can be replayed directly into the context.
+<span class="lineno">  415 </span>loadRecentMessages :: TranscriptHandle -&gt; Int -&gt; Int -&gt; IO [Message]
+<span class="lineno">  416 </span><span class="decl"><span class="istickedoff">loadRecentMessages th maxCount maxTokens = do</span>
+<span class="lineno">  417 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- _th_query th TranscriptFilter</span>
+<span class="lineno">  418 </span><span class="spaces">    </span><span class="istickedoff">{ _tf_harness   = Nothing</span>
+<span class="lineno">  419 </span><span class="spaces">    </span><span class="istickedoff">, _tf_model     = Nothing</span>
+<span class="lineno">  420 </span><span class="spaces">    </span><span class="istickedoff">, _tf_direction = Nothing</span>
+<span class="lineno">  421 </span><span class="spaces">    </span><span class="istickedoff">, _tf_timeRange = Nothing</span>
+<span class="lineno">  422 </span><span class="spaces">    </span><span class="istickedoff">, _tf_limit     = Nothing</span>
+<span class="lineno">  423 </span><span class="spaces">    </span><span class="istickedoff">}</span>
+<span class="lineno">  424 </span><span class="spaces">  </span><span class="istickedoff">let total     = length entries</span>
+<span class="lineno">  425 </span><span class="spaces">      </span><span class="istickedoff">countWin  = if total &gt; maxCount</span>
+<span class="lineno">  426 </span><span class="spaces">                    </span><span class="istickedoff">then drop (total - maxCount) entries</span>
+<span class="lineno">  427 </span><span class="spaces">                    </span><span class="istickedoff">else entries</span>
+<span class="lineno">  428 </span><span class="spaces">      </span><span class="istickedoff">-- Walk newest→oldest, adding to the budget; stop at the first</span>
+<span class="lineno">  429 </span><span class="spaces">      </span><span class="istickedoff">-- entry that would push us OVER the limit. Always include at</span>
+<span class="lineno">  430 </span><span class="spaces">      </span><span class="istickedoff">-- least one entry if the window is non-empty, so a single</span>
+<span class="lineno">  431 </span><span class="spaces">      </span><span class="istickedoff">-- oversized message is not silently dropped.</span>
+<span class="lineno">  432 </span><span class="spaces">      </span><span class="istickedoff">reversed  = reverse countWin</span>
+<span class="lineno">  433 </span><span class="spaces">      </span><span class="istickedoff">budgeted  = goBudget 0 <span class="nottickedoff">True</span> reversed</span>
+<span class="lineno">  434 </span><span class="spaces">      </span><span class="istickedoff">goBudget _    _     [] = []</span>
+<span class="lineno">  435 </span><span class="spaces">      </span><span class="istickedoff">goBudget used first (e:es) =</span>
+<span class="lineno">  436 </span><span class="spaces">        </span><span class="istickedoff">let cost  = T.length (_te_payload e) `div` 4</span>
+<span class="lineno">  437 </span><span class="spaces">            </span><span class="istickedoff">used' = used + cost</span>
+<span class="lineno">  438 </span><span class="spaces">        </span><span class="istickedoff">in if used' &gt; maxTokens &amp;&amp; not first</span>
+<span class="lineno">  439 </span><span class="spaces">             </span><span class="istickedoff">then []</span>
+<span class="lineno">  440 </span><span class="spaces">             </span><span class="istickedoff">else e : goBudget used' False es</span>
+<span class="lineno">  441 </span><span class="spaces">  </span><span class="istickedoff">pure (map entryToMessage (reverse budgeted))</span>
+<span class="lineno">  442 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  443 </span><span class="spaces">    </span><span class="istickedoff">entryToMessage e =</span>
+<span class="lineno">  444 </span><span class="spaces">      </span><span class="istickedoff">let role = case _te_direction e of</span>
+<span class="lineno">  445 </span><span class="spaces">            </span><span class="istickedoff">Request  -&gt; User</span>
+<span class="lineno">  446 </span><span class="spaces">            </span><span class="istickedoff">Response -&gt; Assistant</span>
+<span class="lineno">  447 </span><span class="spaces">      </span><span class="istickedoff">in Message role [TextBlock (_te_payload e)]</span></span>
+<span class="lineno">  448 </span>
+
+</pre>
+</body>
+</html>

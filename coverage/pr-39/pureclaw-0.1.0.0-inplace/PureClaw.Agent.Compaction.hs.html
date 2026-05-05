@@ -1,0 +1,143 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.Compaction
+<span class="lineno">    2 </span>  ( -- * Compaction
+<span class="lineno">    3 </span>    compactContext
+<span class="lineno">    4 </span>  , CompactionResult (..)
+<span class="lineno">    5 </span>    -- * Configuration
+<span class="lineno">    6 </span>  , defaultTokenLimit
+<span class="lineno">    7 </span>  , defaultKeepRecent
+<span class="lineno">    8 </span>    -- * Metadata
+<span class="lineno">    9 </span>  , compactionMetadataKey
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Control.Exception
+<span class="lineno">   13 </span>import Data.Text (Text)
+<span class="lineno">   14 </span>import Data.Text qualified as T
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>import PureClaw.Agent.Context
+<span class="lineno">   17 </span>import PureClaw.Core.Types
+<span class="lineno">   18 </span>import PureClaw.Providers.Class
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>-- | Result of a compaction attempt.
+<span class="lineno">   21 </span>data CompactionResult
+<span class="lineno">   22 </span>  = Compacted Int Int Text  -- ^ old count, new count, summary text
+<span class="lineno">   23 </span>  | NotNeeded               -- ^ context is below threshold
+<span class="lineno">   24 </span>  | CompactionError Text    -- ^ provider error during summarization
+<span class="lineno">   25 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   26 </span>
+<span class="lineno">   27 </span>-- | Metadata key used to mark compaction entries in the transcript.
+<span class="lineno">   28 </span>-- 'loadRecentMessages' looks for the last entry carrying this key and
+<span class="lineno">   29 </span>-- only replays entries from that point forward.
+<span class="lineno">   30 </span>compactionMetadataKey :: Text
+<span class="lineno">   31 </span><span class="decl"><span class="istickedoff">compactionMetadataKey = &quot;compaction&quot;</span></span>
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | Default context window token limit (200k for Claude).
+<span class="lineno">   34 </span>defaultTokenLimit :: Int
+<span class="lineno">   35 </span><span class="decl"><span class="istickedoff">defaultTokenLimit = 200000</span></span>
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Default number of recent messages to keep uncompacted.
+<span class="lineno">   38 </span>defaultKeepRecent :: Int
+<span class="lineno">   39 </span><span class="decl"><span class="istickedoff">defaultKeepRecent = 10</span></span>
+<span class="lineno">   40 </span>
+<span class="lineno">   41 </span>-- | Compact a context by summarizing old messages via the provider.
+<span class="lineno">   42 </span>--
+<span class="lineno">   43 </span>-- Keeps the most recent @keepRecent@ messages intact and asks the
+<span class="lineno">   44 </span>-- provider to summarize the older ones into a single message. The
+<span class="lineno">   45 </span>-- summary replaces the old messages in the context.
+<span class="lineno">   46 </span>--
+<span class="lineno">   47 </span>-- Returns 'NotNeeded' if the context is below the token threshold.
+<span class="lineno">   48 </span>compactContext
+<span class="lineno">   49 </span>  :: Provider p
+<span class="lineno">   50 </span>  =&gt; p
+<span class="lineno">   51 </span>  -&gt; ModelId
+<span class="lineno">   52 </span>  -&gt; Int        -- ^ token threshold (compact when estimated tokens exceed this)
+<span class="lineno">   53 </span>  -&gt; Int        -- ^ number of recent messages to keep
+<span class="lineno">   54 </span>  -&gt; Context
+<span class="lineno">   55 </span>  -&gt; IO (Context, CompactionResult)
+<span class="lineno">   56 </span><span class="decl"><span class="istickedoff">compactContext provider model threshold keepRecent ctx</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="istickedoff">| contextTokenEstimate ctx &lt; threshold = pure (<span class="nottickedoff">ctx</span>, NotNeeded)</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">| contextMessageCount ctx &lt;= keepRecent = pure (<span class="nottickedoff">ctx</span>, NotNeeded)</span>
+<span class="lineno">   59 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
+<span class="lineno">   60 </span><span class="spaces">      </span><span class="istickedoff">let msgs = contextMessages ctx</span>
+<span class="lineno">   61 </span><span class="spaces">          </span><span class="istickedoff">oldCount = length msgs - keepRecent</span>
+<span class="lineno">   62 </span><span class="spaces">          </span><span class="istickedoff">(oldMsgs, recentMsgs) = splitAt oldCount msgs</span>
+<span class="lineno">   63 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">summaryPrompt = buildSummaryPrompt oldMsgs</span></span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">summaryResult &lt;- summarize provider <span class="nottickedoff">model</span> <span class="nottickedoff">summaryPrompt</span></span>
+<span class="lineno">   65 </span><span class="spaces">      </span><span class="istickedoff">case summaryResult of</span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (<span class="nottickedoff">ctx</span>, CompactionError <span class="nottickedoff">err</span>)</span>
+<span class="lineno">   67 </span><span class="spaces">        </span><span class="istickedoff">Right summaryText -&gt;</span>
+<span class="lineno">   68 </span><span class="spaces">          </span><span class="istickedoff">let prefixed = &quot;[Context summary] &quot; &lt;&gt; summaryText</span>
+<span class="lineno">   69 </span><span class="spaces">              </span><span class="istickedoff">summaryMsg = textMessage <span class="nottickedoff">User</span> prefixed</span>
+<span class="lineno">   70 </span><span class="spaces">              </span><span class="istickedoff">newMsgs = summaryMsg : recentMsgs</span>
+<span class="lineno">   71 </span><span class="spaces">              </span><span class="istickedoff">ctx' = replaceMessages newMsgs ctx</span>
+<span class="lineno">   72 </span><span class="spaces">          </span><span class="istickedoff">in pure (ctx', Compacted (length msgs) (length newMsgs) prefixed)</span></span>
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>-- | Build a prompt asking the provider to summarize conversation history.
+<span class="lineno">   75 </span>buildSummaryPrompt :: [Message] -&gt; Text
+<span class="lineno">   76 </span><span class="decl"><span class="nottickedoff">buildSummaryPrompt msgs =</span>
+<span class="lineno">   77 </span><span class="spaces">  </span><span class="nottickedoff">&quot;Summarize the following conversation history concisely. &quot;</span>
+<span class="lineno">   78 </span><span class="spaces">  </span><span class="nottickedoff">&lt;&gt; &quot;Preserve key facts, decisions, file paths, and context needed &quot;</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="nottickedoff">&lt;&gt; &quot;to continue the conversation. Be brief but complete.\n\n&quot;</span>
+<span class="lineno">   80 </span><span class="spaces">  </span><span class="nottickedoff">&lt;&gt; T.intercalate &quot;\n\n&quot; (map formatMessage msgs)</span></span>
+<span class="lineno">   81 </span>
+<span class="lineno">   82 </span>-- | Format a message for the summary prompt.
+<span class="lineno">   83 </span>formatMessage :: Message -&gt; Text
+<span class="lineno">   84 </span><span class="decl"><span class="nottickedoff">formatMessage msg =</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="nottickedoff">let role = case _msg_role msg of</span>
+<span class="lineno">   86 </span><span class="spaces">        </span><span class="nottickedoff">User      -&gt; &quot;User&quot;</span>
+<span class="lineno">   87 </span><span class="spaces">        </span><span class="nottickedoff">Assistant -&gt; &quot;Assistant&quot;</span>
+<span class="lineno">   88 </span><span class="spaces">      </span><span class="nottickedoff">content = T.intercalate &quot; &quot; [extractText b | b &lt;- _msg_content msg]</span>
+<span class="lineno">   89 </span><span class="spaces">  </span><span class="nottickedoff">in role &lt;&gt; &quot;: &quot; &lt;&gt; content</span></span>
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>-- | Extract text content from a block.
+<span class="lineno">   92 </span>extractText :: ContentBlock -&gt; Text
+<span class="lineno">   93 </span><span class="decl"><span class="nottickedoff">extractText (TextBlock t) = t</span>
+<span class="lineno">   94 </span><span class="spaces"></span><span class="nottickedoff">extractText (ToolUseBlock _ name _) = &quot;[tool:&quot; &lt;&gt; name &lt;&gt; &quot;]&quot;</span>
+<span class="lineno">   95 </span><span class="spaces"></span><span class="nottickedoff">extractText (ImageBlock mediaType _) = &quot;[image:&quot; &lt;&gt; mediaType &lt;&gt; &quot;]&quot;</span>
+<span class="lineno">   96 </span><span class="spaces"></span><span class="nottickedoff">extractText (ToolResultBlock _ parts _) = &quot;[result:&quot; &lt;&gt; T.take 100 (partsText parts) &lt;&gt; &quot;]&quot;</span></span>
+<span class="lineno">   97 </span>
+<span class="lineno">   98 </span>-- | Extract text from tool result parts.
+<span class="lineno">   99 </span>partsText :: [ToolResultPart] -&gt; Text
+<span class="lineno">  100 </span><span class="decl"><span class="nottickedoff">partsText ps = T.intercalate &quot; &quot; [t | TRPText t &lt;- ps]</span></span>
+<span class="lineno">  101 </span>
+<span class="lineno">  102 </span>-- | Call the provider to generate a summary.
+<span class="lineno">  103 </span>summarize :: Provider p =&gt; p -&gt; ModelId -&gt; Text -&gt; IO (Either Text Text)
+<span class="lineno">  104 </span><span class="decl"><span class="istickedoff">summarize provider model prompt = do</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">let <span class="nottickedoff">req = CompletionRequest</span></span>
+<span class="lineno">  106 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">{ _cr_model        = model</span></span>
+<span class="lineno">  107 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_messages     = [textMessage User prompt]</span></span>
+<span class="lineno">  108 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_systemPrompt = Just &quot;You are a conversation summarizer. Produce a concise summary.&quot;</span></span>
+<span class="lineno">  109 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_maxTokens    = Just 1024</span></span>
+<span class="lineno">  110 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_tools        = []</span></span>
+<span class="lineno">  111 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_toolChoice   = Nothing</span></span>
+<span class="lineno">  112 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">  113 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try @SomeException (complete provider <span class="nottickedoff">req</span>)</span>
+<span class="lineno">  114 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  115 </span><span class="spaces">    </span><span class="istickedoff">Left e -&gt; pure (Left <span class="nottickedoff">(T.pack (show e))</span>)</span>
+<span class="lineno">  116 </span><span class="spaces">    </span><span class="istickedoff">Right resp -&gt;</span>
+<span class="lineno">  117 </span><span class="spaces">      </span><span class="istickedoff">let text = responseText resp</span>
+<span class="lineno">  118 </span><span class="spaces">      </span><span class="istickedoff">in if <span class="tickonlyfalse">T.null (T.strip text)</span></span>
+<span class="lineno">  119 </span><span class="spaces">           </span><span class="istickedoff">then <span class="nottickedoff">pure (Left &quot;Provider returned empty summary&quot;)</span></span>
+<span class="lineno">  120 </span><span class="spaces">           </span><span class="istickedoff">else pure (Right text)</span></span>
+
+</pre>
+</body>
+</html>

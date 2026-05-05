@@ -1,0 +1,61 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.Context
+<span class="lineno">    2 </span>  ( -- * Context type (constructor intentionally NOT exported)
+<span class="lineno">    3 </span>    Context
+<span class="lineno">    4 </span>    -- * Construction
+<span class="lineno">    5 </span>  , emptyContext
+<span class="lineno">    6 </span>    -- * Operations
+<span class="lineno">    7 </span>  , addMessage
+<span class="lineno">    8 </span>  , contextMessages
+<span class="lineno">    9 </span>  , contextSystemPrompt
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Data.Text (Text)
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import PureClaw.Providers.Class
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>-- | Conversation context. Maintains message history and an optional
+<span class="lineno">   17 </span>-- system prompt. Constructor is not exported — use 'emptyContext'.
+<span class="lineno">   18 </span>data Context = Context
+<span class="lineno">   19 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ctx_systemPrompt</span></span></span> :: Maybe Text
+<span class="lineno">   20 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ctx_messages</span></span></span>     :: [Message]  -- oldest first
+<span class="lineno">   21 </span>  }
+<span class="lineno">   22 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>-- | Create an empty context with an optional system prompt.
+<span class="lineno">   25 </span>emptyContext :: Maybe Text -&gt; Context
+<span class="lineno">   26 </span><span class="decl"><span class="istickedoff">emptyContext sys = Context sys []</span></span>
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>-- | Append a message to the conversation history.
+<span class="lineno">   29 </span>addMessage :: Message -&gt; Context -&gt; Context
+<span class="lineno">   30 </span><span class="decl"><span class="istickedoff">addMessage msg ctx = ctx { _ctx_messages = _ctx_messages ctx ++ [msg] }</span></span>
+<span class="lineno">   31 </span>
+<span class="lineno">   32 </span>-- | Get all messages in chronological order.
+<span class="lineno">   33 </span>contextMessages :: Context -&gt; [Message]
+<span class="lineno">   34 </span><span class="decl"><span class="istickedoff">contextMessages = _ctx_messages</span></span>
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>-- | Get the system prompt, if any.
+<span class="lineno">   37 </span>contextSystemPrompt :: Context -&gt; Maybe Text
+<span class="lineno">   38 </span><span class="decl"><span class="istickedoff">contextSystemPrompt = _ctx_systemPrompt</span></span>
+
+</pre>
+</body>
+</html>

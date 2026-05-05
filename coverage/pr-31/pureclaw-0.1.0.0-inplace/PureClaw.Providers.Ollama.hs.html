@@ -1,0 +1,194 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Providers.Ollama
+<span class="lineno">    2 </span>  ( -- * Provider type
+<span class="lineno">    3 </span>    OllamaProvider
+<span class="lineno">    4 </span>  , mkOllamaProvider
+<span class="lineno">    5 </span>  , mkOllamaProviderWithUrl
+<span class="lineno">    6 </span>    -- * Errors
+<span class="lineno">    7 </span>  , OllamaError (..)
+<span class="lineno">    8 </span>    -- * Request/response encoding (exported for testing)
+<span class="lineno">    9 </span>  , encodeRequest
+<span class="lineno">   10 </span>  , decodeResponse
+<span class="lineno">   11 </span>    -- * Model listing (exported for testing)
+<span class="lineno">   12 </span>  , parseModelNames
+<span class="lineno">   13 </span>  ) where
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>import Control.Exception
+<span class="lineno">   16 </span>import Data.Aeson
+<span class="lineno">   17 </span>import Data.Aeson.Types
+<span class="lineno">   18 </span>import Data.ByteString (ByteString)
+<span class="lineno">   19 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   20 </span>import Data.Maybe qualified
+<span class="lineno">   21 </span>import Data.Text (Text)
+<span class="lineno">   22 </span>import Data.Text qualified as T
+<span class="lineno">   23 </span>import Network.HTTP.Client qualified as HTTP
+<span class="lineno">   24 </span>import Network.HTTP.Types.Status qualified as Status
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>import PureClaw.Core.Errors
+<span class="lineno">   27 </span>import PureClaw.Core.Types
+<span class="lineno">   28 </span>import PureClaw.Providers.Class
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>-- | Ollama provider for local model inference.
+<span class="lineno">   31 </span>data OllamaProvider = OllamaProvider
+<span class="lineno">   32 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ol_manager</span></span></span> :: HTTP.Manager
+<span class="lineno">   33 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ol_baseUrl</span></span></span> :: String    -- ^ Base URL without endpoint path (e.g. &quot;http://localhost:11434&quot;)
+<span class="lineno">   34 </span>  }
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>-- | Create an Ollama provider. Defaults to localhost:11434.
+<span class="lineno">   37 </span>mkOllamaProvider :: HTTP.Manager -&gt; OllamaProvider
+<span class="lineno">   38 </span><span class="decl"><span class="nottickedoff">mkOllamaProvider mgr = OllamaProvider mgr &quot;http://localhost:11434&quot;</span></span>
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>-- | Create an Ollama provider with a custom base URL.
+<span class="lineno">   41 </span>-- The URL should be the base (e.g. @http://myhost:11434@).
+<span class="lineno">   42 </span>mkOllamaProviderWithUrl :: HTTP.Manager -&gt; String -&gt; OllamaProvider
+<span class="lineno">   43 </span><span class="decl"><span class="nottickedoff">mkOllamaProviderWithUrl mgr url =</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="nottickedoff">let trimmed = reverse (dropWhile (== '/') (reverse url))</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="nottickedoff">in OllamaProvider mgr trimmed</span></span>
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>instance <span class="decl"><span class="nottickedoff">Provider OllamaProvider</span></span> where
+<span class="lineno">   48 </span>  <span class="decl"><span class="nottickedoff">complete = ollamaComplete</span></span>
+<span class="lineno">   49 </span>  <span class="decl"><span class="nottickedoff">listModels = ollamaListModels</span></span>
+<span class="lineno">   50 </span>
+<span class="lineno">   51 </span>-- | Errors from the Ollama API.
+<span class="lineno">   52 </span>data OllamaError
+<span class="lineno">   53 </span>  = OllamaAPIError Int ByteString
+<span class="lineno">   54 </span>  | OllamaParseError Text
+<span class="lineno">   55 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Exception OllamaError</span></span></span></span></span></span></span></span>
+<span class="lineno">   58 </span>
+<span class="lineno">   59 </span>instance ToPublicError OllamaError where
+<span class="lineno">   60 </span>  <span class="decl"><span class="nottickedoff">toPublicError _ = TemporaryError &quot;Provider error&quot;</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>ollamaComplete :: OllamaProvider -&gt; CompletionRequest -&gt; IO CompletionResponse
+<span class="lineno">   63 </span><span class="decl"><span class="nottickedoff">ollamaComplete provider req = do</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="nottickedoff">initReq &lt;- HTTP.parseRequest (_ol_baseUrl provider ++ &quot;/api/chat&quot;)</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="nottickedoff">let httpReq = initReq</span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="nottickedoff">{ HTTP.method = &quot;POST&quot;</span>
+<span class="lineno">   67 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestBody = HTTP.RequestBodyLBS (encodeRequest req)</span>
+<span class="lineno">   68 </span><span class="spaces">        </span><span class="nottickedoff">, HTTP.requestHeaders = [(&quot;content-type&quot;, &quot;application/json&quot;)]</span>
+<span class="lineno">   69 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">   70 </span><span class="spaces">  </span><span class="nottickedoff">resp &lt;- HTTP.httpLbs httpReq (_ol_manager provider)</span>
+<span class="lineno">   71 </span><span class="spaces">  </span><span class="nottickedoff">let status = Status.statusCode (HTTP.responseStatus resp)</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="nottickedoff">if status /= 200</span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="nottickedoff">then throwIO (OllamaAPIError status (BL.toStrict (HTTP.responseBody resp)))</span>
+<span class="lineno">   74 </span><span class="spaces">    </span><span class="nottickedoff">else case decodeResponse (HTTP.responseBody resp) of</span>
+<span class="lineno">   75 </span><span class="spaces">      </span><span class="nottickedoff">Left err -&gt; throwIO (OllamaParseError (T.pack err))</span>
+<span class="lineno">   76 </span><span class="spaces">      </span><span class="nottickedoff">Right response -&gt; pure response</span></span>
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- | Encode a request for the Ollama /api/chat endpoint.
+<span class="lineno">   79 </span>-- Ollama uses system messages in the messages array and a simpler
+<span class="lineno">   80 </span>-- tool format than OpenAI.
+<span class="lineno">   81 </span>encodeRequest :: CompletionRequest -&gt; BL.ByteString
+<span class="lineno">   82 </span><span class="decl"><span class="istickedoff">encodeRequest req = encode $ object $</span>
+<span class="lineno">   83 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;model&quot;    .= unModelId (_cr_model req)</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">, &quot;messages&quot; .= encodeMessages req</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">, &quot;stream&quot;   .= False</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="istickedoff">++ [<span class="nottickedoff">&quot;tools&quot; .= map encodeTool (_cr_tools req)</span> | <span class="tickonlyfalse">not (null (_cr_tools req))</span>]</span></span>
+<span class="lineno">   88 </span>
+<span class="lineno">   89 </span>encodeMessages :: CompletionRequest -&gt; [Value]
+<span class="lineno">   90 </span><span class="decl"><span class="istickedoff">encodeMessages req =</span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">maybe [] (\s -&gt; [object [&quot;role&quot; .= (&quot;system&quot; :: Text), &quot;content&quot; .= s]]) (_cr_systemPrompt req)</span>
+<span class="lineno">   92 </span><span class="spaces">  </span><span class="istickedoff">++ map encodeMsg (_cr_messages req)</span></span>
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>encodeMsg :: Message -&gt; Value
+<span class="lineno">   95 </span><span class="decl"><span class="istickedoff">encodeMsg msg = case _msg_content msg of</span>
+<span class="lineno">   96 </span><span class="spaces">  </span><span class="istickedoff">[TextBlock t] -&gt;</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">object [&quot;role&quot; .= roleToText (_msg_role msg), &quot;content&quot; .= t]</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="istickedoff">blocks -&gt;</span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">-- Ollama supports content as string only; concatenate text blocks</span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">let textParts = concatMap blockText blocks</span></span>
+<span class="lineno">  101 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">in object [&quot;role&quot; .= roleToText (_msg_role msg), &quot;content&quot; .= T.intercalate &quot;\n&quot; textParts]</span></span></span>
+<span class="lineno">  102 </span>
+<span class="lineno">  103 </span>blockText :: ContentBlock -&gt; [Text]
+<span class="lineno">  104 </span><span class="decl"><span class="nottickedoff">blockText (TextBlock t) = [t]</span>
+<span class="lineno">  105 </span><span class="spaces"></span><span class="nottickedoff">blockText (ImageBlock _ _) = [&quot;[image]&quot;]</span>
+<span class="lineno">  106 </span><span class="spaces"></span><span class="nottickedoff">blockText (ToolUseBlock _ name _) = [&quot;[tool:&quot; &lt;&gt; name &lt;&gt; &quot;]&quot;]</span>
+<span class="lineno">  107 </span><span class="spaces"></span><span class="nottickedoff">blockText (ToolResultBlock _ parts _) = [t | TRPText t &lt;- parts]</span></span>
+<span class="lineno">  108 </span>
+<span class="lineno">  109 </span>encodeTool :: ToolDefinition -&gt; Value
+<span class="lineno">  110 </span><span class="decl"><span class="nottickedoff">encodeTool td = object</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="nottickedoff">[ &quot;type&quot; .= (&quot;function&quot; :: Text)</span>
+<span class="lineno">  112 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;function&quot; .= object</span>
+<span class="lineno">  113 </span><span class="spaces">      </span><span class="nottickedoff">[ &quot;name&quot;        .= _td_name td</span>
+<span class="lineno">  114 </span><span class="spaces">      </span><span class="nottickedoff">, &quot;description&quot; .= _td_description td</span>
+<span class="lineno">  115 </span><span class="spaces">      </span><span class="nottickedoff">, &quot;parameters&quot;  .= _td_inputSchema td</span>
+<span class="lineno">  116 </span><span class="spaces">      </span><span class="nottickedoff">]</span>
+<span class="lineno">  117 </span><span class="spaces">  </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  118 </span>
+<span class="lineno">  119 </span>-- | Decode an Ollama /api/chat response.
+<span class="lineno">  120 </span>decodeResponse :: BL.ByteString -&gt; Either String CompletionResponse
+<span class="lineno">  121 </span><span class="decl"><span class="istickedoff">decodeResponse bs = eitherDecode bs &gt;&gt;= parseEither parseResp</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  123 </span><span class="spaces">    </span><span class="istickedoff">parseResp :: Value -&gt; Parser CompletionResponse</span>
+<span class="lineno">  124 </span><span class="spaces">    </span><span class="istickedoff">parseResp = withObject <span class="nottickedoff">&quot;OllamaResponse&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">msg &lt;- o .: &quot;message&quot;</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">content &lt;- msg .: &quot;content&quot;</span>
+<span class="lineno">  127 </span><span class="spaces">      </span><span class="istickedoff">modelText &lt;- o .: &quot;model&quot;</span>
+<span class="lineno">  128 </span><span class="spaces">      </span><span class="istickedoff">-- Ollama tool calls come as tool_calls array in the message</span>
+<span class="lineno">  129 </span><span class="spaces">      </span><span class="istickedoff">toolCalls &lt;- msg .:? &quot;tool_calls&quot; .!= ([] :: [Value])</span>
+<span class="lineno">  130 </span><span class="spaces">      </span><span class="istickedoff">toolBlocks &lt;- mapM <span class="nottickedoff">parseToolCall</span> toolCalls</span>
+<span class="lineno">  131 </span><span class="spaces">      </span><span class="istickedoff">let textBlocks = [TextBlock content | <span class="tickonlytrue">not (T.null content)</span>]</span>
+<span class="lineno">  132 </span><span class="spaces">      </span><span class="istickedoff">pure CompletionResponse</span>
+<span class="lineno">  133 </span><span class="spaces">        </span><span class="istickedoff">{ _crsp_content = textBlocks ++ toolBlocks</span>
+<span class="lineno">  134 </span><span class="spaces">        </span><span class="istickedoff">, _crsp_model   = ModelId modelText</span>
+<span class="lineno">  135 </span><span class="spaces">        </span><span class="istickedoff">, _crsp_usage   = Nothing  -- Ollama doesn't report usage in chat endpoint</span>
+<span class="lineno">  136 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  137 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">parseToolCall :: Value -&gt; Parser ContentBlock</span>
+<span class="lineno">  139 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">parseToolCall = withObject &quot;ToolCall&quot; $ \tc -&gt; do</span></span>
+<span class="lineno">  140 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">fn &lt;- tc .: &quot;function&quot;</span></span>
+<span class="lineno">  141 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">name &lt;- fn .: &quot;name&quot;</span></span>
+<span class="lineno">  142 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">args &lt;- fn .: &quot;arguments&quot;</span></span>
+<span class="lineno">  143 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">-- Ollama doesn't return a call ID, so generate a placeholder</span></span>
+<span class="lineno">  144 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure (ToolUseBlock (ToolCallId (&quot;ollama-&quot; &lt;&gt; name)) name args)</span></span></span>
+<span class="lineno">  145 </span>
+<span class="lineno">  146 </span>-- | List available models via Ollama's /api/tags endpoint.
+<span class="lineno">  147 </span>-- Returns an empty list on any error (network, parse, etc.).
+<span class="lineno">  148 </span>ollamaListModels :: OllamaProvider -&gt; IO [ModelId]
+<span class="lineno">  149 </span><span class="decl"><span class="nottickedoff">ollamaListModels provider = do</span>
+<span class="lineno">  150 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- try @SomeException $ do</span>
+<span class="lineno">  151 </span><span class="spaces">    </span><span class="nottickedoff">initReq &lt;- HTTP.parseRequest (_ol_baseUrl provider ++ &quot;/api/tags&quot;)</span>
+<span class="lineno">  152 </span><span class="spaces">    </span><span class="nottickedoff">resp &lt;- HTTP.httpLbs initReq (_ol_manager provider)</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="nottickedoff">let status = Status.statusCode (HTTP.responseStatus resp)</span>
+<span class="lineno">  154 </span><span class="spaces">    </span><span class="nottickedoff">if status /= 200</span>
+<span class="lineno">  155 </span><span class="spaces">      </span><span class="nottickedoff">then pure []</span>
+<span class="lineno">  156 </span><span class="spaces">      </span><span class="nottickedoff">else case eitherDecode (HTTP.responseBody resp) of</span>
+<span class="lineno">  157 </span><span class="spaces">        </span><span class="nottickedoff">Left _    -&gt; pure []</span>
+<span class="lineno">  158 </span><span class="spaces">        </span><span class="nottickedoff">Right val -&gt; pure (parseModelNames val)</span>
+<span class="lineno">  159 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  160 </span><span class="spaces">    </span><span class="nottickedoff">Left _  -&gt; pure []</span>
+<span class="lineno">  161 </span><span class="spaces">    </span><span class="nottickedoff">Right models -&gt; pure models</span></span>
+<span class="lineno">  162 </span>
+<span class="lineno">  163 </span>-- | Parse model names from Ollama /api/tags response.
+<span class="lineno">  164 </span>-- Expected format: { &quot;models&quot;: [{ &quot;name&quot;: &quot;llama3:latest&quot;, ... }, ...] }
+<span class="lineno">  165 </span>parseModelNames :: Value -&gt; [ModelId]
+<span class="lineno">  166 </span><span class="decl"><span class="istickedoff">parseModelNames = Data.Maybe.fromMaybe [] . parseMaybe parseModels</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  168 </span><span class="spaces">    </span><span class="istickedoff">parseModels :: Value -&gt; Parser [ModelId]</span>
+<span class="lineno">  169 </span><span class="spaces">    </span><span class="istickedoff">parseModels = withObject <span class="nottickedoff">&quot;OllamaTagsResponse&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  170 </span><span class="spaces">      </span><span class="istickedoff">models &lt;- o .: &quot;models&quot;</span>
+<span class="lineno">  171 </span><span class="spaces">      </span><span class="istickedoff">mapM (withObject <span class="nottickedoff">&quot;Model&quot;</span> (\m -&gt; ModelId &lt;$&gt; m .: &quot;name&quot;)) models</span></span>
+
+</pre>
+</body>
+</html>

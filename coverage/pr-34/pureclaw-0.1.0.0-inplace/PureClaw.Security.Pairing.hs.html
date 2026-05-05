@@ -1,0 +1,177 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Pairing
+<span class="lineno">    2 </span>  ( -- * Pairing state
+<span class="lineno">    3 </span>    PairingState
+<span class="lineno">    4 </span>  , mkPairingState
+<span class="lineno">    5 </span>    -- * Operations
+<span class="lineno">    6 </span>  , generatePairingCode
+<span class="lineno">    7 </span>  , attemptPair
+<span class="lineno">    8 </span>  , verifyToken
+<span class="lineno">    9 </span>  , revokeToken
+<span class="lineno">   10 </span>    -- * Configuration
+<span class="lineno">   11 </span>  , PairingConfig (..)
+<span class="lineno">   12 </span>  , defaultPairingConfig
+<span class="lineno">   13 </span>    -- * Errors
+<span class="lineno">   14 </span>  , PairingError (..)
+<span class="lineno">   15 </span>  ) where
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import Control.Concurrent.STM
+<span class="lineno">   18 </span>import Crypto.Random qualified as CR
+<span class="lineno">   19 </span>import Data.Bits (shiftL, (.|.))
+<span class="lineno">   20 </span>import Data.ByteString (ByteString)
+<span class="lineno">   21 </span>import Data.ByteString qualified as BS
+<span class="lineno">   22 </span>import Data.Map.Strict (Map)
+<span class="lineno">   23 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   24 </span>import Data.Set (Set)
+<span class="lineno">   25 </span>import Data.Set qualified as Set
+<span class="lineno">   26 </span>import Data.Text (Text)
+<span class="lineno">   27 </span>import Data.Text qualified as T
+<span class="lineno">   28 </span>import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+<span class="lineno">   29 </span>import Data.Word (Word32)
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>import PureClaw.Security.Crypto
+<span class="lineno">   32 </span>import PureClaw.Security.Secrets
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>-- | Configuration for the pairing system.
+<span class="lineno">   35 </span>data PairingConfig = PairingConfig
+<span class="lineno">   36 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pc_codeExpiry</span></span></span>      :: NominalDiffTime
+<span class="lineno">   37 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pc_maxAttempts</span></span></span>     :: Int
+<span class="lineno">   38 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pc_lockoutDuration</span></span></span> :: NominalDiffTime
+<span class="lineno">   39 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pc_tokenBytes</span></span></span>      :: Int
+<span class="lineno">   40 </span>  }
+<span class="lineno">   41 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   42 </span>
+<span class="lineno">   43 </span>-- | Sensible defaults: 5 minute code expiry, 5 attempts before lockout,
+<span class="lineno">   44 </span>-- 15 minute lockout, 32-byte tokens.
+<span class="lineno">   45 </span>defaultPairingConfig :: PairingConfig
+<span class="lineno">   46 </span><span class="decl"><span class="istickedoff">defaultPairingConfig = PairingConfig</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">{ _pc_codeExpiry      = 300</span>
+<span class="lineno">   48 </span><span class="spaces">  </span><span class="istickedoff">, _pc_maxAttempts     = 5</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">, _pc_lockoutDuration = 900</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="istickedoff">, _pc_tokenBytes      = 32</span>
+<span class="lineno">   51 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Errors from pairing operations.
+<span class="lineno">   54 </span>data PairingError
+<span class="lineno">   55 </span>  = InvalidCode
+<span class="lineno">   56 </span>  | LockedOut
+<span class="lineno">   57 </span>  | CodeExpired
+<span class="lineno">   58 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | Per-client attempt tracking.
+<span class="lineno">   61 </span>data AttemptInfo = AttemptInfo
+<span class="lineno">   62 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ai_count</span></span></span>     :: Int
+<span class="lineno">   63 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ai_lastAttempt</span></span></span> :: UTCTime
+<span class="lineno">   64 </span>  }
+<span class="lineno">   65 </span>
+<span class="lineno">   66 </span>-- | Mutable pairing state, managed via STM.
+<span class="lineno">   67 </span>data PairingState = PairingState
+<span class="lineno">   68 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ps_config</span></span></span>    :: PairingConfig
+<span class="lineno">   69 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ps_codes</span></span></span>     :: TVar (Map Text UTCTime)
+<span class="lineno">   70 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ps_attempts</span></span></span>  :: TVar (Map Text AttemptInfo)
+<span class="lineno">   71 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ps_tokens</span></span></span>    :: TVar (Set ByteString)
+<span class="lineno">   72 </span>  }
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>-- | Create a fresh pairing state.
+<span class="lineno">   75 </span>mkPairingState :: PairingConfig -&gt; IO PairingState
+<span class="lineno">   76 </span><span class="decl"><span class="istickedoff">mkPairingState config = PairingState config</span>
+<span class="lineno">   77 </span><span class="spaces">  </span><span class="istickedoff">&lt;$&gt; newTVarIO Map.empty</span>
+<span class="lineno">   78 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; newTVarIO Map.empty</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; newTVarIO Set.empty</span></span>
+<span class="lineno">   80 </span>
+<span class="lineno">   81 </span>-- | Generate a cryptographically random 6-digit pairing code.
+<span class="lineno">   82 </span>-- The code is registered in the pairing state with an expiry time.
+<span class="lineno">   83 </span>generatePairingCode :: PairingState -&gt; IO PairingCode
+<span class="lineno">   84 </span><span class="decl"><span class="istickedoff">generatePairingCode st = do</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">bytes &lt;- CR.getRandomBytes 4 :: IO ByteString</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="istickedoff">let n = (fromIntegral (BS.index bytes 0) `shiftL` 24</span>
+<span class="lineno">   87 </span><span class="spaces">       </span><span class="istickedoff">.|. fromIntegral (BS.index bytes 1) `shiftL` 16</span>
+<span class="lineno">   88 </span><span class="spaces">       </span><span class="istickedoff">.|. fromIntegral (BS.index bytes 2) `shiftL`  8</span>
+<span class="lineno">   89 </span><span class="spaces">       </span><span class="istickedoff">.|. fromIntegral (BS.index bytes 3)) :: Word32</span>
+<span class="lineno">   90 </span><span class="spaces">      </span><span class="istickedoff">codeText = T.justifyRight 6 <span class="nottickedoff">'0'</span> (T.pack (show (n `mod` 1000000)))</span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">   92 </span><span class="spaces">  </span><span class="istickedoff">let expiry = addUTCTime (_pc_codeExpiry (_ps_config st)) now</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">atomically $ modifyTVar' (_ps_codes st) (Map.insert codeText expiry)</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">pure (mkPairingCode codeText)</span></span>
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>-- | Attempt to pair using a code. Returns a bearer token on success.
+<span class="lineno">   97 </span>-- Tracks per-client attempts and enforces lockout after too many failures.
+<span class="lineno">   98 </span>attemptPair :: PairingState -&gt; Text -&gt; PairingCode -&gt; IO (Either PairingError BearerToken)
+<span class="lineno">   99 </span><span class="decl"><span class="istickedoff">attemptPair st clientId code = do</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">withPairingCode code $ \codeText -&gt; do</span>
+<span class="lineno">  102 </span><span class="spaces">    </span><span class="istickedoff">let config = _ps_config st</span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">result &lt;- atomically $ do</span>
+<span class="lineno">  104 </span><span class="spaces">      </span><span class="istickedoff">attempts &lt;- readTVar (_ps_attempts st)</span>
+<span class="lineno">  105 </span><span class="spaces">      </span><span class="istickedoff">case Map.lookup clientId attempts of</span>
+<span class="lineno">  106 </span><span class="spaces">        </span><span class="istickedoff">Just info</span>
+<span class="lineno">  107 </span><span class="spaces">          </span><span class="istickedoff">| _ai_count info &gt;= _pc_maxAttempts config</span>
+<span class="lineno">  108 </span><span class="spaces">          </span><span class="istickedoff">, <span class="tickonlytrue">diffUTCTime now (_ai_lastAttempt info) &lt; _pc_lockoutDuration config</span></span>
+<span class="lineno">  109 </span><span class="spaces">          </span><span class="istickedoff">-&gt; pure (Left LockedOut)</span>
+<span class="lineno">  110 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  111 </span><span class="spaces">          </span><span class="istickedoff">codes &lt;- readTVar (_ps_codes st)</span>
+<span class="lineno">  112 </span><span class="spaces">          </span><span class="istickedoff">case Map.lookup codeText codes of</span>
+<span class="lineno">  113 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  114 </span><span class="spaces">              </span><span class="istickedoff">bumpAttempts st clientId now</span>
+<span class="lineno">  115 </span><span class="spaces">              </span><span class="istickedoff">pure (Left InvalidCode)</span>
+<span class="lineno">  116 </span><span class="spaces">            </span><span class="istickedoff">Just expiry</span>
+<span class="lineno">  117 </span><span class="spaces">              </span><span class="istickedoff">| <span class="tickonlyfalse">now &gt; expiry</span> -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  118 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">modifyTVar' (_ps_codes st) (Map.delete codeText)</span></span>
+<span class="lineno">  119 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">bumpAttempts st clientId now</span></span>
+<span class="lineno">  120 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">pure (Left CodeExpired)</span></span>
+<span class="lineno">  121 </span><span class="spaces">              </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; do</span>
+<span class="lineno">  122 </span><span class="spaces">                  </span><span class="istickedoff">modifyTVar' (_ps_codes st) (Map.delete codeText)</span>
+<span class="lineno">  123 </span><span class="spaces">                  </span><span class="istickedoff">modifyTVar' (_ps_attempts st) (Map.delete clientId)</span>
+<span class="lineno">  124 </span><span class="spaces">                  </span><span class="istickedoff">pure (Right ())</span>
+<span class="lineno">  125 </span><span class="spaces">    </span><span class="istickedoff">case result of</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">Left err -&gt; pure (Left err)</span>
+<span class="lineno">  127 </span><span class="spaces">      </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  128 </span><span class="spaces">        </span><span class="istickedoff">tokenBytes &lt;- CR.getRandomBytes (_pc_tokenBytes config)</span>
+<span class="lineno">  129 </span><span class="spaces">        </span><span class="istickedoff">let tokenHash = sha256Hash tokenBytes</span>
+<span class="lineno">  130 </span><span class="spaces">        </span><span class="istickedoff">atomically $ modifyTVar' (_ps_tokens st) (Set.insert tokenHash)</span>
+<span class="lineno">  131 </span><span class="spaces">        </span><span class="istickedoff">pure (Right (mkBearerToken tokenBytes))</span></span>
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- | Verify a bearer token against stored hashes. Constant-time comparison.
+<span class="lineno">  134 </span>verifyToken :: PairingState -&gt; BearerToken -&gt; IO Bool
+<span class="lineno">  135 </span><span class="decl"><span class="istickedoff">verifyToken st token =</span>
+<span class="lineno">  136 </span><span class="spaces">  </span><span class="istickedoff">withBearerToken token $ \tokenBytes -&gt; do</span>
+<span class="lineno">  137 </span><span class="spaces">    </span><span class="istickedoff">let tokenHash = sha256Hash tokenBytes</span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">hashes &lt;- readTVarIO (_ps_tokens st)</span>
+<span class="lineno">  139 </span><span class="spaces">    </span><span class="istickedoff">pure (Set.member tokenHash hashes)</span></span>
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>-- | Revoke a bearer token.
+<span class="lineno">  142 </span>revokeToken :: PairingState -&gt; BearerToken -&gt; IO ()
+<span class="lineno">  143 </span><span class="decl"><span class="istickedoff">revokeToken st token =</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">withBearerToken token $ \tokenBytes -&gt; do</span>
+<span class="lineno">  145 </span><span class="spaces">    </span><span class="istickedoff">let tokenHash = sha256Hash tokenBytes</span>
+<span class="lineno">  146 </span><span class="spaces">    </span><span class="istickedoff">atomically $ modifyTVar' (_ps_tokens st) (Set.delete tokenHash)</span></span>
+<span class="lineno">  147 </span>
+<span class="lineno">  148 </span>-- Internal: bump attempt counter for a client.
+<span class="lineno">  149 </span>bumpAttempts :: PairingState -&gt; Text -&gt; UTCTime -&gt; STM ()
+<span class="lineno">  150 </span><span class="decl"><span class="istickedoff">bumpAttempts st clientId now =</span>
+<span class="lineno">  151 </span><span class="spaces">  </span><span class="istickedoff">modifyTVar' (_ps_attempts st) $ Map.alter bump clientId</span>
+<span class="lineno">  152 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="istickedoff">bump Nothing = Just (AttemptInfo 1 <span class="nottickedoff">now</span>)</span>
+<span class="lineno">  154 </span><span class="spaces">    </span><span class="istickedoff">bump (Just info) = Just info { _ai_count = _ai_count info + 1, _ai_lastAttempt = now }</span></span>
+
+</pre>
+</body>
+</html>
