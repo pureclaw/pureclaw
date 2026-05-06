@@ -179,13 +179,13 @@ export function ChatArea({
               boxShadow: '0 0 0 2px rgba(124,108,246,0.12)',
             }}
           >
-            <span style={{ color: 'var(--text-faint)' }}>Respond to {selectedAgent.name}{'\u2026'}</span>
             <span
-              className="inline-block ml-0.5"
+              className="inline-block mr-0.5"
               style={{ color: 'var(--accent-primary)', animation: 'blink var(--blink-duration) step-end infinite' }}
             >
               |
             </span>
+            <span style={{ color: 'var(--text-faint)' }}>Respond to {selectedAgent.name}{'\u2026'}</span>
           </div>
           <button className="btn btn-primary px-4 py-3 rounded-lg text-sm font-medium flex items-center gap-2">
             Send <span className="kbd">{'\u2318\u21B5'}</span>
