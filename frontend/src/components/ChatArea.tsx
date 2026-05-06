@@ -215,15 +215,14 @@ export function ChatArea({
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             rows={1}
-            disabled={sending}
           />
           <button
             className="btn btn-primary px-4 py-3 rounded-lg text-sm font-medium flex items-center gap-2"
             onClick={handleSend}
-            disabled={!input.trim() || sending || !onSend}
-            style={{ opacity: (!input.trim() || sending || !onSend) ? 0.5 : 1 }}
+            disabled={!input.trim() || !onSend}
+            style={{ opacity: (!input.trim() || !onSend) ? 0.5 : 1 }}
           >
-            {sending ? 'Sending\u2026' : <>Send <span className="kbd">{'\u2318\u21B5'}</span></>}
+            Send <span className="kbd">{'\u2318\u21B5'}</span>
           </button>
         </div>
       </div>

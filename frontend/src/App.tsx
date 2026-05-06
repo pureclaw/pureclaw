@@ -53,36 +53,37 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
             blocks: [{ collapsedText: sysPrompt }],
           })
         }
-        // Extract user messages
+        // Extract only the LAST message from the request — it's the new
+        // one being sent. Earlier messages in the array are conversation
+        // history already represented by previous transcript entries.
         const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; input?: unknown }> }> | undefined
-        if (msgs) {
-          for (const msg of msgs) {
-            const textParts = extractTextFromContent(msg.content)
-            const toolCalls = extractToolCalls(msg.content)
-            if (msg.role === 'user') {
-              if (textParts) {
-                messages.push({
-                  id: e.id + '-user-' + messages.length,
-                  agentName: 'You',
-                  agentStatus: 'completed',
-                  timestamp: ts,
-                  blocks: [{ text: textParts }],
-                  meta: parsed.model as string | undefined,
-                })
-              }
-            } else if (msg.role === 'assistant') {
-              const blocks: import('./types').MessageContent[] = []
-              if (textParts) blocks.push({ text: textParts })
-              for (const tc of toolCalls) blocks.push({ text: tc })
-              if (blocks.length > 0) {
-                messages.push({
-                  id: e.id + '-asst-' + messages.length,
-                  agentName: e.model ?? 'Assistant',
-                  agentStatus: 'completed',
-                  timestamp: ts,
-                  blocks,
-                })
-              }
+        if (msgs && msgs.length > 0) {
+          const msg = msgs[msgs.length - 1]!
+          const textParts = extractTextFromContent(msg.content)
+          const toolCalls = extractToolCalls(msg.content)
+          if (msg.role === 'user') {
+            if (textParts) {
+              messages.push({
+                id: e.id + '-user',
+                agentName: 'You',
+                agentStatus: 'completed',
+                timestamp: ts,
+                blocks: [{ text: textParts }],
+                meta: parsed.model as string | undefined,
+              })
+            }
+          } else if (msg.role === 'assistant') {
+            const blocks: import('./types').MessageContent[] = []
+            if (textParts) blocks.push({ text: textParts })
+            for (const tc of toolCalls) blocks.push({ text: tc })
+            if (blocks.length > 0) {
+              messages.push({
+                id: e.id + '-asst',
+                agentName: e.model ?? 'Assistant',
+                agentStatus: 'completed',
+                timestamp: ts,
+                blocks,
+              })
             }
           }
         }
@@ -169,7 +170,44 @@ export default function App() {
   const currentSessionId = sessionIdFromSelection(selectedId)
   const { entries, loading, refresh } = useTranscript(currentSessionId)
   const { send, sending } = useSendMessage(currentSessionId, refresh)
-  const messages = useMemo(() => transcriptToMessages(entries), [entries])
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null)
+  const transcriptMessages = useMemo(() => transcriptToMessages(entries), [entries])
+
+  // Combine transcript messages with optimistic pending message + thinking indicator
+  const messages = useMemo(() => {
+    if (!pendingMessage) return transcriptMessages
+    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    return [
+      ...transcriptMessages,
+      {
+        id: 'pending-user',
+        agentName: 'You',
+        agentStatus: 'completed' as const,
+        timestamp: now,
+        blocks: [{ text: pendingMessage }],
+      },
+      {
+        id: 'pending-thinking',
+        agentName: 'Assistant',
+        agentStatus: 'thinking' as const,
+        timestamp: now,
+        blocks: [],
+        isGenerating: true,
+      },
+    ]
+  }, [transcriptMessages, pendingMessage])
+
+  // Clear pending message when transcript refreshes with new entries
+  useEffect(() => {
+    if (pendingMessage && entries.length > 0) {
+      setPendingMessage(null)
+    }
+  }, [entries, pendingMessage])
+
+  const handleSend = useCallback((message: string) => {
+    setPendingMessage(message)
+    send(message)
+  }, [send])
 
   // Sync state from browser back/forward navigation
   useEffect(() => {
@@ -205,7 +243,7 @@ export default function App() {
           selectedAgent={selectedAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
           messages={messages}
           loading={loading}
-          onSend={currentSessionId ? send : undefined}
+          onSend={currentSessionId ? handleSend : undefined}
           sending={sending}
         />
       </div>
