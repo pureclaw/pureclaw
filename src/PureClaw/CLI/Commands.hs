@@ -12,8 +12,9 @@ module PureClaw.CLI.Commands
   , buildPolicy
   ) where
 
+import Control.Concurrent (forkIO)
 import Control.Exception (IOException, bracket_, try)
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -51,6 +52,7 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
+import PureClaw.Frontend.Server
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -569,7 +571,7 @@ runChat opts = do
         harnessRef  <- newIORef discoveredHarnesses
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
-        modelRef    <- newIORef model
+        modelRef    <- newIORef (Just model)
         -- Runtime validation on resume: if the session's recorded
         -- runtime was an RTHarness, validate that the harness is still
         -- running (it may have been discovered by 'discoverHarnesses'
