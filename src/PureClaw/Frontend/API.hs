@@ -13,7 +13,8 @@ module PureClaw.Frontend.API
 import Control.Exception (SomeException, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as Aeson
-import Data.Aeson (ToJSON (..), object, (.=))
+import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:))
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -27,22 +28,35 @@ import System.Directory (doesFileExist, getFileSize)
 import System.FilePath ((</>))
 
 import PureClaw.Agent.AgentDef (unAgentName)
-import PureClaw.Core.Types (unSessionId)
+import PureClaw.Agent.Context
+import PureClaw.Core.Types (ModelId (..), unModelId, unSessionId)
 import PureClaw.Handles.Harness
+import PureClaw.Handles.Log
 import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
-import PureClaw.Session.Handle (listSessions)
+import PureClaw.Providers.Class
+import PureClaw.Session.Handle (listSessions, loadRecentMessages)
 import PureClaw.Session.Types
+import PureClaw.Handles.Transcript
+import PureClaw.Transcript.Provider
 import PureClaw.Transcript.Types
 
 -- | Runtime environment for the frontend API.
 data FrontendEnv = FrontendEnv
-  { _fe_harnesses   :: IORef (Map.Map Text HarnessHandle)
+  { _fe_harnesses    :: IORef (Map.Map Text HarnessHandle)
     -- ^ Live harness handles from AgentEnv.
-  , _fe_sessionsDir :: FilePath
+  , _fe_sessionsDir  :: FilePath
     -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
-  , _fe_recentLimit :: Int
+  , _fe_recentLimit  :: Int
     -- ^ Max number of recent sessions to return.
+  , _fe_provider     :: IORef (Maybe SomeProvider)
+    -- ^ Shared provider ref from AgentEnv.
+  , _fe_model        :: IORef (Maybe ModelId)
+    -- ^ Shared model ref from AgentEnv.
+  , _fe_systemPrompt :: Maybe Text
+    -- ^ System prompt for completions.
+  , _fe_logger       :: LogHandle
+    -- ^ Logger for API operations.
   }
 
 -- | Activity state of a harness, derived from tmux screen capture.
@@ -101,6 +115,8 @@ apiApp env req respond = do
     ("GET", ["api", "sessions", "recent"])   -> handleRecentSessions env respond
     ("GET", ["api", "sessions", sid, "transcript"]) ->
       handleTranscript env sid respond
+    ("POST", ["api", "sessions", sid, "send"]) ->
+      handleSend env sid req respond
     _                                        -> respondNotFound respond
 
 handleHarnesses :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -231,6 +247,82 @@ readTranscriptFile path = do
   contents <- LBS.readFile path
   let linesBS = filter (not . LBS.null) (LBS.split 0x0A contents)
   pure [e | l <- linesBS, Just e <- [Aeson.decode l]]
+
+-- | Request body for sending a message.
+newtype SendRequest = SendRequest { _sr_message :: Text }
+
+instance FromJSON SendRequest where
+  parseJSON = Aeson.withObject "SendRequest" $ \o ->
+    SendRequest <$> o .: "message"
+
+-- | Send a user message to a session and get a completion.
+handleSend :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleSend env sid req respond = do
+  -- Validate session ID
+  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+    then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
+    else do
+      let sessionDir = _fe_sessionsDir env </> T.unpack sid
+          transcriptPath = sessionDir </> "transcript.jsonl"
+      exists <- doesFileExist transcriptPath
+      if not exists
+        then respond $ jsonResponse status404 (object ["error" .= ("Session not found" :: Text)])
+        else do
+          -- Parse request body
+          body <- consumeBody req
+          case Aeson.eitherDecode body of
+            Left _ ->
+              respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"message\": \"...\"}" :: Text)])
+            Right (SendRequest userText) -> do
+              mProvider <- readIORef (_fe_provider env)
+              mModel <- readIORef (_fe_model env)
+              case (mProvider, mModel) of
+                (Nothing, _) ->
+                  respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
+                (_, Nothing) ->
+                  respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
+                (Just provider, Just model) -> do
+                  result <- try @SomeException $ doCompletion env provider model userText transcriptPath
+                  case result of
+                    Left e -> do
+                      _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
+                      respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
+                    Right respText ->
+                      respond $ jsonResponse status200 (object ["response" .= respText])
+
+-- | Run a completion: load context, send to provider, record to transcript.
+doCompletion :: FrontendEnv -> SomeProvider -> ModelId -> Text -> FilePath -> IO Text
+doCompletion env provider model userText transcriptPath = do
+  -- Open a transcript handle for recording
+  th <- mkFileTranscriptHandle (_fe_logger env) transcriptPath
+  -- Load recent messages for context
+  history <- loadRecentMessages th 50 100000
+  -- Build context with system prompt and history
+  let ctx0 = foldl (flip addMessage) (emptyContext (_fe_systemPrompt env)) history
+      userMsg = textMessage User userText
+      ctx = addMessage userMsg ctx0
+      -- Wrap provider with transcript logging
+      provider' = mkTranscriptProvider th (unModelId model) provider
+      req = CompletionRequest
+        { _cr_model        = model
+        , _cr_messages     = contextMessages ctx
+        , _cr_systemPrompt = contextSystemPrompt ctx
+        , _cr_maxTokens    = Just 4096
+        , _cr_tools        = []
+        , _cr_toolChoice   = Nothing
+        }
+  resp <- complete provider' req
+  _th_flush th
+  _th_close th
+  pure (responseText resp)
+
+-- | Consume the full request body.
+consumeBody :: Request -> IO LBS.ByteString
+consumeBody req = LBS.fromChunks <$> go
+  where
+    go = do
+      chunk <- getRequestBodyChunk req
+      if BS.null chunk then pure [] else (chunk :) <$> go
 
 -- | JSON 404 response.
 respondNotFound :: (Response -> IO ResponseReceived) -> IO ResponseReceived

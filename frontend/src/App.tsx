@@ -3,7 +3,7 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { BottomBar } from './components/BottomBar'
-import { useHarnesses, useRecentSessions, useTranscript } from './hooks/useApi'
+import { useHarnesses, useRecentSessions, useTranscript, useSendMessage } from './hooks/useApi'
 import { mockStats } from './data/mockData'
 import type { Message, TranscriptEntry } from './types'
 
@@ -167,7 +167,8 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
 
   const currentSessionId = sessionIdFromSelection(selectedId)
-  const { entries, loading } = useTranscript(currentSessionId)
+  const { entries, loading, refresh } = useTranscript(currentSessionId)
+  const { send, sending } = useSendMessage(currentSessionId, refresh)
   const messages = useMemo(() => transcriptToMessages(entries), [entries])
 
   // Sync state from browser back/forward navigation
@@ -204,6 +205,8 @@ export default function App() {
           selectedAgent={selectedAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
           messages={messages}
           loading={loading}
+          onSend={currentSessionId ? send : undefined}
+          sending={sending}
         />
       </div>
       <BottomBar

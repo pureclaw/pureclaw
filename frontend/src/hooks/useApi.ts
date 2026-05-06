@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { HarnessInfo, SessionInfo, TranscriptEntry } from '../types'
 
 const POLL_INTERVAL = 3000
@@ -62,17 +62,17 @@ export function useRecentSessions() {
 export function useTranscript(sessionId: string | null) {
   const [entries, setEntries] = useState<TranscriptEntry[]>([])
   const [loading, setLoading] = useState(false)
-  const lastFetchedId = useRef<string | null>(null)
+  const [refreshCount, setRefreshCount] = useState(0)
+
+  const refresh = useCallback(() => {
+    setRefreshCount((c) => c + 1)
+  }, [])
 
   useEffect(() => {
     if (!sessionId) {
       setEntries([])
-      lastFetchedId.current = null
       return
     }
-
-    // Don't re-fetch if already loaded
-    if (sessionId === lastFetchedId.current) return
 
     let cancelled = false
     setLoading(true)
@@ -81,12 +81,38 @@ export function useTranscript(sessionId: string | null) {
       .then((data) => {
         if (cancelled) return
         setEntries(data ?? [])
-        lastFetchedId.current = sessionId
         setLoading(false)
       })
 
     return () => { cancelled = true }
-  }, [sessionId])
+  }, [sessionId, refreshCount])
 
-  return { entries, loading }
+  return { entries, loading, refresh }
+}
+
+export function useSendMessage(sessionId: string | null, onComplete: () => void) {
+  const [sending, setSending] = useState(false)
+
+  const send = useCallback(async (message: string) => {
+    if (!sessionId || sending) return
+    setSending(true)
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        console.error('Send failed:', err)
+      }
+    } catch (e) {
+      console.error('Send error:', e)
+    } finally {
+      setSending(false)
+      onComplete()
+    }
+  }, [sessionId, sending, onComplete])
+
+  return { send, sending }
 }

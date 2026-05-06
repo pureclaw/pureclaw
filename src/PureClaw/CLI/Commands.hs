@@ -651,9 +651,13 @@ runChat opts = do
         writeIORef envRef (Just env)
         -- Start the frontend server on a background thread
         let frontendEnv = FrontendEnv
-              { _fe_harnesses   = harnessRef
-              , _fe_sessionsDir = sessionsDir
-              , _fe_recentLimit = 20
+              { _fe_harnesses    = harnessRef
+              , _fe_sessionsDir  = sessionsDir
+              , _fe_recentLimit  = 20
+              , _fe_provider     = providerRef
+              , _fe_model        = modelRef
+              , _fe_systemPrompt = sysPrompt
+              , _fe_logger       = logger
               }
         void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv)
         runAgentLoopWith env reloadedMessages

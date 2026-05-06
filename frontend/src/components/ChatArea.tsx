@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import type { Agent, Message, MessageContent, CodeSpan } from '../types'
 import { StatusDot } from './StatusDot'
 
@@ -127,11 +127,37 @@ export function ChatArea({
   selectedAgent,
   messages,
   loading,
+  onSend,
+  sending,
 }: {
   selectedAgent: Agent
   messages: Message[]
   loading?: boolean
+  onSend?: (message: string) => void
+  sending?: boolean
 }) {
+  const [input, setInput] = useState('')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  const handleSend = () => {
+    const trimmed = input.trim()
+    if (!trimmed || sending || !onSend) return
+    onSend(trimmed)
+    setInput('')
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      handleSend()
+    }
+  }
   return (
     <div className="flex-1 flex flex-col min-w-0" style={{ background: 'var(--bg-base)' }}>
       {/* Chat header */}
@@ -165,30 +191,39 @@ export function ChatArea({
               <ChatMessage key={msg.id} message={msg} />
             ))
           )}
+          <div ref={messagesEndRef} />
         </div>
       </div>
 
       {/* Input area */}
       <div className="shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
         <div className="px-4 py-3 flex items-end gap-3">
-          <div
-            className="flex-1 rounded-lg px-4 py-3 text-sm"
+          <textarea
+            ref={textareaRef}
+            className="flex-1 rounded-lg px-4 py-3 text-sm resize-none"
             style={{
               background: 'var(--bg-sunken)',
               border: '1px solid var(--accent-primary)',
               boxShadow: '0 0 0 2px rgba(124,108,246,0.12)',
+              color: 'var(--text-primary)',
+              outline: 'none',
+              minHeight: '44px',
+              maxHeight: '200px',
             }}
+            placeholder={`Message ${selectedAgent.name}\u2026`}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            rows={1}
+            disabled={sending}
+          />
+          <button
+            className="btn btn-primary px-4 py-3 rounded-lg text-sm font-medium flex items-center gap-2"
+            onClick={handleSend}
+            disabled={!input.trim() || sending || !onSend}
+            style={{ opacity: (!input.trim() || sending || !onSend) ? 0.5 : 1 }}
           >
-            <span
-              className="inline-block mr-0.5"
-              style={{ color: 'var(--accent-primary)', animation: 'blink var(--blink-duration) step-end infinite' }}
-            >
-              |
-            </span>
-            <span style={{ color: 'var(--text-faint)' }}>Respond to {selectedAgent.name}{'\u2026'}</span>
-          </div>
-          <button className="btn btn-primary px-4 py-3 rounded-lg text-sm font-medium flex items-center gap-2">
-            Send <span className="kbd">{'\u2318\u21B5'}</span>
+            {sending ? 'Sending\u2026' : <>Send <span className="kbd">{'\u2318\u21B5'}</span></>}
           </button>
         </div>
       </div>
