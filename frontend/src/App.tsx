@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { BottomBar } from './components/BottomBar'
 import { useHarnesses, useRecentSessions, useTranscript, useSendMessage } from './hooks/useApi'
 import type { Message, TranscriptEntry } from './types'
 
@@ -258,21 +257,15 @@ export default function App() {
           selectedId={selectedId}
           onSelect={handleSelect}
         />
-        <div className="flex-1 flex flex-col min-w-0">
-          <ChatArea
-            selectedAgent={selectedAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
-            messages={messages}
-            loading={loading}
-            onSend={currentSessionId ? handleSend : undefined}
-            sending={sending}
-          />
-          <BottomBar
-            tokensUsed={sessionStats.tokensUsed}
-            contextWindow={0}
-            sessionStart={selectedSession?.createdAt ?? null}
-            running={sending}
-          />
-        </div>
+        <ChatArea
+          selectedAgent={selectedAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
+          messages={messages}
+          loading={loading}
+          onSend={currentSessionId ? handleSend : undefined}
+          sending={sending}
+          tokensUsed={sessionStats.tokensUsed}
+          sessionStart={selectedSession?.createdAt ?? null}
+        />
       </div>
     </>
   )

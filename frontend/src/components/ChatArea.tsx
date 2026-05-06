@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import type { Agent, Message, MessageContent, CodeSpan } from '../types'
 import { StatusDot } from './StatusDot'
+import { BottomBar } from './BottomBar'
 
 function agentNameColor(message: Message): string {
   switch (message.agentStatus) {
@@ -129,12 +130,16 @@ export function ChatArea({
   loading,
   onSend,
   sending,
+  tokensUsed,
+  sessionStart,
 }: {
   selectedAgent: Agent
   messages: Message[]
   loading?: boolean
   onSend?: (message: string) => void
   sending?: boolean
+  tokensUsed?: number
+  sessionStart?: string | null
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -226,6 +231,13 @@ export function ChatArea({
           </button>
         </div>
       </div>
+
+      <BottomBar
+        tokensUsed={tokensUsed ?? 0}
+        contextWindow={0}
+        sessionStart={sessionStart ?? null}
+        running={sending ?? false}
+      />
     </div>
   )
 }
