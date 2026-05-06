@@ -168,7 +168,7 @@ chatOptionsParser = ChatOptions
   <$> optional (strOption
       ( long "model"
      <> short 'm'
-     <> help "Model to use (default: claude-sonnet-4-20250514)"
+     <> help "Model to use (from config file, or set via /target)"
       ))
   <*> optional (strOption
       ( long "api-key"
@@ -424,7 +424,7 @@ runChat opts = do
 
   -- Resolve effective values: CLI flag > config file > default
   let effectiveProvider = fromMaybe Anthropic  (_co_provider opts <|> parseProviderMaybe (_fc_provider fileCfg))
-      effectiveModel    = fromMaybe "claude-sonnet-4-20250514" (_co_model opts <|> fmap T.unpack (_fc_model fileCfg))
+      effectiveModel    = _co_model opts <|> fmap T.unpack (_fc_model fileCfg)
       effectiveMemory   = fromMaybe NoMemory    (_co_memory opts <|> parseMemoryMaybe (_fc_memory fileCfg))
       effectiveApiKey   = _co_apiKey opts <|> fmap T.unpack (_fc_apiKey fileCfg)
       effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
@@ -442,7 +442,7 @@ runChat opts = do
     else resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
 
   -- Model
-  let model = ModelId (T.pack effectiveModel)
+  let mModel = fmap (ModelId . T.pack) effectiveModel
 
   -- Agent resolution: CLI --agent > config default_agent > Nothing.
   -- On invalid name or missing agent, log a clear error and exit non-zero.
@@ -583,7 +583,7 @@ runChat opts = do
                   , SessionTypes._sm_agent             =
                       fmap AgentDef._ad_name mAgentDef
                   , SessionTypes._sm_runtime           = SessionTypes.RTProvider
-                  , SessionTypes._sm_model             = T.pack effectiveModel
+                  , SessionTypes._sm_model             = maybe "" T.pack effectiveModel
                   , SessionTypes._sm_channel           = T.pack effectiveChannel
                   , SessionTypes._sm_createdAt         = now
                   , SessionTypes._sm_lastActive        = now
@@ -610,7 +610,7 @@ runChat opts = do
         harnessRef  <- newIORef discoveredHarnesses
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
-        modelRef    <- newIORef model
+        modelRef    <- newIORef mModel
         -- Runtime validation on resume: if the session's recorded
         -- runtime was an RTHarness, validate that the harness is still
         -- running (it may have been discovered by 'discoverHarnesses'
