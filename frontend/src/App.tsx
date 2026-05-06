@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { useHarnesses, useRecentSessions, useTranscript, useSendMessage } from './hooks/useApi'
+import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, createSession } from './hooks/useApi'
 import type { Message, TranscriptEntry } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -306,6 +306,15 @@ export default function App() {
     send(message)
   }, [send, entries.length])
 
+  const handleNewSession = useCallback(async () => {
+    const session = await createSession()
+    if (session) {
+      const newId = `session:${session.id}`
+      setSelectedId(newId)
+      window.history.pushState(null, '', pathFromSelectedId(newId))
+    }
+  }, [])
+
   // Sync state from browser back/forward navigation
   useEffect(() => {
     const onPopState = () => setSelectedId(selectedIdFromPath())
@@ -332,7 +341,7 @@ export default function App() {
 
   return (
     <>
-      <TopBar taskTitle={taskTitle} />
+      <TopBar taskTitle={taskTitle} onNewSession={handleNewSession} />
       <div className="flex flex-1 min-h-0">
         <Sidebar
           harnesses={harnesses}

@@ -116,3 +116,13 @@ export function useSendMessage(sessionId: string | null, onComplete: () => void)
 
   return { send, sending }
 }
+
+export async function createSession(): Promise<import('../types').SessionInfo | null> {
+  try {
+    const res = await fetch('/api/sessions/new', { method: 'POST' })
+    if (!res.ok) return null
+    return await res.json() as import('../types').SessionInfo
+  } catch {
+    return null
+  }
+}

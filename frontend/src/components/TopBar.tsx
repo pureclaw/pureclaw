@@ -1,6 +1,6 @@
 import logoSvg from '../../assets/logo.svg'
 
-export function TopBar({ taskTitle }: { taskTitle: string }) {
+export function TopBar({ taskTitle, onNewSession }: { taskTitle: string; onNewSession?: () => void }) {
   return (
     <div
       className="topbar-bg flex items-center px-4 gap-4 shrink-0"
@@ -24,18 +24,17 @@ export function TopBar({ taskTitle }: { taskTitle: string }) {
       <div className="flex-1" />
 
       <div className="flex items-center gap-2">
-        <button className="btn btn-ghost flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-            <rect x="2" y="2" width="3" height="8" rx="0.5" />
-            <rect x="7" y="2" width="3" height="8" rx="0.5" />
+        <button
+          className="btn btn-ghost flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium"
+          onClick={onNewSession}
+          disabled={!onNewSession}
+          style={{ opacity: onNewSession ? 1 : 0.5 }}
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <line x1="6" y1="2" x2="6" y2="10" />
+            <line x1="2" y1="6" x2="10" y2="6" />
           </svg>
-          Pause
-        </button>
-        <button className="btn btn-danger-ghost flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-            <rect x="2" y="2" width="8" height="8" rx="1" />
-          </svg>
-          Stop
+          New Session
         </button>
         <div
           className="text-xs px-2 py-1 rounded-md"

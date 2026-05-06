@@ -21,7 +21,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Time (UTCTime)
+import Data.Time (UTCTime, getCurrentTime)
 import Network.HTTP.Types
 import Network.Wai
 import System.Directory (doesFileExist, getFileSize)
@@ -35,7 +35,7 @@ import PureClaw.Handles.Log
 import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
-import PureClaw.Session.Handle (listSessions, loadRecentMessages)
+import PureClaw.Session.Handle (SessionHandle (..), listSessions, loadRecentMessages, mkSessionHandle)
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
 import PureClaw.Transcript.Provider
@@ -115,6 +115,8 @@ apiApp env req respond = do
     ("GET", ["api", "sessions", "recent"])   -> handleRecentSessions env respond
     ("GET", ["api", "sessions", sid, "transcript"]) ->
       handleTranscript env sid respond
+    ("POST", ["api", "sessions", "new"]) ->
+      handleNewSession env respond
     ("POST", ["api", "sessions", sid, "send"]) ->
       handleSend env sid req respond
     _                                        -> respondNotFound respond
@@ -247,6 +249,27 @@ readTranscriptFile path = do
   contents <- LBS.readFile path
   let linesBS = filter (not . LBS.null) (LBS.split 0x0A contents)
   pure [e | l <- linesBS, Just e <- [Aeson.decode l]]
+
+-- | Create a new empty session.
+handleNewSession :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleNewSession env respond = do
+  now <- getCurrentTime
+  mModel <- readIORef (_fe_model env)
+  let modelText = maybe "" unModelId mModel
+      sid = newSessionId Nothing now
+      meta = SessionMeta
+        { _sm_id                = sid
+        , _sm_agent             = Nothing
+        , _sm_runtime           = RTProvider
+        , _sm_model             = modelText
+        , _sm_channel           = "web"
+        , _sm_createdAt         = now
+        , _sm_lastActive        = now
+        , _sm_bootstrapConsumed = True
+        }
+  sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
+  _sh_save sh
+  respond $ jsonResponse status200 (toSessionInfo meta)
 
 -- | Request body for sending a message.
 newtype SendRequest = SendRequest { _sr_message :: Text }
