@@ -4,7 +4,6 @@ import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { BottomBar } from './components/BottomBar'
 import { useHarnesses, useRecentSessions, useTranscript, useSendMessage } from './hooks/useApi'
-import { mockStats } from './data/mockData'
 import type { Message, TranscriptEntry } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -162,6 +161,20 @@ function extractToolCalls(content: Array<{ type: string; name?: string; id?: str
     .map((b) => `Tool call: ${b.name}`)
 }
 
+function computeSessionStats(entries: TranscriptEntry[]): { tokensUsed: number } {
+  let tokensUsed = 0
+  for (const e of entries) {
+    if (e.direction !== 'response') continue
+    const parsed = tryParseJson(e.payload)
+    if (!parsed) continue
+    const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
+    if (usage) {
+      tokensUsed += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
+    }
+  }
+  return { tokensUsed }
+}
+
 export default function App() {
   const { harnesses } = useHarnesses()
   const { sessions } = useRecentSessions()
@@ -231,6 +244,10 @@ export default function App() {
 
   const taskTitle = selectedAgent?.name ?? 'PureClaw'
 
+  // Compute session stats from transcript entries
+  const sessionStats = useMemo(() => computeSessionStats(entries), [entries])
+  const selectedSession = sessions.find((s) => s.id === currentSessionId)
+
   return (
     <>
       <TopBar taskTitle={taskTitle} />
@@ -241,20 +258,22 @@ export default function App() {
           selectedId={selectedId}
           onSelect={handleSelect}
         />
-        <ChatArea
-          selectedAgent={selectedAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
-          messages={messages}
-          loading={loading}
-          onSend={currentSessionId ? handleSend : undefined}
-          sending={sending}
-        />
+        <div className="flex-1 flex flex-col min-w-0">
+          <ChatArea
+            selectedAgent={selectedAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
+            messages={messages}
+            loading={loading}
+            onSend={currentSessionId ? handleSend : undefined}
+            sending={sending}
+          />
+          <BottomBar
+            tokensUsed={sessionStats.tokensUsed}
+            contextWindow={0}
+            sessionStart={selectedSession?.createdAt ?? null}
+            running={sending}
+          />
+        </div>
       </div>
-      <BottomBar
-        {...mockStats}
-        active={harnesses.filter((h) => h.activity === 'thinking').length}
-        idle={harnesses.filter((h) => h.activity === 'idle').length}
-        done={harnesses.filter((h) => h.activity === 'stopped').length}
-      />
     </>
   )
 }
