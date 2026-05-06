@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { Agent, Message, MessageContent, CodeSpan } from '../types'
 import { StatusDot } from './StatusDot'
 
@@ -26,7 +27,39 @@ function CodeBlock({ lines }: { lines: CodeSpan[][] }) {
   )
 }
 
+function CollapsedBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const preview = text.slice(0, 120).replace(/\n/g, ' ')
+  const truncated = text.length > 120
+
+  return (
+    <div
+      className="rounded px-3 py-2 mb-2 text-xs cursor-pointer select-none"
+      style={{
+        background: 'var(--bg-sunken)',
+        border: '1px solid var(--border)',
+        color: 'var(--text-muted)',
+      }}
+      onClick={() => setExpanded(!expanded)}
+    >
+      <div className="flex items-center gap-1.5">
+        <span style={{ fontSize: 10, opacity: 0.6 }}>{expanded ? '\u25BC' : '\u25B6'}</span>
+        {expanded ? (
+          <pre className="whitespace-pre-wrap break-words" style={{ fontFamily: 'inherit', margin: 0, maxHeight: 400, overflow: 'auto' }}>
+            {text}
+          </pre>
+        ) : (
+          <span>{preview}{truncated ? '\u2026' : ''}</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function MessageBlock({ block }: { block: MessageContent }) {
+  if (block.collapsedText) {
+    return <CollapsedBlock text={block.collapsedText} />
+  }
   if (block.codeBlock) {
     return <CodeBlock lines={block.codeBlock} />
   }
@@ -49,7 +82,7 @@ function MessageBlock({ block }: { block: MessageContent }) {
     )
   }
   if (block.text) {
-    return <p className="mb-2" style={{ color: 'var(--text-primary)' }}>{block.text}</p>
+    return <p className="mb-2 whitespace-pre-wrap" style={{ color: 'var(--text-primary)' }}>{block.text}</p>
   }
   return null
 }
@@ -74,6 +107,11 @@ function ChatMessage({ message }: { message: Message }) {
         <span className="text-xs" style={{ color: 'var(--text-faint)' }}>
           {message.timestamp}
         </span>
+        {message.meta && (
+          <span className="text-xs" style={{ color: 'var(--text-faint)', opacity: 0.7 }}>
+            {message.meta}
+          </span>
+        )}
         {message.isGenerating && <TypingIndicator />}
       </div>
       <div className="text-sm" style={{ lineHeight: 'var(--leading-relaxed)' }}>
@@ -105,15 +143,14 @@ export function ChatArea({
         <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)' }}>
           {selectedAgent.name}
         </span>
-        <span style={{ color: 'var(--border)' }}>&middot;</span>
-        <span className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
-          User auth with email/password, OAuth2, sessions, rate limiting
-        </span>
-        <div className="ml-auto flex items-center gap-4 text-xs" style={{ color: 'var(--text-faint)' }}>
-          <span>claude-opus-4-6</span>
-          <span style={{ color: 'var(--border)' }}>&middot;</span>
-          <span>14,208 tokens</span>
-        </div>
+        {selectedAgent.description && (
+          <>
+            <span style={{ color: 'var(--border)' }}>&middot;</span>
+            <span className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
+              {selectedAgent.description}
+            </span>
+          </>
+        )}
       </div>
 
       {/* Messages */}
@@ -142,7 +179,7 @@ export function ChatArea({
               boxShadow: '0 0 0 2px rgba(124,108,246,0.12)',
             }}
           >
-            <span style={{ color: 'var(--text-faint)' }}>Respond to {selectedAgent.name}\u2026</span>
+            <span style={{ color: 'var(--text-faint)' }}>Respond to {selectedAgent.name}{'\u2026'}</span>
             <span
               className="inline-block ml-0.5"
               style={{ color: 'var(--accent-primary)', animation: 'blink var(--blink-duration) step-end infinite' }}
@@ -151,7 +188,7 @@ export function ChatArea({
             </span>
           </div>
           <button className="btn btn-primary px-4 py-3 rounded-lg text-sm font-medium flex items-center gap-2">
-            Send <span className="kbd">\u2318\u21B5</span>
+            Send <span className="kbd">{'\u2318\u21B5'}</span>
           </button>
         </div>
       </div>

@@ -32,13 +32,133 @@ function sessionIdFromSelection(selectedId: string | null): string | null {
 
 /** Convert transcript entries to the Message format ChatArea expects. */
 function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
-  return entries.map((e) => ({
-    id: e.id,
-    agentName: e.direction === 'request' ? 'You' : (e.harness ?? e.model ?? 'Assistant'),
-    agentStatus: e.direction === 'request' ? 'completed' as const : 'completed' as const,
-    timestamp: new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-    blocks: [{ text: e.payload }],
-  }))
+  const messages: Message[] = []
+  const seenSystemPrompts = new Set<string>()
+
+  for (const e of entries) {
+    const ts = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+
+    if (e.direction === 'request') {
+      const parsed = tryParseJson(e.payload)
+      if (parsed) {
+        // Extract system prompt as a separate collapsed message (only first occurrence)
+        const sysPrompt = parsed.system_prompt as string | undefined
+        if (sysPrompt && !seenSystemPrompts.has(sysPrompt)) {
+          seenSystemPrompts.add(sysPrompt)
+          messages.push({
+            id: e.id + '-sys',
+            agentName: 'System',
+            agentStatus: 'idle',
+            timestamp: ts,
+            blocks: [{ collapsedText: sysPrompt }],
+          })
+        }
+        // Extract user messages
+        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; input?: unknown }> }> | undefined
+        if (msgs) {
+          for (const msg of msgs) {
+            const textParts = extractTextFromContent(msg.content)
+            const toolCalls = extractToolCalls(msg.content)
+            if (msg.role === 'user') {
+              if (textParts) {
+                messages.push({
+                  id: e.id + '-user-' + messages.length,
+                  agentName: 'You',
+                  agentStatus: 'completed',
+                  timestamp: ts,
+                  blocks: [{ text: textParts }],
+                  meta: parsed.model as string | undefined,
+                })
+              }
+            } else if (msg.role === 'assistant') {
+              const blocks: import('./types').MessageContent[] = []
+              if (textParts) blocks.push({ text: textParts })
+              for (const tc of toolCalls) blocks.push({ text: tc })
+              if (blocks.length > 0) {
+                messages.push({
+                  id: e.id + '-asst-' + messages.length,
+                  agentName: e.model ?? 'Assistant',
+                  agentStatus: 'completed',
+                  timestamp: ts,
+                  blocks,
+                })
+              }
+            }
+          }
+        }
+      } else {
+        // Non-JSON request (e.g. harness send)
+        messages.push({
+          id: e.id,
+          agentName: 'You',
+          agentStatus: 'completed',
+          timestamp: ts,
+          blocks: [{ text: e.payload }],
+        })
+      }
+    } else {
+      // Response
+      const parsed = tryParseJson(e.payload)
+      if (parsed) {
+        const content = parsed.content as Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> | undefined
+        const textParts = extractTextFromContent(content)
+        const toolCalls = extractToolCalls(content)
+        const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
+        const usageMeta = usage
+          ? `${usage.input_tokens ?? 0} in / ${usage.output_tokens ?? 0} out tokens`
+          : undefined
+
+        const blocks: import('./types').MessageContent[] = []
+        if (textParts) blocks.push({ text: textParts })
+        for (const tc of toolCalls) blocks.push({ text: tc })
+        if (blocks.length === 0) blocks.push({ text: '(empty response)' })
+
+        messages.push({
+          id: e.id,
+          agentName: e.model ?? e.harness ?? 'Assistant',
+          agentStatus: 'completed',
+          timestamp: ts,
+          blocks,
+          meta: usageMeta,
+        })
+      } else {
+        // Non-JSON response (e.g. harness output)
+        messages.push({
+          id: e.id,
+          agentName: e.harness ?? e.model ?? 'Assistant',
+          agentStatus: 'completed',
+          timestamp: ts,
+          blocks: [{ text: e.payload }],
+        })
+      }
+    }
+  }
+
+  return messages
+}
+
+function tryParseJson(s: string): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(s)
+    return typeof v === 'object' && v !== null ? v : null
+  } catch {
+    return null
+  }
+}
+
+function extractTextFromContent(content: Array<{ type: string; text?: string }> | undefined): string | null {
+  if (!content) return null
+  const texts = content
+    .filter((b) => b.type === 'text' && b.text)
+    .map((b) => b.text!)
+  return texts.length > 0 ? texts.join('\n') : null
+}
+
+function extractToolCalls(content: Array<{ type: string; name?: string; id?: string; input?: unknown }> | undefined): string[] {
+  if (!content) return []
+  return content
+    .filter((b) => b.type === 'tool_use' && b.name)
+    .map((b) => `Tool call: ${b.name}`)
 }
 
 export default function App() {

@@ -45,6 +45,8 @@ export interface MessageContent {
   codeBlock?: CodeSpan[][]
   listItems?: string[]
   orderedItems?: string[]
+  collapsedText?: string   // shown collapsed by default, expandable
+  rawJson?: string         // raw JSON, hidden by default, toggleable
 }
 
 export interface Message {
@@ -54,4 +56,5 @@ export interface Message {
   timestamp: string
   blocks: MessageContent[]
   isGenerating?: boolean
+  meta?: string            // e.g. model name, token usage
 }
