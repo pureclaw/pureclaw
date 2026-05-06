@@ -1,0 +1,236 @@
+@import '../design-tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Animations ──────────────────────────────────────────────────────── */
+
+@keyframes needsPulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--needs-input-glow); }
+  50% { box-shadow: 0 0 0 3px transparent; }
+}
+
+@keyframes thinkingGradient {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes typingDot {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+
+/* ── Status Dots ─────────────────────────────────────────────────────── */
+
+.dot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-sm {
+  width: var(--dot-size-sm);
+  height: var(--dot-size-sm);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-needs {
+  background: var(--needs-input);
+  animation: needsPulse var(--pulse-duration) ease-in-out infinite;
+}
+
+.dot-thinking {
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  background-size: 200% 200%;
+  animation: thinkingGradient var(--gradient-duration) ease infinite;
+}
+
+.dot-idle {
+  background: var(--text-muted);
+  opacity: 0.35;
+}
+
+.dot-completed {
+  background: var(--success);
+  opacity: 0.5;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+
+.agent-row {
+  border-left: 2px solid transparent;
+  transition: background var(--duration-fast) var(--ease-out),
+              border-color var(--duration-fast) var(--ease-out);
+  cursor: pointer;
+}
+
+.agent-row:hover:not(.selected) {
+  background: var(--surface-hover);
+}
+
+.agent-row.selected {
+  border-left-color: var(--accent-primary);
+  background: var(--bg-elevated);
+}
+
+.agent-row.shimmer {
+  background-image: linear-gradient(90deg, transparent 0%, rgba(124,108,246,0.04) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer var(--shimmer-duration) infinite;
+}
+
+.agent-row.shimmer.selected {
+  background-color: var(--bg-elevated);
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────── */
+
+.btn {
+  transition: background var(--duration-fast) ease, box-shadow var(--duration-fast) ease, transform 80ms ease;
+  cursor: pointer;
+  outline: none;
+  border: none;
+}
+
+.btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 4px rgba(124, 108, 246, 0.4);
+}
+
+.btn:active { transform: translateY(0.5px); }
+.btn-primary { background: var(--accent-primary); color: white; }
+.btn-primary:hover { background: #8B7DF7; }
+.btn-ghost { background: var(--bg-elevated); color: var(--text-muted); border: 1px solid var(--border); }
+.btn-ghost:hover { background: #252A40; color: var(--text-primary); }
+.btn-danger-ghost { background: rgba(255, 107, 107, 0.08); color: #FF6B6B; border: 1px solid rgba(255, 107, 107, 0.15); }
+.btn-danger-ghost:hover { background: rgba(255, 107, 107, 0.14); }
+
+/* ── Chat ─────────────────────────────────────────────────────────────── */
+
+.message-group {
+  animation: fadeIn var(--duration-slow) var(--ease-out) both;
+}
+
+.code-block {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 12px 16px;
+  overflow-x: auto;
+  color: var(--text-muted);
+}
+
+.code-block .kw { color: var(--accent-primary); }
+.code-block .str { color: var(--success); }
+.code-block .fn { color: var(--accent-secondary); }
+.code-block .cm { color: var(--text-faint); }
+
+/* ── Typing indicator ────────────────────────────────────────────────── */
+
+.typing-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  display: inline-block;
+  animation: typingDot 1.4s ease-in-out infinite;
+}
+
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* ── Scrollbars ──────────────────────────────────────────────────────── */
+
+.sidebar-scroll { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.sidebar-scroll::-webkit-scrollbar { width: 4px; }
+.sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
+.sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.chat-scroll { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.chat-scroll::-webkit-scrollbar { width: 6px; }
+.chat-scroll::-webkit-scrollbar-track { background: transparent; }
+.chat-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+/* ── Misc ─────────────────────────────────────────────────────────────── */
+
+.progress-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--accent-gradient);
+}
+
+.topbar-bg {
+  background: linear-gradient(135deg, rgba(124,108,246,0.08) 0%, rgba(79,142,247,0.04) 100%);
+}
+
+.pill {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  font-weight: var(--font-medium);
+  line-height: 1.5;
+}
+
+.token-count {
+  background: var(--bg-base);
+  color: var(--text-faint);
+}
+
+.inline-code {
+  font-size: var(--text-xs);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--accent-secondary);
+}
+
+.kbd {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.2);
+  color: rgba(255,255,255,0.6);
+  font-family: inherit;
+}

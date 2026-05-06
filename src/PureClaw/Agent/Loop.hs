@@ -106,20 +106,26 @@ runAgentLoopWith env initialMessages = do
                       _ch_send channel (OutgoingMessage noProviderMessage)
                       go ctx
                     Just provider -> do
-                      let userMsg = textMessage User stripped
-                          ctx' = addMessage userMsg ctx
-                      _lh_logDebug logger $
-                        "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-                      -- Wrap provider with transcript logging (session owns the transcript)
-                      th <- envTranscript env
-                      model <- readIORef (_env_model env)
-                      let provider' = mkTranscriptProvider th (unModelId model) provider
-                      handleCompletion provider' ctx'
+                      mModel <- readIORef (_env_model env)
+                      case mModel of
+                        Nothing -> do
+                          _ch_send channel (OutgoingMessage noModelMessage)
+                          go ctx
+                        Just model -> do
+                          let userMsg = textMessage User stripped
+                              ctx' = addMessage userMsg ctx
+                          _lh_logDebug logger $
+                            "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
+                          -- Wrap provider with transcript logging (session owns the transcript)
+                          th <- envTranscript env
+                          let provider' = mkTranscriptProvider th (unModelId model) provider
+                          handleCompletion provider' ctx'
           where stripped = T.strip (_im_content msg)
 
     handleCompletion provider ctx = do
-      model <- readIORef (_env_model env)
-      let modelName = unModelId model
+      mModel <- readIORef (_env_model env)
+      let model = maybe (ModelId "") id mModel
+          modelName = unModelId model
           req = CompletionRequest
             { _cr_model        = model
             , _cr_messages     = contextMessages ctx
@@ -204,4 +210,14 @@ noProviderMessage = T.intercalate "\n"
   , ""
   , "  /provider <PROVIDER>"
   , ""
+  ]
+
+-- | Message shown when user sends a chat message but no model is configured.
+noModelMessage :: Text
+noModelMessage = T.intercalate "\n"
+  [ "No model configured. Set a model with:"
+  , ""
+  , "  /target <MODEL>"
+  , ""
+  , "or add 'model = \"<model>\"' to your config file."
   ]

@@ -657,15 +657,16 @@ executeSlashCommand env CmdNew ctx = do
   pure (clearMessages ctx)
 
 executeSlashCommand env CmdStatus ctx = do
-  model <- readIORef (_env_model env)
+  mModel <- readIORef (_env_model env)
   target <- readIORef (_env_target env)
   mProvider <- readIORef (_env_provider env)
   mVault <- readIORef (_env_vault env)
   th <- envTranscript env
   transcriptPath <- _th_getPath th
   harnesses <- readIORef (_env_harnesses env)
-  let targetLine = case target of
-        TargetProvider    -> "  Target:    model: " <> unModelId model
+  let modelText = maybe "(not set)" unModelId mModel
+      targetLine = case target of
+        TargetProvider    -> "  Target:    model: " <> modelText
         TargetHarness name -> "  Target:    harness: " <> name
       providerLine = case mProvider of
         Nothing -> "  Provider:  (not configured)"
@@ -722,9 +723,9 @@ executeSlashCommand env (CmdTargetDefault (Just name)) ctx = do
 
 executeSlashCommand env (CmdTarget Nothing) ctx = do
   target <- readIORef (_env_target env)
-  model  <- readIORef (_env_model env)
+  mModel <- readIORef (_env_model env)
   let desc = case target of
-        TargetProvider    -> "model: " <> unModelId model
+        TargetProvider    -> "model: " <> maybe "(not set)" unModelId mModel
         TargetHarness name -> "harness: " <> name
   _ch_send (_env_channel env) (OutgoingMessage ("Current target: " <> desc))
   pure ctx
@@ -745,7 +746,7 @@ executeSlashCommand env (CmdTarget (Just name)) ctx = do
       if ModelId name `elem` models
         then do
           writeIORef (_env_target env) TargetProvider
-          writeIORef (_env_model env) (ModelId name)
+          writeIORef (_env_model env) (Just (ModelId name))
           pureclawDir <- getPureclawDir
           let configPath = pureclawDir </> "config.toml"
           existing <- loadFileConfig configPath
@@ -789,45 +790,50 @@ executeSlashCommand env CmdCompact ctx = do
       _ch_send (_env_channel env) (OutgoingMessage "Cannot compact: no provider configured.")
       pure ctx
     Just provider -> do
-      model <- readIORef (_env_model env)
-      (ctx', result) <- compactContext
-        provider
-        model
-        0
-        defaultKeepRecent
-        ctx
-      case result of
-        Compacted o n summaryText -> do
-          -- Record the compaction summary to the transcript so it
-          -- survives a gateway restart.  The metadata key marks this
-          -- entry as a compaction boundary; loadRecentMessages will
-          -- only replay entries from the last such boundary forward.
-          th <- envTranscript env
-          now <- Time.getCurrentTime
-          let entry = TranscriptEntry
-                { _te_id            = "compaction-" <> T.pack (show now)
-                , _te_timestamp     = now
-                , _te_harness       = Nothing
-                , _te_model         = Nothing
-                , _te_direction     = Request
-                , _te_payload       = summaryText
-                , _te_durationMs    = Nothing
-                , _te_correlationId = "compaction"
-                , _te_metadata      = Map.singleton compactionMetadataKey
-                                        (Aeson.Bool True)
-                }
-          _th_record th entry
-          _th_flush th
-          let msg = "Compacted: " <> T.pack (show o)
-                    <> " messages \x2192 " <> T.pack (show n)
-          _ch_send (_env_channel env) (OutgoingMessage msg)
-          pure ctx'
-        NotNeeded -> do
-          _ch_send (_env_channel env) (OutgoingMessage "Nothing to compact (too few messages).")
+      mModel <- readIORef (_env_model env)
+      case mModel of
+        Nothing -> do
+          _ch_send (_env_channel env) (OutgoingMessage "Cannot compact: no model configured.")
           pure ctx
-        CompactionError e -> do
-          _ch_send (_env_channel env) (OutgoingMessage ("Compaction failed: " <> e))
-          pure ctx
+        Just model -> do
+          (ctx', result) <- compactContext
+            provider
+            model
+            0
+            defaultKeepRecent
+            ctx
+          case result of
+            Compacted o n summaryText -> do
+              -- Record the compaction summary to the transcript so it
+              -- survives a gateway restart.  The metadata key marks this
+              -- entry as a compaction boundary; loadRecentMessages will
+              -- only replay entries from the last such boundary forward.
+              th <- envTranscript env
+              now <- Time.getCurrentTime
+              let entry = TranscriptEntry
+                    { _te_id            = "compaction-" <> T.pack (show now)
+                    , _te_timestamp     = now
+                    , _te_harness       = Nothing
+                    , _te_model         = Nothing
+                    , _te_direction     = Request
+                    , _te_payload       = summaryText
+                    , _te_durationMs    = Nothing
+                    , _te_correlationId = "compaction"
+                    , _te_metadata      = Map.singleton compactionMetadataKey
+                                            (Aeson.Bool True)
+                    }
+              _th_record th entry
+              _th_flush th
+              let msg = "Compacted: " <> T.pack (show o)
+                        <> " messages \x2192 " <> T.pack (show n)
+              _ch_send (_env_channel env) (OutgoingMessage msg)
+              pure ctx'
+            NotNeeded -> do
+              _ch_send (_env_channel env) (OutgoingMessage "Nothing to compact (too few messages).")
+              pure ctx
+            CompactionError e -> do
+              _ch_send (_env_channel env) (OutgoingMessage ("Compaction failed: " <> e))
+              pure ctx
 
 executeSlashCommand env (CmdProvider sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
@@ -901,10 +907,10 @@ executeProviderCommand :: AgentEnv -> VaultHandle -> ProviderSubCommand -> Conte
 executeProviderCommand env _vault ProviderList ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   mProvider <- readIORef (_env_provider env)
-  model <- readIORef (_env_model env)
+  mModel <- readIORef (_env_model env)
   let activeIndicator = case mProvider of
         Nothing -> "(not configured)"
-        Just _  -> "active, model: " <> unModelId model
+        Just _  -> "active, model: " <> maybe "(not set)" unModelId mModel
       listing = T.intercalate "\n" $
         [ "Provider: " <> activeIndicator
         , ""
@@ -1028,7 +1034,7 @@ handleOllamaConfigure env _vault ctx = do
             then mkOllamaProvider manager
             else mkOllamaProviderWithUrl manager (T.unpack baseUrl)
       writeIORef (_env_provider env) (Just (MkProvider ollamaProvider))
-      writeIORef (_env_model env) (ModelId model)
+      writeIORef (_env_model env) (Just (ModelId model))
       send $ "Ollama configured successfully. Model: " <> model <> ", URL: " <> baseUrl
       pure ctx
 
@@ -1778,7 +1784,7 @@ executeSessionCommand env sub ctx = do
     SessionInfo -> do
       activeSession <- readIORef (_env_session env)
       meta <- readIORef (_sh_meta activeSession)
-      model <- readIORef (_env_model env)
+      mModel <- readIORef (_env_model env)
       target <- readIORef (_env_target env)
       let sidLine    = "  Session: " <> unSessionId (_sm_id meta)
           agentLine  = case _sm_agent meta of
@@ -1788,7 +1794,7 @@ executeSessionCommand env sub ctx = do
             SessionTypes.RTProvider   -> "provider"
             SessionTypes.RTHarness n  -> "harness:" <> n
           targetLine = case target of
-            TargetProvider     -> "  Target:  model: " <> unModelId model
+            TargetProvider     -> "  Target:  model: " <> maybe "(not set)" unModelId mModel
             TargetHarness name -> "  Target:  harness: " <> name
           body = T.intercalate "\n"
             [ "Session info:"

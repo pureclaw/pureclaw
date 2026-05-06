@@ -5,6 +5,10 @@ module PureClaw.CLI.Commands
   , Command (..)
   , ChatOptions (..)
   , chatOptionsParser
+    -- * Serve options (exported for testing)
+  , ServeOptions (..)
+  , serveOptionsParser
+  , commandParser
     -- * Enums (exported for testing)
   , ProviderType (..)
   , MemoryBackend (..)
@@ -12,8 +16,9 @@ module PureClaw.CLI.Commands
   , buildPolicy
   ) where
 
+import Control.Concurrent (forkIO)
 import Control.Exception (IOException, bracket_, try)
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -34,6 +39,7 @@ import System.Process.Typed qualified as P
 
 import PureClaw.Auth.AnthropicOAuth
 import PureClaw.CLI.Config
+import PureClaw.Frontend.Server
 
 import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Completion
@@ -125,13 +131,44 @@ data ChatOptions = ChatOptions
   }
   deriving stock (Show, Eq)
 
+-- | Top-level CLI command.
+data Command
+  = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
+  | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
+  | CmdImport ImportOptions (Maybe FilePath)  -- ^ Import an OpenClaw state directory
+  | ServeCmd ServeOptions    -- ^ Serve the web frontend
+  deriving stock (Show, Eq)
+
+-- | Options for the @serve@ subcommand.
+data ServeOptions = ServeOptions
+  { _so_port :: Int
+  , _so_dir  :: FilePath
+  }
+  deriving stock (Show, Eq)
+
+-- | Parser for serve options.
+serveOptionsParser :: Parser ServeOptions
+serveOptionsParser = ServeOptions
+  <$> option auto
+      ( long "port"
+     <> value 8080
+     <> showDefault
+     <> help "Port to serve on"
+      )
+  <*> strOption
+      ( long "dir"
+     <> value "frontend/dist"
+     <> showDefault
+     <> help "Directory containing built frontend files"
+      )
+
 -- | Parser for chat options.
 chatOptionsParser :: Parser ChatOptions
 chatOptionsParser = ChatOptions
   <$> optional (strOption
       ( long "model"
      <> short 'm'
-     <> help "Model to use (default: claude-sonnet-4-20250514)"
+     <> help "Model to use (from config file, or set via /target)"
       ))
   <*> optional (strOption
       ( long "api-key"
@@ -224,13 +261,6 @@ memoryToText NoMemory       = "none"
 memoryToText SQLiteMemory   = "sqlite"
 memoryToText MarkdownMemory = "markdown"
 
--- | Top-level CLI command.
-data Command
-  = CmdTui ChatOptions       -- ^ Interactive terminal UI (always CLI channel)
-  | CmdGateway ChatOptions   -- ^ Gateway mode (channel from config/flags)
-  | CmdImport ImportOptions (Maybe FilePath)  -- ^ Import an OpenClaw state directory
-  deriving stock (Show, Eq)
-
 -- | Full CLI parser with subcommands.
 cliParserInfo :: ParserInfo Command
 cliParserInfo = info (commandParser <**> helper)
@@ -254,6 +284,8 @@ commandParser = subparser
         (progDesc "PureClaw Gateway"))
    <> command "import" (info (importParser <**> helper)
         (progDesc "Import an OpenClaw state directory"))
+   <> command "serve" (info (ServeCmd <$> serveOptionsParser <**> helper)
+        (progDesc "Serve the web frontend"))
     )
   <|> (CmdTui <$> chatOptionsParser)  -- default to tui when no subcommand
 
@@ -279,6 +311,15 @@ runCLI = do
     CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
     CmdGateway opts -> runChat opts
     CmdImport opts mPos -> runImport opts mPos
+    ServeCmd opts -> runServe opts
+
+-- | Run the frontend server (standalone mode, no API).
+runServe :: ServeOptions -> IO ()
+runServe opts =
+  runFrontend FrontendConfig
+    { _fsc_port      = _so_port opts
+    , _fsc_staticDir = _so_dir opts
+    } Nothing
 
 -- | Import an OpenClaw state directory.
 runImport :: ImportOptions -> Maybe FilePath -> IO ()
@@ -383,7 +424,7 @@ runChat opts = do
 
   -- Resolve effective values: CLI flag > config file > default
   let effectiveProvider = fromMaybe Anthropic  (_co_provider opts <|> parseProviderMaybe (_fc_provider fileCfg))
-      effectiveModel    = fromMaybe "claude-sonnet-4-20250514" (_co_model opts <|> fmap T.unpack (_fc_model fileCfg))
+      effectiveModel    = _co_model opts <|> fmap T.unpack (_fc_model fileCfg)
       effectiveMemory   = fromMaybe NoMemory    (_co_memory opts <|> parseMemoryMaybe (_fc_memory fileCfg))
       effectiveApiKey   = _co_apiKey opts <|> fmap T.unpack (_fc_apiKey fileCfg)
       effectiveSystem   = _co_system opts <|> fmap T.unpack (_fc_system fileCfg)
@@ -401,7 +442,7 @@ runChat opts = do
     else resolveProvider effectiveProvider effectiveApiKey vaultOpt manager
 
   -- Model
-  let model = ModelId (T.pack effectiveModel)
+  let mModel = fmap (ModelId . T.pack) effectiveModel
 
   -- Agent resolution: CLI --agent > config default_agent > Nothing.
   -- On invalid name or missing agent, log a clear error and exit non-zero.
@@ -542,7 +583,7 @@ runChat opts = do
                   , SessionTypes._sm_agent             =
                       fmap AgentDef._ad_name mAgentDef
                   , SessionTypes._sm_runtime           = SessionTypes.RTProvider
-                  , SessionTypes._sm_model             = T.pack effectiveModel
+                  , SessionTypes._sm_model             = maybe "" T.pack effectiveModel
                   , SessionTypes._sm_channel           = T.pack effectiveChannel
                   , SessionTypes._sm_createdAt         = now
                   , SessionTypes._sm_lastActive        = now
@@ -569,7 +610,7 @@ runChat opts = do
         harnessRef  <- newIORef discoveredHarnesses
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
-        modelRef    <- newIORef model
+        modelRef    <- newIORef mModel
         -- Runtime validation on resume: if the session's recorded
         -- runtime was an RTHarness, validate that the harness is still
         -- running (it may have been discovered by 'discoverHarnesses'
@@ -608,6 +649,17 @@ runChat opts = do
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
+        -- Start the frontend server on a background thread
+        let frontendEnv = FrontendEnv
+              { _fe_harnesses    = harnessRef
+              , _fe_sessionsDir  = sessionsDir
+              , _fe_recentLimit  = 20
+              , _fe_provider     = providerRef
+              , _fe_model        = modelRef
+              , _fe_systemPrompt = sysPrompt
+              , _fe_logger       = logger
+              }
+        void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv)
         runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of

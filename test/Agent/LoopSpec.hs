@@ -98,7 +98,7 @@ mkTestEnv :: Provider p => p -> ChannelHandle -> IO AgentEnv
 mkTestEnv p ch = do
   vaultRef      <- newIORef Nothing
   providerRef   <- newIORef (Just (MkProvider p))
-  modelRef      <- newIORef (ModelId "mock")
+  modelRef      <- newIORef (Just (ModelId "mock"))
   harnessRef    <- newIORef Map.empty
   targetRef     <- newIORef TargetProvider
   windowIdxRef  <- newIORef 0

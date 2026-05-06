@@ -252,7 +252,7 @@ spec = do
     let mkEnv sentRef = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-          modelRef    <- newIORef (ModelId "test")
+          modelRef    <- newIORef (Just (ModelId "test"))
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
@@ -344,7 +344,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -383,7 +383,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -419,7 +419,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -454,7 +454,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -483,7 +483,7 @@ spec = do
       combined `shouldContain` "configured successfully"
       -- Verify provider and model were hot-swapped in session
       newModel <- readIORef modelRef
-      newModel `shouldBe` ModelId "llama3"
+      newModel `shouldBe` Just (ModelId "llama3")
       mProvider <- readIORef providerRef
       case mProvider of
         Just _  -> pure ()
@@ -501,7 +501,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -539,7 +539,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -573,7 +573,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -599,7 +599,7 @@ spec = do
       _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
       -- Verify model IORef was updated
       newModel <- readIORef modelRef
-      newModel `shouldBe` ModelId "llama3"
+      newModel `shouldBe` Just (ModelId "llama3")
       -- Verify target is TargetProvider
       newTarget <- readIORef targetRef
       newTarget `shouldBe` TargetProvider
@@ -618,7 +618,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef (Map.singleton "claude-code" mkNoOpHarnessHandle)
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -647,7 +647,7 @@ spec = do
       newTarget `shouldBe` TargetHarness "claude-code"
       -- Model should be unchanged
       newModel <- readIORef modelRef
-      newModel `shouldBe` ModelId "test"
+      newModel `shouldBe` Just (ModelId "test")
       -- Verify success message
       allSent <- readIORef allSentRef
       let combined = T.unpack (T.intercalate " " allSent)
@@ -664,7 +664,7 @@ spec = do
             }
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef (Map.singleton "claude-code-0" mockHarness)
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 1
@@ -702,7 +702,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -740,7 +740,7 @@ spec = do
             }
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef (Map.singleton "cc-0" mockHarness)
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 1
@@ -773,7 +773,7 @@ spec = do
     let mkEnvNoVault sentRef = do
           vaultRef    <- newIORef Nothing
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-          modelRef    <- newIORef (ModelId "test")
+          modelRef    <- newIORef (Just (ModelId "test"))
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
@@ -822,7 +822,7 @@ spec = do
       msgsRef <- newIORef ["bad"]
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -866,7 +866,7 @@ spec = do
             }
       vaultRef    <- newIORef (Just vaultWithRealisticRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -902,7 +902,7 @@ spec = do
     let mkEnvWithVault sentRef vault = do
           vaultRef    <- newIORef (Just vault)
           providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-          modelRef    <- newIORef (ModelId "test")
+          modelRef    <- newIORef (Just (ModelId "test"))
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
@@ -931,7 +931,7 @@ spec = do
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -965,7 +965,7 @@ spec = do
       msgsRef <- newIORef ["bad"]  -- invalid choice to end quickly
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1015,7 +1015,7 @@ spec = do
             }
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1062,7 +1062,7 @@ spec = do
             }
       writeIORef vaultRef (Just vaultWithRekey)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1096,7 +1096,7 @@ spec = do
       msgsRef <- newIORef ["1"]  -- pick passphrase
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1200,7 +1200,7 @@ spec = do
       _ <- _vh_put vault "todelete" "val"
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1239,7 +1239,7 @@ spec = do
       _ <- _vh_put vault "keep" (TE.encodeUtf8 "val")
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1276,7 +1276,7 @@ spec = do
       vault <- mkMockVaultHandle
       vaultRef    <- newIORef (Just vault)
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1354,7 +1354,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1390,7 +1390,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1427,7 +1427,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1539,7 +1539,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
@@ -1577,7 +1577,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1626,7 +1626,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1666,7 +1666,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1728,7 +1728,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1767,7 +1767,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1802,7 +1802,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       sessionRef <- newIORef =<< mkNoOpSessionHandle
       let env = AgentEnv
             { _env_provider     = providerRef
@@ -1833,7 +1833,7 @@ spec = do
       sentRef <- newIORef (Nothing :: Maybe Text)
       vaultRef    <- newIORef Nothing
       providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef    <- newIORef (ModelId "test")
+      modelRef    <- newIORef (Just (ModelId "test"))
       harnessRef    <- newIORef Map.empty
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
@@ -1886,7 +1886,7 @@ spec = do
       windowIdxRef  <- newIORef 0
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-      modelRef      <- newIORef (ModelId "test")
+      modelRef      <- newIORef (Just (ModelId "test"))
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1948,7 +1948,7 @@ spec = do
     let mkAgentEnv sentRef = do
           vaultRef      <- newIORef Nothing
           providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-          modelRef      <- newIORef (ModelId "test")
+          modelRef      <- newIORef (Just (ModelId "test"))
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
@@ -2001,7 +2001,7 @@ spec = do
     let mkAgentEnv2 sentRef = do
           vaultRef      <- newIORef Nothing
           providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-          modelRef      <- newIORef (ModelId "test")
+          modelRef      <- newIORef (Just (ModelId "test"))
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
@@ -2152,7 +2152,7 @@ spec = do
     let mkSessionEnv sentRef = do
           vaultRef      <- newIORef Nothing
           providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
-          modelRef      <- newIORef (ModelId "test")
+          modelRef      <- newIORef (Just (ModelId "test"))
           harnessRef    <- newIORef Map.empty
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0

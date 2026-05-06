@@ -130,10 +130,17 @@ decodeResponse bs = eitherDecode bs >>= parseEither parseResp
       toolCalls <- msg .:? "tool_calls" .!= ([] :: [Value])
       toolBlocks <- mapM parseToolCall toolCalls
       let textBlocks = [TextBlock content | not (T.null content)]
+      -- Ollama reports usage as prompt_eval_count / eval_count
+      mPromptEval <- o .:? "prompt_eval_count"
+      mEvalCount  <- o .:? "eval_count"
+      let mUsage = case (mPromptEval, mEvalCount) of
+            (Nothing, Nothing) -> Nothing
+            (mi, mo)           -> Just (Usage (Data.Maybe.fromMaybe 0 mi)
+                                              (Data.Maybe.fromMaybe 0 mo))
       pure CompletionResponse
         { _crsp_content = textBlocks ++ toolBlocks
         , _crsp_model   = ModelId modelText
-        , _crsp_usage   = Nothing  -- Ollama doesn't report usage in chat endpoint
+        , _crsp_usage   = mUsage
         }
 
     parseToolCall :: Value -> Parser ContentBlock
