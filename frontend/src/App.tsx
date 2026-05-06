@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
@@ -171,6 +171,7 @@ export default function App() {
   const { entries, loading, refresh } = useTranscript(currentSessionId)
   const { send, sending } = useSendMessage(currentSessionId, refresh)
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
+  const entryCountAtSend = useRef(0)
   const transcriptMessages = useMemo(() => transcriptToMessages(entries), [entries])
 
   // Combine transcript messages with optimistic pending message + thinking indicator
@@ -197,17 +198,18 @@ export default function App() {
     ]
   }, [transcriptMessages, pendingMessage])
 
-  // Clear pending message when transcript refreshes with new entries
+  // Clear pending message when transcript gains new entries after the send
   useEffect(() => {
-    if (pendingMessage && entries.length > 0) {
+    if (pendingMessage && entries.length > entryCountAtSend.current) {
       setPendingMessage(null)
     }
-  }, [entries, pendingMessage])
+  }, [entries.length, pendingMessage])
 
   const handleSend = useCallback((message: string) => {
+    entryCountAtSend.current = entries.length
     setPendingMessage(message)
     send(message)
-  }, [send])
+  }, [send, entries.length])
 
   // Sync state from browser back/forward navigation
   useEffect(() => {
