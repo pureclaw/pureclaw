@@ -131,6 +131,7 @@ export function ChatArea({
   onSend,
   sending,
   tokensUsed,
+  contextWindow,
   sessionStart,
 }: {
   selectedAgent: Agent
@@ -139,6 +140,7 @@ export function ChatArea({
   onSend?: (message: string) => void
   sending?: boolean
   tokensUsed?: number
+  contextWindow?: number
   sessionStart?: string | null
 }) {
   const [input, setInput] = useState('')
@@ -234,7 +236,7 @@ export function ChatArea({
 
       <BottomBar
         tokensUsed={tokensUsed ?? 0}
-        contextWindow={0}
+        contextWindow={contextWindow ?? 0}
         sessionStart={sessionStart ?? null}
         running={sending ?? false}
       />

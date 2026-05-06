@@ -39,7 +39,9 @@ export function BottomBar({
             <ProgressBar value={tokensUsed} max={contextWindow} widthPx={80} />
             <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
               {formatTokens(tokensUsed)}{' '}
-              <span style={{ color: 'var(--text-faint)' }}>/ {formatTokens(contextWindow)}</span>
+              <span style={{ color: 'var(--text-faint)' }}>
+                / {formatTokens(contextWindow)} ({Math.round((tokensUsed / contextWindow) * 100)}%)
+              </span>
             </span>
           </>
         ) : (

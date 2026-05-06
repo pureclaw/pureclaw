@@ -160,18 +160,58 @@ function extractToolCalls(content: Array<{ type: string; name?: string; id?: str
     .map((b) => `Tool call: ${b.name}`)
 }
 
-function computeSessionStats(entries: TranscriptEntry[]): { tokensUsed: number } {
+function computeSessionStats(entries: TranscriptEntry[]): { tokensUsed: number; contextWindow: number } {
   let tokensUsed = 0
+  let lastModel: string | null = null
   for (const e of entries) {
-    if (e.direction !== 'response') continue
-    const parsed = tryParseJson(e.payload)
-    if (!parsed) continue
-    const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
-    if (usage) {
-      tokensUsed += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
+    if (e.direction === 'response') {
+      const parsed = tryParseJson(e.payload)
+      if (!parsed) continue
+      const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
+      if (usage) {
+        tokensUsed += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
+      }
+      if (parsed.model) lastModel = parsed.model as string
+    } else if (e.direction === 'request' && !lastModel) {
+      const parsed = tryParseJson(e.payload)
+      if (parsed?.model) lastModel = parsed.model as string
     }
   }
-  return { tokensUsed }
+  return { tokensUsed, contextWindow: modelContextWindow(lastModel) }
+}
+
+/** Best-effort context window lookup for common models. Returns 0 if unknown. */
+function modelContextWindow(model: string | null): number {
+  if (!model) return 0
+  const m = model.toLowerCase()
+
+  // Anthropic Claude
+  if (m.includes('claude') && m.includes('opus')) return 200000
+  if (m.includes('claude') && m.includes('sonnet')) return 200000
+  if (m.includes('claude') && m.includes('haiku')) return 200000
+
+  // OpenAI
+  if (m.includes('gpt-4o')) return 128000
+  if (m.includes('gpt-4-turbo')) return 128000
+  if (m.includes('gpt-4')) return 8192
+  if (m.includes('gpt-3.5')) return 16385
+  if (m.includes('o1') || m.includes('o3') || m.includes('o4')) return 200000
+
+  // Ollama / common open models
+  if (m.includes('llama3') || m.includes('llama-3')) return 8192
+  if (m.includes('llama4') || m.includes('llama-4')) return 10000000
+  if (m.includes('gemma3') || m.includes('gemma-3')) return 128000
+  if (m.includes('gemma4') || m.includes('gemma-4')) return 128000
+  if (m.includes('gemma2') || m.includes('gemma-2')) return 8192
+  if (m.includes('mistral')) return 32768
+  if (m.includes('mixtral')) return 32768
+  if (m.includes('qwen')) return 32768
+  if (m.includes('phi')) return 128000
+  if (m.includes('deepseek')) return 128000
+  if (m.includes('command-r')) return 128000
+  if (m.includes('codestral')) return 32768
+
+  return 0
 }
 
 export default function App() {
@@ -264,6 +304,7 @@ export default function App() {
           onSend={currentSessionId ? handleSend : undefined}
           sending={sending}
           tokensUsed={sessionStats.tokensUsed}
+          contextWindow={sessionStats.contextWindow}
           sessionStart={selectedSession?.createdAt ?? null}
         />
       </div>
