@@ -335,7 +335,7 @@ export function ChatArea({
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto chat-scroll px-5 py-6">
-        <div className="flex flex-col gap-5" style={{ maxWidth: 'var(--chat-max-width)', width: '100%', margin: '0 auto' }}>
+        <div className="flex flex-col gap-5">
           {loading ? (
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>Loading transcript...</div>
           ) : messages.length === 0 && onSend && agents && agents.length > 0 && onAgentChange && onCustomPromptFile ? (
