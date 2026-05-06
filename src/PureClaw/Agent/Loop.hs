@@ -10,6 +10,7 @@ import Control.Exception
 import Control.Monad
 import Data.IORef
 import Data.Foldable (for_)
+import Data.Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -124,7 +125,7 @@ runAgentLoopWith env initialMessages = do
 
     handleCompletion provider ctx = do
       mModel <- readIORef (_env_model env)
-      let model = maybe (ModelId "") id mModel
+      let model = fromMaybe (ModelId "") mModel
           modelName = unModelId model
           req = CompletionRequest
             { _cr_model        = model
