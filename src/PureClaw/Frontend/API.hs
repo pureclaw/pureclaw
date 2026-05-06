@@ -8,12 +8,13 @@ module PureClaw.Frontend.API
   , HarnessActivity (..)
   , SessionInfo (..)
   , TranscriptEntryInfo (..)
+  , AgentInfo (..)
   ) where
 
 import Control.Exception (SomeException, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as Aeson
-import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:))
+import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
@@ -21,13 +22,14 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import Network.HTTP.Types
 import Network.Wai
-import System.Directory (doesFileExist, getFileSize)
-import System.FilePath ((</>))
+import System.Directory (doesFileExist, getFileSize, renameFile)
+import System.FilePath ((</>), takeDirectory)
 
-import PureClaw.Agent.AgentDef (unAgentName)
+import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
 import PureClaw.Agent.Context
 import PureClaw.Core.Types (ModelId (..), unModelId, unSessionId)
 import PureClaw.Handles.Harness
@@ -57,6 +59,10 @@ data FrontendEnv = FrontendEnv
     -- ^ System prompt for completions.
   , _fe_logger       :: LogHandle
     -- ^ Logger for API operations.
+  , _fe_agentsDir    :: FilePath
+    -- ^ On-disk agents directory (e.g. @~\/.pureclaw\/agents@).
+  , _fe_defaultAgent :: Maybe Text
+    -- ^ Default agent name from config.
   }
 
 -- | Activity state of a harness, derived from tmux screen capture.
@@ -82,6 +88,19 @@ instance ToJSON HarnessInfo where
   toJSON hi = object
     [ "name"     .= _hi_name hi
     , "activity" .= _hi_activity hi
+    ]
+
+-- | JSON-serializable agent info for the frontend.
+data AgentInfo = AgentInfo
+  { _ai_name      :: Text
+  , _ai_isDefault :: Bool
+  }
+  deriving stock (Show, Eq)
+
+instance ToJSON AgentInfo where
+  toJSON ai = object
+    [ "name"      .= _ai_name ai
+    , "isDefault" .= _ai_isDefault ai
     ]
 
 -- | JSON-serializable session info for the frontend.
@@ -116,9 +135,12 @@ apiApp env req respond = do
     ("GET", ["api", "sessions", sid, "transcript"]) ->
       handleTranscript env sid respond
     ("POST", ["api", "sessions", "new"]) ->
-      handleNewSession env respond
+      handleNewSession env req respond
     ("POST", ["api", "sessions", sid, "send"]) ->
       handleSend env sid req respond
+    ("PUT", ["api", "sessions", sid, "prompt"]) ->
+      handleSetPrompt env sid req respond
+    ("GET", ["api", "agents"])               -> handleAgents env respond
     _                                        -> respondNotFound respond
 
 handleHarnesses :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -250,16 +272,47 @@ readTranscriptFile path = do
   let linesBS = filter (not . LBS.null) (LBS.split 0x0A contents)
   pure [e | l <- linesBS, Just e <- [Aeson.decode l]]
 
+-- | List available agents.
+handleAgents :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleAgents env respond = do
+  defs <- discoverAgents (_fe_logger env) (_fe_agentsDir env)
+  let infos = map toAgentInfo defs
+  respond $ jsonResponse status200 infos
+  where
+    toAgentInfo def =
+      let name = unAgentName (_ad_name def)
+      in AgentInfo
+        { _ai_name      = name
+        , _ai_isDefault = _fe_defaultAgent env == Just name
+        }
+
+-- | Request body for creating a new session.
+data NewSessionRequest = NewSessionRequest
+  { _nsr_agent        :: Maybe Text
+  , _nsr_customPrompt :: Maybe Text
+  }
+
+instance FromJSON NewSessionRequest where
+  parseJSON = Aeson.withObject "NewSessionRequest" $ \o ->
+    NewSessionRequest <$> o .:? "agent" <*> o .:? "customPrompt"
+
 -- | Create a new empty session.
-handleNewSession :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-handleNewSession env respond = do
+handleNewSession :: FrontendEnv -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleNewSession env req respond = do
+  body <- consumeBody req
+  let parsed = case Aeson.eitherDecode body of
+        Right r -> r
+        Left _  -> NewSessionRequest Nothing Nothing
+      mAgentText = _nsr_agent parsed
+      mAgentName = mAgentText >>= either (const Nothing) Just . mkAgentName
+      mPrefix = mAgentText >>= either (const Nothing) Just . mkSessionPrefix
   now <- getCurrentTime
   mModel <- readIORef (_fe_model env)
   let modelText = maybe "" unModelId mModel
-      sid = newSessionId Nothing now
+      sid = newSessionId mPrefix now
       meta = SessionMeta
         { _sm_id                = sid
-        , _sm_agent             = Nothing
+        , _sm_agent             = mAgentName
         , _sm_runtime           = RTProvider
         , _sm_model             = modelText
         , _sm_channel           = "web"
@@ -268,8 +321,48 @@ handleNewSession env respond = do
         , _sm_bootstrapConsumed = True
         }
   sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
+  -- Write custom prompt file if provided
+  case _nsr_customPrompt parsed of
+    Just prompt | not (T.null (T.strip prompt)) ->
+      TIO.writeFile (_sh_dir sh </> "custom-prompt.md") prompt
+    _ -> pure ()
   _sh_save sh
   respond $ jsonResponse status200 (toSessionInfo meta)
+
+-- | Set or replace the custom prompt for a session, optionally updating
+-- the agent name in @session.json@.
+handleSetPrompt :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleSetPrompt env sid req respond = do
+  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+    then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
+    else do
+      let sessionDir = _fe_sessionsDir env </> T.unpack sid
+          promptPath = sessionDir </> "custom-prompt.md"
+          metaPath   = sessionDir </> "session.json"
+      body <- consumeBody req
+      case Aeson.eitherDecode body of
+        Left _ ->
+          respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"prompt\": \"...\"}" :: Text)])
+        Right obj -> case Map.lookup ("prompt" :: Text) (obj :: Map.Map Text Text) of
+          Nothing ->
+            respond $ jsonResponse status400 (object ["error" .= ("Missing 'prompt' field" :: Text)])
+          Just prompt -> do
+            TIO.writeFile promptPath prompt
+            -- Update agent name in session metadata if a name was provided
+            let mName = Map.lookup "name" obj
+            case mName of
+              Just name | not (T.null name) -> do
+                raw <- LBS.readFile metaPath
+                case Aeson.eitherDecode' raw of
+                  Right meta -> do
+                    let agentName = either (const Nothing) Just (mkAgentName name)
+                        updated = (meta :: SessionMeta) { _sm_agent = agentName }
+                        tmpP = metaPath <> ".tmp"
+                    LBS.writeFile tmpP (Aeson.encode updated)
+                    renameFile tmpP metaPath
+                  Left _ -> pure ()
+              _ -> pure ()
+            respond $ jsonResponse status200 (object ["ok" .= True])
 
 -- | Request body for sending a message.
 newtype SendRequest = SendRequest { _sr_message :: Text }
@@ -320,8 +413,15 @@ doCompletion env provider model userText transcriptPath = do
   th <- mkFileTranscriptHandle (_fe_logger env) transcriptPath
   -- Load recent messages for context
   history <- loadRecentMessages th 50 100000
+  -- Check for per-session custom prompt, falling back to global
+  let sessionDir = takeDirectory transcriptPath
+      customPromptPath = sessionDir </> "custom-prompt.md"
+  customExists <- doesFileExist customPromptPath
+  systemPrompt <- if customExists
+    then Just <$> TIO.readFile customPromptPath
+    else pure (_fe_systemPrompt env)
   -- Build context with system prompt and history
-  let ctx0 = foldl (flip addMessage) (emptyContext (_fe_systemPrompt env)) history
+  let ctx0 = foldl (flip addMessage) (emptyContext systemPrompt) history
       userMsg = textMessage User userText
       ctx = addMessage userMsg ctx0
       -- Wrap provider with transcript logging

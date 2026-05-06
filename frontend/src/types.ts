@@ -26,6 +26,11 @@ export interface SessionInfo {
   createdAt: string
 }
 
+export interface AgentInfo {
+  name: string
+  isDefault: boolean
+}
+
 export interface TranscriptEntry {
   id: string
   timestamp: string

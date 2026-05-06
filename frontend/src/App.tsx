@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, createSession } from './hooks/useApi'
+import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt } from './hooks/useApi'
 import type { Message, TranscriptEntry } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -260,7 +260,18 @@ function modelContextWindow(model: string | null): number {
 export default function App() {
   const { harnesses } = useHarnesses()
   const { sessions } = useRecentSessions()
+  const { agents } = useAgents()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
+  const [customPromptFile, setCustomPromptFile] = useState<{ name: string; content: string } | null>(null)
+
+  // Initialize selectedAgent from default agent once agents load
+  useEffect(() => {
+    if (selectedAgent === null && agents.length > 0) {
+      const defaultAgent = agents.find((a) => a.isDefault)
+      setSelectedAgent(defaultAgent?.name ?? agents[0]?.name ?? null)
+    }
+  }, [agents, selectedAgent])
 
   const currentSessionId = sessionIdFromSelection(selectedId)
   const { entries, loading, refresh } = useTranscript(currentSessionId)
@@ -300,20 +311,28 @@ export default function App() {
     }
   }, [entries.length, pendingMessage])
 
-  const handleSend = useCallback((message: string) => {
+  const handleSend = useCallback(async (message: string) => {
+    // Upload custom prompt before the first message in the session
+    if (customPromptFile && currentSessionId && entries.length === 0) {
+      // Derive agent name from filename: "my-agent.md" → "my-agent"
+      const name = customPromptFile.name.replace(/\.[^.]+$/, '')
+      await setSessionPrompt(currentSessionId, customPromptFile.content, name)
+      setCustomPromptFile(null)
+    }
     entryCountAtSend.current = entries.length
     setPendingMessage(message)
     send(message)
-  }, [send, entries.length])
+  }, [send, entries.length, customPromptFile, currentSessionId])
 
   const handleNewSession = useCallback(async () => {
-    const session = await createSession()
+    const session = await createSession(selectedAgent || undefined, customPromptFile?.content)
     if (session) {
       const newId = `session:${session.id}`
       setSelectedId(newId)
       window.history.pushState(null, '', pathFromSelectedId(newId))
+      setCustomPromptFile(null)
     }
-  }, [])
+  }, [selectedAgent, customPromptFile])
 
   // Sync state from browser back/forward navigation
   useEffect(() => {
@@ -329,11 +348,11 @@ export default function App() {
   }, [])
 
   // Derive a display agent for the chat area from the selection
-  const selectedAgent = selectedId
+  const displayAgent = selectedId
     ? deriveAgent(selectedId, harnesses, sessions)
     : null
 
-  const taskTitle = selectedAgent?.name ?? 'PureClaw'
+  const taskTitle = displayAgent?.name ?? 'PureClaw'
 
   // Compute session stats from transcript entries
   const sessionStats = useMemo(() => computeSessionStats(entries), [entries])
@@ -350,7 +369,7 @@ export default function App() {
           onSelect={handleSelect}
         />
         <ChatArea
-          selectedAgent={selectedAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
+          selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
           messages={messages}
           loading={loading}
           onSend={currentSessionId ? handleSend : undefined}
@@ -358,6 +377,11 @@ export default function App() {
           tokensUsed={sessionStats.tokensUsed}
           contextWindow={sessionStats.contextWindow}
           sessionStart={selectedSession?.createdAt ?? null}
+          agents={agents}
+          currentAgent={selectedAgent}
+          onAgentChange={setSelectedAgent}
+          customPromptFile={customPromptFile}
+          onCustomPromptFile={setCustomPromptFile}
         />
       </div>
     </>

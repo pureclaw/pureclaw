@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { HarnessInfo, SessionInfo, TranscriptEntry } from '../types'
+import type { AgentInfo, HarnessInfo, SessionInfo, TranscriptEntry } from '../types'
 
 const POLL_INTERVAL = 3000
 
@@ -117,9 +117,43 @@ export function useSendMessage(sessionId: string | null, onComplete: () => void)
   return { send, sending }
 }
 
-export async function createSession(): Promise<import('../types').SessionInfo | null> {
+export async function setSessionPrompt(sessionId: string, prompt: string, name?: string): Promise<boolean> {
   try {
-    const res = await fetch('/api/sessions/new', { method: 'POST' })
+    const body: Record<string, string> = { prompt }
+    if (name) body.name = name
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+export function useAgents() {
+  const [agents, setAgents] = useState<AgentInfo[]>([])
+
+  useEffect(() => {
+    fetchJson<AgentInfo[]>('/api/agents').then((data) => {
+      if (data) setAgents(data)
+    })
+  }, [])
+
+  return { agents }
+}
+
+export async function createSession(agent?: string, customPrompt?: string): Promise<import('../types').SessionInfo | null> {
+  try {
+    const body: Record<string, string> = {}
+    if (agent) body.agent = agent
+    if (customPrompt) body.customPrompt = customPrompt
+    const res = await fetch('/api/sessions/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
     if (!res.ok) return null
     return await res.json() as import('../types').SessionInfo
   } catch {

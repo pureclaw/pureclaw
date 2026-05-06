@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react'
-import type { Agent, Message, MessageContent, CodeSpan } from '../types'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import type { Agent, AgentInfo, Message, MessageContent, CodeSpan } from '../types'
 import { StatusDot } from './StatusDot'
 import { BottomBar } from './BottomBar'
 
@@ -124,6 +124,143 @@ function ChatMessage({ message }: { message: Message }) {
   )
 }
 
+function SessionSetup({
+  agents,
+  currentAgent,
+  onAgentChange,
+  customPromptFile,
+  onCustomPromptFile,
+}: {
+  agents: AgentInfo[]
+  currentAgent: string | null
+  onAgentChange: (agent: string) => void
+  customPromptFile: { name: string; content: string } | null
+  onCustomPromptFile: (file: { name: string; content: string } | null) => void
+}) {
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleFile = useCallback((file: File) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const content = e.target?.result as string
+      onCustomPromptFile({ name: file.name, content })
+      onAgentChange('')
+    }
+    reader.readAsText(file)
+  }, [onCustomPromptFile, onAgentChange])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    const file = e.dataTransfer.files[0]
+    if (file) handleFile(file)
+  }, [handleFile])
+
+  return (
+    <div className="flex flex-col items-center gap-6 py-8" style={{ maxWidth: 420, margin: '0 auto', width: '100%' }}>
+      <div className="text-center">
+        <div className="text-sm font-semibold mb-1" style={{ color: 'var(--text-primary)' }}>
+          Session setup
+        </div>
+        <div className="text-xs" style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>
+          Choose an agent for this session. The agent definition is injected as the system prompt
+          at the start of the conversation and cannot be changed after the first message.
+        </div>
+      </div>
+
+      {agents.length > 0 && (
+        <div className="w-full" style={{ opacity: customPromptFile ? 0.4 : 1, transition: 'opacity 0.15s' }}>
+          <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>
+            Agent
+          </label>
+          <select
+            className="w-full text-sm rounded-md px-3 py-2"
+            style={{
+              background: 'var(--bg-elevated)',
+              color: currentAgent ? 'var(--text-primary)' : 'var(--text-muted)',
+              border: '1px solid var(--border)',
+              outline: 'none',
+              cursor: customPromptFile ? 'default' : 'pointer',
+            }}
+            value={currentAgent ?? ''}
+            disabled={!!customPromptFile}
+            onChange={(e) => {
+              onAgentChange(e.target.value)
+              if (e.target.value) onCustomPromptFile(null)
+            }}
+          >
+            <option value="">None</option>
+            {agents.map((a) => (
+              <option key={a.name} value={a.name}>
+                {a.name}{a.isDefault ? ' (default)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 w-full" style={{ color: 'var(--text-faint)' }}>
+        <div className="flex-1" style={{ borderTop: '1px solid var(--border)' }} />
+        <span className="text-xs">or</span>
+        <div className="flex-1" style={{ borderTop: '1px solid var(--border)' }} />
+      </div>
+
+      <div className="w-full">
+        <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-muted)' }}>
+          Use a one-off agent file
+        </label>
+        <div
+          className="rounded-md px-4 py-5 text-center cursor-pointer transition-colors"
+          style={{
+            border: `2px dashed ${dragOver ? 'var(--accent-primary)' : 'var(--border)'}`,
+            background: dragOver ? 'rgba(124,108,246,0.06)' : 'var(--bg-sunken)',
+            color: 'var(--text-muted)',
+          }}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".md,.txt,.toml"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) handleFile(file)
+            }}
+          />
+          {customPromptFile ? (
+            <div className="flex items-center justify-center gap-2">
+              <span className="text-xs font-medium" style={{ color: 'var(--accent-primary)' }}>
+                {customPromptFile.name}
+              </span>
+              <button
+                className="text-xs px-1.5 py-0.5 rounded"
+                style={{ color: 'var(--text-faint)', background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onCustomPromptFile(null)
+                  const def = agents.find((a) => a.isDefault)
+                  onAgentChange(def?.name ?? agents[0]?.name ?? '')
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          ) : (
+            <div className="text-xs">
+              Drop a <code>.md</code> or <code>.txt</code> file here to use as the system prompt
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function ChatArea({
   selectedAgent,
   messages,
@@ -133,6 +270,11 @@ export function ChatArea({
   tokensUsed,
   contextWindow,
   sessionStart,
+  agents,
+  currentAgent,
+  onAgentChange,
+  customPromptFile,
+  onCustomPromptFile,
 }: {
   selectedAgent: Agent
   messages: Message[]
@@ -142,6 +284,11 @@ export function ChatArea({
   tokensUsed?: number
   contextWindow?: number
   sessionStart?: string | null
+  agents?: AgentInfo[]
+  currentAgent?: string | null
+  onAgentChange?: (agent: string) => void
+  customPromptFile?: { name: string; content: string } | null
+  onCustomPromptFile?: (file: { name: string; content: string } | null) => void
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -191,6 +338,14 @@ export function ChatArea({
         <div className="flex flex-col gap-5" style={{ maxWidth: 'var(--chat-max-width)', width: '100%', margin: '0 auto' }}>
           {loading ? (
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>Loading transcript...</div>
+          ) : messages.length === 0 && onSend && agents && agents.length > 0 && onAgentChange && onCustomPromptFile ? (
+            <SessionSetup
+              agents={agents}
+              currentAgent={currentAgent ?? null}
+              onAgentChange={onAgentChange}
+              customPromptFile={customPromptFile ?? null}
+              onCustomPromptFile={onCustomPromptFile}
+            />
           ) : messages.length === 0 ? (
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>No messages yet. Select a session to view its transcript.</div>
           ) : (
