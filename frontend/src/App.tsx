@@ -161,23 +161,66 @@ function extractToolCalls(content: Array<{ type: string; name?: string; id?: str
 }
 
 function computeSessionStats(entries: TranscriptEntry[]): { tokensUsed: number; contextWindow: number } {
-  let tokensUsed = 0
+  let realTokens = 0
+  let hasRealUsage = false
   let lastModel: string | null = null
+
+  // The most useful token metric is the last request's input_tokens
+  // (= full context size) + cumulative output_tokens across all responses.
+  // When real usage data isn't available, estimate from payload text.
+  let lastInputTokens = 0
+  let totalOutputTokens = 0
+  let estimatedTokens = 0
+
   for (const e of entries) {
-    if (e.direction === 'response') {
-      const parsed = tryParseJson(e.payload)
-      if (!parsed) continue
-      const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
-      if (usage) {
-        tokensUsed += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
-      }
+    const parsed = tryParseJson(e.payload)
+    if (!parsed) {
+      // Non-JSON payload — estimate from raw text
+      estimatedTokens += Math.ceil(e.payload.length / 4)
+      continue
+    }
+
+    if (e.direction === 'request') {
       if (parsed.model) lastModel = parsed.model as string
-    } else if (e.direction === 'request' && !lastModel) {
-      const parsed = tryParseJson(e.payload)
-      if (parsed?.model) lastModel = parsed.model as string
+    } else if (e.direction === 'response') {
+      if (parsed.model) lastModel = parsed.model as string
+      const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
+      if (usage && (usage.input_tokens != null || usage.output_tokens != null)) {
+        hasRealUsage = true
+        lastInputTokens = usage.input_tokens ?? lastInputTokens
+        totalOutputTokens += usage.output_tokens ?? 0
+      } else {
+        // Estimate output tokens from response text content
+        const content = parsed.content as Array<{ type: string; text?: string }> | undefined
+        if (content) {
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              estimatedTokens += Math.ceil(block.text.length / 4)
+            }
+          }
+        }
+      }
     }
   }
-  return { tokensUsed, contextWindow: modelContextWindow(lastModel) }
+
+  if (hasRealUsage) {
+    // last input_tokens reflects total context size, plus all output tokens
+    realTokens = lastInputTokens + totalOutputTokens
+    return { tokensUsed: realTokens, contextWindow: modelContextWindow(lastModel) }
+  }
+
+  // Fallback: estimate from all payload text (~4 chars per token)
+  // For requests, the last one's messages array size is the best proxy
+  // for current context usage
+  let lastRequestTextLen = 0
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]!.direction === 'request') {
+      lastRequestTextLen = entries[i]!.payload.length
+      break
+    }
+  }
+  const estimatedContext = Math.ceil(lastRequestTextLen / 4)
+  return { tokensUsed: estimatedContext + estimatedTokens, contextWindow: modelContextWindow(lastModel) }
 }
 
 /** Best-effort context window lookup for common models. Returns 0 if unknown. */
