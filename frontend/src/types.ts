@@ -8,6 +8,33 @@ export interface Agent {
   description?: string
 }
 
+// API types matching the Haskell backend
+
+export type HarnessActivity = 'thinking' | 'idle' | 'stopped'
+
+export interface HarnessInfo {
+  name: string
+  activity: HarnessActivity
+}
+
+export interface SessionInfo {
+  id: string
+  agent: string | null
+  runtime: string
+  model: string
+  lastActive: string
+  createdAt: string
+}
+
+export interface TranscriptEntry {
+  id: string
+  timestamp: string
+  direction: 'request' | 'response'
+  payload: string
+  harness: string | null
+  model: string | null
+}
+
 export interface CodeSpan {
   type: 'kw' | 'str' | 'fn' | 'cm' | 'text'
   text: string

@@ -118,6 +118,7 @@ library
     PureClaw.Scheduler.Cron
     PureClaw.Scheduler.Heartbeat
     -- Frontend
+    PureClaw.Frontend.API
     PureClaw.Frontend.Server
     -- Transcript
     PureClaw.Transcript

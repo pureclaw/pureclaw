@@ -4,6 +4,8 @@ module PureClaw.Frontend.Server
     -- * Configuration
   , FrontendConfig (..)
   , defaultFrontendConfig
+    -- * Re-export environment
+  , FrontendEnv (..)
   ) where
 
 import Data.ByteString qualified as BS
@@ -14,6 +16,8 @@ import Network.Wai
 import Network.Wai.Handler.Warp qualified as Warp
 import System.Directory (doesFileExist)
 import System.FilePath ((</>), takeExtension)
+
+import PureClaw.Frontend.API
 
 -- | Frontend server configuration.
 data FrontendConfig = FrontendConfig
@@ -29,13 +33,26 @@ defaultFrontendConfig = FrontendConfig
   , _fsc_staticDir = "frontend/dist"
   }
 
--- | Start the frontend static file server.
-runFrontend :: FrontendConfig -> IO ()
-runFrontend cfg = do
+-- | Start the frontend server with API endpoints and static file serving.
+-- API routes (@\/api\/*@) are handled by 'apiApp'; everything else
+-- falls through to the static file server with SPA fallback.
+runFrontend :: FrontendConfig -> Maybe FrontendEnv -> IO ()
+runFrontend cfg mEnv = do
   putStrLn "PureClaw frontend server"
   putStrLn $ "  Serving: " <> _fsc_staticDir cfg
   putStrLn $ "  URL:     http://localhost:" <> show (_fsc_port cfg)
-  Warp.run (_fsc_port cfg) (staticApp (_fsc_staticDir cfg))
+  Warp.run (_fsc_port cfg) (combinedApp mEnv (_fsc_staticDir cfg))
+
+-- | Combined WAI application: API routes first, then static files.
+combinedApp :: Maybe FrontendEnv -> FilePath -> Application
+combinedApp mEnv staticDir req respond =
+  case pathInfo req of
+    ("api" : _) -> case mEnv of
+      Just env -> apiApp env req respond
+      Nothing  -> respond $ responseLBS status503
+        [(hContentType, "application/json")]
+        "{\"error\":\"API not available in standalone serve mode\"}"
+    _ -> staticApp staticDir req respond
 
 -- | WAI application that serves static files with SPA fallback.
 staticApp :: FilePath -> Application

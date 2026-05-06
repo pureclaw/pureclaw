@@ -16,8 +16,9 @@ module PureClaw.CLI.Commands
   , buildPolicy
   ) where
 
+import Control.Concurrent (forkIO)
 import Control.Exception (IOException, bracket_, try)
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -312,13 +313,13 @@ runCLI = do
     CmdImport opts mPos -> runImport opts mPos
     ServeCmd opts -> runServe opts
 
--- | Run the frontend server.
+-- | Run the frontend server (standalone mode, no API).
 runServe :: ServeOptions -> IO ()
 runServe opts =
   runFrontend FrontendConfig
     { _fsc_port      = _so_port opts
     , _fsc_staticDir = _so_dir opts
-    }
+    } Nothing
 
 -- | Import an OpenClaw state directory.
 runImport :: ImportOptions -> Maybe FilePath -> IO ()
@@ -648,6 +649,13 @@ runChat opts = do
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
+        -- Start the frontend server on a background thread
+        let frontendEnv = FrontendEnv
+              { _fe_harnesses   = harnessRef
+              , _fe_sessionsDir = sessionsDir
+              , _fe_recentLimit = 20
+              }
+        void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv)
         runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of

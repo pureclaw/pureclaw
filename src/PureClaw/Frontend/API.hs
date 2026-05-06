@@ -1,0 +1,247 @@
+module PureClaw.Frontend.API
+  ( -- * WAI Application
+    apiApp
+    -- * Environment
+  , FrontendEnv (..)
+    -- * Response types (exported for testing)
+  , HarnessInfo (..)
+  , HarnessActivity (..)
+  , SessionInfo (..)
+  , TranscriptEntryInfo (..)
+  ) where
+
+import Control.Exception (SomeException, try)
+import Control.Monad (filterM)
+import Data.Aeson qualified as Aeson
+import Data.Aeson (ToJSON (..), object, (.=))
+import Data.ByteString.Lazy qualified as LBS
+import Data.IORef
+import Data.Map.Strict qualified as Map
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Data.Time (UTCTime)
+import Network.HTTP.Types
+import Network.Wai
+import System.Directory (doesFileExist, getFileSize)
+import System.FilePath ((</>))
+
+import PureClaw.Agent.AgentDef (unAgentName)
+import PureClaw.Core.Types (unSessionId)
+import PureClaw.Handles.Harness
+import PureClaw.Harness.ClaudeCode (isIdle)
+import PureClaw.Harness.Tmux (captureWindow)
+import PureClaw.Session.Handle (listSessions)
+import PureClaw.Session.Types
+import PureClaw.Transcript.Types
+
+-- | Runtime environment for the frontend API.
+data FrontendEnv = FrontendEnv
+  { _fe_harnesses   :: IORef (Map.Map Text HarnessHandle)
+    -- ^ Live harness handles from AgentEnv.
+  , _fe_sessionsDir :: FilePath
+    -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
+  , _fe_recentLimit :: Int
+    -- ^ Max number of recent sessions to return.
+  }
+
+-- | Activity state of a harness, derived from tmux screen capture.
+data HarnessActivity
+  = HarnessThinking
+  | HarnessIdle
+  | HarnessStopped
+  deriving stock (Show, Eq)
+
+instance ToJSON HarnessActivity where
+  toJSON HarnessThinking = Aeson.String "thinking"
+  toJSON HarnessIdle     = Aeson.String "idle"
+  toJSON HarnessStopped  = Aeson.String "stopped"
+
+-- | JSON-serializable harness info for the frontend.
+data HarnessInfo = HarnessInfo
+  { _hi_name     :: Text
+  , _hi_activity :: HarnessActivity
+  }
+  deriving stock (Show, Eq)
+
+instance ToJSON HarnessInfo where
+  toJSON hi = object
+    [ "name"     .= _hi_name hi
+    , "activity" .= _hi_activity hi
+    ]
+
+-- | JSON-serializable session info for the frontend.
+data SessionInfo = SessionInfo
+  { _si_id         :: Text
+  , _si_agent      :: Maybe Text
+  , _si_runtime    :: Text
+  , _si_model      :: Text
+  , _si_lastActive :: UTCTime
+  , _si_createdAt  :: UTCTime
+  }
+  deriving stock (Show, Eq)
+
+instance ToJSON SessionInfo where
+  toJSON si = object
+    [ "id"         .= _si_id si
+    , "agent"      .= _si_agent si
+    , "runtime"    .= _si_runtime si
+    , "model"      .= _si_model si
+    , "lastActive" .= _si_lastActive si
+    , "createdAt"  .= _si_createdAt si
+    ]
+
+-- | WAI application handling @\/api\/*@ routes.
+apiApp :: FrontendEnv -> Application
+apiApp env req respond = do
+  let method = requestMethod req
+      path   = pathInfo req
+  case (method, path) of
+    ("GET", ["api", "harnesses"])            -> handleHarnesses env respond
+    ("GET", ["api", "sessions", "recent"])   -> handleRecentSessions env respond
+    ("GET", ["api", "sessions", sid, "transcript"]) ->
+      handleTranscript env sid respond
+    _                                        -> respondNotFound respond
+
+handleHarnesses :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleHarnesses env respond = do
+  harnesses <- readIORef (_fe_harnesses env)
+  infos <- traverse probeHarness (Map.toList harnesses)
+  respond $ jsonResponse status200 infos
+
+-- | Probe a single harness to determine its activity.
+-- Checks process status first, then does a quick screen capture
+-- to distinguish thinking from idle.
+probeHarness :: (Text, HarnessHandle) -> IO HarnessInfo
+probeHarness (name, hh) = do
+  st <- _hh_status hh
+  activity <- case st of
+    HarnessExited _ -> pure HarnessStopped
+    HarnessRunning  -> probeActivity (_hh_session hh) name
+  pure HarnessInfo
+    { _hi_name     = name
+    , _hi_activity = activity
+    }
+
+-- | Capture the tmux window and check if the harness is idle or thinking.
+probeActivity :: Text -> Text -> IO HarnessActivity
+probeActivity tmuxSession windowName = do
+  let target = tmuxSession <> ":" <> extractWindowIdx windowName
+  result <- try @SomeException $ captureWindow target 50
+  case result of
+    Left _        -> pure HarnessIdle
+    Right capture -> do
+      let screenText = TE.decodeUtf8Lenient capture
+      pure $ if isIdle screenText then HarnessIdle else HarnessThinking
+
+-- | Extract the window index suffix from a harness name like "claude-code-0".
+extractWindowIdx :: Text -> Text
+extractWindowIdx name =
+  case T.splitOn "-" name of
+    parts | length parts >= 2 -> last parts
+    _                         -> "0"
+
+handleRecentSessions :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleRecentSessions env respond = do
+  metas <- listSessions (_fe_sessionsDir env) Nothing (_fe_recentLimit env)
+  nonEmpty <- filterM (hasTranscriptEntries (_fe_sessionsDir env)) metas
+  let infos = map toSessionInfo nonEmpty
+  respond $ jsonResponse status200 infos
+
+-- | Check whether a session has at least one transcript entry.
+hasTranscriptEntries :: FilePath -> SessionMeta -> IO Bool
+hasTranscriptEntries baseDir meta = do
+  let path = baseDir </> T.unpack (unSessionId (_sm_id meta)) </> "transcript.jsonl"
+  exists <- doesFileExist path
+  if not exists
+    then pure False
+    else do
+      size <- getFileSize path
+      pure (size > 0)
+
+toSessionInfo :: SessionMeta -> SessionInfo
+toSessionInfo m = SessionInfo
+  { _si_id         = unSessionId (_sm_id m)
+  , _si_agent      = fmap unAgentName (_sm_agent m)
+  , _si_runtime    = runtimeToText (_sm_runtime m)
+  , _si_model      = _sm_model m
+  , _si_lastActive = _sm_lastActive m
+  , _si_createdAt  = _sm_createdAt m
+  }
+
+runtimeToText :: RuntimeType -> Text
+runtimeToText RTProvider      = "provider"
+runtimeToText (RTHarness name) = "harness:" <> name
+
+-- | JSON-serializable transcript entry for the frontend.
+data TranscriptEntryInfo = TranscriptEntryInfo
+  { _tei_id        :: Text
+  , _tei_timestamp :: UTCTime
+  , _tei_direction :: Text
+  , _tei_payload   :: Text
+  , _tei_harness   :: Maybe Text
+  , _tei_model     :: Maybe Text
+  }
+  deriving stock (Show, Eq)
+
+instance ToJSON TranscriptEntryInfo where
+  toJSON e = object
+    [ "id"        .= _tei_id e
+    , "timestamp" .= _tei_timestamp e
+    , "direction" .= _tei_direction e
+    , "payload"   .= _tei_payload e
+    , "harness"   .= _tei_harness e
+    , "model"     .= _tei_model e
+    ]
+
+toTranscriptEntryInfo :: TranscriptEntry -> TranscriptEntryInfo
+toTranscriptEntryInfo e = TranscriptEntryInfo
+  { _tei_id        = _te_id e
+  , _tei_timestamp = _te_timestamp e
+  , _tei_direction = case _te_direction e of
+      Request  -> "request"
+      Response -> "response"
+  , _tei_payload   = _te_payload e
+  , _tei_harness   = _te_harness e
+  , _tei_model     = _te_model e
+  }
+
+-- | Read transcript entries from a session's @transcript.jsonl@ file.
+handleTranscript :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleTranscript env sid respond = do
+  -- Reject path traversal
+  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+    then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
+    else do
+      let path = _fe_sessionsDir env </> T.unpack sid </> "transcript.jsonl"
+      exists <- doesFileExist path
+      if not exists
+        then respond $ jsonResponse status404 (object ["error" .= ("Session not found" :: Text)])
+        else do
+          result <- try @SomeException $ readTranscriptFile path
+          case result of
+            Left _ ->
+              respond $ jsonResponse status500 (object ["error" .= ("Failed to read transcript" :: Text)])
+            Right entries ->
+              respond $ jsonResponse status200 (map toTranscriptEntryInfo entries)
+
+-- | Read and parse a JSONL transcript file.
+readTranscriptFile :: FilePath -> IO [TranscriptEntry]
+readTranscriptFile path = do
+  contents <- LBS.readFile path
+  let linesBS = filter (not . LBS.null) (LBS.split 0x0A contents)
+  pure [e | l <- linesBS, Just e <- [Aeson.decode l]]
+
+-- | JSON 404 response.
+respondNotFound :: (Response -> IO ResponseReceived) -> IO ResponseReceived
+respondNotFound respond =
+  respond $ jsonResponse status404 (object ["error" .= ("Not found" :: Text)])
+
+-- | Build a JSON response.
+jsonResponse :: ToJSON a => Status -> a -> Response
+jsonResponse st body =
+  responseLBS st
+    [ (hContentType, "application/json")
+    , ("Access-Control-Allow-Origin", "*")
+    ]
+    (Aeson.encode body)

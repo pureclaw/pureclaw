@@ -88,9 +88,11 @@ function ChatMessage({ message }: { message: Message }) {
 export function ChatArea({
   selectedAgent,
   messages,
+  loading,
 }: {
   selectedAgent: Agent
   messages: Message[]
+  loading?: boolean
 }) {
   return (
     <div className="flex-1 flex flex-col min-w-0" style={{ background: 'var(--bg-base)' }}>
@@ -117,9 +119,15 @@ export function ChatArea({
       {/* Messages */}
       <div className="flex-1 overflow-y-auto chat-scroll px-5 py-6">
         <div className="flex flex-col gap-5" style={{ maxWidth: 'var(--chat-max-width)', width: '100%', margin: '0 auto' }}>
-          {messages.map((msg) => (
-            <ChatMessage key={msg.id} message={msg} />
-          ))}
+          {loading ? (
+            <div className="text-sm" style={{ color: 'var(--text-muted)' }}>Loading transcript...</div>
+          ) : messages.length === 0 ? (
+            <div className="text-sm" style={{ color: 'var(--text-muted)' }}>No messages yet. Select a session to view its transcript.</div>
+          ) : (
+            messages.map((msg) => (
+              <ChatMessage key={msg.id} message={msg} />
+            ))
+          )}
         </div>
       </div>
 
