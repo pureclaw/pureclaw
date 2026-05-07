@@ -25,6 +25,7 @@ import PureClaw.Core.Errors
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
+import PureClaw.MCP (mcpRegistry)
 import PureClaw.Providers.Class
 import PureClaw.Tools.Registry
 import PureClaw.Transcript.Provider
@@ -57,8 +58,16 @@ runAgentLoopWith env initialMessages = do
   where
     channel  = _env_channel env
     logger   = _env_logger env
-    registry = _env_registry env
-    tools    = registryDefinitions registry
+    baseRegistry = _env_registry env
+
+    -- | Build the effective registry by merging built-in tools with
+    -- any connected MCP server tools.
+    effectiveRegistry :: IO ToolRegistry
+    effectiveRegistry = do
+      servers <- readIORef (_env_mcpServers env)
+      if Map.null servers
+        then pure baseRegistry
+        else pure $ mergeRegistries baseRegistry (mcpRegistry (Map.elems servers))
 
     go ctx = do
       receiveResult <- try @IOException (_ch_receive channel)
@@ -125,7 +134,9 @@ runAgentLoopWith env initialMessages = do
 
     handleCompletion provider ctx = do
       mModel <- readIORef (_env_model env)
-      let model = fromMaybe (ModelId "") mModel
+      registry <- effectiveRegistry
+      let tools = registryDefinitions registry
+          model = fromMaybe (ModelId "") mModel
           modelName = unModelId model
           req = CompletionRequest
             { _cr_model        = model
@@ -192,6 +203,7 @@ runAgentLoopWith env initialMessages = do
 
     executeCall (callId, name, input) = do
       _lh_logInfo logger $ "Tool call: " <> name
+      registry <- effectiveRegistry
       result <- executeTool registry name input
       case result of
         Nothing -> do

@@ -591,6 +591,7 @@ runChat opts = do
         -- BOOTSTRAP.md and its consumed flag is currently False.
         onFirstStreamDoneRef <- newIORef
           =<< resolveBootstrapCallback logger mAgentDef sessionHandle
+        mcpRef <- newIORef Map.empty
         let env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -607,6 +608,7 @@ runChat opts = do
               , _env_agentDef     = mAgentDef
               , _env_session      = sessionRef
               , _env_onFirstStreamDone = onFirstStreamDoneRef
+              , _env_mcpServers   = mcpRef
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)

@@ -257,6 +257,7 @@ spec = do
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
           sessionRef <- newIORef =<< mkNoOpSessionHandle
+          mcpRef     <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -274,6 +275,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -349,6 +351,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -366,6 +369,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -388,6 +392,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -405,6 +410,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -424,6 +430,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -440,6 +447,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -459,6 +467,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -475,6 +484,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -506,6 +516,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -522,6 +533,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -544,6 +556,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -560,6 +573,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget Nothing) ctx
@@ -578,6 +592,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -594,6 +609,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
@@ -623,6 +639,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -639,6 +656,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "claude-code")) ctx
@@ -669,6 +687,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 1
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -686,6 +705,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "claude-code-0" "list TODOs") ctx
@@ -707,6 +727,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -724,6 +745,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "nonexistent" "hello") ctx
@@ -745,6 +767,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 1
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -762,6 +785,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "cc-0" "test") ctx
@@ -778,6 +802,7 @@ spec = do
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
           sessionRef <- newIORef =<< mkNoOpSessionHandle
+          mcpRef     <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -795,6 +820,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -827,6 +853,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -843,6 +870,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -871,6 +899,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -887,6 +916,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -907,6 +937,7 @@ spec = do
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
           sessionRef <- newIORef =<< mkNoOpSessionHandle
+          mcpRef     <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -924,6 +955,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -936,6 +968,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -952,6 +985,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -970,6 +1004,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let yubikey = AgePlugin
             { _ap_name   = "yubikey"
             , _ap_binary = "age-plugin-yubikey"
@@ -991,6 +1026,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1020,6 +1056,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1036,6 +1073,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1067,6 +1105,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1083,6 +1122,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1101,6 +1141,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let ch = mkMockChannelAll allSentRef msgsRef
           env = AgentEnv
             { _env_provider     = providerRef
@@ -1119,6 +1160,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1205,6 +1247,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1221,6 +1264,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -1244,6 +1288,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1260,6 +1305,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -1281,6 +1327,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1300,6 +1347,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -1359,6 +1407,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1376,6 +1425,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1395,6 +1445,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1412,6 +1463,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1432,6 +1484,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1449,6 +1502,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -1541,6 +1595,7 @@ spec = do
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1558,6 +1613,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1578,6 +1634,7 @@ spec = do
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
+      mcpRef        <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1595,6 +1652,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1627,6 +1685,7 @@ spec = do
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
+      mcpRef        <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1644,6 +1703,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1667,6 +1727,7 @@ spec = do
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
+      mcpRef        <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1684,6 +1745,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1729,6 +1791,7 @@ spec = do
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
+      mcpRef        <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1746,6 +1809,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -1768,6 +1832,7 @@ spec = do
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
+      mcpRef        <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1785,6 +1850,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -1804,6 +1870,7 @@ spec = do
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1821,6 +1888,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -1838,6 +1906,7 @@ spec = do
       targetRef     <- newIORef TargetProvider
       windowIdxRef  <- newIORef 0
       sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1855,6 +1924,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1887,6 +1957,7 @@ spec = do
       vaultRef      <- newIORef Nothing
       providerRef   <- newIORef (Just (MkProvider (MockProvider "summary")))
       modelRef      <- newIORef (Just (ModelId "test"))
+      mcpRef        <- newIORef Map.empty
       let env = AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1904,6 +1975,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -1953,6 +2025,7 @@ spec = do
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
           sessionRef <- newIORef =<< mkNoOpSessionHandle
+          mcpRef     <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -1970,6 +2043,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
 
     it "/agent list lists discovered agent names" $ withTempHome $ do
@@ -2006,6 +2080,7 @@ spec = do
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
           sessionRef <- newIORef =<< mkNoOpSessionHandle
+          mcpRef     <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -2023,6 +2098,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
 
     it "/agent info <name> shows files and frontmatter" $ withTempHome $ do
@@ -2157,6 +2233,7 @@ spec = do
           targetRef     <- newIORef TargetProvider
           windowIdxRef  <- newIORef 0
           sessionRef <- newIORef =<< mkNoOpSessionHandle
+          mcpRef     <- newIORef Map.empty
           pure AgentEnv
             { _env_provider     = providerRef
             , _env_model        = modelRef
@@ -2174,6 +2251,7 @@ spec = do
             , _env_agentDef      = Nothing
             , _env_session       = sessionRef
             , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
             }
 
     it "/session new writes session.json on disk and returns a confirmation" $ withTempHome $ do

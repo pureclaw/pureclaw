@@ -8,6 +8,7 @@ module PureClaw.Agent.SlashCommands
   , HarnessSubCommand (..)
   , AgentSubCommand (..)
   , SessionSubCommand (..)
+  , McpSubCommand (..)
     -- * Known harnesses
   , knownHarnesses
     -- * Agent name tab completion helper
@@ -48,10 +49,12 @@ import System.FilePath ((</>))
 import Data.ByteString.Lazy qualified as BL
 import System.Exit
 import System.IO (Handle, hGetLine)
+import System.Process (proc)
 import System.Process.Typed qualified as P
 
 import Data.Aeson qualified as Aeson
 import PureClaw.Agent.AgentDef qualified as AgentDef
+import PureClaw.MCP qualified as MCP
 import PureClaw.Agent.Compaction
 import PureClaw.Agent.Context
 import PureClaw.Agent.Env
@@ -91,6 +94,7 @@ data CommandGroup
   | GroupTranscript  -- ^ Transcript / permanent log
   | GroupHarness    -- ^ Harness management (tmux-based AI CLI tools)
   | GroupAgent      -- ^ Agent management (bootstrap file collections)
+  | GroupMcp        -- ^ MCP server management
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 -- | Human-readable section heading for '/help' output.
@@ -102,6 +106,7 @@ groupHeading GroupVault      = "Vault"
 groupHeading GroupTranscript = "Transcript"
 groupHeading GroupHarness    = "Harness"
 groupHeading GroupAgent      = "Agent"
+groupHeading GroupMcp        = "MCP"
 
 -- | Specification for a single slash command.
 -- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
@@ -181,6 +186,14 @@ data AgentSubCommand
   | AgentUnknown Text          -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
+-- | Subcommands of the '/mcp' family.
+data McpSubCommand
+  = McpConnect Text [Text]    -- ^ Connect to server: (name, command + args)
+  | McpDisconnect Text        -- ^ Disconnect a named server
+  | McpList                   -- ^ List connected servers and their tools
+  | McpUnknown Text           -- ^ Unrecognised subcommand
+  deriving stock (Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
@@ -202,6 +215,7 @@ data SlashCommand
   | CmdAgent AgentSubCommand          -- ^ Agent management commands
   | CmdSession SessionSubCommand      -- ^ Session management commands
   | CmdMsg Text Text                  -- ^ Send a message to a specific target (name, message)
+  | CmdMcp McpSubCommand              -- ^ MCP server management commands
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -214,7 +228,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ msgCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ mcpCommandSpecs ++ msgCommandSpecs
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -404,6 +418,42 @@ agentUnknownFallback t =
      then let rest = T.strip (T.drop (T.length "/agent") lower)
               sub  = fst (T.break (== ' ') rest)
           in Just (CmdAgent (AgentUnknown sub))
+     else Nothing
+
+mcpCommandSpecs :: [CommandSpec]
+mcpCommandSpecs =
+  [ CommandSpec "/mcp connect <name> <command...>"
+      "Connect to an MCP server" GroupMcp mcpConnectP
+  , CommandSpec "/mcp disconnect <name>"
+      "Disconnect from an MCP server" GroupMcp mcpDisconnectP
+  , CommandSpec "/mcp list"
+      "List connected MCP servers and their tools" GroupMcp mcpListP
+  ]
+
+mcpConnectP :: Text -> Maybe SlashCommand
+mcpConnectP t =
+  let lower = T.toLower t
+  in if "/mcp connect " `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length "/mcp connect") t)
+              (name, cmdPart) = T.break (== ' ') rest
+          in if T.null name || T.null (T.strip cmdPart)
+               then Nothing
+               else Just (CmdMcp (McpConnect name (T.words (T.strip cmdPart))))
+     else Nothing
+
+mcpDisconnectP :: Text -> Maybe SlashCommand
+mcpDisconnectP t =
+  let lower = T.toLower t
+  in if "/mcp disconnect " `T.isPrefixOf` lower
+     then let name = T.strip (T.drop (T.length "/mcp disconnect") t)
+          in if T.null name then Nothing else Just (CmdMcp (McpDisconnect name))
+     else Nothing
+
+mcpListP :: Text -> Maybe SlashCommand
+mcpListP t =
+  let lower = T.toLower (T.strip t)
+  in if lower == "/mcp list" || lower == "/mcp"
+     then Just (CmdMcp McpList)
      else Nothing
 
 msgCommandSpecs :: [CommandSpec]
@@ -877,6 +927,9 @@ executeSlashCommand env (CmdAgent sub) ctx = do
 executeSlashCommand env (CmdSession sub) ctx = do
   executeSessionCommand env sub ctx
 
+executeSlashCommand env (CmdMcp sub) ctx = do
+  executeMcpCommand env sub ctx
+
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)
   case sub of
@@ -902,6 +955,85 @@ supportedProviders =
   , ("openrouter", "OpenRouter (multi-model gateway)")
   , ("ollama",     "Ollama (local models)")
   ]
+
+-- ---------------------------------------------------------------------------
+-- MCP commands
+-- ---------------------------------------------------------------------------
+
+executeMcpCommand :: AgentEnv -> McpSubCommand -> Context -> IO Context
+executeMcpCommand env (McpConnect name cmdArgs) ctx = do
+  let channel = _env_channel env
+      logger  = _env_logger env
+  servers <- readIORef (_env_mcpServers env)
+  if Map.member name servers
+    then do
+      _ch_send channel (OutgoingMessage $
+        "MCP server \"" <> name <> "\" is already connected. Disconnect it first with /mcp disconnect " <> name)
+      pure ctx
+    else do
+      case cmdArgs of
+        [] -> do
+          _ch_send channel (OutgoingMessage
+            "Usage: /mcp connect <name> <command> [args...]")
+          pure ctx
+        (cmdText : argTexts) -> do
+          let cmd  = T.unpack cmdText
+              args = map T.unpack argTexts
+          result <- try @SomeException $
+            MCP.connectServer logger name cmdArgs (proc cmd args)
+          case result of
+            Left e -> do
+              _ch_send channel (OutgoingMessage $
+                "Failed to connect to MCP server \"" <> name <> "\": " <> T.pack (show e))
+              pure ctx
+            Right server -> do
+              atomicModifyIORef' (_env_mcpServers env) $ \m ->
+                (Map.insert name server m, ())
+              let toolNames = MCP.mcpToolNames server
+                  toolList = T.intercalate ", " toolNames
+              _ch_send channel (OutgoingMessage $
+                "Connected to MCP server \"" <> name <> "\" ("
+                <> T.pack (show (length toolNames)) <> " tools: " <> toolList <> ")")
+              pure ctx
+
+executeMcpCommand env (McpDisconnect name) ctx = do
+  let channel = _env_channel env
+      logger  = _env_logger env
+  servers <- readIORef (_env_mcpServers env)
+  case Map.lookup name servers of
+    Nothing -> do
+      _ch_send channel (OutgoingMessage $
+        "No MCP server named \"" <> name <> "\" is connected.")
+      pure ctx
+    Just server -> do
+      MCP.disconnectServer logger server
+      atomicModifyIORef' (_env_mcpServers env) $ \m ->
+        (Map.delete name m, ())
+      _ch_send channel (OutgoingMessage $
+        "Disconnected MCP server \"" <> name <> "\".")
+      pure ctx
+
+executeMcpCommand env McpList ctx = do
+  let channel = _env_channel env
+  servers <- readIORef (_env_mcpServers env)
+  if Map.null servers
+    then _ch_send channel (OutgoingMessage
+           "No MCP servers connected. Use /mcp connect <name> <command...> to connect one.")
+    else do
+      let lines' = flip map (Map.toList servers) $ \(sName, server) ->
+            let nTools = length (MCP.mcpToolNames server)
+                cmd = T.intercalate " " (MCP._ms_command server)
+            in "  " <> sName <> " (" <> T.pack (show nTools)
+               <> " tools) \x2014 " <> cmd
+          msg = "Connected MCP servers:\n" <> T.intercalate "\n" lines'
+      _ch_send channel (OutgoingMessage msg)
+  pure ctx
+
+executeMcpCommand env (McpUnknown sub) ctx = do
+  _ch_send (_env_channel env) (OutgoingMessage $
+    "Unknown /mcp subcommand: " <> sub
+    <> "\nAvailable: connect, disconnect, list")
+  pure ctx
 
 executeProviderCommand :: AgentEnv -> VaultHandle -> ProviderSubCommand -> Context -> IO Context
 executeProviderCommand env _vault ProviderList ctx = do

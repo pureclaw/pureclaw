@@ -17,6 +17,7 @@ import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript (TranscriptHandle)
+import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault
@@ -72,6 +73,11 @@ data AgentEnv = AgentEnv
     -- 'StreamDone' does not re-fire it. In production this is
     -- populated with @'markBootstrapConsumed' session@ so the agent
     -- marks its bootstrap as consumed exactly once per process start.
+  , _env_mcpServers :: IORef (Map Text McpServer)
+    -- ^ Connected MCP servers, keyed by user-assigned name.
+    -- Mutable so @\/mcp connect@ and @\/mcp disconnect@ can add\/remove
+    -- servers at runtime. Tools from these servers are merged into the
+    -- effective registry on each completion request.
   }
 
 -- | Read the active session's transcript handle.

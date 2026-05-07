@@ -8,6 +8,7 @@ module PureClaw.Tools.Registry
   , registerRichTool
   , registryDefinitions
   , executeTool
+  , mergeRegistries
   ) where
 
 import Data.Aeson (Value)
@@ -55,3 +56,9 @@ executeTool reg name input =
   case Map.lookup name (_tr_tools reg) of
     Nothing -> pure Nothing
     Just (_, handler) -> Just <$> handler input
+
+-- | Merge two registries. Tools from the second registry override
+-- tools with the same name in the first.
+mergeRegistries :: ToolRegistry -> ToolRegistry -> ToolRegistry
+mergeRegistries (ToolRegistry a) (ToolRegistry b) =
+  ToolRegistry (Map.union b a)

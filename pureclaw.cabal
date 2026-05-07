@@ -125,6 +125,8 @@ library
     PureClaw.Transcript.Combinator
     PureClaw.Transcript.Provider
     PureClaw.Transcript.Types
+    -- MCP
+    PureClaw.MCP
     -- CLI
     PureClaw.CLI.Config
     PureClaw.CLI.Import
@@ -145,9 +147,12 @@ library
     http-client,
     http-client-tls,
     http-types,
+    mcp-client,
+    mcp-types,
     memory,
     mtl,
     optparse-applicative,
+    process,
     sqlite-simple,
     stm,
     temporary,
