@@ -18,6 +18,7 @@ import System.Directory (doesFileExist)
 import System.FilePath ((</>), takeExtension)
 
 import PureClaw.Frontend.API
+import PureClaw.Handles.Log (LogHandle(..))
 
 -- | Frontend server configuration.
 data FrontendConfig = FrontendConfig
@@ -36,11 +37,12 @@ defaultFrontendConfig = FrontendConfig
 -- | Start the frontend server with API endpoints and static file serving.
 -- API routes (@\/api\/*@) are handled by 'apiApp'; everything else
 -- falls through to the static file server with SPA fallback.
-runFrontend :: FrontendConfig -> Maybe FrontendEnv -> IO ()
-runFrontend cfg mEnv = do
-  putStrLn "PureClaw frontend server"
-  putStrLn $ "  Serving: " <> _fsc_staticDir cfg
-  putStrLn $ "  URL:     http://localhost:" <> show (_fsc_port cfg)
+runFrontend :: FrontendConfig -> Maybe FrontendEnv -> LogHandle -> IO ()
+runFrontend cfg mEnv logger = do
+  let logInfo = _lh_logInfo logger
+  logInfo "PureClaw frontend server"
+  logInfo $ "  Serving: " <> T.pack (_fsc_staticDir cfg)
+  logInfo $ "  URL:     http://localhost:" <> T.pack (show (_fsc_port cfg))
   Warp.run (_fsc_port cfg) (combinedApp mEnv (_fsc_staticDir cfg))
 
 -- | Combined WAI application: API routes first, then static files.

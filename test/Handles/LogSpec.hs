@@ -8,7 +8,7 @@ spec :: Spec
 spec = do
   describe "mkStderrLogHandle" $ do
     it "creates a handle with all four log functions" $ do
-      let handle = mkStderrLogHandle
+      handle <- mkStderrLogHandle
       -- Verify the handle can be constructed — functions are present
       -- We don't call logInfo etc. here to avoid polluting test output
       handle `seq` pure () :: IO ()

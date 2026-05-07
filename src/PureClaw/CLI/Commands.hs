@@ -355,7 +355,7 @@ runImport opts mPositional = do
 -- | Run an interactive chat session.
 runChat :: ChatOptions -> IO ()
 runChat opts = do
-  let logger = mkStderrLogHandle
+  logger <- mkStderrLogHandle
 
   -- --session and --prefix are mutually exclusive. We enforce this
   -- post-parse because optparse-applicative's <|> would make one
@@ -622,7 +622,7 @@ runChat opts = do
               , _fe_agentsDir    = agentsDir
               , _fe_defaultAgent = _fc_defaultAgent fileCfg
               }
-        void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv)
+        void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv) logger
         runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of

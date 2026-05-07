@@ -6,6 +6,7 @@ module PureClaw.Handles.Log
   , mkNoOpLogHandle
   ) where
 
+import Control.Concurrent.MVar
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
 import Data.Text qualified as T
@@ -22,19 +23,21 @@ data LogHandle = LogHandle
   }
 
 -- | Log to stderr with ISO 8601 timestamps and level prefixes.
-mkStderrLogHandle :: LogHandle
-mkStderrLogHandle = LogHandle
-  { _lh_logInfo  = logWithLevel "INFO"
-  , _lh_logWarn  = logWithLevel "WARN"
-  , _lh_logError = logWithLevel "ERROR"
-  , _lh_logDebug = logWithLevel "DEBUG"
-  }
-  where
-    logWithLevel :: Text -> Text -> IO ()
-    logWithLevel level msg = do
-      now <- getCurrentTime
-      let timestamp = T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" now)
-      TIO.hPutStrLn stderr $ "[" <> timestamp <> "] [" <> level <> "] " <> msg
+-- Uses an 'MVar' to serialize writes so concurrent threads don't interleave.
+mkStderrLogHandle :: IO LogHandle
+mkStderrLogHandle = do
+  lock <- newMVar ()
+  let logWithLevel :: Text -> Text -> IO ()
+      logWithLevel level msg = withMVar lock $ \() -> do
+        now <- getCurrentTime
+        let timestamp = T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" now)
+        TIO.hPutStrLn stderr $ "[" <> timestamp <> "] [" <> level <> "] " <> msg
+  pure LogHandle
+    { _lh_logInfo  = logWithLevel "INFO"
+    , _lh_logWarn  = logWithLevel "WARN"
+    , _lh_logError = logWithLevel "ERROR"
+    , _lh_logDebug = logWithLevel "DEBUG"
+    }
 
 -- | No-op log handle. All operations silently succeed.
 mkNoOpLogHandle :: LogHandle
