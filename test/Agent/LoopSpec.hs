@@ -103,6 +103,7 @@ mkTestEnv p ch = do
   targetRef     <- newIORef TargetProvider
   windowIdxRef  <- newIORef 0
   sessionRef <- newIORef =<< mkNoOpSessionHandle
+  mcpRef     <- newIORef Map.empty
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -119,6 +120,7 @@ mkTestEnv p ch = do
     , _env_agentDef      = Nothing
     , _env_session       = sessionRef
     , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+    , _env_mcpServers   = mcpRef
     }
 
 spec :: Spec
