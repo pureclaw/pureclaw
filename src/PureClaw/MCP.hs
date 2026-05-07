@@ -18,6 +18,7 @@ import Data.Aeson (Value (..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.Maybe (fromMaybe)
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -169,7 +170,7 @@ mcpRegistry = foldl addServer emptyRegistry
             , _td_description = toolDesc tool
             , _td_inputSchema = Aeson.toJSON (inputSchema tool)
             }
-          handler input = mcpExecuteTool (_ms_session server) toolN input
+          handler = mcpExecuteTool (_ms_session server) toolN
       in registerRichTool def handler reg
 
 -- ---------------------------------------------------------------------------
@@ -180,7 +181,7 @@ toolName :: Tool -> Text
 toolName (Tool { name = n }) = n
 
 toolDesc :: Tool -> Text
-toolDesc (Tool { description = d }) = maybe "" id d
+toolDesc (Tool { description = d }) = fromMaybe "" d
 
 -- ---------------------------------------------------------------------------
 -- Tool execution
@@ -194,7 +195,7 @@ mcpExecuteTool session tName input = do
   case result of
     Left e -> pure ([TRPText (T.pack (show e))], True)
     Right (CallToolResult { content = blocks, isError = mErr }) ->
-      let isErr = maybe False id mErr
+      let isErr = fromMaybe False mErr
           parts = map convertContent blocks
       in pure (if null parts then [TRPText ""] else parts, isErr)
 
