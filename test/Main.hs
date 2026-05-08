@@ -38,6 +38,8 @@ import qualified Tools.WebSearchSpec
 import qualified Tools.MessageSpec
 import qualified Tools.CronSpec
 import qualified Tools.ImageSpec
+import qualified Tools.SearchFilesSpec
+import qualified Tools.ClarifySpec
 import qualified Memory.NoneSpec
 import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
@@ -115,6 +117,8 @@ main = hspec $ do
   describe "Tools.Message" Tools.MessageSpec.spec
   describe "Tools.Cron" Tools.CronSpec.spec
   describe "Tools.Image" Tools.ImageSpec.spec
+  describe "Tools.SearchFiles" Tools.SearchFilesSpec.spec
+  describe "Tools.Clarify" Tools.ClarifySpec.spec
   describe "Memory.None" Memory.NoneSpec.spec
   describe "Memory.Markdown" Memory.MarkdownSpec.spec
   describe "Memory.SQLite" Memory.SQLiteSpec.spec

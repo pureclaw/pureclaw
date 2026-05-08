@@ -80,6 +80,8 @@ library
     PureClaw.Tools.Message
     PureClaw.Tools.Cron
     PureClaw.Tools.Image
+    PureClaw.Tools.SearchFiles
+    PureClaw.Tools.Clarify
     -- Agent
     PureClaw.Agent.AgentDef
     PureClaw.Agent.Completion
@@ -230,6 +232,8 @@ test-suite pureclaw-test
     Tools.MessageSpec
     Tools.CronSpec
     Tools.ImageSpec
+    Tools.SearchFilesSpec
+    Tools.ClarifySpec
     Memory.MarkdownSpec
     Memory.SQLiteSpec
     Memory.NoneSpec

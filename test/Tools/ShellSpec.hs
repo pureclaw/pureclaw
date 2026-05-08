@@ -30,7 +30,7 @@ spec = do
     it "executes allowed commands" $ do
       let policy = withAutonomy Full
                  $ allowCommand (CommandName "echo") defaultPolicy
-          mockShell = ShellHandle $ \_ -> pure ProcessResult
+          mockShell = ShellHandle $ \_ _ -> pure ProcessResult
             { _pr_exitCode = ExitSuccess
             , _pr_stdout   = BS8.pack "hello world"
             , _pr_stderr   = ""
@@ -44,7 +44,7 @@ spec = do
     it "reports non-zero exit codes" $ do
       let policy = withAutonomy Full
                  $ allowCommand (CommandName "false") defaultPolicy
-          mockShell = ShellHandle $ \_ -> pure ProcessResult
+          mockShell = ShellHandle $ \_ _ -> pure ProcessResult
             { _pr_exitCode = ExitFailure 1
             , _pr_stdout   = ""
             , _pr_stderr   = BS8.pack "error"

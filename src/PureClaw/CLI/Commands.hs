@@ -83,12 +83,15 @@ import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Tools.Clarify
+import PureClaw.Tools.Edit
 import PureClaw.Tools.FileRead
 import PureClaw.Tools.FileWrite
 import PureClaw.Tools.Git
 import PureClaw.Tools.HttpRequest
 import PureClaw.Tools.Memory
 import PureClaw.Tools.Registry
+import PureClaw.Tools.SearchFiles
 import PureClaw.Tools.Shell
 
 -- | Supported LLM providers.
@@ -456,9 +459,6 @@ runChat opts = do
       nh        = mkNetworkHandle manager
   mh <- resolveMemory effectiveMemory
 
-  -- Tool registry
-  let registry = buildRegistry policy sh workspace fh mh nh
-
   hSetBuffering stdout LineBuffering
   case mProvider of
     Just _  -> _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
@@ -492,6 +492,7 @@ runChat opts = do
 
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
+        let registry = buildRegistry policy sh workspace fh mh nh channel
         putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"
         case effectiveChannel of
           "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
@@ -712,12 +713,15 @@ parseMemoryMaybe (Just t) = case T.unpack t of
   _          -> Nothing
 
 -- | Build the tool registry with all available tools.
-buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> NetworkHandle -> ToolRegistry
-buildRegistry policy sh workspace fh mh nh =
+buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> NetworkHandle -> ChannelHandle -> ToolRegistry
+buildRegistry policy sh workspace fh mh nh ch =
   let reg = uncurry registerTool
   in reg (shellTool policy sh)
    $ reg (fileReadTool workspace fh)
    $ reg (fileWriteTool workspace fh)
+   $ reg (editTool workspace fh)
+   $ reg (searchFilesTool workspace)
+   $ reg (clarifyTool ch)
    $ reg (gitTool policy sh)
    $ reg (memoryStoreTool mh)
    $ reg (memoryRecallTool mh)

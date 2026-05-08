@@ -45,7 +45,7 @@ gitTool policy sh = (def, handler)
             Left (CommandNotAllowed _) -> pure ("git is not in the allowed commands list", True)
             Left CommandInAutonomyDeny -> pure ("All commands denied by security policy", True)
             Right authorized -> do
-              result <- try @SomeException (_sh_execute sh authorized)
+              result <- try @SomeException (_sh_execute sh defaultExecOptions authorized)
               case result of
                 Left e -> pure (T.pack (show e), True)
                 Right pr -> do
