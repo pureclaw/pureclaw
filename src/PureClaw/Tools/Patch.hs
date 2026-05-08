@@ -132,9 +132,9 @@ applyHunks content (h:hs) =
 applyHunk :: Text -> PatchHunk -> Either Text Text
 applyHunk content hunk =
   let contentLines = T.lines content
-      -- Build the pattern: context lines followed by removal lines
-      pattern = _ph_context hunk <> _ph_removals hunk
-  in case findPattern pattern contentLines of
+      -- Build the search pattern: context lines followed by removal lines
+      searchPat = _ph_context hunk <> _ph_removals hunk
+  in case findPattern searchPat contentLines of
     Nothing ->
       -- Try without context (just removals)
       case findPattern (_ph_removals hunk) contentLines of
