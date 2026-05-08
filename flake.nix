@@ -40,6 +40,7 @@
                 age
                 age-plugin-yubikey
                 git
+                ripgrep
                 signal-cli
                 tmux
               ];

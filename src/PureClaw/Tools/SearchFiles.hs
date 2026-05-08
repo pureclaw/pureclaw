@@ -3,7 +3,7 @@ module PureClaw.Tools.SearchFiles
     searchFilesTool
   ) where
 
-import Control.Exception
+import Control.Exception (IOException, try)
 import Data.Aeson
 import Data.Aeson.Types
 import Data.ByteString.Lazy qualified as BL
@@ -11,6 +11,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import System.Exit
+import System.IO.Error (isDoesNotExistError)
 import System.Process.Typed qualified as P
 
 import PureClaw.Core.Types
@@ -79,9 +80,13 @@ searchFilesTool (WorkspaceRoot root) = (def, handler)
       let args = buildRgArgs si
           config = P.setWorkingDir root
                  $ P.proc "rg" args
-      result <- try @SomeException $ P.readProcess config
+      result <- try @IOException $ P.readProcess config
       case result of
-        Left e -> pure ("search_files error: " <> T.pack (show e), True)
+        Left e
+          | isDoesNotExistError e ->
+              pure ("search_files requires ripgrep (rg) but it is not installed or not on PATH", True)
+          | otherwise ->
+              pure ("search_files error: " <> T.pack (show e), True)
         Right (exitCode, outLazy, errLazy) ->
           let out = TE.decodeUtf8Lenient (BL.toStrict outLazy)
               err = TE.decodeUtf8Lenient (BL.toStrict errLazy)
