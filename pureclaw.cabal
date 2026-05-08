@@ -82,6 +82,9 @@ library
     PureClaw.Tools.Image
     PureClaw.Tools.SearchFiles
     PureClaw.Tools.Clarify
+    PureClaw.Tools.WebExtract
+    PureClaw.Tools.Patch
+    PureClaw.Tools.Delegate
     -- Agent
     PureClaw.Agent.AgentDef
     PureClaw.Agent.Completion
@@ -234,6 +237,9 @@ test-suite pureclaw-test
     Tools.ImageSpec
     Tools.SearchFilesSpec
     Tools.ClarifySpec
+    Tools.WebExtractSpec
+    Tools.PatchSpec
+    Tools.DelegateSpec
     Memory.MarkdownSpec
     Memory.SQLiteSpec
     Memory.NoneSpec

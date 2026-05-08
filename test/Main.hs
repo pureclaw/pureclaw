@@ -40,6 +40,9 @@ import qualified Tools.CronSpec
 import qualified Tools.ImageSpec
 import qualified Tools.SearchFilesSpec
 import qualified Tools.ClarifySpec
+import qualified Tools.WebExtractSpec
+import qualified Tools.PatchSpec
+import qualified Tools.DelegateSpec
 import qualified Memory.NoneSpec
 import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
@@ -119,6 +122,9 @@ main = hspec $ do
   describe "Tools.Image" Tools.ImageSpec.spec
   describe "Tools.SearchFiles" Tools.SearchFilesSpec.spec
   describe "Tools.Clarify" Tools.ClarifySpec.spec
+  describe "Tools.WebExtract" Tools.WebExtractSpec.spec
+  describe "Tools.Patch" Tools.PatchSpec.spec
+  describe "Tools.Delegate" Tools.DelegateSpec.spec
   describe "Memory.None" Memory.NoneSpec.spec
   describe "Memory.Markdown" Memory.MarkdownSpec.spec
   describe "Memory.SQLite" Memory.SQLiteSpec.spec
