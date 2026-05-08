@@ -157,12 +157,12 @@ applyHunk content hunk =
 findPattern :: [Text] -> [Text] -> Maybe Int
 findPattern [] _ = Just 0
 findPattern _ [] = Nothing
-findPattern pattern contentLines = go 0 contentLines
+findPattern pat contentLines = go 0 contentLines
   where
-    patLen = length pattern
+    patLen = length pat
     go _ remaining | length remaining < patLen = Nothing
     go idx remaining
-      | take patLen remaining `linesMatch` pattern = Just idx
+      | take patLen remaining `linesMatch` pat = Just idx
       | otherwise = go (idx + 1) (drop 1 remaining)
 
     linesMatch :: [Text] -> [Text] -> Bool
