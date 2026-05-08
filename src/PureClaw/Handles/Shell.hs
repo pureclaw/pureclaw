@@ -11,6 +11,7 @@ module PureClaw.Handles.Shell
   , mkNoOpShellHandle
   ) where
 
+import Control.Concurrent.Async qualified as Async
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
@@ -78,25 +79,44 @@ mkShellHandle logger = ShellHandle
                  $ P.setEnv safeEnv
                  $ P.proc prog args
       _lh_logInfo logger $ "Executing: " <> T.pack prog <> " " <> T.unwords (getCommandArgs cmd)
-      let run = do
-            (exitCode, outLazy, errLazy) <- P.readProcess config
-            pure ProcessResult
-              { _pr_exitCode = exitCode
-              , _pr_stdout   = BL.toStrict outLazy
-              , _pr_stderr   = BL.toStrict errLazy
-              }
       case _eo_timeout opts of
-        Nothing -> run
-        Just ms -> do
-          result <- Timeout.timeout (ms * 1000) run
-          case result of
-            Just r  -> pure r
-            Nothing -> pure ProcessResult
-              { _pr_exitCode = ExitFailure 124
-              , _pr_stdout   = ""
-              , _pr_stderr   = TE.encodeUtf8 ("Command timed out after " <> T.pack (show ms) <> "ms")
-              }
+        Nothing -> do
+          (exitCode, outLazy, errLazy) <- P.readProcess config
+          pure ProcessResult
+            { _pr_exitCode = exitCode
+            , _pr_stdout   = BL.toStrict outLazy
+            , _pr_stderr   = BL.toStrict errLazy
+            }
+        Just ms -> runWithTimeout config ms
   }
+
+-- | Run a process with a timeout. Launches the process via
+-- 'readProcess' on a background thread, then races it against a
+-- timer. On timeout the process is killed via 'Async.cancel' and a
+-- synthetic exit-124 result is returned.
+--
+-- This avoids the "waitForProcess: No child processes" error that
+-- occurs when 'System.Timeout.timeout' wrapping 'readProcess' races
+-- with the child reaper on Linux — 'Async.cancel' delivers a clean
+-- 'AsyncCancelled' that typed-process handles correctly.
+runWithTimeout :: P.ProcessConfig () () () -> Int -> IO ProcessResult
+runWithTimeout config ms = do
+  worker <- Async.async $ P.readProcess config
+  result <- Timeout.timeout (ms * 1000) (Async.wait worker)
+  case result of
+    Just (exitCode, outLazy, errLazy) ->
+      pure ProcessResult
+        { _pr_exitCode = exitCode
+        , _pr_stdout   = BL.toStrict outLazy
+        , _pr_stderr   = BL.toStrict errLazy
+        }
+    Nothing -> do
+      Async.cancel worker
+      pure ProcessResult
+        { _pr_exitCode = ExitFailure 124
+        , _pr_stdout   = ""
+        , _pr_stderr   = TE.encodeUtf8 ("Command timed out after " <> T.pack (show ms) <> "ms")
+        }
 
 -- | No-op shell handle. Returns success with empty output.
 mkNoOpShellHandle :: ShellHandle
