@@ -101,7 +101,7 @@ htmlToMarkdown html =
 
 -- | Remove everything between <tag>...</tag> including the tags.
 removeBlocks :: Text -> Text -> Text
-removeBlocks tag input = go input
+removeBlocks tag = go
   where
     openTag = "<" <> tag
     closeTag = "</" <> tag <> ">"

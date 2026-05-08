@@ -100,7 +100,7 @@ delegateTaskTool parentEnv = (def, handler)
         [ "You are a focused sub-agent. Complete the following task and report your results concisely."
         , ""
         , "TASK: " <> goal
-        , maybe "" (\c -> "\nCONTEXT: " <> c) mContext
+        , maybe "" (("\nCONTEXT: " <>) ) mContext
         , ""
         , "When you have completed the task, provide a clear summary of what you did and the results."
         , "Do not ask clarifying questions — work with what you have."
