@@ -138,7 +138,7 @@ applyHunk content hunk =
     Nothing ->
       -- Try without context (just removals)
       case findPattern (_ph_removals hunk) contentLines of
-        Nothing -> Left ("hunk failed: could not find target lines")
+        Nothing -> Left "hunk failed: could not find target lines"
         Just idx ->
           let before = take idx contentLines
               after  = drop (idx + length (_ph_removals hunk)) contentLines
