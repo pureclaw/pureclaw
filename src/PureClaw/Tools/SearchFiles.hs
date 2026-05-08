@@ -109,7 +109,7 @@ searchFilesTool (WorkspaceRoot root) = (def, handler)
             Nothing -> []
             Just n  -> ["--context", show n]
           limitArgs = ["--max-count", show (_si_limit si)]
-          caseArgs = if _si_caseInsensitive si then ["--ignore-case"] else []
+          caseArgs = ["--ignore-case" | _si_caseInsensitive si]
           searchPath = T.unpack (_si_path si)
       in concat
           [ ["--no-heading", "--color", "never"]

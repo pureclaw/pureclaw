@@ -74,7 +74,7 @@ mkShellHandle logger = ShellHandle
   { _sh_execute = \opts cmd -> do
       let prog = getCommandProgram cmd
           args = map T.unpack (getCommandArgs cmd)
-          config = maybe id (\d -> P.setWorkingDir d) (_eo_workingDir opts)
+          config = maybe id P.setWorkingDir (_eo_workingDir opts)
                  $ P.setEnv safeEnv
                  $ P.proc prog args
       _lh_logInfo logger $ "Executing: " <> T.pack prog <> " " <> T.unwords (getCommandArgs cmd)
