@@ -7,6 +7,7 @@ import Data.Aeson (object, (.=))
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
+import System.Timeout (timeout)
 import Test.Hspec
 
 import PureClaw.Agent.Env
@@ -97,10 +98,9 @@ spec = do
             }
       atomically $ writeTQueue (_sch_inbox sc) envelope
 
-      -- Wait a bit for processing
-      threadDelay 50000  -- 50ms
+      -- Poll until we see the response (up to 5s)
+      waitForResponses sentRef 1
 
-      -- Push EOF to terminate the loop
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
 
@@ -129,9 +129,9 @@ spec = do
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = txt, _sdm_timestamp = ts }
             }
       atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "First" 1000)
-      threadDelay 50000
+      waitForResponses sentRef 1
       atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "Second" 2000)
-      threadDelay 50000
+      waitForResponses sentRef 2
 
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
@@ -156,7 +156,7 @@ spec = do
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "/status", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) statusEnvelope
-      threadDelay 50000
+      waitForResponses sentRef 1
 
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
@@ -189,7 +189,7 @@ spec = do
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "do it", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) envelope
-      threadDelay 100000  -- 100ms for tool call round-trip
+      waitForResponses sentRef 1  -- at least 1 response
 
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
@@ -230,3 +230,19 @@ mkTestSignalChannelForFlow = do
   let transport = mkMockSignalTransport inQ outQ
       config = SignalConfig { _sc_account = "+1234567890", _sc_textChunkLimit = 6000, _sc_allowFrom = AllowAll }
   mkSignalChannel config transport mkNoOpLogHandle
+
+-- | Poll an IORef until it contains at least @n@ items, with a 5-second timeout.
+-- Fails the test if the timeout is reached.
+waitForResponses :: IORef [a] -> Int -> IO ()
+waitForResponses ref n = do
+  result <- timeout 5000000 go  -- 5 seconds
+  case result of
+    Just () -> pure ()
+    Nothing -> expectationFailure $
+      "Timed out waiting for " <> show n <> " response(s)"
+  where
+    go = do
+      xs <- readIORef ref
+      if length xs >= n
+        then pure ()
+        else threadDelay 10000 >> go  -- check every 10ms
