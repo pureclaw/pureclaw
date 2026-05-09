@@ -31,6 +31,7 @@ import qualified Tools.ShellSpec
 import qualified Tools.FileReadSpec
 import qualified Tools.GitSpec
 import qualified Tools.MemorySpec
+import qualified Tools.FileWriteSpec
 import qualified Tools.EditSpec
 import qualified Tools.ProcessSpec
 import qualified Handles.ProcessSpec
@@ -113,6 +114,7 @@ main = hspec $ do
   describe "Tools.FileRead" Tools.FileReadSpec.spec
   describe "Tools.Git" Tools.GitSpec.spec
   describe "Tools.Memory" Tools.MemorySpec.spec
+  describe "Tools.FileWrite" Tools.FileWriteSpec.spec
   describe "Tools.Edit" Tools.EditSpec.spec
   describe "Tools.Process" Tools.ProcessSpec.spec
   describe "Handles.Process" Handles.ProcessSpec.spec
