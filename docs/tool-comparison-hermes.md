@@ -6,7 +6,7 @@
 |---|---|---|
 | `file_read` | `read_file` | Hermes adds offset/limit pagination, ~100K char guard |
 | `file_write` | `write_file` | Hermes adds auto syntax checks (.py/.json/.yaml/.toml) |
-| `edit` | `patch` | **Partial parity.** PureClaw now has fuzzy matching (whitespace-normalized, trimmed-lines, line-ending-normalized) and `replace_all` mode. Still missing: ~6 fuzzy strategies |
+| `edit` | `patch` | **Near parity.** 5 fuzzy strategies (whitespace-normalized, trimmed-lines, line-ending-normalized, indentation-normalized, case-insensitive) + `replace_all`. Missing: ~4 advanced strategies (block-anchor, line-range, similarity-threshold, AST-aware) |
 | `patch` | `patch` (V4A) | ✅ **Implemented.** Multi-file unified diff patches in a single tool call. Context-aware hunk matching. |
 | `shell` | `terminal` | **Partial parity.** PureClaw now has timeout and working directory via `ExecOptions`. `ShellHandle` interface designed for future backends (Docker/SSH/etc). Still missing: PTY, watch patterns, remote backends |
 | `git` | _(via terminal)_ | PureClaw has a dedicated git tool; Hermes just uses terminal. PureClaw advantage here (structured subcommands) |
@@ -14,22 +14,22 @@
 | `web_extract` | `web_extract` | ✅ **Implemented.** HTML→markdown conversion (headings, lists, emphasis, code, entities), script/style stripping, configurable truncation. Still missing: PDF support, LLM summarization |
 | `web_search` | `web_search` | Roughly equivalent. Hermes supports DuckDuckGo/Firecrawl/Exa backends and advanced operators |
 | `memory_store` / `memory_recall` | `memory` | Different model. PureClaw: vector/FTS search with similarity scores. Hermes: curated markdown (MEMORY.md/USER.md) injected into system prompt, 2200 char cap |
-| `process` | `process` | Similar (spawn/list/poll/kill/write_stdin). Hermes adds log pagination, wait, submit, close stdin |
+| `process` | `process` | **Near parity.** spawn/list/poll/kill/write_stdin/wait/close_stdin. Missing: log pagination offset, submit |
 | `message` | `send_message` | **Big gap.** Hermes sends to 17 platforms with media attachments. PureClaw sends text to the active channel only |
 | `cron` | `cronjob` | Hermes adds repeat limits, custom model overrides, skill-aware, pause/resume/trigger. PureClaw is basic add/remove/list |
 | `image` | `vision_analyze` | Different scope. PureClaw reads local image files. Hermes analyzes URLs via vision LLM with custom prompts |
 | `search_files` | `search_files` | ✅ **Implemented.** Ripgrep-backed regex search with glob filters, output modes (content/files_only/count), context lines, limit, case-insensitive. Near parity — missing only offset pagination |
 | `clarify` | `clarify` | ✅ **Implemented.** Open-ended and multiple choice (up to 4 + "Other"). Returns JSON with question, choices_offered, user_response. Full parity |
 | `delegate_task` | `delegate_task` | ✅ **Implemented.** Isolated sub-agents with restricted toolsets, bounded turns (max 30), own context. Recursive delegation prevented. Missing: max_concurrent (sequential only), orchestrator role |
+| `todo` | `todo` | ✅ **Implemented.** In-memory task list with statuses (pending/in_progress/completed/cancelled). Read/write/merge modes. Grouped output. Full parity. |
+| `execute_code` | `execute_code` | ✅ **Implemented.** Run Python/Node/Ruby/Bash via subprocess. Respects security policy. Timeout (default 30s, max 300s). Output capped. Missing: programmatic tool access inside script |
+| `session_search` | `session_search` | ✅ **Implemented.** Substring search across session transcripts. Snippets with context, grouped by session. Missing: FTS5 backend, LLM summarization |
 
 ## Tools Hermes Has That PureClaw Lacks Entirely
 
 | Hermes Tool | What It Does | Impact |
 |---|---|---|
 | **`browser_*`** (12 tools) | Full browser automation -- navigate, click, type, scroll, screenshot, JS console, CDP | High -- entire capability missing |
-| **`execute_code`** | Run Python that calls tools programmatically (collapses multi-step pipelines) | Medium-high -- reduces inference round-trips |
-| **`todo`** | In-memory task list for decomposing complex work | Medium -- lightweight planning aid |
-| **`session_search`** | FTS5 search across past session transcripts with LLM summarization | Medium -- cross-session recall |
 | **`image_generate`** | Text-to-image via FAL.ai (FLUX, GPT-Image, etc.) | Low-medium -- niche but impressive |
 | **`text_to_speech`** | TTS via 5+ providers | Low -- niche |
 | **`mixture_of_agents`** | Multi-model reasoning synthesis | Low -- advanced reasoning aid |
@@ -128,7 +128,11 @@ Ordered by bang-for-buck (impact vs implementation effort):
 4. ~~**`web_extract`**~~ ✅ Done (HTML→markdown, truncation, size limits)
 5. ~~**`delegate_task`**~~ ✅ Done (isolated sub-agents, restricted toolsets, bounded turns)
 6. ~~**`patch` V4A mode**~~ ✅ Done (multi-file unified diff patches)
-7. **`todo`** -- Simple in-memory task tracking. Tiny implementation, helps agent plan multi-step work.
-8. **Shell backends** -- Docker/SSH execution. `ExecOptions` interface is ready; implement new `mkDockerShellHandle`/`mkSSHShellHandle`.
-9. **`message` platform expansion** -- Each platform is a separate integration. Low ROI without users on those platforms.
-10. **Browser automation** -- Big effort, big payoff, but MCP can cover this in the interim.
+7. ~~**`todo`**~~ ✅ Done (in-memory, read/write/merge, status grouping)
+8. ~~**`execute_code`**~~ ✅ Done (Python/Node/Ruby/Bash, security policy, timeout)
+9. ~~**`session_search`**~~ ✅ Done (substring search across transcripts)
+10. ~~**Edit: more fuzzy strategies**~~ ✅ Done (5 strategies total)
+11. ~~**Process: wait + close_stdin**~~ ✅ Done
+12. **Shell backends** -- Docker/SSH execution. `ExecOptions` interface is ready.
+13. **`message` platform expansion** -- Each platform is a separate integration.
+14. **Browser automation** -- Big effort, big payoff, but MCP can cover this in the interim.
