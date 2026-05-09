@@ -501,7 +501,7 @@ runChat opts = do
         -- Build registry: pure tools + IO tools (todo needs IORef state)
         (todoDef, todoHandler) <- todoTool
         let sessSearchTool = sessionSearchTool logger (pureclawDir </> "sessions")
-            registry = uncurry registerTool (todoDef, todoHandler)
+            registry = registerTool todoDef todoHandler
                      $ uncurry registerTool sessSearchTool
                      $ buildRegistry policy sh workspace fh mh nh channel
         putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"

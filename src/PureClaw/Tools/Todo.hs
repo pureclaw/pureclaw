@@ -93,7 +93,7 @@ todoTool = do
               then pure ("Invalid status in: " <> T.intercalate ", " (map _ti_id invalid)
                         <> ". Valid: " <> T.intercalate ", " validStatuses, True)
               else do
-                let newMap = Map.fromList [((_ti_id ti), ti) | ti <- todos]
+                let newMap = Map.fromList [(_ti_id ti, ti) | ti <- todos]
                 if merge
                   then atomicModifyIORef' stateRef $ \old ->
                     (Map.union newMap old, ())
