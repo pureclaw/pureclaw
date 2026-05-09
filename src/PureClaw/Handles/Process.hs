@@ -20,7 +20,8 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import System.Exit
-import System.IO (Handle, hFlush)
+import System.IO (Handle, hClose, hFlush)
+import System.Timeout qualified as Timeout
 import System.Process.Typed qualified as P
 
 import PureClaw.Handles.Log
@@ -52,6 +53,11 @@ data ProcessHandle = ProcessHandle
   , _ph_poll       :: ProcessId -> IO (Maybe ProcessStatus)
   , _ph_kill       :: ProcessId -> IO Bool
   , _ph_writeStdin :: ProcessId -> ByteString -> IO Bool
+  , _ph_wait       :: ProcessId -> Int -> IO (Maybe ProcessStatus)
+    -- ^ Block until process exits or timeout (milliseconds). Returns
+    -- 'Nothing' if process not found, 'Just status' on completion or timeout.
+  , _ph_closeStdin :: ProcessId -> IO Bool
+    -- ^ Close the stdin pipe of a process. Returns False if not found.
   }
 
 -- Internal entry tracking a background process.
@@ -153,6 +159,30 @@ mkProcessHandle logger = do
             case result of
               Left _ -> pure False
               Right () -> pure True
+
+    , _ph_wait = \(ProcessId pid) timeoutMs -> do
+        st <- readIORef stateRef
+        case Map.lookup pid (_pst_processes st) of
+          Nothing -> pure Nothing
+          Just entry -> do
+            result <- Timeout.timeout (timeoutMs * 1000)
+                        (Async.wait (_pe_exitAsync entry))
+            case result of
+              Nothing -> Just <$> getStatus entry  -- timeout, return current status
+              Just ec -> do
+                stdout <- readIORef (_pe_stdoutRef entry)
+                stderr <- readIORef (_pe_stderrRef entry)
+                pure (Just (ProcessDone ec stdout stderr))
+
+    , _ph_closeStdin = \(ProcessId pid) -> do
+        st <- readIORef stateRef
+        case Map.lookup pid (_pst_processes st) of
+          Nothing -> pure False
+          Just entry -> do
+            result <- try @SomeException (hClose (_pe_stdinH entry))
+            case result of
+              Left _  -> pure False
+              Right () -> pure True
     }
 
 -- | Read from a handle in a loop, appending to an IORef.
@@ -205,4 +235,6 @@ mkNoOpProcessHandle = ProcessHandle
   , _ph_poll       = \_ -> pure (Just (ProcessDone ExitSuccess "" ""))
   , _ph_kill       = \_ -> pure True
   , _ph_writeStdin = \_ _ -> pure True
+  , _ph_wait       = \_ _ -> pure (Just (ProcessDone ExitSuccess "" ""))
+  , _ph_closeStdin = \_ -> pure True
   }

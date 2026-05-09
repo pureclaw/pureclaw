@@ -31,6 +31,7 @@ import qualified Tools.ShellSpec
 import qualified Tools.FileReadSpec
 import qualified Tools.GitSpec
 import qualified Tools.MemorySpec
+import qualified Tools.FileWriteSpec
 import qualified Tools.EditSpec
 import qualified Tools.ProcessSpec
 import qualified Handles.ProcessSpec
@@ -38,6 +39,14 @@ import qualified Tools.WebSearchSpec
 import qualified Tools.MessageSpec
 import qualified Tools.CronSpec
 import qualified Tools.ImageSpec
+import qualified Tools.SearchFilesSpec
+import qualified Tools.ClarifySpec
+import qualified Tools.WebExtractSpec
+import qualified Tools.PatchSpec
+import qualified Tools.DelegateSpec
+import qualified Tools.TodoSpec
+import qualified Tools.ExecuteCodeSpec
+import qualified Tools.SessionSearchSpec
 import qualified Memory.NoneSpec
 import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
@@ -108,6 +117,7 @@ main = hspec $ do
   describe "Tools.FileRead" Tools.FileReadSpec.spec
   describe "Tools.Git" Tools.GitSpec.spec
   describe "Tools.Memory" Tools.MemorySpec.spec
+  describe "Tools.FileWrite" Tools.FileWriteSpec.spec
   describe "Tools.Edit" Tools.EditSpec.spec
   describe "Tools.Process" Tools.ProcessSpec.spec
   describe "Handles.Process" Handles.ProcessSpec.spec
@@ -115,6 +125,14 @@ main = hspec $ do
   describe "Tools.Message" Tools.MessageSpec.spec
   describe "Tools.Cron" Tools.CronSpec.spec
   describe "Tools.Image" Tools.ImageSpec.spec
+  describe "Tools.SearchFiles" Tools.SearchFilesSpec.spec
+  describe "Tools.Clarify" Tools.ClarifySpec.spec
+  describe "Tools.WebExtract" Tools.WebExtractSpec.spec
+  describe "Tools.Patch" Tools.PatchSpec.spec
+  describe "Tools.Delegate" Tools.DelegateSpec.spec
+  describe "Tools.Todo" Tools.TodoSpec.spec
+  describe "Tools.ExecuteCode" Tools.ExecuteCodeSpec.spec
+  describe "Tools.SessionSearch" Tools.SessionSearchSpec.spec
   describe "Memory.None" Memory.NoneSpec.spec
   describe "Memory.Markdown" Memory.MarkdownSpec.spec
   describe "Memory.SQLite" Memory.SQLiteSpec.spec

@@ -30,7 +30,7 @@ spec = do
     it "executes git commands when allowed" $ do
       let policy = withAutonomy Full
                  $ allowCommand (CommandName "git") defaultPolicy
-          mockShell = ShellHandle $ \_ -> pure ProcessResult
+          mockShell = ShellHandle $ \_ _ -> pure ProcessResult
             { _pr_exitCode = ExitSuccess
             , _pr_stdout   = BS8.pack "On branch main"
             , _pr_stderr   = ""

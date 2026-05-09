@@ -10,6 +10,8 @@ import Data.ByteString qualified as BS
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import System.Directory (canonicalizePath, createDirectoryIfMissing)
+import System.FilePath ((</>), takeDirectory)
 
 import PureClaw.Core.Types
 import PureClaw.Handles.File
@@ -59,22 +61,25 @@ fileWriteTool root fh = (def, handler)
 
     writeNew :: WorkspaceRoot -> Text -> Text -> IO (Text, Bool)
     writeNew (WorkspaceRoot wr) path content = do
-      -- Create the file first so mkSafePath can validate it exists
-      let fullPath = wr <> "/" <> T.unpack path
-      result <- try @SomeException (TE.encodeUtf8 content `seq` pure ())
-      case result of
+      -- Canonicalize the workspace root so the constructed path matches
+      -- what mkSafePath will resolve to (e.g. /tmp → /private/tmp on macOS).
+      canonRoot <- canonicalizePath wr
+      let fullPath = canonRoot </> T.unpack path
+      -- Create parent directories (e.g. for "docs/foo.md")
+      writeResult <- try @SomeException $ do
+        createDirectoryIfMissing True (takeDirectory fullPath)
+        BS.writeFile fullPath (TE.encodeUtf8 content)
+      case writeResult of
         Left e -> pure (T.pack (show e), True)
         Right () -> do
-          writeResult <- try @SomeException $ do
-            BS.writeFile fullPath (TE.encodeUtf8 content)
-          case writeResult of
-            Left e -> pure (T.pack (show e), True)
-            Right () -> do
-              -- Validate the written file is safe
-              validated <- mkSafePath (WorkspaceRoot wr) fullPath
-              case validated of
-                Left pe -> pure (T.pack (show pe), True)
-                Right _ -> pure ("Written to " <> path, False)
+          -- Validate the written file is safe (canonicalized path within workspace)
+          validated <- mkSafePath (WorkspaceRoot wr) fullPath
+          case validated of
+            Left pe -> do
+              -- Wrote an unsafe file — clean it up
+              _ <- try @SomeException (BS.writeFile fullPath BS.empty)
+              pure (T.pack (show pe), True)
+            Right _ -> pure ("Written to " <> path, False)
 
     parseInput :: Value -> Parser (Text, Text)
     parseInput = withObject "FileWriteInput" $ \o ->

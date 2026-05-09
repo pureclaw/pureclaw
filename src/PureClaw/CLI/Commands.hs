@@ -83,13 +83,22 @@ import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Passphrase
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Tools.Clarify
+import PureClaw.Tools.Edit
 import PureClaw.Tools.FileRead
 import PureClaw.Tools.FileWrite
 import PureClaw.Tools.Git
 import PureClaw.Tools.HttpRequest
 import PureClaw.Tools.Memory
+import PureClaw.Tools.Patch
 import PureClaw.Tools.Registry
+import PureClaw.Tools.SearchFiles
+import PureClaw.Tools.Delegate
+import PureClaw.Tools.ExecuteCode
+import PureClaw.Tools.SessionSearch
 import PureClaw.Tools.Shell
+import PureClaw.Tools.Todo
+import PureClaw.Tools.WebExtract
 
 -- | Supported LLM providers.
 data ProviderType
@@ -456,9 +465,6 @@ runChat opts = do
       nh        = mkNetworkHandle manager
   mh <- resolveMemory effectiveMemory
 
-  -- Tool registry
-  let registry = buildRegistry policy sh workspace fh mh nh
-
   hSetBuffering stdout LineBuffering
   case mProvider of
     Just _  -> _lh_logInfo logger $ "Provider: " <> T.pack (providerToText effectiveProvider)
@@ -492,6 +498,12 @@ runChat opts = do
 
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
+        -- Build registry: pure tools + IO tools (todo needs IORef state)
+        (todoDef, todoHandler) <- todoTool
+        let sessSearchTool = sessionSearchTool logger (pureclawDir </> "sessions")
+            registry = registerTool todoDef todoHandler
+                     $ uncurry registerTool sessSearchTool
+                     $ buildRegistry policy sh workspace fh mh nh channel
         putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"
         case effectiveChannel of
           "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
@@ -592,13 +604,17 @@ runChat opts = do
         onFirstStreamDoneRef <- newIORef
           =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         mcpRef <- newIORef Map.empty
-        let env = AgentEnv
+        -- Use lazy circular binding: delegateTaskTool captures env, and
+        -- env.registry includes the delegate tool. Haskell's laziness
+        -- makes this safe — the tool closure only forces env when invoked.
+        let fullRegistry = uncurry registerTool (delegateTaskTool env) registry
+            env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
               , _env_channel      = channel
               , _env_logger       = logger
               , _env_systemPrompt = sysPrompt
-              , _env_registry     = registry
+              , _env_registry     = fullRegistry
               , _env_vault        = vaultRef
               , _env_pluginHandle = mkPluginHandle
               , _env_policy       = policy
@@ -712,16 +728,22 @@ parseMemoryMaybe (Just t) = case T.unpack t of
   _          -> Nothing
 
 -- | Build the tool registry with all available tools.
-buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> NetworkHandle -> ToolRegistry
-buildRegistry policy sh workspace fh mh nh =
+buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle -> MemoryHandle -> NetworkHandle -> ChannelHandle -> ToolRegistry
+buildRegistry policy sh workspace fh mh nh ch =
   let reg = uncurry registerTool
   in reg (shellTool policy sh)
    $ reg (fileReadTool workspace fh)
    $ reg (fileWriteTool workspace fh)
+   $ reg (editTool workspace fh)
+   $ reg (patchTool workspace fh)
+   $ reg (searchFilesTool workspace)
+   $ reg (clarifyTool ch)
    $ reg (gitTool policy sh)
    $ reg (memoryStoreTool mh)
    $ reg (memoryRecallTool mh)
    $ reg (httpRequestTool AllowAll nh)
+   $ reg (webExtractTool AllowAll nh)
+   $ reg (executeCodeTool policy)
      emptyRegistry
 
 -- | Build a security policy from optional autonomy level and allowed commands.

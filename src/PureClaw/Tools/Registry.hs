@@ -9,6 +9,7 @@ module PureClaw.Tools.Registry
   , registryDefinitions
   , executeTool
   , mergeRegistries
+  , filterRegistry
   ) where
 
 import Data.Aeson (Value)
@@ -62,3 +63,8 @@ executeTool reg name input =
 mergeRegistries :: ToolRegistry -> ToolRegistry -> ToolRegistry
 mergeRegistries (ToolRegistry a) (ToolRegistry b) =
   ToolRegistry (Map.union b a)
+
+-- | Filter a registry to only include tools whose names satisfy a predicate.
+filterRegistry :: (Text -> Bool) -> ToolRegistry -> ToolRegistry
+filterRegistry predicate (ToolRegistry tools) =
+  ToolRegistry (Map.filterWithKey (\k _ -> predicate k) tools)

@@ -80,6 +80,14 @@ library
     PureClaw.Tools.Message
     PureClaw.Tools.Cron
     PureClaw.Tools.Image
+    PureClaw.Tools.SearchFiles
+    PureClaw.Tools.Clarify
+    PureClaw.Tools.WebExtract
+    PureClaw.Tools.Patch
+    PureClaw.Tools.Delegate
+    PureClaw.Tools.Todo
+    PureClaw.Tools.ExecuteCode
+    PureClaw.Tools.SessionSearch
     -- Agent
     PureClaw.Agent.AgentDef
     PureClaw.Agent.Completion
@@ -223,6 +231,7 @@ test-suite pureclaw-test
     Tools.FileReadSpec
     Tools.GitSpec
     Tools.MemorySpec
+    Tools.FileWriteSpec
     Tools.EditSpec
     Tools.ProcessSpec
     Handles.ProcessSpec
@@ -230,6 +239,14 @@ test-suite pureclaw-test
     Tools.MessageSpec
     Tools.CronSpec
     Tools.ImageSpec
+    Tools.SearchFilesSpec
+    Tools.ClarifySpec
+    Tools.WebExtractSpec
+    Tools.PatchSpec
+    Tools.DelegateSpec
+    Tools.TodoSpec
+    Tools.ExecuteCodeSpec
+    Tools.SessionSearchSpec
     Memory.MarkdownSpec
     Memory.SQLiteSpec
     Memory.NoneSpec

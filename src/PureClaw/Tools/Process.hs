@@ -23,13 +23,13 @@ processTool policy ph = (def, handler)
   where
     def = ToolDefinition
       { _td_name        = "process"
-      , _td_description = "Manage background processes. Actions: spawn (start a background command), list (show all), poll (check status and output), kill (terminate), write_stdin (send input)."
+      , _td_description = "Manage background processes. Actions: spawn, list, poll, kill, write_stdin, wait, close_stdin."
       , _td_inputSchema = object
           [ "type" .= ("object" :: Text)
           , "properties" .= object
               [ "action" .= object
                   [ "type" .= ("string" :: Text)
-                  , "enum" .= (["spawn", "list", "poll", "kill", "write_stdin"] :: [Text])
+                  , "enum" .= (["spawn", "list", "poll", "kill", "write_stdin", "wait", "close_stdin"] :: [Text])
                   , "description" .= ("The action to perform" :: Text)
                   ]
               , "command" .= object
@@ -43,6 +43,18 @@ processTool policy ph = (def, handler)
               , "input" .= object
                   [ "type" .= ("string" :: Text)
                   , "description" .= ("Input to send to stdin (for write_stdin)" :: Text)
+                  ]
+              , "timeout_ms" .= object
+                  [ "type" .= ("integer" :: Text)
+                  , "description" .= ("Timeout in milliseconds (for wait, default: 30000)" :: Text)
+                  ]
+              , "offset" .= object
+                  [ "type" .= ("integer" :: Text)
+                  , "description" .= ("Byte offset for log pagination in poll (default: 0)" :: Text)
+                  ]
+              , "max_bytes" .= object
+                  [ "type" .= ("integer" :: Text)
+                  , "description" .= ("Max bytes to return from poll output (default: 10000)" :: Text)
                   ]
               ]
           , "required" .= (["action"] :: [Text])
@@ -72,6 +84,14 @@ processTool policy ph = (def, handler)
       case parseEither parseWriteStdin input of
         Left err -> pure (T.pack err, True)
         Right (pid, bytes) -> doWriteStdin pid bytes
+    dispatch "wait" input =
+      case parseEither parseWait input of
+        Left err -> pure (T.pack err, True)
+        Right (pid, timeoutMs) -> doWait pid timeoutMs
+    dispatch "close_stdin" input =
+      case parseEither parseId input of
+        Left err -> pure (T.pack err, True)
+        Right pid -> doCloseStdin pid
     dispatch action _ = pure ("Unknown action: " <> action, True)
 
     doSpawn :: Text -> IO (Text, Bool)
@@ -127,6 +147,31 @@ processTool policy ph = (def, handler)
         then pure ("Sent input to process " <> T.pack (show pid), False)
         else pure ("Process " <> T.pack (show pid) <> " not found or not running", True)
 
+    doWait :: Int -> Int -> IO (Text, Bool)
+    doWait pid timeoutMs = do
+      status <- _ph_wait ph (ProcessId pid) timeoutMs
+      case status of
+        Nothing -> pure ("Process " <> T.pack (show pid) <> " not found", True)
+        Just (ProcessRunning stdout stderr) ->
+          let out = T.pack (BS8.unpack stdout)
+              err = T.pack (BS8.unpack stderr)
+          in pure ("Status: still running (wait timed out after "
+                  <> T.pack (show timeoutMs) <> "ms)\n" <> formatOutput out err, False)
+        Just (ProcessDone exitCode stdout stderr) ->
+          let out = T.pack (BS8.unpack stdout)
+              err = T.pack (BS8.unpack stderr)
+              exitInfo = case exitCode of
+                ExitSuccess   -> "0"
+                ExitFailure n -> T.pack (show n)
+          in pure ("Status: done (exit " <> exitInfo <> ")\n" <> formatOutput out err, False)
+
+    doCloseStdin :: Int -> IO (Text, Bool)
+    doCloseStdin pid = do
+      ok <- _ph_closeStdin ph (ProcessId pid)
+      if ok
+        then pure ("Closed stdin for process " <> T.pack (show pid), False)
+        else pure ("Process " <> T.pack (show pid) <> " not found", True)
+
     formatList :: [ProcessInfo] -> Text
     formatList = T.intercalate "\n" . map formatInfo
 
@@ -161,3 +206,7 @@ processTool policy ph = (def, handler)
     parseWriteStdin :: Value -> Parser (Int, Text)
     parseWriteStdin = withObject "ProcessWriteStdinInput" $ \o ->
       (,) <$> o .: "id" <*> o .: "input"
+
+    parseWait :: Value -> Parser (Int, Int)
+    parseWait = withObject "ProcessWaitInput" $ \o ->
+      (,) <$> o .: "id" <*> o .:? "timeout_ms" .!= 30000
