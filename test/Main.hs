@@ -44,6 +44,9 @@ import qualified Tools.ClarifySpec
 import qualified Tools.WebExtractSpec
 import qualified Tools.PatchSpec
 import qualified Tools.DelegateSpec
+import qualified Tools.TodoSpec
+import qualified Tools.ExecuteCodeSpec
+import qualified Tools.SessionSearchSpec
 import qualified Memory.NoneSpec
 import qualified Memory.MarkdownSpec
 import qualified Memory.SQLiteSpec
@@ -127,6 +130,9 @@ main = hspec $ do
   describe "Tools.WebExtract" Tools.WebExtractSpec.spec
   describe "Tools.Patch" Tools.PatchSpec.spec
   describe "Tools.Delegate" Tools.DelegateSpec.spec
+  describe "Tools.Todo" Tools.TodoSpec.spec
+  describe "Tools.ExecuteCode" Tools.ExecuteCodeSpec.spec
+  describe "Tools.SessionSearch" Tools.SessionSearchSpec.spec
   describe "Memory.None" Memory.NoneSpec.spec
   describe "Memory.Markdown" Memory.MarkdownSpec.spec
   describe "Memory.SQLite" Memory.SQLiteSpec.spec

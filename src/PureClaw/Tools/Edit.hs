@@ -187,6 +187,8 @@ fuzzyFind needle haystack = tryStrategies strategies
       [ ("whitespace-normalized", normalizeWhitespace)
       , ("trimmed-lines", trimLines)
       , ("line-ending-normalized", normalizeLineEndings)
+      , ("indentation-normalized", normalizeIndentation)
+      , ("case-insensitive", T.toLower)
       ]
 
     tryStrategies :: [(Text, Text -> Text)] -> FuzzyMatch
@@ -243,10 +245,12 @@ mapBackToOriginal normalize normPos normLen original =
 fuzzyFindPattern :: Text -> Text -> Maybe Text
 fuzzyFindPattern needle strategy =
   let normalize = case strategy of
-        "whitespace-normalized" -> normalizeWhitespace
-        "trimmed-lines"        -> trimLines
-        "line-ending-normalized" -> normalizeLineEndings
-        _                      -> id
+        "whitespace-normalized"   -> normalizeWhitespace
+        "trimmed-lines"           -> trimLines
+        "line-ending-normalized"  -> normalizeLineEndings
+        "indentation-normalized"  -> normalizeIndentation
+        "case-insensitive"        -> T.toLower
+        _                         -> id
   in Just (normalize needle)
 
 -- | Normalize all whitespace runs to single spaces, trim.
@@ -260,6 +264,11 @@ trimLines = T.unlines . map T.strip . T.lines
 -- | Normalize line endings: \r\n → \n
 normalizeLineEndings :: Text -> Text
 normalizeLineEndings = T.replace "\r\n" "\n"
+
+-- | Normalize indentation: strip all leading whitespace from each line.
+-- This handles mismatched tabs-vs-spaces and indent-level differences.
+normalizeIndentation :: Text -> Text
+normalizeIndentation = T.unlines . map T.stripStart . T.lines
 
 -- | Count non-overlapping occurrences of a needle in a haystack.
 countOccurrences :: Text -> Text -> Int

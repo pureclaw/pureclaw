@@ -94,7 +94,10 @@ import PureClaw.Tools.Patch
 import PureClaw.Tools.Registry
 import PureClaw.Tools.SearchFiles
 import PureClaw.Tools.Delegate
+import PureClaw.Tools.ExecuteCode
+import PureClaw.Tools.SessionSearch
 import PureClaw.Tools.Shell
+import PureClaw.Tools.Todo
 import PureClaw.Tools.WebExtract
 
 -- | Supported LLM providers.
@@ -495,7 +498,12 @@ runChat opts = do
 
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
-        let registry = buildRegistry policy sh workspace fh mh nh channel
+        -- Build registry: pure tools + IO tools (todo needs IORef state)
+        (todoDef, todoHandler) <- todoTool
+        let sessSearchTool = sessionSearchTool logger (pureclawDir </> "sessions")
+            registry = uncurry registerTool (todoDef, todoHandler)
+                     $ uncurry registerTool sessSearchTool
+                     $ buildRegistry policy sh workspace fh mh nh channel
         putStrLn "PureClaw 0.1.0 \x2014 Haskell-native AI agent runtime"
         case effectiveChannel of
           "cli" -> putStrLn "Type your message and press Enter. Ctrl-D to exit."
@@ -735,6 +743,7 @@ buildRegistry policy sh workspace fh mh nh ch =
    $ reg (memoryRecallTool mh)
    $ reg (httpRequestTool AllowAll nh)
    $ reg (webExtractTool AllowAll nh)
+   $ reg (executeCodeTool policy)
      emptyRegistry
 
 -- | Build a security policy from optional autonomy level and allowed commands.
