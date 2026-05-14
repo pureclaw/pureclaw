@@ -23,6 +23,7 @@ import PureClaw.Handles.Backend
   ( BackendContext (BcSshDisconnect)
   , BackendError
     ( BackendBinaryNotFound
+    , BackendBufferQuotaExceeded
     , BackendSshConnectFailed
     )
   , BackendException (..)
@@ -34,9 +35,12 @@ import PureClaw.Handles.Backend
   , RecvResult (..)
   , Rows (..)
   , SshConnectFailure (..)
+  , acquireBufferQuota
   , mkInMemoryBackendHandle
   , mkNoOpBackendHandle
+  , newBackendBufferQuota
   , newInMemoryState
+  , releaseBufferQuota
   )
 import PureClaw.Internal.FakeClock (newFakeClock)
 import PureClaw.Security.Policy qualified as Security.Policy
@@ -136,8 +140,21 @@ spec = do
       pendingWith "WU1: haddock decision tree in PureClaw.Handles.Backend; doctest asserts presence."
 
     -- docs/terminal-backend-abstractions.md line 70: process-wide buffer quota
-    it "DoD #23: oversubscribed process-wide recv-buffer cap returns Left (BackendBufferQuotaExceeded n)" $
-      pendingWith "WU7: QSem-based process-wide quota in PureClaw.Handles.Backend."
+    --
+    -- The behavioural coverage of DoD #23 lives in 'Backend.PtySpec' (where
+    -- the drainer-backed substrate that exercises the quota is also tested).
+    -- Here we only smoke-test the type-layer wiring in 'Handles.Backend'.
+    it "DoD #23: quota helpers acquire/release and reject oversubscription" $ do
+      q   <- newBackendBufferQuota 4
+      r1  <- acquireBufferQuota q 3
+      r1 `shouldBe` Right ()
+      r2  <- acquireBufferQuota q 2
+      case r2 of
+        Left (BackendBufferQuotaExceeded n) -> n `shouldBe` 2
+        other -> expectationFailure $ "unexpected: " <> show other
+      releaseBufferQuota q 3
+      r3 <- acquireBufferQuota q 4
+      r3 `shouldBe` Right ()
 
     -- docs/terminal-backend-abstractions.md line 71: no-op resize is a silent no-op
     it "DoD #24: mkNoOpBackendHandle Pipe _bh_resize is a silent no-op" $ do

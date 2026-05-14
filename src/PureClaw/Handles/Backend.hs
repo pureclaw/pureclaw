@@ -101,6 +101,15 @@ module PureClaw.Handles.Backend
   , InMemoryState (..)
   , newInMemoryState
   , mkInMemoryBackendHandle
+    -- * Process-wide recv-buffer quota (WU7)
+  , BackendBufferQuota
+  , newBackendBufferQuota
+  , globalBackendBufferQuota
+  , acquireBufferQuota
+  , releaseBufferQuota
+  , bufferQuotaAvailableMiB
+  , setGlobalBackendBufferQuotaForTest
+  , defaultAggregateBufferCapMiB
     -- * Re-exports
   , CommandName
   , FakeClock
@@ -109,7 +118,7 @@ module PureClaw.Handles.Backend
 import Control.Exception (Exception, SomeException, bracket, displayException)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -117,6 +126,9 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
+import Text.Read (readMaybe)
 
 import {-# SOURCE #-} PureClaw.Internal.Redact qualified as Redact
 import PureClaw.Core.Types (CommandName)
@@ -793,3 +805,97 @@ mkInMemoryBackendHandle kind cfg = do
     , _bh_resize      = doResize
     , _bh_close       = doClose
     }
+
+--------------------------------------------------------------------------------
+-- Process-wide recv-buffer quota (WU7)
+--------------------------------------------------------------------------------
+
+-- | The default process-wide aggregate recv-buffer cap (64 MiB).
+--
+-- Override at process startup by setting the
+-- @PURECLAW_BACKEND_AGGREGATE_CAP_MIB@ environment variable; the
+-- 'globalBackendBufferQuota' singleton consults this variable once on
+-- first use.
+defaultAggregateBufferCapMiB :: Int
+defaultAggregateBufferCapMiB = 64
+
+-- | Process-wide recv-buffer quota, in MiB.
+--
+-- Backed by an 'IORef' counter (not a @QSem@ \/ @QSemN@): the
+-- semantics we want are __non-blocking__ @tryAcquire@-style, returning
+-- 'Left BackendBufferQuotaExceeded' on oversubscription rather than
+-- blocking the calling thread. @QSemN.tryWaitQSemN@ does not exist
+-- upstream, and a counter-based 'atomicModifyIORef'' is simpler and
+-- equivalent in correctness for a single-process quota.
+--
+-- The double-release defense in 'releaseBufferQuota' relies on the
+-- per-acquisition 'IORef' flag that backend factories thread through
+-- their close action; this 'BackendBufferQuota' type itself stores
+-- only the running total.
+newtype BackendBufferQuota = BackendBufferQuota (IORef Int)
+
+-- | Construct a quota with the given capacity (in MiB). Available
+-- units start at the capacity.
+newBackendBufferQuota :: Int -> IO BackendBufferQuota
+newBackendBufferQuota capMiB = BackendBufferQuota <$> newIORef capMiB
+
+-- | The shared, process-wide 'BackendBufferQuota' used by all real
+-- backend factories.
+--
+-- Sized from the @PURECLAW_BACKEND_AGGREGATE_CAP_MIB@ environment
+-- variable at first use; falls back to 'defaultAggregateBufferCapMiB'
+-- if the variable is unset or unparseable.
+--
+-- Tests that need to drive oversubscription deterministically can
+-- replace the singleton with 'setGlobalBackendBufferQuotaForTest'.
+globalBackendBufferQuota :: IORef BackendBufferQuota
+globalBackendBufferQuota = unsafePerformIO $ do
+  cap <- readBufferQuotaCap
+  q   <- newBackendBufferQuota cap
+  newIORef q
+{-# NOINLINE globalBackendBufferQuota #-}
+
+readBufferQuotaCap :: IO Int
+readBufferQuotaCap = do
+  mEnv <- lookupEnv "PURECLAW_BACKEND_AGGREGATE_CAP_MIB"
+  case mEnv >>= readMaybe of
+    Just n | n > 0 -> pure n
+    _              -> pure defaultAggregateBufferCapMiB
+
+-- | Replace the global quota with a fresh one of the given capacity.
+-- Test-only helper; production code must not call this.
+setGlobalBackendBufferQuotaForTest :: Int -> IO ()
+setGlobalBackendBufferQuotaForTest capMiB = do
+  q <- newBackendBufferQuota capMiB
+  writeIORef globalBackendBufferQuota q
+
+-- | Inspect available MiB in a 'BackendBufferQuota'. Read-only; for
+-- tests and diagnostics.
+bufferQuotaAvailableMiB :: BackendBufferQuota -> IO Int
+bufferQuotaAvailableMiB (BackendBufferQuota ref) = readIORef ref
+
+-- | Try to acquire @n@ MiB. Returns 'Left BackendBufferQuotaExceeded'
+-- if the quota is oversubscribed; the caller is expected to surface
+-- this as a 'BackendError' on construction. Atomically decrements the
+-- running counter on success.
+--
+-- Pass a negative or zero @n@ to acquire nothing — useful for pipe-
+-- kind factories that don\'t carry a recv buffer.
+acquireBufferQuota :: BackendBufferQuota -> Int -> IO (Either BackendError ())
+acquireBufferQuota (BackendBufferQuota ref) n
+  | n <= 0    = pure (Right ())
+  | otherwise = atomicModifyIORef' ref $ \avail ->
+      if avail >= n
+        then (avail - n, Right ())
+        else (avail, Left (BackendBufferQuotaExceeded n))
+
+-- | Release @n@ MiB back to the quota.
+--
+-- Designed to be called inside a backend\'s close action. The double-
+-- release defense lives at the call site (a per-backend 'IORef Bool'
+-- flag flipped on first release); this function unconditionally
+-- increments and is therefore safe to call from a 'bracket' cleanup.
+releaseBufferQuota :: BackendBufferQuota -> Int -> IO ()
+releaseBufferQuota (BackendBufferQuota ref) n
+  | n <= 0    = pure ()
+  | otherwise = atomicModifyIORef' ref $ \avail -> (avail + n, ())

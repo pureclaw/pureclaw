@@ -63,6 +63,9 @@ library
     PureClaw.Handles.Transcript
     PureClaw.Handles.Harness
     PureClaw.Handles.Backend
+    -- Backend
+    PureClaw.Backend.Pty
+    PureClaw.Backend.Pty.Fake
     -- Internal
     PureClaw.Internal.Redact
     PureClaw.Internal.FakeClock
