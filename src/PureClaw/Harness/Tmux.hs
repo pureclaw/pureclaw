@@ -1,3 +1,16 @@
+-- |
+-- == Scope note (post-WU4)
+--
+-- For NEW code, the canonical shell-quoter lives in
+-- 'PureClaw.Internal.ShellQuote'. The local re-exports
+-- 'shellEscape' / 'shellEscapeStr' here delegate to it. The
+-- double-quote variant 'escapeForShell' and the @sh -c@-based
+-- 'stealthShellCommand' remain local because they are specific to
+-- the existing Claude Code supervision flow; they will retire when
+-- the future TmuxRpc work refactors the harness.
+--
+-- See @docs\/terminal-backend-abstractions.md@
+-- § \"Remote arg quoting\" and § \"Scope of Harness.Tmux migration\".
 module PureClaw.Harness.Tmux
   ( -- * tmux availability
     requireTmux
@@ -16,6 +29,9 @@ module PureClaw.Harness.Tmux
   , tmuxDisplay
     -- * Stealth mode
   , stealthShellCommand
+    -- * Shell quoting (delegates to 'PureClaw.Internal.ShellQuote')
+  , shellEscape
+  , shellEscapeStr
   ) where
 
 import Data.ByteString (ByteString)
@@ -32,6 +48,7 @@ import System.IO.Temp qualified as Temp
 import System.Process.Typed qualified as P
 
 import PureClaw.Handles.Harness
+import PureClaw.Internal.ShellQuote qualified as ShellQuote
 
 -- | Resolve the absolute path to the tmux binary.
 -- First checks PATH via 'findExecutable', then tries common system locations.
@@ -105,19 +122,18 @@ escapeForShell = concatMap go
     go '`'  = "\\`"
     go c    = [c]
 
--- | Shell-escape a 'String' argument. Convenience wrapper around 'shellEscape'.
+-- | Shell-escape a 'String' argument. Delegates to the canonical
+-- quoter 'PureClaw.Internal.ShellQuote.shellQuoteString'; new code
+-- should call that module directly.
 shellEscapeStr :: String -> String
-shellEscapeStr = T.unpack . shellEscape . T.pack
+shellEscapeStr = ShellQuote.shellQuoteString
 
--- | Simple shell escaping for individual arguments.
--- Wraps in single quotes and escapes embedded single quotes.
+-- | Single-quote-wrap a 'Text' for inclusion as a shell argument.
+-- Delegates to the canonical quoter
+-- 'PureClaw.Internal.ShellQuote.shellQuote'; new code should call
+-- that module directly.
 shellEscape :: Text -> Text
-shellEscape t
-  | T.null t = "''"
-  | T.all isSafe t = t
-  | otherwise = "'" <> T.replace "'" "'\\''" t <> "'"
-  where
-    isSafe c = c `elem` (['a'..'z'] <> ['A'..'Z'] <> ['0'..'9'] <> "-_./=:@")
+shellEscape = ShellQuote.shellQuote
 
 -- | Start a tmux session with the given name if not already running.
 -- Creates a detached session with 300x100 dimensions.
