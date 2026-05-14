@@ -68,6 +68,7 @@ library
     PureClaw.Backend.Pty.Fake
     PureClaw.Backend.Local
     PureClaw.Backend.SSH
+    PureClaw.Backend.Tmux
     -- Internal
     PureClaw.Internal.Redact
     PureClaw.Internal.FakeClock

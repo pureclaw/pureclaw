@@ -67,6 +67,7 @@ module PureClaw.Backend.SSH
   , closeSshMultiplex
     -- * Test seam (argv construction)
   , buildSshArgv
+  , buildSshArgvFromParts
   ) where
 
 import Control.Concurrent.Async qualified as Async
@@ -406,7 +407,33 @@ buildSshArgv
   -> Maybe ControlOpts
   -> Bool
   -> [String]
-buildSshArgv tgt remote mKnown mCtl wantPty =
+buildSshArgv tgt remote =
+  buildSshArgvFromParts tgt (getRemoteProgram remote) (getRemoteArgs remote)
+
+-- | Lower-level variant of 'buildSshArgv' that takes the remote program
+-- and arg list directly, rather than packaged in a 'RemoteCommand'.
+--
+-- The 'RemoteCommand' constructor is intentionally non-exported, but
+-- consumers (notably 'PureClaw.Backend.Tmux') need to splice
+-- subcommand-specific argv into the same hardened ssh prefix — e.g.
+-- the same authorized remote tmux binary, but with different args for
+-- the pin-resolve probe vs the attach. This helper expresses exactly
+-- that: take an already-authorized program path and a fresh args list
+-- (the caller's responsibility — the auth invariant lives at
+-- 'authorizeRemote' time).
+--
+-- Note: the program path is shell-quoted, so a path like
+-- @/opt/my tools/tmux@ round-trips through the remote login shell
+-- intact.
+buildSshArgvFromParts
+  :: SshTarget
+  -> FilePath               -- ^ remote program path (already authorized)
+  -> [Text]                 -- ^ remote program args
+  -> Maybe SafeRuntimePath  -- ^ optional @UserKnownHostsFile@
+  -> Maybe ControlOpts      -- ^ optional ControlMaster settings
+  -> Bool                   -- ^ request a remote PTY via @-tt@?
+  -> [String]
+buildSshArgvFromParts tgt remoteProg remoteArgs mKnown mCtl wantPty =
   hardenedFlags
     <> knownHostsFlag
     <> identityFlag
@@ -461,9 +488,8 @@ buildSshArgv tgt remote mKnown mCtl wantPty =
 
     remoteQuotedTail :: [String]
     remoteQuotedTail =
-      let prog     = T.pack (getRemoteProgram remote)
-          progQ    = T.unpack (shellQuote prog)
-          argsQ    = map (T.unpack . shellQuote) (getRemoteArgs remote)
+      let progQ = T.unpack (shellQuote (T.pack remoteProg))
+          argsQ = map (T.unpack . shellQuote) remoteArgs
       in progQ : argsQ
 
 --------------------------------------------------------------------------------
