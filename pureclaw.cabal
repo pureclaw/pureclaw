@@ -66,6 +66,7 @@ library
     -- Backend
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake
+    PureClaw.Backend.Local
     -- Internal
     PureClaw.Internal.Redact
     PureClaw.Internal.FakeClock
