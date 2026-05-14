@@ -95,6 +95,8 @@ module PureClaw.Handles.Backend
     -- * Bracket helpers
   , withBackendHandle
   , withBackendHandleE
+    -- * Concurrent-use guard
+  , withConcurrentUseGuard
     -- * No-op + in-memory test backends
   , mkNoOpBackendHandle
   , InMemoryConfig (..)
@@ -115,7 +117,21 @@ module PureClaw.Handles.Backend
   , FakeClock
   ) where
 
-import Control.Exception (Exception, SomeException, bracket, displayException)
+import Control.Concurrent.MVar
+  ( MVar
+  , newMVar
+  , putMVar
+  , tryTakeMVar
+  )
+import Control.Exception
+  ( Exception
+  , SomeException
+  , bracket
+  , displayException
+  , finally
+  , throwIO
+  , toException
+  )
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -662,6 +678,36 @@ withBackendHandleE acquire body = do
   case result of
     Left  e -> pure (Left e)
     Right b -> Right <$> withBackendHandle b body
+
+-- | Wrap a 'BackendHandle' so that concurrent entry into '_bh_send'
+-- and '_bh_recv' from multiple threads is detected and rejected.
+--
+-- The documented concurrency contract on 'BackendHandle' says callers
+-- MUST NOT invoke '_bh_send' or '_bh_recv' from two threads at once;
+-- this wrapper enforces that contract by gating both actions on a
+-- single 'MVar'. The second-entrant observes a 'BackendException' with
+-- @_be_context = 'BcConcurrentUse'@ instead of corrupting state.
+--
+-- '_bh_resize' and '_bh_close' are NOT gated: resize is documented as
+-- safe from any thread, and close is documented as idempotent.
+withConcurrentUseGuard :: BackendHandle -> IO BackendHandle
+withConcurrentUseGuard bh = do
+  gate <- newMVar ()
+  pure bh
+    { _bh_send = guarded gate . _bh_send bh
+    , _bh_recv = guarded gate . _bh_recv bh
+    }
+  where
+    guarded :: MVar () -> IO a -> IO a
+    guarded gate io = do
+      m <- tryTakeMVar gate
+      case m of
+        Nothing ->
+          throwIO $ BackendException
+            BcConcurrentUse
+            (toException
+               (userError "concurrent _bh_send/_bh_recv on a BackendHandle"))
+        Just () -> io `finally` putMVar gate ()
 
 --------------------------------------------------------------------------------
 -- No-op backend

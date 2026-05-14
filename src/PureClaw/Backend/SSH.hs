@@ -71,7 +71,8 @@ module PureClaw.Backend.SSH
 
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (modifyMVar_, newMVar)
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, throwIO, toException, try)
+import Control.Exception qualified as Exception
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
@@ -91,7 +92,9 @@ import PureClaw.Backend.Pty
   )
 import PureClaw.Core.Types (AllowList (..), CommandName (..))
 import PureClaw.Handles.Backend
-  ( BackendError (..)
+  ( BackendContext (..)
+  , BackendError (..)
+  , BackendException (..)
   , BackendHandle (..)
   , BackendKind (..)
   , EnvMap
@@ -106,6 +109,7 @@ import PureClaw.Handles.Backend
   , globalBackendBufferQuota
   , releaseBufferQuota
   , sshIdle
+  , withConcurrentUseGuard
   )
 import PureClaw.Internal.ShellQuote (shellQuote)
 import PureClaw.Security.Command
@@ -516,8 +520,59 @@ mkSshBackendHandle pio sshCmd tgt remote opts = do
   -- 'RecvTimedOut'.
   r <- try @SomeException (mkDrainerBackendHandle pio ptyOpts spec Pty)
   case r of
-    Right ok -> pure ok
-    Left _   -> pure (Left (BackendSshConnectFailed SshConnectTimeout))
+    Right (Left e)   -> pure (Left e)
+    Right (Right bh) -> Right <$> wrapSshHandle bh
+    Left  _          -> pure (Left (BackendSshConnectFailed SshConnectTimeout))
+
+-- | Wrap a freshly-constructed Pty-kind ssh 'BackendHandle' so it
+-- enforces two ssh-specific invariants:
+--
+-- 1. Once a recv has observed @RecvEof@ (the ssh transport has
+--    closed), a subsequent '_bh_send' throws 'BackendException' with
+--    @_be_context = 'BcSshWrite'@ rather than silently succeeding
+--    against a dead transport. Any @IO@ exception escaping the inner
+--    '_bh_send' is also wrapped under 'BcSshWrite'.
+-- 2. Concurrent entry into '_bh_send' \/ '_bh_recv' from multiple
+--    threads is rejected with 'BcConcurrentUse' (via
+--    'withConcurrentUseGuard').
+--
+-- Wrappers compose: the recv-EOF tracker wraps the underlying handle
+-- first; the resulting handle is then passed through
+-- 'withConcurrentUseGuard'. The end-user-visible '_bh_send' \/
+-- '_bh_recv' therefore goes through both gates.
+wrapSshHandle :: BackendHandle -> IO BackendHandle
+wrapSshHandle bh = do
+  eofRef <- newIORef False
+  let trackedRecv mIdle = do
+        res <- _bh_recv bh mIdle
+        case res of
+          RecvEof _ -> writeIORef eofRef True
+          _         -> pure ()
+        pure res
+
+      sshSend bs = do
+        wasEof <- readIORef eofRef
+        if wasEof
+          then throwIO $ BackendException BcSshWrite
+                 (toException (userError "ssh transport closed"))
+          else do
+            r <- try @SomeException (_bh_send bh bs)
+            case r of
+              Right ()                                  -> pure ()
+              Left e | Just be <- castBackendException e -> throwIO be
+                     | otherwise                         -> throwIO $
+                         BackendException BcSshWrite e
+  withConcurrentUseGuard bh
+    { _bh_send = sshSend
+    , _bh_recv = trackedRecv
+    }
+
+-- | If the supplied 'SomeException' already is a 'BackendException',
+-- return it; otherwise 'Nothing'. Used by 'wrapSshHandle' to avoid
+-- double-wrapping when an inner layer already threw a structured
+-- 'BackendException'.
+castBackendException :: SomeException -> Maybe BackendException
+castBackendException = Exception.fromException
 
 --------------------------------------------------------------------------------
 -- Pipe-kind factory

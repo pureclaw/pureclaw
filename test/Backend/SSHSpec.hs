@@ -11,6 +11,10 @@
 -- stays @pendingWith@ a clear message rather than failing.
 module Backend.SSHSpec (spec) where
 
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async qualified as Async
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception qualified as Exception
 import Control.Monad qualified
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
@@ -30,6 +34,7 @@ import System.Posix.Files qualified as PF
 import Test.Hspec
 
 import PureClaw.Backend.Pty (realPtyIO)
+import PureClaw.Backend.Pty.Fake (FakePtyConfig (..), fakePtyIO)
 import PureClaw.Backend.SSH
   ( ControlOpts (..)
   , SshTarget (..)
@@ -43,12 +48,15 @@ import PureClaw.Backend.SSH
   )
 import PureClaw.Core.Types (CommandName (..))
 import PureClaw.Handles.Backend
-  ( BackendError (..)
+  ( BackendContext (..)
+  , BackendError (..)
+  , BackendException (..)
   , BackendHandle (..)
   , RecvResult (..)
   , recvBytes
   , runBackend
   )
+import PureClaw.Internal.FakeClock (newFakeClock)
 import PureClaw.Security.Command (authorize)
 import PureClaw.Security.Command qualified as SC
 import PureClaw.Security.Path
@@ -340,6 +348,105 @@ spec = do
               RecvTimedOut _  -> pure ()
               RecvSettled _   -> pure ()
               RecvTruncated _ -> pure ()
+
+    -- Plan-review-gate Completeness raised two edge cases unenforced
+    -- by the WU9 DoDs (#3-#5 + #15). WU9.5 closes them with fakePtyIO.
+    describe "WU9.5 — disconnect-mid-recv and concurrent-use" $ do
+      let -- Build an SSH backend driven by 'fakePtyIO' (no real ssh
+          -- subprocess; the argv is computed and ignored by the fake's
+          -- '_pio_open').
+          mkFakeSshHandle :: FakePtyConfig -> IO BackendHandle
+          mkFakeSshHandle cfg = do
+            (kr, _rr) <- mkTestRoots
+            kp <- writeDummyKey kr "id_wu95"
+            let host   = fromRight (mkSshHost "example.com")
+                remote = fromRight $ authorizeRemote
+                  (allowRemoteCommand (CommandName "true")
+                    (withAutonomy Core.Full defaultPolicy))
+                  "true"
+                  []
+                policy = allowCommand (CommandName "ssh")
+                           (withAutonomy Core.Full defaultPolicy)
+                sshCmd = fromRight (authorize policy "ssh" [])
+                target = SshTarget
+                  { _st_user     = T.pack "test"
+                  , _st_host     = host
+                  , _st_port     = Nothing
+                  , _st_identity = kp
+                  }
+            pio <- fakePtyIO cfg
+            r <- mkSshBackendHandle pio sshCmd target remote defaultSshOpts
+            case r of
+              Left e  -> error ("setup: mkSshBackendHandle: " <> show e)
+              Right h -> pure h
+
+      it "mid-recv EOF: _bh_recv returns RecvEof with bytes-so-far" $ do
+        clk <- newFakeClock
+        let payload = BS8.pack "partial-data\n"
+            cfg = FakePtyConfig
+                    { _fpc_clock         = clk
+                    , _fpc_initialOutput = BS.empty
+                    , _fpc_eofAfterBytes = Just (BS.length payload)
+                    , _fpc_outputScript  = [payload]
+                    }
+        bh <- mkFakeSshHandle cfg
+        r <- _bh_recv bh Nothing
+        _bh_close bh
+        _bh_close bh -- idempotent: must not throw
+        case r of
+          RecvEof bytes -> bytes `shouldBe` payload
+          other -> expectationFailure $
+            "expected RecvEof, got: " <> show other
+
+      it "post-disconnect _bh_send throws BackendException BcSshWrite" $ do
+        clk <- newFakeClock
+        let payload = BS8.pack "partial-data\n"
+            cfg = FakePtyConfig
+                    { _fpc_clock         = clk
+                    , _fpc_initialOutput = BS.empty
+                    , _fpc_eofAfterBytes = Just (BS.length payload)
+                    , _fpc_outputScript  = [payload]
+                    }
+        bh <- mkFakeSshHandle cfg
+        _ <- _bh_recv bh Nothing
+        res <- Exception.try @BackendException
+                 (_bh_send bh (BS8.pack "anything\n"))
+        _bh_close bh
+        case res of
+          Right () ->
+            expectationFailure "expected BackendException, got success"
+          Left be ->
+            _be_context be `shouldBe` BcSshWrite
+
+      it "concurrent _bh_send while _bh_recv is in flight throws BcConcurrentUse" $ do
+        clk <- newFakeClock
+        -- No data, no EOF cap: drainer/_bh_recv blocks for the idle
+        -- timeout, holding the guard MVar.
+        let cfg = FakePtyConfig
+                    { _fpc_clock         = clk
+                    , _fpc_initialOutput = BS.empty
+                    , _fpc_eofAfterBytes = Nothing
+                    , _fpc_outputScript  = []
+                    }
+        bh <- mkFakeSshHandle cfg
+        entered <- newEmptyMVar
+        a <- Async.async $ do
+          putMVar entered ()
+          _ <- _bh_recv bh Nothing
+          pure ()
+        () <- takeMVar entered
+        -- 50ms is plenty for thread A to grab the guard MVar before
+        -- the main thread issues its concurrent send.
+        threadDelay 50_000
+        res <- Exception.try @BackendException
+                 (_bh_send bh (BS8.pack "x"))
+        Async.cancel a
+        _bh_close bh
+        case res of
+          Right () ->
+            expectationFailure "expected BackendException BcConcurrentUse"
+          Left be ->
+            _be_context be `shouldBe` BcConcurrentUse
 
     -- docs/terminal-backend-abstractions.md line 52: ssh bash 3-turn
     describe "DoD #3: mkSshBackendHandle bash three-turn sequence" $ do
