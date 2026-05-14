@@ -67,6 +67,7 @@ library
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake
     PureClaw.Backend.Local
+    PureClaw.Backend.SSH
     -- Internal
     PureClaw.Internal.Redact
     PureClaw.Internal.FakeClock
