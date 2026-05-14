@@ -306,7 +306,7 @@ forbiddenEnvVars = Set.fromList
 -- Rejects any key listed in 'forbiddenEnvVars' with a
 -- 'BackendInvalidOption' carrying the offending name.
 mkEnvMap :: [(String, String)] -> Either BackendError EnvMap
-mkEnvMap entries = go Map.empty entries
+mkEnvMap = go Map.empty
   where
     go acc [] = Right acc
     go acc ((k, v) : rest)
