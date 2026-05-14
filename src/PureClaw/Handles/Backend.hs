@@ -92,12 +92,24 @@ module PureClaw.Handles.Backend
   , isConversational
   , recv
   , recvWith
+    -- * Bracket helpers
+  , withBackendHandle
+  , withBackendHandleE
+    -- * No-op + in-memory test backends
+  , mkNoOpBackendHandle
+  , InMemoryConfig (..)
+  , InMemoryState (..)
+  , newInMemoryState
+  , mkInMemoryBackendHandle
     -- * Re-exports
   , CommandName
+  , FakeClock
   ) where
 
-import Control.Exception (Exception, SomeException, displayException)
+import Control.Exception (Exception, SomeException, bracket, displayException)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -108,6 +120,7 @@ import Data.Text.Encoding qualified as TE
 
 import {-# SOURCE #-} PureClaw.Internal.Redact qualified as Redact
 import PureClaw.Core.Types (CommandName)
+import PureClaw.Internal.FakeClock (FakeClock)
 
 -- | The mechanism a 'BackendHandle' uses to talk to its subprocess.
 --
@@ -612,3 +625,171 @@ recv b = _bh_recv b Nothing
 -- common case of overriding the default idle policy for a single call.
 recvWith :: BackendHandle -> IdleSpec -> IO (RecvResult ByteString)
 recvWith b s = _bh_recv b (Just s)
+
+-- | Run an action with an already-constructed 'BackendHandle',
+-- guaranteeing '_bh_close' runs on success or exception.
+--
+-- Body exceptions are re-raised after the close action finishes.
+-- '_bh_close' is documented as idempotent and never-throwing on every
+-- backend kind, so the close phase cannot mask a body exception.
+withBackendHandle :: BackendHandle -> (BackendHandle -> IO a) -> IO a
+withBackendHandle b = bracket (pure b) (\_ -> _bh_close b)
+
+-- | Combined acquire-and-bracket helper for the common factory pattern
+-- @IO (Either BackendError BackendHandle)@.
+--
+-- On a 'Left' result from @acquire@, no body is run and the error is
+-- returned as-is. On a 'Right' result, behaves like 'withBackendHandle'
+-- and re-raises any body exception after closing.
+withBackendHandleE
+  :: IO (Either BackendError BackendHandle)
+  -> (BackendHandle -> IO a)
+  -> IO (Either BackendError a)
+withBackendHandleE acquire body = do
+  result <- acquire
+  case result of
+    Left  e -> pure (Left e)
+    Right b -> Right <$> withBackendHandle b body
+
+--------------------------------------------------------------------------------
+-- No-op backend
+--------------------------------------------------------------------------------
+
+-- | A purely no-op 'BackendHandle' for both 'Pipe' and 'Pty' kinds.
+--
+-- * '_bh_send' silently discards its argument.
+-- * '_bh_recv' (with or without an idle override) returns 'RecvSettled' on
+--   an empty payload.
+-- * '_bh_resize' is a silent no-op for both kinds.
+-- * '_bh_close' is idempotent and never throws.
+mkNoOpBackendHandle :: BackendKind -> BackendHandle
+mkNoOpBackendHandle kind = BackendHandle
+  { _bh_name        = "noop"
+  , _bh_kind        = kind
+  , _bh_defaultIdle = testIdleSpec
+  , _bh_send        = \_   -> pure ()
+  , _bh_recv        = \_   -> pure (RecvSettled BS.empty)
+  , _bh_resize      = \_ _ -> pure ()
+  , _bh_close       = pure ()
+  }
+
+--------------------------------------------------------------------------------
+-- In-memory backend
+--------------------------------------------------------------------------------
+
+-- | Construction-time configuration for 'mkInMemoryBackendHandle'.
+--
+-- The caller owns @_imc_state@ — create it with 'newInMemoryState'
+-- ahead of time and inspect it via 'readIORef' after exercising the
+-- returned handle. This shape keeps the factory's signature
+-- @BackendKind -> InMemoryConfig -> IO BackendHandle@ (per the design
+-- doc) while still giving tests a way to introspect what was sent /
+-- received / resized / closed.
+data InMemoryConfig = InMemoryConfig
+  { _imc_clock           :: !FakeClock
+    -- ^ Deterministic clock used for idle measurement (not yet wired
+    -- to the recv path in WU3; required by the design doc for parity
+    -- with @fakePtyIO@ and for forward-compatibility with the
+    -- property-test seam in WU7).
+  , _imc_scriptedReplies :: ![ByteString]
+    -- ^ Consumed in order on each '_bh_recv'. Once exhausted,
+    -- subsequent recvs return @RecvEof BS.empty@.
+  , _imc_eofAfter        :: !(Maybe Int)
+    -- ^ Optional cap: after this many '_bh_recv' calls, every
+    -- subsequent recv returns @RecvEof BS.empty@ regardless of any
+    -- remaining scripted replies.
+  , _imc_state           :: !(IORef InMemoryState)
+    -- ^ Caller-supplied introspection state. Construct via
+    -- 'newInMemoryState'.
+  }
+
+-- | Mutable in-memory backend state. Updated in place by the
+-- 'BackendHandle' returned from 'mkInMemoryBackendHandle'.
+--
+-- Lists are stored in reverse-chronological order for cheap @cons@;
+-- callers that want chronological order should 'reverse' on read.
+data InMemoryState = InMemoryState
+  { _ims_sentBytes   :: ![ByteString]
+    -- ^ Every payload passed to '_bh_send', most-recent first.
+  , _ims_recvCalls   :: !Int
+    -- ^ Number of '_bh_recv' invocations issued against the handle.
+  , _ims_resizeCalls :: ![(Cols, Rows)]
+    -- ^ Every @(cols, rows)@ pair passed to '_bh_resize', most-recent
+    -- first. For 'Pipe'-kind handles, this list always stays empty
+    -- because '_bh_resize' is a silent no-op on pipes.
+  , _ims_closed      :: !Bool
+    -- ^ Set to 'True' on first '_bh_close'; remains 'True' on subsequent
+    -- (idempotent) calls.
+  }
+  deriving stock (Eq, Show)
+
+-- | Allocate a fresh, empty 'InMemoryState' for 'InMemoryConfig'.
+newInMemoryState :: IO (IORef InMemoryState)
+newInMemoryState = newIORef InMemoryState
+  { _ims_sentBytes   = []
+  , _ims_recvCalls   = 0
+  , _ims_resizeCalls = []
+  , _ims_closed      = False
+  }
+
+-- | A deterministic, scriptable 'BackendHandle' for property tests.
+--
+-- The handle:
+--
+-- * records each '_bh_send' payload into '_imc_state' (newest first);
+-- * pulls the next scripted reply from '_imc_scriptedReplies' on each
+--   '_bh_recv', wrapping it in 'RecvSettled'. Once the script is
+--   exhausted — or @_imc_eofAfter@ recvs have occurred, whichever
+--   comes first — every subsequent recv returns @RecvEof BS.empty@;
+-- * records each '_bh_resize' call into '_imc_state' if @kind == Pty@;
+--   for @kind == Pipe@, resize is a silent no-op (nothing recorded);
+-- * marks '_ims_closed' on '_bh_close'. Close is idempotent.
+mkInMemoryBackendHandle :: BackendKind -> InMemoryConfig -> IO BackendHandle
+mkInMemoryBackendHandle kind cfg = do
+  scriptRef <- newIORef (_imc_scriptedReplies cfg)
+  let stRef    = _imc_state cfg
+      eofAfter = _imc_eofAfter cfg
+
+      doRecv :: IO (RecvResult ByteString)
+      doRecv = do
+        -- Pre-increment so #-of-calls includes the current invocation
+        -- when comparing against eofAfter.
+        n <- atomicModifyIORef' stRef $ \s ->
+          let n' = _ims_recvCalls s + 1
+          in (s { _ims_recvCalls = n' }, n')
+        let pastCap = case eofAfter of
+              Nothing  -> False
+              Just cap -> n > cap
+        if pastCap
+          then pure (RecvEof BS.empty)
+          else do
+            next <- atomicModifyIORef' scriptRef $ \case
+              []     -> ([], Nothing)
+              (r:tl) -> (tl, Just r)
+            case next of
+              Just r  -> pure (RecvSettled r)
+              Nothing -> pure (RecvEof BS.empty)
+
+      doResize :: Cols -> Rows -> IO ()
+      doResize c r = case kind of
+        Pipe -> pure ()
+        Pty  -> atomicModifyIORef' stRef $ \s ->
+          (s { _ims_resizeCalls = (c, r) : _ims_resizeCalls s }, ())
+
+      doSend :: ByteString -> IO ()
+      doSend bs = atomicModifyIORef' stRef $ \s ->
+        (s { _ims_sentBytes = bs : _ims_sentBytes s }, ())
+
+      doClose :: IO ()
+      doClose = atomicModifyIORef' stRef $ \s ->
+        (s { _ims_closed = True }, ())
+
+  pure BackendHandle
+    { _bh_name        = "in-memory"
+    , _bh_kind        = kind
+    , _bh_defaultIdle = testIdleSpec
+    , _bh_send        = doSend
+    , _bh_recv        = const doRecv
+    , _bh_resize      = doResize
+    , _bh_close       = doClose
+    }

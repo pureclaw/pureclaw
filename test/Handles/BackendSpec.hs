@@ -5,13 +5,17 @@
 -- This module enumerates the cross-backend Definition-of-Done items from
 -- @docs/terminal-backend-abstractions.md@ § Acceptance Criteria (v1) as
 -- pending Hspec tests. Each test is annotated with the DoD number from the
--- design doc; the body is @pendingWith@ so the suite compiles without any
--- production code from @PureClaw.Handles.Backend@ existing yet.
+-- design doc; tests for DoDs not yet covered by landed production code
+-- remain @pendingWith@.
 --
--- See @.beads/plans/active-plan.md@ WU0 for the scaffold contract.
+-- WU3 flips #12, #14 (split per kind), #15, and #24 to green.
+--
+-- See @.beads/plans/active-plan.md@ WU0 / WU3 for the scaffold contract.
 module Handles.BackendSpec (spec) where
 
-import Control.Exception (SomeException, toException)
+import Control.Exception (SomeException, toException, try)
+import Data.ByteString qualified as BS
+import Data.IORef (readIORef)
 import Test.Hspec
 
 import PureClaw.Core.Types (CommandName (..))
@@ -22,30 +26,86 @@ import PureClaw.Handles.Backend
     , BackendSshConnectFailed
     )
   , BackendException (..)
+  , BackendHandle (..)
+  , BackendKind (..)
+  , Cols (..)
+  , InMemoryConfig (..)
+  , InMemoryState (..)
+  , RecvResult (..)
+  , Rows (..)
   , SshConnectFailure (..)
+  , mkInMemoryBackendHandle
+  , mkNoOpBackendHandle
+  , newInMemoryState
   )
+import PureClaw.Internal.FakeClock (newFakeClock)
 
 mkExn :: String -> SomeException
 mkExn = toException . userError
 
 spec :: Spec
 spec = do
-  describe "WU0 red-phase scaffold (cross-backend DoDs)" $ do
+  describe "WU3 — No-op + in-memory backends (cross-backend DoDs)" $ do
     -- docs/terminal-backend-abstractions.md line 61: idempotent close
-    it "DoD #12: _bh_close is idempotent and never throws on any backend" $
-      pendingWith "WU3: implemented when mkNoOpBackendHandle + mkInMemoryBackendHandle land."
+    it "DoD #12: _bh_close is idempotent and never throws (no-op backend)" $ do
+      let h = mkNoOpBackendHandle Pty
+      r1 <- try @SomeException (_bh_close h)
+      r2 <- try @SomeException (_bh_close h)
+      case (r1, r2) of
+        (Right (), Right ()) -> pure ()
+        (Left e, _)          -> expectationFailure $
+          "first close threw: " <> show e
+        (_, Left e)          -> expectationFailure $
+          "second close threw: " <> show e
 
-    -- docs/terminal-backend-abstractions.md line 63: no-op backend shapes
-    it "DoD #14: mkNoOpBackendHandle Pty returns RecvSettled \"\" on _bh_recv Nothing" $
-      pendingWith "WU3: mkNoOpBackendHandle Pty / Pipe recv shape."
+    -- docs/terminal-backend-abstractions.md line 63: no-op recv (Pty)
+    it "DoD #14: mkNoOpBackendHandle Pty returns RecvSettled \"\" on _bh_recv Nothing" $ do
+      let h = mkNoOpBackendHandle Pty
+      r <- _bh_recv h Nothing
+      r `shouldBe` RecvSettled BS.empty
 
-    -- docs/terminal-backend-abstractions.md line 63: no-op resize silent
-    it "DoD #14: mkNoOpBackendHandle Pipe likewise yields RecvSettled \"\"" $
-      pendingWith "WU3: mkNoOpBackendHandle Pipe recv shape."
+    -- docs/terminal-backend-abstractions.md line 63: no-op recv (Pipe)
+    it "DoD #14: mkNoOpBackendHandle Pipe likewise yields RecvSettled \"\"" $ do
+      let h = mkNoOpBackendHandle Pipe
+      r <- _bh_recv h Nothing
+      r `shouldBe` RecvSettled BS.empty
 
     -- docs/terminal-backend-abstractions.md line 64: in-memory round-trip
-    it "DoD #15: mkInMemoryBackendHandle round-trips bytes deterministically" $
-      pendingWith "WU3: mkInMemoryBackendHandle deterministic round-trip + fake-clock idle property."
+    it "DoD #15: mkInMemoryBackendHandle round-trips bytes deterministically" $ do
+      clock <- newFakeClock
+      st    <- newInMemoryState
+      let cfg = InMemoryConfig
+            { _imc_clock           = clock
+            , _imc_scriptedReplies = ["hello\n", "world\n"]
+            , _imc_eofAfter        = Nothing
+            , _imc_state           = st
+            }
+      h  <- mkInMemoryBackendHandle Pty cfg
+      _bh_send h "x"
+      r1 <- _bh_recv h Nothing
+      r2 <- _bh_recv h Nothing
+      r3 <- _bh_recv h Nothing
+      r1 `shouldBe` RecvSettled "hello\n"
+      r2 `shouldBe` RecvSettled "world\n"
+      r3 `shouldBe` RecvEof BS.empty
+      s  <- readIORef st
+      _ims_sentBytes s   `shouldBe` ["x"]
+      _ims_recvCalls s   `shouldBe` 3
+
+    it "DoD #15: mkInMemoryBackendHandle honours _imc_eofAfter" $ do
+      clock <- newFakeClock
+      st    <- newInMemoryState
+      let cfg = InMemoryConfig
+            { _imc_clock           = clock
+            , _imc_scriptedReplies = ["a", "b", "c"]
+            , _imc_eofAfter        = Just 1
+            , _imc_state           = st
+            }
+      h  <- mkInMemoryBackendHandle Pipe cfg
+      r1 <- _bh_recv h Nothing
+      r2 <- _bh_recv h Nothing
+      r1 `shouldBe` RecvSettled "a"
+      r2 `shouldBe` RecvEof BS.empty
 
     -- docs/terminal-backend-abstractions.md line 66: show redaction (WU2)
     describe "DoD #17: Show BackendException / BackendError / SshConnectFailure redacts hostnames + paths" $ do
@@ -79,8 +139,49 @@ spec = do
       pendingWith "WU7: QSem-based process-wide quota in PureClaw.Handles.Backend."
 
     -- docs/terminal-backend-abstractions.md line 71: no-op resize is a silent no-op
-    it "DoD #24: mkNoOpBackendHandle Pipe and Pty _bh_resize is a silent no-op" $
-      pendingWith "WU3: silent no-op resize on both kinds; observable via test."
+    it "DoD #24: mkNoOpBackendHandle Pipe _bh_resize is a silent no-op" $ do
+      let h = mkNoOpBackendHandle Pipe
+      r <- try @SomeException (_bh_resize h (Cols 80) (Rows 24))
+      case r of
+        Right () -> pure ()
+        Left e   -> expectationFailure $ "Pipe no-op resize threw: " <> show e
+
+    it "DoD #24: mkNoOpBackendHandle Pty _bh_resize is a silent no-op" $ do
+      let h = mkNoOpBackendHandle Pty
+      r <- try @SomeException (_bh_resize h (Cols 80) (Rows 24))
+      case r of
+        Right () -> pure ()
+        Left e   -> expectationFailure $ "Pty no-op resize threw: " <> show e
+
+    it "DoD #24: in-memory Pty backend records _bh_resize calls" $ do
+      clock <- newFakeClock
+      st    <- newInMemoryState
+      let cfg = InMemoryConfig
+            { _imc_clock           = clock
+            , _imc_scriptedReplies = []
+            , _imc_eofAfter        = Nothing
+            , _imc_state           = st
+            }
+      h <- mkInMemoryBackendHandle Pty cfg
+      _bh_resize h (Cols 100) (Rows 30)
+      _bh_resize h (Cols 120) (Rows 40)
+      s <- readIORef st
+      -- Stored newest-first.
+      _ims_resizeCalls s `shouldBe` [(Cols 120, Rows 40), (Cols 100, Rows 30)]
+
+    it "DoD #24: in-memory Pipe backend does NOT record _bh_resize (silent no-op)" $ do
+      clock <- newFakeClock
+      st    <- newInMemoryState
+      let cfg = InMemoryConfig
+            { _imc_clock           = clock
+            , _imc_scriptedReplies = []
+            , _imc_eofAfter        = Nothing
+            , _imc_state           = st
+            }
+      h <- mkInMemoryBackendHandle Pipe cfg
+      _bh_resize h (Cols 80) (Rows 24)
+      s <- readIORef st
+      _ims_resizeCalls s `shouldBe` []
 
   describe "WU0 orchestrator-only gates (documented; not run here)" $ do
     -- docs/terminal-backend-abstractions.md line 67: SecurityPolicy construction sites

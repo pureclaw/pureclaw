@@ -65,6 +65,7 @@ library
     PureClaw.Handles.Backend
     -- Internal
     PureClaw.Internal.Redact
+    PureClaw.Internal.FakeClock
     -- Harness (tmux lifecycle)
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode
