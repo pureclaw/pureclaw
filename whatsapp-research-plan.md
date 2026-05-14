@@ -43,16 +43,66 @@ Pureclaw's `ChannelHandle` is single-sender, plaintext, no media, no streaming. 
 
 ---
 
-## Q3. wacli IPC contract
-The Haskell side talks to wacli through three concrete surfaces — we don't design a JSON-RPC schema from scratch, we map wacli's existing contracts.
+## Q3. wacli IPC contract — **DECIDED: dual-channel (webhook for messages, `--events` for lifecycle)**
 
-**Investigate:**
-- **Inbound:** `wacli sync --follow --events` emits NDJSON lifecycle events on stdout. Read `docs/sync.md` and `internal/app/sync_events.go` to enumerate event kinds (message arrived, connection state, sync progress). Decide which we ingest into `IncomingMessage` vs. log-only.
-- **Inbound (alternative):** `sync --webhook URL` POSTs deliveries to an HTTP endpoint. Compare ergonomics against NDJSON-on-stdout — webhook fits pureclaw's existing Warp gateway; NDJSON-on-stdout fits the `signal-cli` precedent. Pick one.
-- **Outbound:** shell out to `wacli send text/file/sticker/voice/react --json ...` per outgoing message. Wacli's locking model means while `sync --follow` is running, the `send` subcommand transparently delegates to it — no double-session risk.
-- **State queries (optional v2+):** read-only SQLite to `<store>/wacli.db` is the documented integration surface for richer queries (search, history). Out of scope for v1.
+Decision (2026-05-14): inbound message payloads come from `wacli sync --follow --webhook URL` POSTing JSON to a pureclaw-hosted local Warp endpoint; lifecycle/warnings come from the `--events` NDJSON stream on stderr; outbound uses `wacli send …`.
 
-**Output:** a `Channels.WhatsApp.Transport` mirror of `Channels.Signal.Transport` with a real implementation backed by wacli and a mock for tests. Choose stdout-NDJSON vs. webhook; document why.
+### Why webhook beats `--events` for message data
+
+Reading `internal/app/sync_events.go:183` (`handleLiveSyncMessage`) and `internal/out/events.go`:
+- The `--events` NDJSON stream emits lifecycle (`connected`, `disconnected`), sync progress (every 25 messages — *not* per message), `history_sync` (count only), `warning`, `event_handler_panic`, `app_state_*`. **No per-message inbound event.**
+- Message data is delivered via two surfaces only: (a) SQLite write to `wacli.db`, (b) `--webhook` POST of `wa.ParsedMessage` (`internal/wa/messages.go:24`).
+- Polling `wacli.db` works but adds latency and couples us to a schema marked "may evolve between releases" in `docs/integrations.md`. Webhook is push-driven and the payload is a stable struct.
+
+### Architecture
+
+- **Inbound (messages):** pureclaw spins up an embedded Warp listener on `127.0.0.1:<random-free-port>` per WhatsApp session, generates a fresh HMAC secret, and launches wacli with `sync --follow --webhook http://127.0.0.1:<port>/wacli --webhook-secret <secret>`. The handler validates `X-Wacli-Signature: sha256=<hmac>` (from `internal/app/webhook.go:128`), parses the `ParsedMessage` JSON, applies pureclaw's allowlist, pushes to a `TQueue` consumed by `_ch_receive`. Local-loopback only — no public webhook exposure needed because wacli runs on the same machine.
+- **Inbound (lifecycle/errors):** consume `--events` NDJSON from wacli's stderr in a reader thread. Map `connected`/`disconnected` to channel state; route `warning` and `event_handler_panic` to `LogHandle.logWarn`/`logError`. Keep this separate from the message path — it's logging, not control flow.
+- **Outbound:** shell out to `wacli send text|file|sticker|voice|react --json …` per send. Locking guarantees (`docs/sync.md:30`) ensure the long-running `sync --follow` process owns the WhatsApp session, and `send` delegates to it instead of spawning a second session.
+- **State queries (v2+):** read-only SQLite over `<store>/wacli.db` for history search, contact lookup, etc. Out of scope for v1.
+
+### Event/payload reference
+
+`wa.ParsedMessage` (`internal/wa/messages.go:24`):
+```
+Chat            types.JID   // group/DM/channel JID
+ID              string      // WhatsApp message id
+SenderJID       string
+Timestamp       time.Time
+FromMe          bool
+Text            string
+Media           *Media      // type/caption/filename/mime/key/sha — nil for text-only
+PushName        string
+ReplyToID       string
+ReplyToDisplay  string
+ReactionToID    string
+ReactionEmoji   string
+IsForwarded     bool
+ForwardingScore uint32
+StarredKnown    bool
+Starred         bool
+Revoked         bool
+```
+
+`--events` envelope (`out/events.go:17`):
+```
+{"event": "<name>", "data": {...} | omitted, "ts": <unix-ms>}
+```
+Event kinds we consume in v1: `connected`, `disconnected`, `warning` (+`code`/`message`), `event_handler_panic`. Ignore in v1: `progress`, `history_sync`, `app_state_*` (informational; webhook covers the data).
+
+### Why this works for both CLI and gateway modes
+
+The webhook listener is embedded *in the WhatsApp channel itself*, not in `Gateway.Server`. The channel is self-contained: `withWhatsAppChannel` brings up the local Warp listener, spawns wacli, returns a `ChannelHandle`, tears both down on exit. Works identically whether pureclaw is in TUI/CLI mode or running the user-facing gateway.
+
+### Output
+
+A `Channels.WhatsApp` module set:
+- `Channels.WhatsApp` — `withWhatsAppChannel`, `ChannelHandle` instance.
+- `Channels.WhatsApp.Wacli` — `WacliProcess` + lifecycle (`startWacliSync`, `stopWacliSync`); shells out for `send …`.
+- `Channels.WhatsApp.Webhook` — Warp listener, HMAC validation, `ParsedMessage` JSON parsing, `TQueue` push.
+- `Channels.WhatsApp.Events` — `--events` NDJSON reader thread, `LogHandle` routing.
+
+Test seam: a `WacliTransport` record (mirroring `SignalTransport`) so tests inject canned `ParsedMessage` POSTs and assert on captured `wacli send` invocations.
 
 ---
 
@@ -127,7 +177,7 @@ wacli_path = ""                # blank = $PATH lookup; nix dev shell provides it
 
 ## Suggested research order
 1. **Q1** — DONE. wacli sidecar, Nix recipe landed.
-2. **Q3** — read wacli's `--events` schema (`internal/app/sync_events.go`, `docs/sync.md`) and pick stdout-NDJSON vs. `--webhook`. Gates the transport mock shape.
+2. **Q3** — DONE. Webhook for messages, `--events` for lifecycle, embedded local Warp listener.
 3. **Q2** + **Q4** in parallel — v1 feature scope and `--store` layout.
 4. **Q5–Q9** — refinements that fit into the design doc once the big shape is settled.
 
@@ -135,7 +185,7 @@ wacli_path = ""                # blank = $PATH lookup; nix dev shell provides it
 - A design doc that:
   - ~~names the chosen runtime (Q1)~~ — DONE.
   - lists v1 features in scope with explicit "deferred to v2" items (Q2, Q6),
-  - documents the wacli IPC choice (stdout-NDJSON vs. webhook) and event-kind ingestion table (Q3),
+  - ~~documents the wacli IPC choice and event-kind ingestion table (Q3)~~ — DONE.
   - documents the `--store` layout and QR-pairing UX (Q4),
   - states subprocess supervision policy (Q5),
   - shows the TOML config schema (Q8),
