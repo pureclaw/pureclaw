@@ -30,16 +30,46 @@ Decision history (for future readers):
 
 ---
 
-## Q2. `ChannelHandle` fit and gap analysis
-Pureclaw's `ChannelHandle` is single-sender, plaintext, no media, no streaming. WhatsApp adds: groups, mentions, reactions, replies/quotes, media, polls, typing, read receipts, multi-chat fan-out.
+## Q2. `ChannelHandle` fit and v1 feature scope — **DECIDED: single-DM, no extensions**
 
-**Investigate:**
-- Read `src/PureClaw/Handles/Channel.hs` and `src/PureClaw/Channels/Telegram.hs` and `Signal.hs`. Confirm the `lastSender :: IORef` pattern is universal — it is what makes "groups" awkward.
-- Decide *minimum viable* WhatsApp surface for v1. Strawman: text-only, DMs only, single-account, no groups, no media, no reactions. Add the rest as later work units.
-- Identify which features need `ChannelHandle` extensions vs. which can live entirely inside `Channels.WhatsApp.*` (e.g. reactions/quotes can be sidecar-local; groups need a routing change).
-- Check `Agent.Loop` and `Session.Handle` to see whether multi-conversation (group + multiple DMs concurrently) is even representable today, or whether one agent loop = one conversation.
+Decision (2026-05-14): v1 is single-DM only — one specific E.164 peer, plain text in/out, no groups, no media, no reactions surfaced to the agent. **No `ChannelHandle` extensions needed.**
 
-**Output:** a "what fits, what doesn't" table; a v1 feature scope; a list of `ChannelHandle` extensions (if any) that v1 needs.
+### Why single-DM
+
+`ChannelHandle` (`src/PureClaw/Handles/Channel.hs:43`):
+- `_ch_receive :: IO IncomingMessage` returns a single stream
+- `_ch_send :: OutgoingMessage -> IO ()` writes to an implicit "current" target
+- Both Signal (`Channels/Signal.hs:46`) and Telegram (`Channels/Telegram.hs:46`) hold the most recent sender in an `IORef` and reply there
+- `IncomingMessage = { _im_userId :: UserId, _im_content :: Text }` — text-only, no media, no metadata
+
+`Agent.Loop.runAgentLoopWith` (`src/PureClaw/Agent/Loop.hs:53`) is a tight `receive → respond → receive` loop owning a single `Context` (transcript). Two interleaved chats would corrupt context. **One agent loop = one conversation.**
+
+Multi-chat / group support would require either (a) per-chat agent loops and session contexts, or (b) routing metadata threaded through `IncomingMessage`/`OutgoingMessage`. Both are nontrivial cross-cutting changes — out of scope for v1.
+
+### v1 feature matrix
+
+| Feature | v1? | Why / how |
+|---|---|---|
+| Inbound text from a single configured E.164 | ✅ | webhook → allowlist filter → `IncomingMessage` |
+| Outbound text replies, chunked | ✅ | shell out `wacli send text --to <E.164> --message …`; reuse `chunkMessage` from Signal |
+| Connection lifecycle logging | ✅ | `--events` `connected`/`disconnected` → `LogHandle` |
+| DM allowlist (allow_from) | ✅ | mirrors `SignalConfig._sc_allowFrom`; reject anything not from the configured peer |
+| Groups (in or out) | ❌ | requires multi-chat routing; defer to v2 |
+| Media (in or out) | ❌ | `IncomingMessage` is text-only; defer to v2 with a richer message type |
+| Reactions (receive) | ❌ | `ParsedMessage.ReactionEmoji` ignored in v1 |
+| Reactions (send) | ❌ | no use case in v1 (agent emits text) |
+| Reply quoting / mentions | ❌ | `ParsedMessage.ReplyToID`/`ReplyToDisplay` ignored in v1 |
+| Multi-account | ❌ | one `default` account per pureclaw instance for v1 |
+| History sync exposure | ❌ | data lands in `wacli.db`; v1 doesn't read it |
+| Self-chat mode (linked number = configured peer) | ❌ | OpenClaw concept; defer until needed |
+
+**Inbound filtering (the dropping rules):**
+- `ParsedMessage.FromMe == true` → drop (echo of our own send)
+- `ParsedMessage.Chat` not a DM (group/channel JID) → drop
+- `ParsedMessage.SenderJID` E.164 not in `allow_from` → log + drop
+- Otherwise: push `IncomingMessage { _im_userId = UserId <senderE164>, _im_content = ParsedMessage.Text }` onto the inbox queue
+
+**Output:** ready for the design doc — module boundaries from Q3 hold, no new types in `Handles.Channel.*`.
 
 ---
 
@@ -106,17 +136,48 @@ Test seam: a `WacliTransport` record (mirroring `SignalTransport`) so tests inje
 
 ---
 
-## Q4. Auth & credentials
-wacli owns its own store (`<store>/session.db` + `wacli.db`, default `~/.wacli` on macOS, `~/.local/state/wacli` on Linux, override via `--store DIR` or `WACLI_STORE_DIR`). For v1 we delegate credential management entirely to wacli — same model as `signal-cli`.
+## Q4. Auth & credentials — **DECIDED: delegate to wacli, `--store ~/.pureclaw/credentials/whatsapp/default`**
 
-**Investigate:**
-- Confirm `wacli accounts add NAME` / `--account NAME` is the right multi-account seam, or if we point each pureclaw "account" at a separate `--store` dir.
-- Decide pureclaw's view of the wacli store path. Strawman: `~/.pureclaw/credentials/whatsapp/<accountId>/` passed to wacli as `--store`, so all integration creds live under `~/.pureclaw` regardless of channel.
-- QR pairing UX: pureclaw shells out to `wacli auth --events` and forwards the QR (wacli renders ASCII to stdout already; we may need to capture and rerender). CLI-only flow for v1 — gateway/Telegram/Signal channels can't render QR.
+Decision (2026-05-14): pureclaw passes wacli `--store ~/.pureclaw/credentials/whatsapp/default`. We do not use `wacli accounts` (that's wacli's own multi-account config layer; we'd just be coordinating two systems that mean the same thing). Vault wrapping is explicitly deferred.
 
-**Output:** the `--store` layout decision + a "first-time pair" flow that the user runs from `pureclaw channels pair --channel whatsapp`.
+### Why not `wacli accounts`
 
-**Deferred:** wrapping wacli's session keys in pureclaw's vault. wacli expects to own its store; integration would require wacli changes. Park until there's user demand.
+`docs/accounts.md`: `--store DIR` and `--account NAME` are mutually exclusive; `--account` resolves through wacli's `<base>/config.yaml`. For pureclaw v1 (single account) using `--store` directly is one less coordination surface — the path *is* the identifier.
+
+For v2 multi-account, we revisit: we either keep using bare `--store` (one path per pureclaw account) or adopt `wacli accounts add` and hand wacli's config the source of truth.
+
+### Why not vault-wrapped credentials
+
+`Security/Vault.hs:54` — `VaultHandle` is a `Text → ByteString` key/value store designed for small secrets (API tokens, passphrases). The vault holds at most a few KB per key. wacli's `session.db` is a SQLite database with whatsmeow's signal-protocol key store — multi-MB, mutated continuously by the running sidecar.
+
+To wrap this we'd need wacli to accept its store contents over stdin/socket on startup and stream changes back out. That's a wacli upstream change. For v1: wacli owns the store on disk; pureclaw owns the *path*. The store dir lives under `~/.pureclaw` so it sits next to vault data and inherits the same backup/permissions story even if not encrypted.
+
+Set the dir to mode `0700` on creation (mirrors how vault paths are protected). That's the security boundary for v1.
+
+### QR pairing flow
+
+`wacli auth --events --qr-format text` (confirmed in `cmd/wacli/auth.go:163`):
+- Emits `auth_starting`, then `qr_code` (with raw payload), then on completion exits with `authenticated: true`
+- Also emits `pair_code` events if `--phone PHONE` supplied (alternative pairing — defer for v1 unless trivial)
+
+Pureclaw flow:
+1. New slash command `/whatsapp pair` (CLI channel only — gated by `_ch_streaming || isCLI`).
+2. Spawn `wacli auth --store <dir> --qr-format text --events`.
+3. Read NDJSON from stderr; on `qr_code` event extract `data.code` (raw payload).
+4. Render ASCII QR locally — Haskell library options: [`qrcode`](https://hackage.haskell.org/package/qrcode) (pure Haskell). Add to cabal deps.
+5. Display QR in the terminal via `_ch_send` (use `OutgoingMessage` with embedded ASCII).
+6. On `authenticated` / process exit success → log "WhatsApp paired as +<phone>".
+7. On non-CLI channels: refuse with "WhatsApp pairing must be initiated from the TUI/CLI".
+
+Auth state check on channel startup: shell out `wacli auth status --json --store <dir>` (`cmd/wacli/auth.go:198`); refuse to start `sync --follow` if not authenticated; tell the user to run `/whatsapp pair`.
+
+### Permissions & secrets
+
+- `<store>` dir created with mode `0700`
+- HMAC webhook secret: generated fresh per session via `getRandomBytes 32`, base64-encoded, passed to wacli via `--webhook-secret`. Not persisted.
+- The webhook listener binds to `127.0.0.1` only — never `0.0.0.0`.
+
+**Output:** ready for the design doc — store layout + pair flow + permissions all specified.
 
 ---
 
@@ -178,15 +239,16 @@ wacli_path = ""                # blank = $PATH lookup; nix dev shell provides it
 ## Suggested research order
 1. **Q1** — DONE. wacli sidecar, Nix recipe landed.
 2. **Q3** — DONE. Webhook for messages, `--events` for lifecycle, embedded local Warp listener.
-3. **Q2** + **Q4** in parallel — v1 feature scope and `--store` layout.
-4. **Q5–Q9** — refinements that fit into the design doc once the big shape is settled.
+3. **Q2** — DONE. Single-DM v1, no `ChannelHandle` extensions.
+4. **Q4** — DONE. `--store ~/.pureclaw/credentials/whatsapp/default`, vault wrapping deferred.
+5. **Q5–Q9** — quick refinements; mostly already settled by Q1–Q4.
 
 ## Exit criteria for the research phase
 - A design doc that:
   - ~~names the chosen runtime (Q1)~~ — DONE.
-  - lists v1 features in scope with explicit "deferred to v2" items (Q2, Q6),
+  - ~~lists v1 features in scope with explicit "deferred to v2" items (Q2, Q6)~~ — DONE (Q2).
   - ~~documents the wacli IPC choice and event-kind ingestion table (Q3)~~ — DONE.
-  - documents the `--store` layout and QR-pairing UX (Q4),
+  - ~~documents the `--store` layout and QR-pairing UX (Q4)~~ — DONE.
   - states subprocess supervision policy (Q5),
   - shows the TOML config schema (Q8),
   - shows the mock transport plan (Q9).
