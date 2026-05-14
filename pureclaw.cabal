@@ -62,6 +62,7 @@ library
     PureClaw.Handles.Log
     PureClaw.Handles.Transcript
     PureClaw.Handles.Harness
+    PureClaw.Handles.Backend
     -- Harness (tmux lifecycle)
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode
