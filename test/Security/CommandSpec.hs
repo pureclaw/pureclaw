@@ -2,6 +2,7 @@ module Security.CommandSpec (spec) where
 
 import Test.Hspec
 import Test.QuickCheck
+import Data.Set qualified as Set
 import PureClaw.Core.Types
 import PureClaw.Security.Command
 import PureClaw.Security.Policy
@@ -43,7 +44,11 @@ spec = do
         Left e    -> expectationFailure $ "Expected Right, got Left: " ++ show e
 
     it "AllowAll policy allows any command" $ do
-      let allPolicy = SecurityPolicy AllowAll Full
+      let allPolicy = SecurityPolicy
+            { _sp_allowedCommands       = AllowAll
+            , _sp_autonomy              = Full
+            , _sp_allowedRemoteCommands = AllowList Set.empty
+            }
       property $ \(cmdText :: String) ->
         case authorize allPolicy cmdText [] of
           Right _ -> True

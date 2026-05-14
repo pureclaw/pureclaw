@@ -758,21 +758,24 @@ buildRegistry policy sh workspace fh mh nh ch =
 buildPolicy :: Maybe AutonomyLevel -> [String] -> SecurityPolicy
 buildPolicy (Just Deny) _ = defaultPolicy
 buildPolicy (Just level) [] = SecurityPolicy
-  { _sp_allowedCommands = AllowAll
-  , _sp_autonomy = level
+  { _sp_allowedCommands       = AllowAll
+  , _sp_autonomy              = level
+  , _sp_allowedRemoteCommands = AllowList Set.empty
   }
 buildPolicy (Just level) cmds =
   let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
   in SecurityPolicy
-    { _sp_allowedCommands = AllowList cmdNames
-    , _sp_autonomy = level
+    { _sp_allowedCommands       = AllowList cmdNames
+    , _sp_autonomy              = level
+    , _sp_allowedRemoteCommands = AllowList Set.empty
     }
 buildPolicy Nothing [] = defaultPolicy
 buildPolicy Nothing cmds =
   let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
   in SecurityPolicy
-    { _sp_allowedCommands = AllowList cmdNames
-    , _sp_autonomy = Full
+    { _sp_allowedCommands       = AllowList cmdNames
+    , _sp_autonomy              = Full
+    , _sp_allowedRemoteCommands = AllowList Set.empty
     }
 
 -- | Resolve the LLM provider from the provider type.

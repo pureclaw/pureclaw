@@ -39,6 +39,7 @@ import PureClaw.Handles.Backend
   , newInMemoryState
   )
 import PureClaw.Internal.FakeClock (newFakeClock)
+import PureClaw.Security.Policy qualified as Security.Policy
 
 mkExn :: String -> SomeException
 mkExn = toException . userError
@@ -183,13 +184,35 @@ spec = do
       s <- readIORef st
       _ims_resizeCalls s `shouldBe` []
 
-  describe "WU0 orchestrator-only gates (documented; not run here)" $ do
+  describe "WU6 — SecurityPolicy migration (DoD #18)" $ do
     -- docs/terminal-backend-abstractions.md line 67: SecurityPolicy construction sites
-    it "DoD #18: every SecurityPolicy construction site sets _sp_allowedRemoteCommands" $
-      pendingWith
-        "WU6 / CI-gated: enforced by -Werror -Wmissing-fields and -Wincomplete-record-updates \
-        \across src/, test/, app/. Not a runtime test."
+    --
+    -- The migration of every construction site to the new
+    -- '_sp_allowedRemoteCommands' field is enforced at COMPILE time by
+    -- '-Werror -Wall' (which implies '-Wmissing-fields') across src/,
+    -- test/, app/. We cannot test a compile-time error inside a runtime
+    -- suite, so this assertion exercises the runtime contract that the
+    -- migration is meant to deliver: 'defaultPolicy' is deny-by-default
+    -- for remote commands, and 'allowRemoteCommand' / 'denyRemoteCommand'
+    -- behave per spec on that default. The compile-time enforcement is
+    -- exercised by the rest of the project simply compiling under
+    -- '-Werror -Wall'.
+    it "DoD #18: defaultPolicy denies remote commands and the helpers work" $ do
+      Security.Policy.isRemoteCommandAllowed
+        Security.Policy.defaultPolicy
+        (CommandName "ssh")
+        `shouldBe` False
+      let allowed = Security.Policy.allowRemoteCommand
+            (CommandName "ssh")
+            Security.Policy.defaultPolicy
+      Security.Policy.isRemoteCommandAllowed allowed (CommandName "ssh")
+        `shouldBe` True
+      Security.Policy.isRemoteCommandAllowed allowed (CommandName "bash")
+        `shouldBe` False
+      Security.Policy.denyRemoteCommand (CommandName "ssh") allowed
+        `shouldBe` Security.Policy.defaultPolicy
 
+  describe "WU0 orchestrator-only gates (documented; not run here)" $ do
     -- docs/terminal-backend-abstractions.md line 72: coverage thresholds
     it "DoD #19: coverage on new modules meets .coverage-thresholds.json" $
       pendingWith
