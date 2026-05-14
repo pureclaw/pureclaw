@@ -17,6 +17,7 @@
         overlays = [
           haskellNix.overlay
           (final: prev: {
+            wacli = final.callPackage ./nix/wacli.nix { };
             # This overlay adds our project to pkgs
             pureclaw-project = final.haskell-nix.cabalProject' {
               src = ./.;
@@ -42,6 +43,7 @@
                 git
                 signal-cli
                 tmux
+                wacli
               ];
             };
           })
