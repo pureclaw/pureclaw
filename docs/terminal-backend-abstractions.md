@@ -1,5 +1,16 @@
 # Terminal / Backend Abstractions
 
+> ### ⚠️ Important v1 Operating Mode Note
+>
+> Tmux **Attach mode** (this work) joins the target window as a real tmux
+> client — the agent and any human attached to the same window see the
+> same screen and share size negotiation. This is **fine for co-pilot
+> scenarios** (the human steps back while the agent works) but is **bad
+> for autonomous use** where the agent must operate without disturbing a
+> live human session. For autonomous, non-intrusive control, wait for
+> the deferred **TmuxRpc** mode (see "Two Tmux Operating Modes" and
+> "V1 Known Limitations").
+
 ## Motivation
 
 PureClaw today can spawn subprocesses (`Handles.Process`, pipe-only) and
@@ -42,12 +53,13 @@ The following are enumerable, independently testable Definition-of-Done items.
 - [ ] `mkSshBackendHandle` with an unresolvable host returns `Left (BackendSshConnectFailed _)`; does not throw.
 - [ ] `mkSshBackendHandle` constructs an ssh argv that includes `-F /dev/null`, `StrictHostKeyChecking=accept-new`, `BatchMode=yes`, `IdentitiesOnly=yes`, `ConnectTimeout=10`, `ServerAliveInterval=30`, `ForwardX11=no`, `ForwardX11Trusted=no`, `ForwardAgent=no`, no `-X`, no `-Y`, no `-A`.
 - [ ] `mkTmuxBackendHandle` with `LocalHost localTmuxCmd` attaches to a pre-existing window, sends a command, captures output, and `_bh_close` detaches without destroying the window. The target window is still present after close.
+- [ ] `mkTmuxBackendHandle` with `RemoteHost _ sshCmd remoteTmuxCmd` attaches to a pre-existing remote window over ssh, sends a command, captures output, and `_bh_close` detaches without destroying the window. The remote target window is still present after close (verified by a second short-lived ssh + `tmux list-windows` from the test harness).
 - [ ] `mkTmuxBackendHandle` against a non-existent window returns `Left (BackendTmuxTargetMissing _)` and does **not** auto-create the window.
 - [ ] `mkTmuxBackendHandle` against an unsafe `TmuxSession` (containing whitespace, shell metacharacters, leading `-`, or NUL) returns `Left (BackendInvalidOption _)` at construction; no subprocess is spawned.
 - [ ] `mkTmuxBackendHandle` over `RemoteHost` requires both an outer `AuthorizedCommand` for ssh and an inner `RemoteCommand` for tmux (enforced by type) and surfaces `BackendSshConnectFailed` (not `BackendTmuxTargetMissing`) when the ssh hop itself fails.
 - [ ] `mkTmuxBackendHandle` constructs a remote argv whose program path **and** every arg are individually shell-quoted on the remote half. Verifiable with a remote program path containing a space (`/opt/my tools/tmux`).
 - [ ] On any backend, `_bh_close` is idempotent (calling twice succeeds both times) and never throws.
-- [ ] On any Pty backend, an oversized read (exceeding `pto_recvBufferCap`) returns `RecvTruncated`; subsequent `_bh_recv` calls continue to return `RecvTruncated` (the flag latches) until `_bh_close`.
+- [ ] On any Pty backend, an oversized read (exceeding `_p_to_recvBufferCap`) returns `RecvTruncated`; subsequent `_bh_recv` calls continue to return `RecvTruncated` (the flag latches) until `_bh_close`.
 - [ ] `mkNoOpBackendHandle Pty` returns a backend whose `_bh_recv Nothing` yields `RecvSettled ""` and whose `_bh_resize` is a silent no-op. `mkNoOpBackendHandle Pipe` likewise.
 - [ ] `mkInMemoryBackendHandle` round-trips bytes deterministically and is the substrate for property tests of `_bh_recv` idle semantics (using a fake clock).
 - [ ] An `ssh` host string starting with `-` (e.g. `-oProxyCommand=evil`) is rejected at `mkSshTarget` construction; `BackendInvalidOption`.
@@ -263,6 +275,17 @@ v1 supports only passphrase-less ssh keys:
    written), the file is `unlink`ed and a best-effort overwrite-with-zero
    is attempted before unlink.
 
+> **Honest note on overwrite-with-zero.** On modern copy-on-write
+> filesystems (APFS, ZFS, btrfs), journaled filesystems (ext4 with
+> data=journal), and SSDs with wear-leveling, the overwrite-with-zero
+> step is **defense-in-depth theatre** — the original key bytes likely
+> remain recoverable via filesystem internals. The actual mitigation is
+> the combination of (a) short lifetime (key file exists only while the
+> backend is open), (b) restrictive mode (0400, geteuid-owned), and (c)
+> per-process `KeysRoot` outside the workspace. The zero-overwrite is
+> retained because it's free and helps on legacy filesystems where it
+> still works (FAT, ext4 without journaling, raw HDDs).
+
 This deliberately collapses the `BatchMode=yes` vs `SSH_ASKPASS` conflict
 — v1 does not need ASKPASS because there are no passphrases to prompt
 for. Passphrase-protected keys + ssh-agent + askpass-helper are explicit
@@ -281,9 +304,9 @@ mkTmuxWindow  :: Text -> Either BackendError TmuxWindow
 mkTmuxPane    :: Text -> Either BackendError TmuxPane
 
 data TmuxTarget = TmuxTarget
-  { tt_session :: !TmuxSession
-  , tt_window  :: !TmuxWindow
-  , tt_pane    :: !(Maybe TmuxPane)
+  { _tt_session :: !TmuxSession
+  , _tt_window  :: !TmuxWindow
+  , _tt_pane    :: !(Maybe TmuxPane)
   }
 ```
 
@@ -312,10 +335,10 @@ than silently writing to the new (potentially different-owner) window.
 
 ### Tmux socket pinning
 
-`TmuxOpts` carries `to_socketPath :: Maybe SafeRuntimePath` to pin the
+`TmuxOpts` carries `_to_socketPath :: Maybe SafeRuntimePath` to pin the
 tmux server socket (`tmux -S /path/to/socket`). When unset, the backend
 uses tmux's default; flagged as a v1 limitation on multi-tenant hosts.
-**Constraint**: when set, `to_socketPath` is validated to be on a local
+**Constraint**: when set, `_to_socketPath` is validated to be on a local
 filesystem (no NFS/SMB) — otherwise socket-via-network is an out-of-band
 remote-attach vector.
 
@@ -394,46 +417,46 @@ forbiddenEnvVars :: Set String      -- LD_PRELOAD, DYLD_INSERT_LIBRARIES, SSH_AU
 mkEnvMap :: [(String, String)] -> Either BackendError EnvMap   -- rejects forbiddenEnvVars
 
 data PtyOpts = PtyOpts
-  { pto_cols          :: !Cols
-  , pto_rows          :: !Rows
-  , pto_env           :: !EnvMap
-  , pto_cwd           :: !(Maybe FilePath)
-  , pto_idle          :: !IdleSpec
-  , pto_recvBufferCap :: !Int
-  , pto_io            :: !PtyIO        -- injectable PTY allocator (test seam)
-  , pto_redactor      :: ByteString -> ByteString
+  { _p_to_cols          :: !Cols
+  , _p_to_rows          :: !Rows
+  , _p_to_env           :: !EnvMap
+  , _p_to_cwd           :: !(Maybe FilePath)
+  , _p_to_idle          :: !IdleSpec
+  , _p_to_recvBufferCap :: !Int
+  , _p_to_io            :: !PtyIO        -- injectable PTY allocator (test seam)
+  , _p_to_redactor      :: ByteString -> ByteString
   }
 
 data PipeOpts = PipeOpts
-  { po_stdinBytes     :: !ByteString
-  , po_env            :: !EnvMap
-  , po_cwd            :: !(Maybe FilePath)
-  , po_recvBufferCap  :: !Int
+  { _po_stdinBytes     :: !ByteString
+  , _po_env            :: !EnvMap
+  , _po_cwd            :: !(Maybe FilePath)
+  , _po_recvBufferCap  :: !Int
   }
 
 data SshOpts = SshOpts
-  { so_pty     :: !PtyOpts             -- for Pty kind; ignored fields documented below
-  , so_control :: !(Maybe ControlOpts) -- ControlMaster opts; Nothing = one-off
-  , so_identity:: !SafeKeyPath         -- ssh identity (v1: passphrase-less)
+  { _so_pty     :: !PtyOpts             -- for Pty kind; ignored fields documented below
+  , _so_control :: !(Maybe ControlOpts) -- ControlMaster opts; Nothing = one-off
+  , _so_identity:: !SafeKeyPath         -- ssh identity (v1: passphrase-less)
   }
 
 data SshPipeOpts = SshPipeOpts
-  { spo_env            :: !EnvMap
-  , spo_cwd            :: !(Maybe FilePath)
-  , spo_idle           :: !IdleSpec
-  , spo_recvBufferCap  :: !Int
-  , spo_control        :: !(Maybe ControlOpts)
-  , spo_identity       :: !SafeKeyPath
+  { _spo_env            :: !EnvMap
+  , _spo_cwd            :: !(Maybe FilePath)
+  , _spo_idle           :: !IdleSpec
+  , _spo_recvBufferCap  :: !Int
+  , _spo_control        :: !(Maybe ControlOpts)
+  , _spo_identity       :: !SafeKeyPath
   }
 
 data ControlOpts = ControlOpts
-  { co_controlPath  :: !SafeRuntimePath
-  , co_persistSecs  :: !Int
+  { _co_controlPath  :: !SafeRuntimePath
+  , _co_persistSecs  :: !Int
   }
 
 data TmuxOpts = TmuxOpts
-  { to_pty        :: !PtyOpts
-  , to_socketPath :: !(Maybe SafeRuntimePath)  -- pin tmux server socket; local-fs only
+  { _to_pty        :: !PtyOpts
+  , _to_socketPath :: !(Maybe SafeRuntimePath)  -- pin tmux server socket; local-fs only
   }
 
 -- Defaults (exported from PureClaw.Handles.Backend or the kind's home module):
@@ -444,15 +467,15 @@ defaultSshPipeOpts :: SafeKeyPath -> SshPipeOpts
 defaultTmuxOpts    :: PtyIO -> TmuxOpts
 ```
 
-`pto_env` is the **complete** subprocess environment. The backend adds
+`_p_to_env` is the **complete** subprocess environment. The backend adds
 `TERM=xterm-256color` and `PATH=/usr/bin:/bin:/usr/local/bin` only if not
 already present. No inheritance from the agent's process environment.
 This matches SECURITY_PRACTICES §2.4 and `Security/Command.hs` haddock.
 
-`pto_redactor` defaults to `defaultCredentialRedactor` (provided by this
+`_p_to_redactor` defaults to `defaultCredentialRedactor` (provided by this
 work, scrubs known credential prompts — `password:`, `passphrase:`,
 `Sorry, try again`, `[sudo] password for`). Opt-out is explicit: set
-`pto_redactor = id`. This makes the secure path the default path
+`_p_to_redactor = id`. This makes the secure path the default path
 (SECURITY_PRACTICES §1).
 
 ## PTY Test Seam
@@ -468,9 +491,9 @@ realPtyIO :: PtyIO                      -- backed by posix-pty
 fakePtyIO :: FakePtyConfig -> IO PtyIO  -- IORef-backed; deterministic; under PureClaw.Backend.Pty.Fake
 
 data FakePtyConfig = FakePtyConfig
-  { fpc_clock         :: !FakeClock
-  , fpc_initialOutput :: !ByteString
-  , fpc_eofAfterBytes :: !(Maybe Int)
+  { _fpc_clock         :: !FakeClock
+  , _fpc_initialOutput :: !ByteString
+  , _fpc_eofAfterBytes :: !(Maybe Int)
   }
 ```
 
@@ -482,9 +505,9 @@ is then a single-file change.
 
 ```haskell
 data InMemoryConfig = InMemoryConfig
-  { imc_clock           :: !FakeClock
-  , imc_scriptedReplies :: ![ByteString]   -- consumed in order on each recv
-  , imc_eofAfter        :: !(Maybe Int)    -- terminate after N recvs
+  { _imc_clock           :: !FakeClock
+  , _imc_scriptedReplies :: ![ByteString]   -- consumed in order on each recv
+  , _imc_eofAfter        :: !(Maybe Int)    -- terminate after N recvs
   }
 
 mkInMemoryBackendHandle :: BackendKind -> InMemoryConfig -> IO BackendHandle
@@ -544,15 +567,15 @@ data RecvSignal
 
 -- Drainer ⇄ Recv state. STM-based.
 data DrainState = DrainState
-  { ds_queue       :: !(TBQueue RecvSignal)   -- bounded queue of chunks + sentinels
-  , ds_truncated   :: !(TVar Bool)            -- latches once flipped
-  , ds_lastByteAt  :: !(TVar (Maybe Time))    -- for idle-quiet measurement
-  , ds_drainerDone :: !(TVar Bool)            -- set when async drainer finishes
+  { _ds_queue       :: !(TBQueue RecvSignal)   -- bounded queue of chunks + sentinels
+  , _ds_truncated   :: !(TVar Bool)            -- latches once flipped
+  , _ds_lastByteAt  :: !(TVar (Maybe Time))    -- for idle-quiet measurement
+  , _ds_drainerDone :: !(TVar Bool)            -- set when async drainer finishes
   }
 ```
 
 The drainer reads from the underlying Fd into the queue; on buffer
-overflow it sets `ds_truncated` and stops enqueuing. `_bh_recv`
+overflow it sets `_ds_truncated` and stops enqueuing. `_bh_recv`
 consumes chunks via STM with `registerDelay` for `idleQuietMs`,
 respecting `idleTimeoutMs` as the hard ceiling and `idleMinFirstByte`
 as a minimum wait before the idle window opens.
@@ -569,8 +592,8 @@ as a minimum wait before the idle window opens.
                   │ first chunk arrives
                   ▼
        ┌──────────────────────────┐ ─── idleQuietMs of silence ──> RecvSettled bytes
-       │   draining               │ ─── ds_truncated == True   ──> RecvTruncated bytes (LATCHES)
-       │                          │ ─── ds_drainerDone == True ──> RecvEof bytes
+       │   draining               │ ─── _ds_truncated == True   ──> RecvTruncated bytes (LATCHES)
+       │                          │ ─── _ds_drainerDone == True ──> RecvEof bytes
        └──────────┬───────────────┘
                   │ idleTimeoutMs elapsed at any point
                   ▼
@@ -604,14 +627,14 @@ proceeds to cancel the drainer Async and release the local PTY. Close is
 idempotent and never throws even when the remote side is unreachable.
 
 An optional best-effort probe (`tmux list-windows` via a *separate*
-short-lived ssh hop if `to_socketPath` is set; otherwise local) can
+short-lived ssh hop if `_to_socketPath` is set; otherwise local) can
 verify the target window is still present — failure is logged, never
 surfaced.
 
 ## Lifecycle (other backends)
 
 - **Local (Pipe / Pty)**: `_bh_close` terminates the child + releases PTY. Idempotent.
-- **SSH**: `_bh_close` closes the ssh subprocess. With `so_control = Just _`, the ControlMaster is NOT torn down — `closeSshMultiplex` is separate.
+- **SSH**: `_bh_close` closes the ssh subprocess. With `_so_control = Just _`, the ControlMaster is NOT torn down — `closeSshMultiplex` is separate.
 - **Tmux**: see above. Detach only. Never kill.
 
 `_bh_close` is **idempotent** and **never throws** on any backend.
@@ -623,7 +646,7 @@ closeSshMultiplex :: AuthorizedCommand -> ControlOpts -> IO ()
 ```
 
 > **v1 ControlMaster caveat.** If you open two `mkSshBackendHandle`s
-> against the same `co_controlPath` and call `closeSshMultiplex` while
+> against the same `_co_controlPath` and call `closeSshMultiplex` while
 > one is still alive, the second backend will hit `BackendException` on
 > the next send. Caller-owned lifetimes; no refcounting in v1.
 
@@ -644,14 +667,14 @@ closeSshMultiplex :: AuthorizedCommand -> ControlOpts -> IO ()
 
 ### Per-process recv buffer cap
 
-In addition to per-backend `pto_recvBufferCap`, `PureClaw.Handles.Backend`
+In addition to per-backend `_p_to_recvBufferCap`, `PureClaw.Handles.Backend`
 maintains a process-wide aggregate cap (default 64 MiB, env-tunable). New
 backend factories acquire from a `QSem` keyed on the cap; oversubscribed
 construction fails with `BackendError BackendBufferQuotaExceeded`.
 
 ## Resource Limits
 
-- `pto_recvBufferCap` / `po_recvBufferCap` bound the per-backend accumulator. Overflow sets the latch; next `_bh_recv` returns `RecvTruncated`. Default: 4 MiB.
+- `_p_to_recvBufferCap` / `_po_recvBufferCap` bound the per-backend accumulator. Overflow sets the latch; next `_bh_recv` returns `RecvTruncated`. Default: 4 MiB.
 - Process-wide aggregate cap: 64 MiB default.
 - `idleTimeoutMs` bounds total wait. Tiered defaults (`localIdle`/`sshIdle`/`tmuxIdle`).
 - `ConnectTimeout=10` caps ssh TCP-SYN-phase.
@@ -698,11 +721,11 @@ toPublicError :: BackendError -> PublicBackendError
 
 -- Runtime exceptions. Send and Recv may throw.
 data BackendException = BackendException
-  { be_context :: !Text             -- short fixed-vocabulary tag, e.g. "ssh-write"
-  , be_cause   :: !SomeException
+  { _be_context :: !Text             -- short fixed-vocabulary tag, e.g. "ssh-write"
+  , _be_cause   :: !SomeException
   }
 instance Show BackendException where
-  -- Hand-written: redacts be_cause via redactErr before formatting.
+  -- Hand-written: redacts _be_cause via redactErr before formatting.
   show e = T.unpack (redactBackendException e)
 instance Exception BackendException
 ```
@@ -720,12 +743,12 @@ tests.
 
 ## Information Disclosure / Redaction
 
-- `pto_redactor` runs on each chunk **after** an internal overlap-window
+- `_p_to_redactor` runs on each chunk **after** an internal overlap-window
   coalesce (last 64 bytes carried forward) so a prompt straddling a
   chunk boundary is still matched.
 - `defaultCredentialRedactor` ships scrubbers for `password:`,
   `passphrase:`, `Sorry, try again`, `[sudo] password for`. Default on
-  for Pty kind (opt out via `pto_redactor = id`).
+  for Pty kind (opt out via `_p_to_redactor = id`).
 - `Show BackendError` / `Show BackendException` / `Show EnvValue` never
   reveal raw secrets, paths, or hostnames.
 - `EnvMap` rejects `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `SSH_AUTH_SOCK`,
@@ -760,6 +783,52 @@ example_pty policy pty = do
   print res
 ```
 
+**SSH Pty (direct, no tmux):**
+```haskell
+example_ssh_pty :: SecurityPolicy -> PtyIO -> SafeKeyPath -> SshTarget -> IO ()
+example_ssh_pty policy pty ident tgt = do
+  sshCmd  <- either (error "policy: ssh")  pure (authorize       policy "ssh"  [])
+  bashCmd <- either (error "policy: bash") pure (authorizeRemote policy "bash" ["-i"])
+  res <- withBackendHandleE (mkSshBackendHandle sshCmd tgt bashCmd (defaultSshOpts pty ident)) $ \b -> do
+    _  <- _bh_recv b Nothing                        -- consume initial prompt
+    r1 <- runBackend b "uname -a\n"
+    r2 <- runBackend b "exit\n"
+    pure (r1, r2)
+  print res
+```
+
+**SSH Pipe one-shot:**
+```haskell
+example_ssh_pipe :: SecurityPolicy -> SafeKeyPath -> SshTarget -> IO ()
+example_ssh_pipe policy ident tgt = do
+  sshCmd      <- either (error "policy: ssh")      pure (authorize       policy "ssh" [])
+  hostnameCmd <- either (error "policy: hostname") pure (authorizeRemote policy "hostname" [])
+  res <- mkSshPipeBackendHandle sshCmd tgt hostnameCmd (defaultSshPipeOpts ident)
+  case res of
+    Left  e -> print (toPublicError e)
+    Right b -> do
+      r <- runBackend b ""
+      BS.putStr (recvBytes r)
+      _bh_close b
+```
+
+**Catching runtime exceptions with `try @BackendException`:**
+```haskell
+example_recover :: BackendHandle -> ByteString -> IO ()
+example_recover b input = do
+  res <- try @BackendException (runBackend b input)
+  case res of
+    Right outcome -> case outcome of
+      RecvSettled bs   -> BS.putStr bs
+      RecvTimedOut bs  -> putStrLn $ "(idle timeout) so-far: " <> show (BS.length bs) <> "B"
+      RecvEof bs       -> putStrLn $ "(eof) final: " <> show (BS.length bs) <> "B"
+      RecvTruncated bs -> putStrLn $ "(truncated) capped at: " <> show (BS.length bs) <> "B"
+    Left e -> do
+      -- transport went away mid-conversation; backend is no longer usable
+      putStrLn $ "(backend dead: " <> show (toPublicException e) <> ") — caller should reconstruct"
+      _bh_close b   -- idempotent; safe to call even if drainer is already gone
+```
+
 **Tmux-over-SSH attach:**
 ```haskell
 example_tmux_remote :: SecurityPolicy -> PtyIO -> SafeKeyPath -> IO ()
@@ -786,9 +855,9 @@ example_test = do
 
   -- In-memory: deterministic replies + fake clock.
   imc <- pure InMemoryConfig
-    { imc_clock = newFakeClock
-    , imc_scriptedReplies = ["hello\n", "world\n"]
-    , imc_eofAfter = Just 2
+    { _imc_clock = newFakeClock
+    , _imc_scriptedReplies = ["hello\n", "world\n"]
+    , _imc_eofAfter = Just 2
     }
   imb <- mkInMemoryBackendHandle Pty imc
   r1  <- runBackend imb "first\n"
@@ -811,8 +880,8 @@ example_recvWith b = do
 example_multiplex :: SecurityPolicy -> SafeKeyPath -> ControlOpts -> IO ()
 example_multiplex policy ident copts = do
   sshCmd <- either (error "policy") pure (authorize policy "ssh" [])
-  let sshOpts = (defaultSshOpts realPtyIO ident) { so_control = Just copts }
-  -- ... use mkSshBackendHandle multiple times sharing copts.co_controlPath ...
+  let sshOpts = (defaultSshOpts realPtyIO ident) { _so_control = Just copts }
+  -- ... use mkSshBackendHandle multiple times sharing copts._co_controlPath ...
   closeSshMultiplex sshCmd copts
 ```
 
@@ -877,7 +946,7 @@ These are intentional v1 scope cuts:
 - **Tmux Attach shares the screen with humans.** Symptom: when both an agent and a human are attached to the same window, both see all output and both inputs interleave. **Recommendation:** in v1, treat shared attach as "fine for co-pilot scenarios where the human pauses while the agent works; bad for autonomous use." Wait for TmuxRpc when non-intrusive control is required.
 - **No SSH reconnect-on-network-blip.** Symptom: a dropped ssh session surfaces as `BackendException` on the next send; previous PTY state is lost. **Workaround:** catch `BackendException`, log via `toPublicError`, re-call `mkSshBackendHandle`.
 - **No tmux session/window discovery.** Symptom: callers must already know `session:window`. A `listTmuxTargets` helper is a follow-up.
-- **Default tmux socket on multi-tenant hosts.** Symptom: collisions on shared session names. **Recommendation:** always set `to_socketPath`.
+- **Default tmux socket on multi-tenant hosts.** Symptom: collisions on shared session names. **Recommendation:** always set `_to_socketPath`.
 - **Interactive prompts mid-command are not auto-handled.** Symptom: sudo/git-editor/host-key prompts surface in `_bh_recv` output; caller writes the response with `_bh_send`. No built-in expect/respond.
 - **Passphrase-protected ssh keys are not supported in v1.** Symptom: a `SafeKeyPath` pointing to a passphrase-protected key produces `BackendSshConnectFailed SshAuthRefused`. **Workaround:** strip the passphrase before storing in Vault. Passphrase + ssh-agent + askpass-helper is v2.
 - **No login-shell ssh.** Symptom: `mkSshBackendHandle` always requires a `RemoteCommand`. Use `authorizeRemote p "bash" ["-i"]` to drive an interactive remote shell explicitly. Login-shell sugar is v2.
