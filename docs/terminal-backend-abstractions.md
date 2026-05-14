@@ -59,14 +59,18 @@ The following are enumerable, independently testable Definition-of-Done items.
 - [ ] `mkTmuxBackendHandle` over `RemoteHost` requires both an outer `AuthorizedCommand` for ssh and an inner `RemoteCommand` for tmux (enforced by type) and surfaces `BackendSshConnectFailed` (not `BackendTmuxTargetMissing`) when the ssh hop itself fails.
 - [ ] `mkTmuxBackendHandle` constructs a remote argv whose program path **and** every arg are individually shell-quoted on the remote half. Verifiable with a remote program path containing a space (`/opt/my tools/tmux`).
 - [ ] On any backend, `_bh_close` is idempotent (calling twice succeeds both times) and never throws.
-- [ ] On any Pty backend, an oversized read (exceeding `_p_to_recvBufferCap`) returns `RecvTruncated`; subsequent `_bh_recv` calls continue to return `RecvTruncated` (the flag latches) until `_bh_close`.
+- [ ] On any Pty backend, an oversized read (exceeding `_pto_recvBufferCap`) returns `RecvTruncated`; subsequent `_bh_recv` calls continue to return `RecvTruncated` (the flag latches) until `_bh_close`.
 - [ ] `mkNoOpBackendHandle Pty` returns a backend whose `_bh_recv Nothing` yields `RecvSettled ""` and whose `_bh_resize` is a silent no-op. `mkNoOpBackendHandle Pipe` likewise.
 - [ ] `mkInMemoryBackendHandle` round-trips bytes deterministically and is the substrate for property tests of `_bh_recv` idle semantics (using a fake clock).
 - [ ] An `ssh` host string starting with `-` (e.g. `-oProxyCommand=evil`) is rejected at `mkSshTarget` construction; `BackendInvalidOption`.
 - [ ] `Show BackendException` against a wrapped exception whose message contains a hostname or filesystem path does **not** include those values verbatim (redacted by `redactErr`). Same for `Show BackendError` and `Show SshConnectFailure`.
 - [ ] All `SecurityPolicy` construction sites in the codebase are updated to set the new `_sp_allowedRemoteCommands :: AllowList CommandName` field. (Construction-site enforcement: `-Werror -Wmissing-fields`. Record-update-site enforcement: `-Werror -Wincomplete-record-updates`. Both flags are already on per project conventions.)
-- [ ] Coverage on the new modules meets thresholds in `.coverage-thresholds.json` (100% across lines, branches, functions, statements).
-- [ ] Module-level haddock in `PureClaw.Handles.Backend` documents the choose-a-kind decision tree (Pipe vs Pty vs (future) TmuxRpc).
+- [ ] When a tmux backend's pinned `@window_id` is destroyed and re-created with the same name mid-session, subsequent `_bh_send`/`_bh_recv`/`_bh_close` calls fail closed with `BackendException` carrying `BackendBrokenTmuxTarget`, NOT silently write to the new window. (Tested with `fakePtyIO`-driven simulation.)
+- [ ] On a Pty-kind backend with `_pto_idle.idleTimeoutMs` exceeded before any byte arrives, `_bh_recv` returns `RecvTimedOut ""` (not blocked, not thrown).
+- [ ] When the process-wide aggregate recv-buffer cap (configurable, default 64 MiB) is oversubscribed at construction time, the factory returns `Left (BackendBufferQuotaExceeded n)` where `n` is the requested per-backend cap in MiB.
+- [ ] `mkNoOpBackendHandle Pipe` and `mkNoOpBackendHandle Pty` both have a `_bh_resize` that is a silent no-op (does not throw; observable via test).
+- [ ] Coverage on the new modules meets thresholds in `.coverage-thresholds.json` (100% across lines, branches, functions, statements; `realPtyIO` kernel-error paths excluded via `-- HPC:Exclude`).
+- [ ] Module-level haddock in `PureClaw.Handles.Backend` documents the choose-a-kind decision tree (Pipe vs Pty vs (future) TmuxRpc). Verified by a doctest that asserts the haddock contains the strings "Pipe", "Pty", and "decision tree" (lightweight; defends the docstring against accidental deletion).
 
 ## The Abstraction
 
@@ -417,14 +421,14 @@ forbiddenEnvVars :: Set String      -- LD_PRELOAD, DYLD_INSERT_LIBRARIES, SSH_AU
 mkEnvMap :: [(String, String)] -> Either BackendError EnvMap   -- rejects forbiddenEnvVars
 
 data PtyOpts = PtyOpts
-  { _p_to_cols          :: !Cols
-  , _p_to_rows          :: !Rows
-  , _p_to_env           :: !EnvMap
-  , _p_to_cwd           :: !(Maybe FilePath)
-  , _p_to_idle          :: !IdleSpec
-  , _p_to_recvBufferCap :: !Int
-  , _p_to_io            :: !PtyIO        -- injectable PTY allocator (test seam)
-  , _p_to_redactor      :: ByteString -> ByteString
+  { _pto_cols          :: !Cols
+  , _pto_rows          :: !Rows
+  , _pto_env           :: !EnvMap
+  , _pto_cwd           :: !(Maybe FilePath)
+  , _pto_idle          :: !IdleSpec
+  , _pto_recvBufferCap :: !Int
+  , _pto_io            :: !PtyIO        -- injectable PTY allocator (test seam)
+  , _pto_redactor      :: ByteString -> ByteString
   }
 
 data PipeOpts = PipeOpts
@@ -467,15 +471,15 @@ defaultSshPipeOpts :: SafeKeyPath -> SshPipeOpts
 defaultTmuxOpts    :: PtyIO -> TmuxOpts
 ```
 
-`_p_to_env` is the **complete** subprocess environment. The backend adds
+`_pto_env` is the **complete** subprocess environment. The backend adds
 `TERM=xterm-256color` and `PATH=/usr/bin:/bin:/usr/local/bin` only if not
 already present. No inheritance from the agent's process environment.
 This matches SECURITY_PRACTICES §2.4 and `Security/Command.hs` haddock.
 
-`_p_to_redactor` defaults to `defaultCredentialRedactor` (provided by this
+`_pto_redactor` defaults to `defaultCredentialRedactor` (provided by this
 work, scrubs known credential prompts — `password:`, `passphrase:`,
 `Sorry, try again`, `[sudo] password for`). Opt-out is explicit: set
-`_p_to_redactor = id`. This makes the secure path the default path
+`_pto_redactor = id`. This makes the secure path the default path
 (SECURITY_PRACTICES §1).
 
 ## PTY Test Seam
@@ -667,14 +671,14 @@ closeSshMultiplex :: AuthorizedCommand -> ControlOpts -> IO ()
 
 ### Per-process recv buffer cap
 
-In addition to per-backend `_p_to_recvBufferCap`, `PureClaw.Handles.Backend`
+In addition to per-backend `_pto_recvBufferCap`, `PureClaw.Handles.Backend`
 maintains a process-wide aggregate cap (default 64 MiB, env-tunable). New
 backend factories acquire from a `QSem` keyed on the cap; oversubscribed
 construction fails with `BackendError BackendBufferQuotaExceeded`.
 
 ## Resource Limits
 
-- `_p_to_recvBufferCap` / `_po_recvBufferCap` bound the per-backend accumulator. Overflow sets the latch; next `_bh_recv` returns `RecvTruncated`. Default: 4 MiB.
+- `_pto_recvBufferCap` / `_po_recvBufferCap` bound the per-backend accumulator. Overflow sets the latch; next `_bh_recv` returns `RecvTruncated`. Default: 4 MiB.
 - Process-wide aggregate cap: 64 MiB default.
 - `idleTimeoutMs` bounds total wait. Tiered defaults (`localIdle`/`sshIdle`/`tmuxIdle`).
 - `ConnectTimeout=10` caps ssh TCP-SYN-phase.
@@ -743,12 +747,12 @@ tests.
 
 ## Information Disclosure / Redaction
 
-- `_p_to_redactor` runs on each chunk **after** an internal overlap-window
+- `_pto_redactor` runs on each chunk **after** an internal overlap-window
   coalesce (last 64 bytes carried forward) so a prompt straddling a
   chunk boundary is still matched.
 - `defaultCredentialRedactor` ships scrubbers for `password:`,
   `passphrase:`, `Sorry, try again`, `[sudo] password for`. Default on
-  for Pty kind (opt out via `_p_to_redactor = id`).
+  for Pty kind (opt out via `_pto_redactor = id`).
 - `Show BackendError` / `Show BackendException` / `Show EnvValue` never
   reveal raw secrets, paths, or hostnames.
 - `EnvMap` rejects `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `SSH_AUTH_SOCK`,
