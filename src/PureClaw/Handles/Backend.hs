@@ -96,7 +96,7 @@ module PureClaw.Handles.Backend
   , CommandName
   ) where
 
-import Control.Exception (Exception, SomeException)
+import Control.Exception (Exception, SomeException, displayException)
 import Data.ByteString (ByteString)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -106,6 +106,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 
+import {-# SOURCE #-} PureClaw.Internal.Redact qualified as Redact
 import PureClaw.Core.Types (CommandName)
 
 -- | The mechanism a 'BackendHandle' uses to talk to its subprocess.
@@ -326,15 +327,16 @@ mkEnvMap = go Map.empty
 
 -- | Default 'PtyOpts._pto_redactor'.
 --
--- For WU1 this is the identity function; the real overlap-window
--- scrubber lives in 'PureClaw.Internal.Redact' (WU2). When wired up
--- it will scrub the known credential prompts @password:@,
--- @passphrase:@, @Sorry, try again@, and @[sudo] password for@ from
--- recv chunks before the caller sees them.
+-- Scrubs the known credential prompts @password:@, @passphrase:@,
+-- @Sorry, try again@, and @[sudo] password for@ from recv chunks
+-- before the caller sees them. The actual scan is implemented in
+-- 'PureClaw.Internal.Redact.credentialPromptScrubber'; this is the
+-- public name that 'PtyOpts._pto_redactor' defaults to.
 --
--- TODO: WU2 wire to redactErr-style overlap-window scrubber.
+-- Per-chunk only: the 64-byte overlap-window carry-forward across
+-- chunk boundaries lives inside the drainer (WU7).
 defaultCredentialRedactor :: ByteString -> ByteString
-defaultCredentialRedactor = id
+defaultCredentialRedactor = Redact.credentialPromptScrubber
 
 -- | Fixed-vocabulary context tag attached to a 'BackendException'.
 --
@@ -424,26 +426,33 @@ data BackendError
     -- ^ The pinned @\@window_id@ no longer matches a live tmux window.
   deriving stock (Eq)
 
--- Hand-written: refuses to derive 'Show' so a future constructor
--- accidentally carrying free 'Text' would still be redacted by the
--- nested ADT's own 'Show'. WU2 will replace this with a routing call
--- through 'PureClaw.Internal.Redact'.
+-- Hand-written: routes through 'PureClaw.Internal.Redact.redactedShowString'
+-- so the rendered output is always redaction-safe — no raw hostnames,
+-- IPv4 addresses, paths, or ssh stderr fragments.
+--
+-- The constructor-by-constructor case is here (not in @Redact@) to
+-- keep @Redact@ outside @Handles.Backend@\'s import cycle: each branch
+-- renders a fixed prefix plus 'show' on a leaf ADT, then the whole
+-- string is passed through the same pipeline 'redactErr' uses.
 instance Show BackendError where
-  show e = case e of
-    BackendBinaryNotFound c ->
-      "BackendBinaryNotFound " ++ show c
-    BackendPtyAllocFailed f ->
-      "BackendPtyAllocFailed " ++ show f
-    BackendSshConnectFailed f ->
-      "BackendSshConnectFailed " ++ show f
-    BackendTmuxTargetMissing t ->
-      "BackendTmuxTargetMissing " ++ show t
-    BackendInvalidOption d ->
-      "BackendInvalidOption " ++ show d
-    BackendBufferQuotaExceeded n ->
-      "BackendBufferQuotaExceeded " ++ show n
-    BackendBrokenTmuxTarget t ->
-      "BackendBrokenTmuxTarget " ++ show t
+  show e = T.unpack (Redact.redactedShowString (renderBackendError e))
+
+renderBackendError :: BackendError -> String
+renderBackendError e = case e of
+  BackendBinaryNotFound c ->
+    "BackendBinaryNotFound " <> show c
+  BackendPtyAllocFailed f ->
+    "BackendPtyAllocFailed " <> show f
+  BackendSshConnectFailed f ->
+    "BackendSshConnectFailed " <> show f
+  BackendTmuxTargetMissing t ->
+    "BackendTmuxTargetMissing " <> show t
+  BackendInvalidOption d ->
+    "BackendInvalidOption " <> show d
+  BackendBufferQuotaExceeded n ->
+    "BackendBufferQuotaExceeded " <> show n
+  BackendBrokenTmuxTarget t ->
+    "BackendBrokenTmuxTarget " <> show t
 
 -- | User-visible (channel-safe) projection of a 'BackendError'.
 --
@@ -483,14 +492,19 @@ data BackendException = BackendException
   , _be_cause   :: !SomeException
   }
 
--- Hand-written: WU2 will replace this stub with
--- 'PureClaw.Internal.Redact.redactBackendException'.
--- TODO: WU2 — replace stub Show with redactBackendException.
+-- Hand-written: routes through 'PureClaw.Internal.Redact.redactedShowString'.
+-- The wrapped 'SomeException'\'s message is rendered first via
+-- 'displayException' and then fed through the redaction pipeline.
 instance Show BackendException where
   show be =
-    "BackendException { _be_context = "
-      ++ show (_be_context be)
-      ++ ", _be_cause = <redacted> }"
+    T.unpack
+      (Redact.redactedShowString
+        ( "BackendException { _be_context = "
+            <> show (_be_context be)
+            <> ", _be_cause = "
+            <> displayException (_be_cause be)
+            <> " }"
+        ))
 
 instance Exception BackendException
 
@@ -535,12 +549,10 @@ defaultPipeOpts = PipeOpts
   }
 
 -- | Default 'PtyOpts': 200x50 geometry, empty env, no cwd, 'localIdle',
--- 4 MiB recv cap, identity redactor.
+-- 4 MiB recv cap, 'defaultCredentialRedactor'.
 --
--- The redactor defaults to 'id' in WU1; WU2 will switch it to
--- 'defaultCredentialRedactor' once the real overlap-window scrubber
--- lands.
--- TODO: WU2 swap identity redactor for 'defaultCredentialRedactor'.
+-- Opt-out for the credential scrubber is explicit: set
+-- @_pto_redactor = id@ on the constructed record.
 defaultPtyOpts :: PtyOpts
 defaultPtyOpts = PtyOpts
   { _pto_cols          = Cols 200
@@ -549,7 +561,7 @@ defaultPtyOpts = PtyOpts
   , _pto_cwd           = Nothing
   , _pto_idle          = localIdle
   , _pto_recvBufferCap = 4 * 1024 * 1024
-  , _pto_redactor      = id
+  , _pto_redactor      = defaultCredentialRedactor
   }
 
 -- | Subprocess I\/O capability: a record of IO actions tagged with its

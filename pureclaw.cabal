@@ -63,6 +63,8 @@ library
     PureClaw.Handles.Transcript
     PureClaw.Handles.Harness
     PureClaw.Handles.Backend
+    -- Internal
+    PureClaw.Internal.Redact
     -- Harness (tmux lifecycle)
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode

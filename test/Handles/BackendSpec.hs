@@ -11,7 +11,22 @@
 -- See @.beads/plans/active-plan.md@ WU0 for the scaffold contract.
 module Handles.BackendSpec (spec) where
 
+import Control.Exception (SomeException, toException)
 import Test.Hspec
+
+import PureClaw.Core.Types (CommandName (..))
+import PureClaw.Handles.Backend
+  ( BackendContext (BcSshDisconnect)
+  , BackendError
+    ( BackendBinaryNotFound
+    , BackendSshConnectFailed
+    )
+  , BackendException (..)
+  , SshConnectFailure (..)
+  )
+
+mkExn :: String -> SomeException
+mkExn = toException . userError
 
 spec :: Spec
 spec = do
@@ -32,9 +47,28 @@ spec = do
     it "DoD #15: mkInMemoryBackendHandle round-trips bytes deterministically" $
       pendingWith "WU3: mkInMemoryBackendHandle deterministic round-trip + fake-clock idle property."
 
-    -- docs/terminal-backend-abstractions.md line 66: show redaction
-    it "DoD #17: Show BackendException / BackendError / SshConnectFailure redacts hostnames + paths" $
-      pendingWith "WU2: redactErr + hand-written Show instances in PureClaw.Internal.Redact."
+    -- docs/terminal-backend-abstractions.md line 66: show redaction (WU2)
+    describe "DoD #17: Show BackendException / BackendError / SshConnectFailure redacts hostnames + paths" $ do
+      it "show (BackendBinaryNotFound _) is well-formed" $ do
+        let rendered = show (BackendBinaryNotFound (CommandName "tmux"))
+        rendered `shouldContain` "BackendBinaryNotFound"
+        rendered `shouldContain` "tmux"
+
+      it "show (BackendSshConnectFailed _) does not leak ssh stderr/hostname/path" $ do
+        let rendered = show (BackendSshConnectFailed SshAuthRefused)
+        rendered `shouldContain` "SshAuthRefused"
+        rendered `shouldNotContain` "/"
+        rendered `shouldNotContain` "."
+        -- No literal IP-octet substring leaks from the underlying ADT.
+        rendered `shouldNotContain` "192.168"
+
+      it "show (BackendException ...) does not leak the cause verbatim" $ do
+        let cause = mkExn "ssh: connect to host db.prod.example.com port 22: refused"
+            rendered = show (BackendException BcSshDisconnect cause)
+        rendered `shouldNotContain` "db.prod.example.com"
+        rendered `shouldContain` "BackendException"
+        rendered `shouldContain` "BcSshDisconnect"
+        rendered `shouldContain` "<host>"
 
     -- docs/terminal-backend-abstractions.md line 73: haddock decision tree
     it "DoD #20: module-level haddock documents Pipe/Pty/decision tree (doctest)" $
