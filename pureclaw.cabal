@@ -160,6 +160,7 @@ library
     memory,
     mtl,
     optparse-applicative,
+    posix-pty,
     process,
     sqlite-simple,
     stm,
@@ -235,6 +236,13 @@ test-suite pureclaw-test
     Tools.EditSpec
     Tools.ProcessSpec
     Handles.ProcessSpec
+    Handles.BackendSpec
+    Backend.LocalSpec
+    Backend.PtySpec
+    Backend.SSHSpec
+    Backend.TmuxSpec
+    Internal.RedactSpec
+    Internal.ShellQuoteSpec
     Tools.WebSearchSpec
     Tools.MessageSpec
     Tools.CronSpec

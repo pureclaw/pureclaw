@@ -16,6 +16,13 @@ import qualified Handles.ShellSpec
 import qualified Handles.NetworkSpec
 import qualified Handles.MemorySpec
 import qualified Handles.ChannelSpec
+import qualified Handles.BackendSpec
+import qualified Backend.LocalSpec
+import qualified Backend.PtySpec
+import qualified Backend.SSHSpec
+import qualified Backend.TmuxSpec
+import qualified Internal.RedactSpec
+import qualified Internal.ShellQuoteSpec
 import qualified Providers.ClassSpec
 import qualified Agent.AgentDefSpec
 import qualified Agent.CompletionSpec
@@ -102,6 +109,13 @@ main = hspec $ do
   describe "Handles.Network" Handles.NetworkSpec.spec
   describe "Handles.Memory" Handles.MemorySpec.spec
   describe "Handles.Channel" Handles.ChannelSpec.spec
+  describe "Handles.Backend" Handles.BackendSpec.spec
+  describe "Backend.Local" Backend.LocalSpec.spec
+  describe "Backend.Pty" Backend.PtySpec.spec
+  describe "Backend.SSH" Backend.SSHSpec.spec
+  describe "Backend.Tmux" Backend.TmuxSpec.spec
+  describe "Internal.Redact" Internal.RedactSpec.spec
+  describe "Internal.ShellQuote" Internal.ShellQuoteSpec.spec
   describe "Providers.Class" Providers.ClassSpec.spec
   describe "Agent.AgentDef" Agent.AgentDefSpec.spec
   describe "Agent.Context" Agent.ContextSpec.spec
