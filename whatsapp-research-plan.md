@@ -181,75 +181,180 @@ Auth state check on channel startup: shell out `wacli auth status --json --store
 
 ---
 
-## Q5. Lifecycle & reconnect
-wacli's `sync --follow` owns the reconnect loop internally — read `internal/app/sync.go` and `sync_status.go` to confirm. Pureclaw just needs to:
-- launch and supervise the wacli subprocess (mirror `Channels.Signal.Transport`'s `startProcess` / `stopProcess`),
-- surface "connected"/"disconnected" lifecycle events from the NDJSON stream into pureclaw logs,
-- decide whether the subprocess dying is fatal (Signal's model) or auto-restarted (wacli's locking makes this safe — only one process owns the store).
+## Q5. Lifecycle & reconnect — **DECIDED: inherit Signal's "let it die" model**
 
-No watchdog/backoff porting needed on the Haskell side.
+Decision (2026-05-15): pureclaw does not auto-restart wacli. Mirror `Channels.Signal.readerLoop`'s explicit comment (`src/PureClaw/Channels/Signal.hs:87` — *"Don't restart — let the channel die, agent loop will get IOError"*). The agent loop already handles `IOException` from `_ch_receive` cleanly (`src/PureClaw/Agent/Loop.hs:75`).
+
+### Failure model
+
+| Failure | Owner | Pureclaw response |
+|---|---|---|
+| WhatsApp Web socket drops (network blip, server-side disconnect) | wacli `sync --follow` | nothing — wacli reconnects internally with its own backoff |
+| App-state LTHash mismatch | wacli | log the `warning` event from `--events` stream; wacli requests recovery automatically |
+| wacli process crashes (panic, OOM, signal) | OS | reader thread sees EOF on stderr → log → channel handle's `receive` throws `IOException` → agent loop exits cleanly → user restarts pureclaw |
+| Webhook listener crashes (Warp exception) | pureclaw | propagate to channel handle so the whole channel tears down — partial state (wacli running but no inbox consumer) would be worse than a clean restart |
+| `--events` reader thread crashes | pureclaw | log; do not bring down the channel — events are auxiliary, the webhook path keeps working |
+
+### What we do build
+
+- `withWhatsAppChannel` brackets:
+  - spawn wacli `sync --follow …` (via `typed-process`, same as Signal)
+  - start Warp on `127.0.0.1:<port>` for the webhook
+  - start the `--events` reader thread
+  - return `ChannelHandle`
+  - cleanup: kill wacli, shut Warp, kill reader thread
+- One supervised-failure point: if wacli exits non-zero, log its last 50 lines of stderr (so the user can diagnose) before the channel handle throws.
+
+### What we don't build
+
+- No watchdog/backoff/auth-unstable porting from OpenClaw's `monitorWebChannel`.
+- No subprocess auto-restart loop.
+- No state-machine for "linked but disconnected" vs "linked and connected" — wacli's `connected`/`disconnected` events are surfaced to logs only.
 
 ---
 
-## Q6. Inbound semantics — access control, mentions, debouncing
-OpenClaw has substantial pre-agent filtering (DM/group policies, pairing flow, mention gating, 60s history-grace window, debouncing). Pureclaw's Signal channel has only an `AllowList UserId` check.
+## Q6. Inbound semantics — **SUBSUMED by Q2**
 
-**Decide for v1:**
-- DM allow-list parity (already trivial — copy the Signal pattern).
-- Skip pairing-flow, group-policies, mention gating until groups land (Q2).
-- Debouncing: confirm whether typing/streaming behavior in pureclaw makes debouncing necessary or whether we can defer.
-
-**Output:** a list of inbound filters v1 will and won't implement, with rationale.
+The inbound filter rules are now specified in Q2's "Inbound filtering" section: drop self-echoes (`FromMe`), drop non-DM chats (group/channel JIDs), drop senders not in `allow_from`. No debouncing in v1 (pureclaw's agent loop is synchronous — there's no streaming-into-mid-response problem to debounce). No pairing-flow (handled by `/whatsapp pair`, not inbound). No mention gating (no groups in v1).
 
 ---
 
-## Q7. Multi-account
-OpenClaw is multi-account from the ground up (account id keys the connection-controller registry). Pureclaw's Signal/Telegram channels are single-account.
+## Q7. Multi-account — **DEFERRED to v2**
 
-**Investigate:**
-- How hard is it to make the existing `withSignalChannel` shape multi-account? Look for assumptions of single inbox, single `lastSender`.
-- For v1, propose single-account with a future-friendly config schema (`[whatsapp.accounts.<id>]` even if only `default` is supported).
+Single-account in v1 (decided in Q4). Config schema in Q8 uses a flat `[whatsapp]` block — no `[whatsapp.accounts.<id>]` nesting yet. When v2 needs multi-account, the path forward is either (a) nest under `[whatsapp.accounts.<id>]` TOML tables and route by id, or (b) adopt `wacli accounts add` and let wacli's own config.yaml be the source of truth. That decision waits until there's a real second-account use case to ground it.
 
 ---
 
-## Q8. Config schema
-Mirror the existing `FileSignalConfig` / `FileTelegramConfig` pattern in `src/PureClaw/CLI/Config.hs`:
+## Q8. Config schema — **FINAL TOML**
 
 ```toml
 [whatsapp]
-account = "default"            # passed to wacli --account
-allow_from = ["+1555..."]      # pureclaw-side allowlist, mirrors Signal
-dm_policy = "allowlist"        # "allowlist" | "open" | "disabled"
-text_chunk_limit = 6000
-store_dir = "~/.pureclaw/credentials/whatsapp/default"  # → wacli --store
-wacli_path = ""                # blank = $PATH lookup; nix dev shell provides it
+# Required: the single E.164 peer this channel will DM with. v1 is single-DM
+# (Q2); the channel refuses to start if this list is empty or has != 1 entry.
+# Field name matches Signal's allow_from for parity and to keep the door open
+# for multi-peer in v2 without a rename.
+allow_from = ["+15551234567"]
+
+# Optional: where wacli's session.db + wacli.db live. Created with mode 0700
+# on first run if missing. Default: ~/.pureclaw/credentials/whatsapp/default
+# store_dir = "~/.pureclaw/credentials/whatsapp/default"
+
+# Optional: explicit wacli binary path. Default: lookup "wacli" on $PATH
+# (the nix dev shell provides it; brew install steipete/tap/wacli also works).
+# wacli_path = "wacli"
+
+# Optional: outbound message chunking, mirrors Signal. WhatsApp's hard limit
+# is ~64k chars; 6000 is a safe default that splits on paragraph boundaries.
+# text_chunk_limit = 6000
 ```
 
-**Investigate:** read `CLI/Config.hs` and `CLI/Commands.hs` resolution layer; sketch the new codec; extend the `default_channel` enum to include `"whatsapp"`.
+And the existing `default_channel` enum (`FileConfig._fc_defaultChannel`) gains `"whatsapp"`:
+
+```toml
+default_channel = "whatsapp"
+```
+
+**Haskell side** (`src/PureClaw/CLI/Config.hs`):
+
+```haskell
+data FileWhatsAppConfig = FileWhatsAppConfig
+  { _fwac_allowFrom      :: Maybe [Text]
+  , _fwac_storeDir       :: Maybe Text
+  , _fwac_wacliPath      :: Maybe Text
+  , _fwac_textChunkLimit :: Maybe Int
+  }
+```
+
+Plus the codec entry in `fileConfigCodec`:
+
+```haskell
+<*> Toml.dioptional (Toml.table fileWhatsAppConfigCodec "whatsapp") .= _fc_whatsapp
+```
+
+And the resolver in `CLI/Commands.hs` mirrors `resolveSignalConfig`:
+
+```haskell
+resolveWhatsAppConfig :: FileConfig -> WhatsAppConfig
+```
+
+returning a fully-resolved `WhatsAppConfig` with defaults applied. The CLI dispatch (`case effectiveChannel of "whatsapp" -> ...`) checks `wacli auth status --json` before spawning `sync --follow`, prints a "run /whatsapp pair" message if unauthenticated, and falls back to CLI channel — same pattern as the existing signal-cli not-installed branch.
 
 ---
 
-## Q9. Testing strategy
-- Mirror `mkMockSignalTransport` for WhatsApp — a `WhatsAppTransport` mock that feeds canned wacli `--events` NDJSON into the inbox and captures outbound `send` invocations. Inbound-parse specs and outbound-routing specs all run against the mock — no wacli subprocess.
-- Real-wacli integration tests: not feasible in CI (pairing requires a real phone scanning a QR). Document a manual smoke-test ritual against a burner WhatsApp account.
-- Coverage thresholds: review `.coverage-thresholds.json` to confirm what bar this module is held to before we estimate test scope.
+## Q9. Testing strategy — **FINAL**
+
+### Transport seam
+
+A `WhatsAppTransport` record mirrors `SignalTransport` (`src/PureClaw/Channels/Signal/Transport.hs:27`):
+
+```haskell
+data WhatsAppTransport = WhatsAppTransport
+  { _wat_inboundWebhook :: TQueue ParsedMessage   -- consumed by ChannelHandle._ch_receive
+  , _wat_inboundEvents  :: TQueue WaEvent         -- consumed by the events reader thread
+  , _wat_send           :: Text -> Text -> IO ()  -- recipient E.164 -> body -> IO ()
+  , _wat_authStatus     :: IO Bool                -- did wacli report authenticated?
+  , _wat_close          :: IO ()
+  }
+```
+
+- **Real implementation** (`mkWacliTransport`): spawns `wacli sync --follow --webhook 127.0.0.1:<port> --webhook-secret <hex> --events`, runs Warp on the local port, parses HMAC-signed `ParsedMessage` JSON into `_wat_inboundWebhook`, parses NDJSON from stderr into `_wat_inboundEvents`. `_wat_send` shells out `wacli send text --to E.164 --message …`. `_wat_authStatus` shells out `wacli auth status --json`.
+- **Mock implementation** (`mkMockWhatsAppTransport`): caller pushes pre-built `ParsedMessage` values into `_wat_inboundWebhook` and `WaEvent` values into `_wat_inboundEvents`; `_wat_send` writes to a `TQueue (Text, Text)` the test inspects. Used everywhere except a single integration smoke test.
+
+### Test surfaces (mock-backed, run in CI)
+
+1. **HMAC validation** (`Channels.WhatsApp.WebhookSpec`):
+   - Valid signature → payload accepted.
+   - Wrong/missing signature → 401, no inbox push, warning logged.
+2. **`ParsedMessage` parsing** (`Channels.WhatsApp.WebhookSpec`):
+   - Text-only DM → `IncomingMessage { _im_userId, _im_content }`.
+   - Media-only → drop (v1: log + skip).
+   - Group JID (`@g.us`) → drop.
+   - Channel JID (`@newsletter`) → drop.
+   - `FromMe = true` → drop (self-echo).
+   - Sender not in `allow_from` → drop with allow-list-block log.
+3. **Outbound routing** (`Channels.WhatsApp.WacliSpec`):
+   - `_ch_send` calls `_wat_send` with the configured E.164 and the message text.
+   - Chunking at `text_chunk_limit` splits a long message on paragraph boundaries (reuse `chunkMessage` from `Signal.Transport`).
+4. **`--events` ingestion** (`Channels.WhatsApp.EventsSpec`):
+   - `connected` / `disconnected` → log entries at info / warn.
+   - `warning` event → log error with `code` + `message` fields.
+   - `qr_code` event (when paired in `auth` mode) → captured for the QR-pair flow.
+   - Malformed JSON line → log warn, skip, continue reading.
+5. **Lifecycle** (`Channels.WhatsApp.LifecycleSpec`):
+   - `withWhatsAppChannel` cleans up Warp and the (mocked) subprocess on normal exit.
+   - `withWhatsAppChannel` cleans up on exception in the action.
+
+### Integration test (gated, manual)
+
+One `test/Integration/WhatsAppFlowSpec.hs` test that runs only when `PURECLAW_WACLI_INTEGRATION=1` is set, asserting end-to-end against a real wacli at a paired test store. Skipped in CI. Documented in the test file's docstring as the manual smoke-test recipe:
+
+1. `mkdir -p ~/.pureclaw/credentials/whatsapp/test`
+2. `nix develop . --command wacli --store ~/.pureclaw/credentials/whatsapp/test auth` — scan QR with burner phone
+3. `PURECLAW_WACLI_INTEGRATION=1 nix develop . --command cabal test pureclaw-test --test-options="--match=WhatsApp"`
+4. From the burner phone, message the linked account; verify the test sees an `IncomingMessage` and `wacli send` produces an outbound message visible in the chat.
+
+### Coverage gate
+
+`.coverage-thresholds.json` requires **100% lines / branches / functions / statements** with `cabal test --enable-coverage`. Mock-backed specs above plus the existing test patterns in `test/Channels/SignalSpec.hs` and `test/Channels/SignalTransportSpec.hs` should be sufficient — the real `mkWacliTransport` is the only piece that resists unit coverage (live process + sockets), so it needs structuring such that all branching logic lives in pure-ish helpers tested separately (HMAC verify, NDJSON parse, chunking, JID classification), leaving `mkWacliTransport` itself as thin wiring.
 
 ---
 
-## Suggested research order
-1. **Q1** — DONE. wacli sidecar, Nix recipe landed.
-2. **Q3** — DONE. Webhook for messages, `--events` for lifecycle, embedded local Warp listener.
-3. **Q2** — DONE. Single-DM v1, no `ChannelHandle` extensions.
-4. **Q4** — DONE. `--store ~/.pureclaw/credentials/whatsapp/default`, vault wrapping deferred.
-5. **Q5–Q9** — quick refinements; mostly already settled by Q1–Q4.
+## Research phase — **COMPLETE**
 
-## Exit criteria for the research phase
-- A design doc that:
-  - ~~names the chosen runtime (Q1)~~ — DONE.
-  - ~~lists v1 features in scope with explicit "deferred to v2" items (Q2, Q6)~~ — DONE (Q2).
-  - ~~documents the wacli IPC choice and event-kind ingestion table (Q3)~~ — DONE.
-  - ~~documents the `--store` layout and QR-pairing UX (Q4)~~ — DONE.
-  - states subprocess supervision policy (Q5),
-  - shows the TOML config schema (Q8),
-  - shows the mock transport plan (Q9).
-- Ready to invoke `/review-design` per the project's design-review-gate.
+All nine questions resolved. The full picture:
+
+| Q | Topic | Outcome |
+|---|---|---|
+| Q1 | Protocol / runtime | wacli sidecar; Nix recipe landed in `nix/wacli.nix` |
+| Q2 | `ChannelHandle` fit, v1 scope | Single-DM, text-only; no channel-type extensions |
+| Q3 | IPC contract | Webhook (loopback Warp + HMAC) for messages; `--events` NDJSON for lifecycle |
+| Q4 | Auth & credentials | wacli owns its store at `~/.pureclaw/credentials/whatsapp/default` (0700); vault wrapping deferred |
+| Q5 | Lifecycle & reconnect | wacli owns reconnect; pureclaw inherits Signal's "let it die" model |
+| Q6 | Inbound filters | Subsumed by Q2 |
+| Q7 | Multi-account | Deferred to v2 |
+| Q8 | Config schema | Flat `[whatsapp]` TOML block; codec mirrors `FileSignalConfig` |
+| Q9 | Testing | `WhatsAppTransport` mock, five spec files, gated integration test, 100% coverage gate |
+
+### Ready for `/review-design`
+
+The plan is now executable as a design document for the metaswarm design-review gate (5-agent parallel review: PM, Architect, Designer, Security, CTO). Once that passes, the next step is `superpowers:writing-plans` for the work-unit decomposition.
