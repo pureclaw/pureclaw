@@ -59,6 +59,7 @@ import PureClaw.Handles.Backend
   , globalBackendBufferQuota
   , localIdle
   , releaseBufferQuota
+  , withConcurrentUseGuard
   )
 import PureClaw.Security.Command
   ( AuthorizedCommand
@@ -190,7 +191,7 @@ mkLocalBackendHandle cmd opts = do
                         releaseQuotaOnce
                         pure ()
 
-              pure $ Right BackendHandle
+              guarded <- withConcurrentUseGuard BackendHandle
                 { _bh_name        = "local-pipe"
                 , _bh_kind        = Pipe
                 , _bh_defaultIdle = localIdle
@@ -199,6 +200,7 @@ mkLocalBackendHandle cmd opts = do
                 , _bh_resize      = doResize
                 , _bh_close       = doClose
                 }
+              pure (Right guarded)
 
 -- | Drain a 'Handle' (stdout or stderr pipe) into the shared
 -- accumulator, latching @truncRef@ if the per-backend cap is exceeded.
@@ -255,7 +257,10 @@ mkLocalPtyBackendHandle pio cmd opts = do
         , _pos_cols    = _pto_cols opts
         , _pos_rows    = _pto_rows opts
         }
-  mkDrainerBackendHandle pio opts spec Pty
+  r <- mkDrainerBackendHandle pio opts spec Pty
+  case r of
+    Left  e  -> pure (Left e)
+    Right bh -> Right <$> withConcurrentUseGuard bh
 
 --------------------------------------------------------------------------------
 -- Env helpers

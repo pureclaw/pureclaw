@@ -723,7 +723,7 @@ spawnSshArgv sshCmd argv opts = do
                         releaseQuotaOnce
                         pure ()
 
-              pure $ Right BackendHandle
+              guarded <- withConcurrentUseGuard BackendHandle
                 { _bh_name        = "ssh-pipe"
                 , _bh_kind        = Pipe
                 , _bh_defaultIdle = _spo_idle opts
@@ -732,6 +732,7 @@ spawnSshArgv sshCmd argv opts = do
                 , _bh_resize      = doResize
                 , _bh_close       = doClose
                 }
+              pure (Right guarded)
   where
     resultFromAcc accRef truncRef = do
       bs  <- readIORef accRef

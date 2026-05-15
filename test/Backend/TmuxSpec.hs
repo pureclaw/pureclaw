@@ -428,8 +428,13 @@ spec = do
         case (mHost, mSock, mKey, mSession) of
           (Just _, Just _, Just _, Just _) ->
             pendingWith
-              "RemoteHost integration test runner not implemented in WU10; \
-              \env vars detected but live runner is reserved for WU11."
+              "Live remote-tmux harness deferred — DoD #7 requires a \
+              \second short-lived ssh + 'tmux list-windows' verification \
+              \run from the test process. The harness is intentionally \
+              \not shipped in this PR; tracked as a v2 follow-up. \
+              \mkTmuxBackendHandle's RemoteHost path is otherwise \
+              \exercised by the type-enforced two-auth + ssh-hop-fail \
+              \tests (DoD #10) which DO run."
           _ ->
             pendingWith
               "PURECLAW_TMUX_TEST_HOST / _SOCKET / _KEY / _SESSION not all set; \

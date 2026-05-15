@@ -779,7 +779,7 @@ example_pipe policy = do
 example_pty :: SecurityPolicy -> PtyIO -> IO ()
 example_pty policy pty = do
   cmd <- either (error "policy: bash not allowed") pure (authorize policy "bash" ["-i"])
-  res <- withBackendHandleE (mkLocalPtyBackendHandle cmd (defaultPtyOpts pty)) $ \b -> do
+  res <- withBackendHandleE (mkLocalPtyBackendHandle pty cmd defaultPtyOpts) $ \b -> do
     _  <- _bh_recv b Nothing                        -- consume initial prompt
     r1 <- runBackend b "cd /tmp\n"
     r2 <- runBackend b "pwd\n"
@@ -789,11 +789,14 @@ example_pty policy pty = do
 
 **SSH Pty (direct, no tmux):**
 ```haskell
-example_ssh_pty :: SecurityPolicy -> PtyIO -> SafeKeyPath -> SshTarget -> IO ()
-example_ssh_pty policy pty ident tgt = do
+example_ssh_pty :: SecurityPolicy -> PtyIO -> SshTarget -> IO ()
+example_ssh_pty policy pty tgt = do
+  -- 'tgt' carries the SafeKeyPath in its _st_identity field; the
+  -- identity is per-destination, not per-call, so it lives on the
+  -- target rather than on the opts.
   sshCmd  <- either (error "policy: ssh")  pure (authorize       policy "ssh"  [])
   bashCmd <- either (error "policy: bash") pure (authorizeRemote policy "bash" ["-i"])
-  res <- withBackendHandleE (mkSshBackendHandle sshCmd tgt bashCmd (defaultSshOpts pty ident)) $ \b -> do
+  res <- withBackendHandleE (mkSshBackendHandle pty sshCmd tgt bashCmd defaultSshOpts) $ \b -> do
     _  <- _bh_recv b Nothing                        -- consume initial prompt
     r1 <- runBackend b "uname -a\n"
     r2 <- runBackend b "exit\n"
@@ -803,11 +806,11 @@ example_ssh_pty policy pty ident tgt = do
 
 **SSH Pipe one-shot:**
 ```haskell
-example_ssh_pipe :: SecurityPolicy -> SafeKeyPath -> SshTarget -> IO ()
-example_ssh_pipe policy ident tgt = do
+example_ssh_pipe :: SecurityPolicy -> SshTarget -> IO ()
+example_ssh_pipe policy tgt = do
   sshCmd      <- either (error "policy: ssh")      pure (authorize       policy "ssh" [])
   hostnameCmd <- either (error "policy: hostname") pure (authorizeRemote policy "hostname" [])
-  res <- mkSshPipeBackendHandle sshCmd tgt hostnameCmd (defaultSshPipeOpts ident)
+  res <- mkSshPipeBackendHandle sshCmd tgt hostnameCmd (defaultSshPipeOpts localIdle)
   case res of
     Left  e -> print (toPublicError e)
     Right b -> do
@@ -835,15 +838,15 @@ example_recover b input = do
 
 **Tmux-over-SSH attach:**
 ```haskell
-example_tmux_remote :: SecurityPolicy -> PtyIO -> SafeKeyPath -> IO ()
-example_tmux_remote policy pty ident = do
+example_tmux_remote :: SecurityPolicy -> PtyIO -> SshTarget -> IO ()
+example_tmux_remote policy pty sshTarget = do
   sshCmd   <- either (error "policy: ssh")  pure (authorize       policy "ssh"  [])
   tmuxCmd  <- either (error "policy: tmux") pure (authorizeRemote policy "tmux" [])
   session  <- either (error "tmux session") pure (mkTmuxSession   "work")
   window   <- either (error "tmux window")  pure (mkTmuxWindow    "0")
   let tgt    = TmuxTarget session window Nothing
       sshLoc = RemoteHost sshTarget sshCmd tmuxCmd
-  res <- withBackendHandleE (mkTmuxBackendHandle sshLoc tgt (defaultTmuxOpts pty)) $ \b -> do
+  res <- withBackendHandleE (mkTmuxBackendHandle pty sshLoc tgt defaultTmuxOpts) $ \b -> do
     runBackend b "ls\n"
   print res
 ```
@@ -881,11 +884,12 @@ example_recvWith b = do
 
 **ControlMaster lifecycle:**
 ```haskell
-example_multiplex :: SecurityPolicy -> SafeKeyPath -> ControlOpts -> IO ()
-example_multiplex policy ident copts = do
+example_multiplex :: SecurityPolicy -> ControlOpts -> IO ()
+example_multiplex policy copts = do
   sshCmd <- either (error "policy") pure (authorize policy "ssh" [])
-  let sshOpts = (defaultSshOpts realPtyIO ident) { _so_control = Just copts }
-  -- ... use mkSshBackendHandle multiple times sharing copts._co_controlPath ...
+  let sshOpts = defaultSshOpts { _so_control = Just copts }
+  -- ... use mkSshBackendHandle multiple times sharing copts._co_controlPath
+  --     each call passes its own PtyIO and SshTarget; sshOpts is reused.
   closeSshMultiplex sshCmd copts
 ```
 
@@ -894,6 +898,45 @@ example_multiplex policy ident copts = do
 report :: BackendError -> Text
 report e = case toPublicError e of PublicBackendError msg -> msg
 ```
+
+## v1 surface notes (shipped vs original draft)
+
+A few shapes in the shipped v1 surface diverge from earlier drafts of
+this document. The changes were made during implementation review and
+are intentional; they are noted here so an integrator reading older
+revisions of the doc isn't surprised:
+
+- **Identity lives on `SshTarget`, not on `SshOpts`.** The `SafeKeyPath`
+  is per-destination (different hosts need different keys), not
+  per-call. `SshTarget` carries `_st_identity :: SafeKeyPath`; the
+  `SshOpts`/`SshPipeOpts` records no longer have an identity field.
+- **`defaultPtyOpts`, `defaultSshOpts`, `defaultTmuxOpts` are
+  nullary.** `PtyIO` is a separate factory parameter (e.g.
+  `mkLocalPtyBackendHandle pio cmd opts`), not bundled into the
+  defaults. This keeps the option records pure and lets tests inject
+  a fake `PtyIO` without touching the option record's shape.
+- **`defaultSshPipeOpts :: IdleSpec -> SshPipeOpts`.** Pipe-kind ssh
+  is one-shot; the only knob a caller usually wants is the idle
+  timeout, so the default is parameterised on the `IdleSpec`.
+- **New optional fields:** `SshOpts._so_knownHostsFile`,
+  `SshPipeOpts._spo_knownHostsFile`, `TmuxOpts._to_brokenTargetCheck`.
+  All three default to a safe "no extra behaviour" value
+  (`Nothing` / `False`); they only need to be set explicitly for
+  pinned-known-hosts validation or mid-session destruction probing
+  (DoD #21).
+- **`TmuxIO` is a test-injection seam.** `realTmuxIO` shells out to
+  `tmux display-message -p`. `mkTmuxBackendHandle` constructs
+  `realTmuxIO` internally; `mkTmuxBackendHandleWith` accepts a
+  caller-supplied `TmuxIO` so tests can drive the pin-resolve step
+  with `fakePtyIO`/scripted resolvers without spawning a real tmux.
+- **`buildSshArgvFromParts`** is an internal helper that lets the
+  tmux backend compose the ssh argv for `display-message` and
+  `attach-session` separately while reusing the WU9 hardened-flag
+  set verbatim. Callers should keep using `buildSshArgv` for normal
+  ssh paths.
+- **`withConcurrentUseGuard`** is applied to every successful return
+  from every backend factory (Pipe + Pty). The doc's concurrency
+  contract is enforced for all kinds, not just Pty.
 
 ## Taxonomy
 

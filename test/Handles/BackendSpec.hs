@@ -136,8 +136,12 @@ spec = do
         rendered `shouldContain` "<host>"
 
     -- docs/terminal-backend-abstractions.md line 73: haddock decision tree
-    it "DoD #20: module-level haddock documents Pipe/Pty/decision tree (doctest)" $
-      pendingWith "WU1: haddock decision tree in PureClaw.Handles.Backend; doctest asserts presence."
+    it "DoD #20: module-level haddock documents Pipe/Pty/decision tree" $ do
+      src <- readFile "src/PureClaw/Handles/Backend.hs"
+      src `shouldContain` "Choose-a-kind decision tree"
+      src `shouldContain` "'Pipe' \8212 one-shot"
+      src `shouldContain` "'Pty' \8212 conversational"
+      src `shouldContain` "TmuxRpc"
 
     -- docs/terminal-backend-abstractions.md line 70: process-wide buffer quota
     --
