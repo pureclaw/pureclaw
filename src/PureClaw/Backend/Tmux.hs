@@ -249,6 +249,11 @@ data TmuxTarget = TmuxTarget
 -- destruction probe; default 'False'. When 'True', every @RecvSettled@
 -- triggers a fresh pin-resolve probe and a different @@\<id\>@ surfaces
 -- as 'BackendException' carrying a 'BackendBrokenTmuxTarget' payload.
+--
+-- (This field is a v1 superset over the active plan's WU10 spec —
+-- needed to gate the cost of the extra @display-message@ probe per
+-- recv. Production callers leave it 'False'; the WU10 DoD #21 test
+-- enables it explicitly.)
 data TmuxOpts = TmuxOpts
   { _to_pty                :: !PtyOpts
   , _to_socketPath         :: !(Maybe SafeRuntimePath)
@@ -282,6 +287,19 @@ defaultTmuxOpts = TmuxOpts
 data SshLocation
   = LocalHost !AuthorizedCommand
   | RemoteHost !SshTarget !AuthorizedCommand !RemoteCommand
+
+-- | The SINGLE permitted close action for a tmux Attach-mode backend
+-- handle.
+--
+-- The constructor is intentionally NOT exported — there is no way (and
+-- no API) to ask the handle to @kill-window@, @kill-session@, or
+-- @kill-pane@. The close path consumes a 'TmuxCloseAction' value and
+-- 'TmuxDetach' is the only inhabitant, so the only thing the close
+-- path can do is write the detach key sequence into the existing PTY.
+--
+-- See @docs\/terminal-backend-abstractions.md@ § "Tmux Attach mode"
+-- and the active plan § WU10.
+data TmuxCloseAction = TmuxDetach
 
 --------------------------------------------------------------------------------
 -- TmuxIO injection seam
@@ -593,20 +611,28 @@ wrapTmuxHandle tio loc tgt opts pinnedAtCtor bh = do
           then throwBroken
           else _bh_send bh bs
 
+      performClose :: TmuxCloseAction -> IO ()
+      performClose TmuxDetach = do
+        -- Ctrl-B (0x02) + 'd' (0x64). Tmux's default prefix +
+        -- detach-client binding. Write failures are non-fatal:
+        -- the transport may already be dead. We swallow the
+        -- exception to honour the "_bh_close never throws"
+        -- contract.
+        _ <- try @SomeException (_bh_send bh (BS.pack [0x02, 0x64]))
+        -- Defensive: the inner close is documented total today, but
+        -- the contract on this wrapper is "MUST NOT throw". Swallow
+        -- any exception escaping the inner close so a future
+        -- regression cannot silently break the wrapper contract.
+        _ <- try @SomeException (_bh_close bh)
+        pure ()
+
       detachClose = modifyMVar_ closeLock $ \() -> do
         wasClosed <- readIORef closedRef
         if wasClosed
           then pure ()
           else do
             writeIORef closedRef True
-            -- Ctrl-B (0x02) + 'd' (0x64). Tmux's default prefix +
-            -- detach-client binding. Write failures are non-fatal:
-            -- the transport may already be dead. We swallow the
-            -- exception to honour the "_bh_close never throws"
-            -- contract.
-            _ <- try @SomeException (_bh_send bh (BS.pack [0x02, 0x64]))
-            _bh_close bh
-            pure ()
+            performClose TmuxDetach
 
       throwBroken :: IO a
       throwBroken = throwIO $ BackendException
