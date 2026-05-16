@@ -113,7 +113,7 @@ module PureClaw.Handles.Backend
   , setGlobalBackendBufferQuotaForTest
   , defaultAggregateBufferCapMiB
     -- * Re-exports
-  , CommandName
+  , CommandName (..)
   , FakeClock
   ) where
 
@@ -147,7 +147,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
 
 import {-# SOURCE #-} PureClaw.Internal.Redact qualified as Redact
-import PureClaw.Core.Types (CommandName)
+import PureClaw.Core.Types (CommandName (..))
 import PureClaw.Internal.FakeClock (FakeClock)
 
 -- | The mechanism a 'BackendHandle' uses to talk to its subprocess.

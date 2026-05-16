@@ -12,8 +12,12 @@
 -- this file owns the integration-level acceptance.
 module Backend.LocalSpec (spec) where
 
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (finally)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
+import System.Timeout (timeout)
 import Test.Hspec
 
 import PureClaw.Backend.Local
@@ -103,3 +107,44 @@ spec = do
                 else expectationFailure $
                   "expected 'pwd' output to contain /tmp; got: "
                     <> show outBytes
+
+    -- Regression: '_bh_close' must complete promptly even when the
+    -- child subprocess is still alive. The documented contract is
+    -- "idempotent and never throws" — never-hangs is implied.
+    --
+    -- The bug we're guarding against: 'realClose' in Backend.Pty does
+    --   closePty → terminateProcess (SIGTERM) → waitForProcess
+    -- but 'bash -i' ignores SIGTERM per bash(1), so waitForProcess
+    -- blocks indefinitely on a live interactive bash.
+    --
+    -- Implementation note: we cannot just wrap '_bh_close' in
+    -- 'timeout' inside the test thread — if close hangs, the thread
+    -- is stuck in a non-interruptible foreign call, and 'timeout'
+    -- can't cancel that. Instead we fork the close into a separate
+    -- thread and wait on an MVar; on timeout we leak the close
+    -- thread + the child, but the suite makes progress.
+    it "Regression: _bh_close returns within 5s even when child is alive" $ do
+      let policy = withAutonomy Core.Full
+                 . allowCommand (CommandName "bash")
+                 $ defaultPolicy
+      case authorize policy "bash" ["--noprofile", "--norc", "-i"] of
+        Left err -> expectationFailure $
+          "bash authorization failed: " <> show err
+        Right cmd -> do
+          eh <- mkLocalPtyBackendHandle realPtyIO cmd defaultPtyOpts
+          case eh of
+            Left err -> expectationFailure $
+              "construction failed: " <> show err
+            Right h -> do
+              -- Drain the initial prompt so we know the subprocess
+              -- is fully alive when close runs.
+              _ <- _bh_recv h Nothing
+              done <- newEmptyMVar
+              _ <- forkIO (_bh_close h `finally` putMVar done ())
+              mr <- timeout 5_000_000 (takeMVar done)
+              case mr of
+                Just () -> pure ()
+                Nothing -> expectationFailure
+                  "_bh_close did not return within 5s — the close \
+                  \path hangs while the child subprocess is alive \
+                  \(see bash(1): interactive shells ignore SIGTERM)."

@@ -79,6 +79,7 @@ import Control.Concurrent.STM.TVar
   , writeTVar
   )
 import Control.Exception (SomeException, mask, try)
+import Control.Monad qualified
 import Control.Monad (unless, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -87,7 +88,9 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import System.Posix.Signals qualified as Posix.Sig
 import System.Process qualified as Proc
+import System.Timeout (timeout)
 
 import System.Posix.Pty qualified as Posix.Pty
 
@@ -248,11 +251,39 @@ realPtyIO = PtyIO
     realClose :: PtyFds -> IO ()
     realClose fds = case fds of
       RealPtyFds pty mPh -> do
-        _ <- try @SomeException (Posix.Pty.closePty pty)
+        -- 1. SIGKILL the child FIRST when we have its PID.
+        --
+        -- SIGTERM (what 'Proc.terminateProcess' sends on POSIX) is
+        -- ignored by interactive shells — see bash(1): "In the
+        -- absence of any traps, an interactive shell ignores
+        -- SIGTERM". A 'bash -i' child therefore survives the polite
+        -- termination signal and 'Proc.waitForProcess' blocks
+        -- forever. SIGKILL cannot be caught or ignored, so it is
+        -- the only signal that reliably unblocks the close path.
+        --
+        -- We do this BEFORE closing the PTY master so the drainer's
+        -- blocking read (a non-interruptible C call inside
+        -- @posix-pty@) terminates deterministically — once the child
+        -- is gone, the slave fd is closed and the master read returns
+        -- EOF, which lets the drainer Async exit its loop.
         case mPh of
           Just ph -> do
-            _ <- try @SomeException (Proc.terminateProcess ph)
-            _ <- try @SomeException (Proc.waitForProcess ph)
+            mPid <- Proc.getPid ph
+            case mPid of
+              Just pid ->
+                Control.Monad.void $ try @SomeException
+                  (Posix.Sig.signalProcess Posix.Sig.sigKILL pid)
+              Nothing  -> pure ()
+          Nothing -> pure ()
+        -- 2. Close PTY master. Also a hangup signal for any child
+        -- that we somehow couldn't address by PID.
+        _ <- try @SomeException (Posix.Pty.closePty pty)
+        -- 3. Collect the zombie. SIGKILL above means this should
+        -- return immediately; bound it to 2s to defend against any
+        -- pathological case where the child survived.
+        case mPh of
+          Just ph -> do
+            _ <- timeout 2_000_000 (try @SomeException (Proc.waitForProcess ph))
             pure ()
           Nothing -> pure ()
       FakePtyFds _ -> pure ()
@@ -530,9 +561,23 @@ mkDrainerBackendHandle pio opts spec kind = do
           doResize = _pio_resize pio fds
 
           doClose = modifyMVar_ closeLock $ \() -> do
+            -- Close FIRST. The drainer is almost always parked in a
+            -- blocking read inside @posix-pty@ — a non-interruptible
+            -- C call. 'Async.cancel' queues an async exception, but
+            -- the FFI call does not return until bytes arrive OR the
+            -- child dies OR the fd is closed. So cancelling before
+            -- '_pio_close' makes the subsequent 'Async.waitCatch'
+            -- block forever.
+            --
+            -- '_pio_close' (for 'realPtyIO') sends SIGKILL to the
+            -- child and closes the master fd, which together force
+            -- the blocking read to return EOF promptly. The drainer
+            -- loop then sees an empty 'ByteString', pushes 'RsEof',
+            -- and exits naturally — and now 'cancel'/'waitCatch'
+            -- below are fast no-ops.
+            _ <- try @SomeException (_pio_close pio fds)
             Async.cancel drainerAsync
             _ <- Async.waitCatch drainerAsync
-            _pio_close pio fds
             releaseQuotaOnce
             pure ()
 
