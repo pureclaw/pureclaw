@@ -462,14 +462,20 @@ spec = do
 
   describe "dispatchOne — single-step routing" $ do
 
-    it "Default with no focus emits the 'no tab focused' dispatcher banner" $ do
+    it ("Default with no focus auto-spawns _rc_defaultKind at the "
+        <> "lowest free index and forwards the text (L6 + K3)") $ do
       fch <- newFakeChannel
       env <- mkDispatcherEnv (fakeChannelHandle fch)
       st  <- mkSyntheticTab (ti 0) KindAi (Idle t0)
       ds  <- newDispatcherState env (syntheticFactory st)
       dispatchOne env ds (UserId "u") "hi there"
-      drained <- drainQueue (_env_channelOutQ env)
-      drained `shouldSatisfy` any isNoFocusBanner
+      -- Tab 0 must be in the registry and the text was forwarded.
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 1
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Just (ti 0)
+      sent <- readIORef (_st_sentRf st)
+      sent `shouldBe` ["hi there"]
 
     it "Default routes to the focused tab" $ do
       fch <- newFakeChannel
@@ -893,15 +899,24 @@ spec = do
       let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
       banners `shouldSatisfy` not . any ("crashed" `T.isInfixOf`)
 
-    it "Switch on a missing tab does not crash and still sets focus" $ do
+    it ("Switch on a missing tab routes through AutoSpawn.handleSwitch "
+        <> "— A3 behavior: silently spawns the default kind at the "
+        <> "lowest free index and focuses it") $ do
       fch <- newFakeChannel
       env <- mkDispatcherEnv (fakeChannelHandle fch)
       st  <- mkSyntheticTab (ti 0) KindAi (Idle t0)
       ds  <- newDispatcherState env (syntheticFactory st)
-      -- /7 — tab 7 is not in the registry; focus still gets set.
+      -- /7 — tab 7 is not in the registry. With WU9 wiring, the
+      -- dispatcher routes through AutoSpawn.handleSwitch which spawns
+      -- _rc_defaultKind at the lowest free index (0 here) and focuses
+      -- the freshly-spawned tab — NOT at the literal requested index 7
+      -- (that's a v1.5+ refinement; the v1 behavior matches the WU5
+      -- factory's "lowest free index" contract).
       dispatchOne env ds (UserId "u") "/7"
       f <- readIORef (_env_focus env)
-      f `shouldBe` Just (ti 7)
+      f `shouldBe` Just (ti 0)
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 1
 
     it "runDispatcher calls runDispatcherWith with defaultTabFactory" $ do
       fch <- newFakeChannel
@@ -948,7 +963,4 @@ drainQueue q = go []
         Nothing -> pure (reverse acc)
         Just v  -> go (v : acc)
 
-isNoFocusBanner :: (OutputSource, ChannelEvent) -> Bool
-isNoFocusBanner (SrcDispatcher, BannerLine t) = "no tab focused" `T.isInfixOf` t
-isNoFocusBanner _ = False
 

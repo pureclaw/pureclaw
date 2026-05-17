@@ -71,6 +71,9 @@ library
     PureClaw.Routing.Config
     PureClaw.Routing.ChannelOut
     PureClaw.Routing.Dispatcher
+    PureClaw.Routing.AutoSpawn
+    PureClaw.Routing.Dashboard
+    PureClaw.Routing.PromptRenderer
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
     PureClaw.Tab.Ai
     PureClaw.Tab.Harness

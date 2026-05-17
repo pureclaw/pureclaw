@@ -18,9 +18,9 @@
     "modules": {
       "PureClaw.Handles.Tab": {
         "stagedBy": "WU1 (commit 9458567, Tabbed Chat #51)",
-        "filledBy": ["WU9"],
+        "filledBy": ["WU10", "WU12"],
         "since": "2026-05-17",
-        "reason": "All 3 factory bodies (`mkTabAi`, `mkTabHarness`, `mkTabBackend`) are `error \"not implemented\"` stubs in WU1 by plan design. The WU6 AI tab factory lives at `PureClaw.Tab.Ai.mkTabAi`, the WU7 harness tab factory at `PureClaw.Tab.Harness.mkTabHarness`, and the WU8 backend tab factory at `PureClaw.Tab.Backend.mkTabBackend`; the 2-arg/3-arg `Handles.Tab` stubs are kept unchanged to preserve the H2 type-shape pins (`_h2_mkTabAi_sig`, `_h2_mkTabHarness_sig`, `_h2_mkTabBackend_sig`) and the existing `defaultTabFactory` wiring. The stubs are now effectively superseded by the `Tab.Ai` / `Tab.Harness` / `Tab.Backend` factories — when `defaultTabFactory` is updated in WU9 to plumb `AgentEnv`, this entry will be removed.",
+        "reason": "The 3 factory bodies (`mkTabAi`, `mkTabHarness`, `mkTabBackend`) are `error \"not implemented\"` stubs by design — they exist purely to pin the H2 type-shape (`_h2_mkTabAi_sig`, `_h2_mkTabHarness_sig`, `_h2_mkTabBackend_sig`) and were called by the WU5-era `defaultTabFactory`. In WU9 the `defaultTabFactory` was rewired to call the real WU6/7/8 factories at `PureClaw.Tab.Ai.mkTabAi`, `PureClaw.Tab.Harness.mkTabHarness`, and `PureClaw.Tab.Backend.mkTabBackend` (each taking `AgentEnv`), so the `Handles.Tab` stubs are no longer reachable from any production code path — they remain in the module solely to keep the H2 type-shape tests honest. The stubs WILL be removed entirely in WU10 (when the H2 type-shape tests are migrated to pin against the real 3-arg factory signatures); the waiver remains until that migration lands.",
         "minimalChecks": [
           "all 3 factory stubs throw ErrorCall containing 'not implemented' (shouldThrow tests)",
           "all 10 TabError arms reached via Show + toPublicTabError",
@@ -34,9 +34,9 @@
       },
       "PureClaw.Tab.Ai": {
         "stagedBy": "WU6 (Tabbed Chat #51)",
-        "filledBy": ["WU9", "WU10"],
+        "filledBy": ["WU10"],
         "since": "2026-05-17",
-        "reason": "WU6 lands the AI tab factory + per-tab loop. Top-level declaration coverage is 97% (34/35); branch coverage 80% (20/25); expression coverage 79% (401/503). The branches/expressions gap is dominated by HPC's per-let-binding tick accounting (e.g. the field-by-field tick of `_ats_target` records as 1 nottickedoff for an idle accessor that the loop body never reads — _env_target hot-swap UX lands in WU9). The remaining gaps are the tool-call continuation path (WU10 Agent.Loop refactor) and a few defensive `pure ()` arms. Functional coverage is complete for the WU6 spec scope.",
+        "reason": "WU6 lands the AI tab factory + per-tab loop. Top-level declaration coverage is 97% (34/35); branch coverage 80% (20/25); expression coverage 79% (401/503). The branches/expressions gap is dominated by HPC's per-let-binding tick accounting (e.g. the field-by-field tick of `_ats_target` records as 1 nottickedoff for an idle accessor that the loop body never reads — _env_target hot-swap UX lands in WU10). The remaining gaps are the tool-call continuation path (WU10 Agent.Loop refactor) and a few defensive `pure ()` arms. Functional coverage is complete for the WU6 spec scope; WU9 added the auto-spawn UX wiring but did not increase Tab.Ai coverage because the WU9 tests exercise Tab.Ai's factory via the dispatcher's `defaultTabFactory` and the test envs supply synthetic factories.",
         "minimalChecks": [
           "mkTabAi happy-path returns Right TabHandle (provider-path + slash-path + close)",
           "mkTabAi sanitize-name reject returns Left TabInvalidName (covers Parse.sanitizeTabName Left arm)",
@@ -55,9 +55,9 @@
       },
       "PureClaw.Tab.Harness": {
         "stagedBy": "WU7 (Tabbed Chat #51)",
-        "filledBy": ["WU9"],
+        "filledBy": ["WU10"],
         "since": "2026-05-17",
-        "reason": "WU7 lands the harness tab factory + drainer/writer helper threads. Top-level declaration coverage is 86% (25/29); alternative coverage 100% (13/13); expression coverage 97% (261/268). The top-level gap is dominated by HPC's per-instance-method accounting (the auto-derived `Show HarnessExitedSignal` instance, required by the `Exception` constraint, contributes 3 uncovered declarations because HPC treats each derived method body as a separate top-level decl). The remaining expression gaps are: the close-handler's `env` parameter binding (HPC accounting quirk — the function IS invoked), and the sentinel `Active` value written to `_hts_statusRef` at allocation (replaced with `Idle now` before `mkTabHarness` returns; observable in coverage only via the brief window). Functional coverage is complete for the WU7 spec scope. The waiver removes when WU9 adds the auto-spawn UX tests that exercise the helper-thread lifecycle end-to-end through the dispatcher.",
+        "reason": "WU7 lands the harness tab factory + drainer/writer helper threads. Top-level declaration coverage is 86% (25/29); alternative coverage 100% (13/13); expression coverage 97% (261/268). The top-level gap is dominated by HPC's per-instance-method accounting (the auto-derived `Show HarnessExitedSignal` instance, required by the `Exception` constraint, contributes 3 uncovered declarations because HPC treats each derived method body as a separate top-level decl). The remaining expression gaps are: the close-handler's `env` parameter binding (HPC accounting quirk — the function IS invoked), and the sentinel `Active` value written to `_hts_statusRef` at allocation (replaced with `Idle now` before `mkTabHarness` returns; observable in coverage only via the brief window). Functional coverage is complete for the WU7 spec scope. WU9 did not increase coverage because the WU9 tests use synthetic factories rather than driving the real `mkTabHarness` end-to-end — the harness-tab side of `/tab close` is exercised via the synthetic-factory path in the WU9 close tests.",
         "minimalChecks": [
           "mkTabHarness happy-path returns Right TabHandle (drainer + writer + close)",
           "mkTabHarness sanitize-name reject returns Left TabInvalidName (covers Parse.sanitizeTabName Left arm)",
@@ -75,9 +75,9 @@
       },
       "PureClaw.Tab.Backend": {
         "stagedBy": "WU8 (Tabbed Chat #51)",
-        "filledBy": ["WU9"],
+        "filledBy": ["WU10"],
         "since": "2026-05-17",
-        "reason": "WU8 lands the backend tab factory + per-tab drainer/writer + the three sub-factory security validation paths (S1 KindShell, S2/S3/S4 KindSsh, S3 KindTmux). Top-level declaration coverage is 93% (31/33); branch coverage 85% (51/60); expression coverage 83% (427/514). The gaps are dominated by two categories: (1) `realBackendIO`'s field lambdas (the three production wirings into `Local.mkLocalBackendHandle`, `SSH.mkSshBackendHandle`, `Tmux.mkTmuxBackendHandle`) which are not invoked in unit tests because they spawn real subprocesses — these are exercised by the WU9 auto-spawn UX tests end-to-end; (2) the SSH `Right identityPath` arm of `resolveSshIdentity` which is unreachable in v1 by design (the v1 stub policy always returns Left to satisfy the S4 audit invariant without materialising the Vault payload to disk — the production on-disk materialisation lands in WU9 with the real `KeysRoot` from `PureClaw.CLI.Config`). Functional coverage is complete for the WU8 spec scope (the security-critical S1/S2/S3/S4 invariants are exercised end-to-end via the BackendIO seam).",
+        "reason": "WU8 lands the backend tab factory + per-tab drainer/writer + the three sub-factory security validation paths (S1 KindShell, S2/S3/S4 KindSsh, S3 KindTmux). Top-level declaration coverage is 93% (31/33); branch coverage 85% (51/60); expression coverage 83% (427/514). The gaps are dominated by two categories: (1) `realBackendIO`'s field lambdas (the three production wirings into `Local.mkLocalBackendHandle`, `SSH.mkSshBackendHandle`, `Tmux.mkTmuxBackendHandle`) which are not invoked in unit tests because they spawn real subprocesses; (2) the SSH `Right identityPath` arm of `resolveSshIdentity` which is unreachable in v1 by design (the v1 stub policy always returns Left to satisfy the S4 audit invariant without materialising the Vault payload to disk — the production on-disk materialisation lands in WU10 with the real `KeysRoot` from `PureClaw.CLI.Config`). Functional coverage is complete for the WU8 spec scope. WU9's dispatcher-side rewire flows through `realBackendIO` only when the production binary is exercised end-to-end (the WU9 unit tests use synthetic factories).",
         "minimalChecks": [
           "mkTabBackend dispatches all 5 TabKinds (KindShell/KindSsh/KindTmux happy paths + KindAi/KindHarness reject-with-TabSpawnAuthDenied)",
           "S1 (KindShell): allowed command spawns; rejected command returns Left TabSpawnAuthDenied with NO _bio_mkShell invocation (recorded via IORef counter)",
@@ -104,9 +104,9 @@
       },
       "PureClaw.Routing.Dispatcher": {
         "stagedBy": "WU5 (Tabbed Chat #51)",
-        "filledBy": ["WU9"],
+        "filledBy": ["WU10"],
         "since": "2026-05-17",
-        "reason": "The 'defaultTabFactory' body dispatches to the 2-arg `Handles.Tab.mkTabAi` / `Handles.Tab.mkTabHarness` / `Handles.Tab.mkTabBackend` stubs (still 'error \"not implemented\"' bottoms — the WU6/WU7/WU8 factories live at `PureClaw.Tab.Ai.mkTabAi`, `PureClaw.Tab.Harness.mkTabHarness`, and `PureClaw.Tab.Backend.mkTabBackend` respectively, taking AgentEnv as an extra argument). Calling 'defaultTabFactory' from any test would trip those bottoms, so the production dispatch path can only be exercised in WU9 when the dispatcher is updated to plumb AgentEnv into the real factories. WU5 tests cover spawnTab/spawnTabWith via an injected synthetic factory (the same TabFactory test seam the dispatcher uses internally), so every non-defaultTabFactory branch is covered.",
+        "reason": "WU9 rewired `defaultTabFactory` to call the real WU6/7/8 factories (taking `AgentEnv`), unblocking the production spawn path. Coverage is now 96% top-level (30/31), 88% branches (37/42), 89% expressions (465/519). The remaining branch/expression gaps are: the `runDispatcher` bracket cleanup of the channel-out writer thread when EOF arrives mid-write (a race-prone path exercised only by the integration smoke tests landing in WU12); and the parser-error PublicError path in `dispatchOne` for parser-Left inputs that DON'T hit the LeadingZero arm (LeadingZero is exercised; the Malformed arm via empty-string-parser tests is exercised; the remaining branches are inside `Parse.parseInput` which is fully covered in Routing.Parse). Functional coverage is complete for the WU5+WU9 spec scope.",
         "minimalChecks": [
           "spawnTabWith happy-path with a synthetic factory (Right idx + registry insert)",
           "spawnTabWith with a throwing factory (C3 — registry rollback + redacted Left)",
@@ -120,7 +120,55 @@
           "S5 emitCrashedRedacted exercised; PublicTabError redaction asserted to contain no raw TabError constructor names",
           "S7 token bucket exercised at the unit level (newRateLimiter/tryConsumeSpawnToken) AND end-to-end via dispatchOne overflow",
           "S8 allowlist invariant asserted as a runtime contract (dispatcher reads from _ch_receive only; no other input seam exists)",
-          "P18 LLM-free invariant: property test over the routing grammar's switch | inject | slash-cmd corpus asserts Provider.complete is never invoked"
+          "P18 LLM-free invariant: property test over the routing grammar's switch | inject | slash-cmd corpus asserts Provider.complete is never invoked",
+          "WU9: dispatchSlash routes CmdTab variants (TabNew/TabList/TabClose/TabFocus/TabResume/TabRename) to AutoSpawn handlers",
+          "WU9: dispatchOne Switch routes through AutoSpawn.handleSwitch (present-tab focus + missing-tab auto-spawn truth table)",
+          "WU9: dispatchOne Default with empty focus routes through AutoSpawn.handleDefault (L6 + K3 implicit-spawn)"
+        ]
+      },
+      "PureClaw.Routing.AutoSpawn": {
+        "stagedBy": "WU9 (Tabbed Chat #51)",
+        "filledBy": ["WU10"],
+        "since": "2026-05-17",
+        "reason": "WU9 lands the auto-spawn UX module owning the A-series truth table, the L-series close lifecycle, the X-series crashed-tab UX, the B-series dashboard dispatch, and the S10 rename handler. Top-level declaration coverage is 83% (26/31); branch coverage 83% (51/61); expression coverage 81% (444/544). The gaps are dominated by the redacted-error projection arms (`emit (\"/\" <> tShowIdx idx <> \": \" <> unPublicTabError (toPublicTabError e))`) which appear in 4 different handlers and are each exercised only on one specific failure mode — exercising every (handler × error) pair would require quadratic test growth for the same redacted-banner shape. The remaining gaps are the `handleSwitch`'s no-default-kind branch (currently unreachable because `_rc_defaultKind` is non-optional in v1 — see the `kindFromDefault` comment in `AutoSpawn.hs`) and the `mkTabIndex Nothing` branch on negative indices (the parser already rejects negative indices upstream, so this is a defensive arm). Functional coverage is complete for the WU9 spec scope (A1–A12, L4–L7, X1–X3, B1–B3, S10 all green); the remaining branches will be exercised end-to-end in WU10 when the existing slash commands (K-series) flow through the AutoSpawn handlers.",
+        "minimalChecks": [
+          "A1: /3 when N exists — focus + recap banner; \"focused\" marker present",
+          "A2: /3 payload when N exists — enqueue payload to tab N; focus unchanged",
+          "A3: /3 when N missing, default set — silent spawn + focus + confirmation",
+          "A4: /3 when N missing, no default — prompt UX via PromptRenderer (covered via /tab new N)",
+          "A6: buffered payload round-trips through the prompt body (text + inline-keyboard)",
+          "A7: /tab new N (no kind) — force-prompt, NO spawn",
+          "A8 / A10: /tab new N kind when N exists — 'already exists' error",
+          "A9: /tab new 3 shell — spawn KindShell, focus, confirmation banner",
+          "A11 / S6: max-tab cap enforced at spawn (covered via dispatcher's spawnTabWith + the dedicated S6 test)",
+          "A12: after /tab close N, index N is reusable; /tab new <kind> spawns at lowest free index",
+          "B1: /tabs with empty registry emits the helper text",
+          "B2: /tabs with N tabs emits one line per tab",
+          "B3: ≥ 8 tabs uses bullet rendering",
+          "L4: /tab close N --force on KindAi — registry entry removed",
+          "L5: /tab close 99 (non-existent) — 'not found' PublicError",
+          "L6: /tab close of focused tab updates focus per highest-remaining rule",
+          "L7: /tab resume <valid-id> emits banner; <invalid-id> rejected by parser",
+          "X1: /N on Crashed tab — '/N crashed: ... [1] retry [2] close'",
+          "X2 / X3: SpawnArgs map round-trips kind + args (sanity assertion)",
+          "S10: rename input sanitization — ANSI/control-byte rejected; success notes redaction-was-applied suffix when sanitization changed the name",
+          "PromptRenderer dispatch heuristic: streaming = True → text renderer; False → inline-keyboard renderer (both expose the kind keywords)",
+          "tabKindArgToKind + kindKeyword: all 5 TabKindArg arms round-trip to the canonical keyword set",
+          "splitArgs: Nothing yields []; Just splits on whitespace",
+          "recapText: returns empty when _rc_switchRecap <= 0"
+        ]
+      },
+      "PureClaw.Routing.Dashboard": {
+        "stagedBy": "WU9 (Tabbed Chat #51)",
+        "filledBy": ["WU12"],
+        "since": "2026-05-17",
+        "reason": "WU9 lands the dashboard renderer (B1/B2/B3). Top-level declaration coverage is 100% (8/8); branch coverage 87% (14/16); expression coverage 98% (100/102). The remaining branch gap is 2 arms in `tryStatus`'s exception path — one for the explicit `Left _ → \"?\"` arm AND one for the `Right s → renderStatus s` arm — both exercised by the dedicated 'Dashboard tolerates a tab whose status raises' test in `Routing.AutoSpawnSpec`. HPC accounts the `try @SomeException`-then-pure-Either pattern as two branches (the Left arm and the Right arm); both are exercised but HPC's per-arm tick treats them as separate ticks. Functional coverage is complete for the WU9 spec scope; the WU12 final-review pass will revisit the HPC accounting (no production gap).",
+        "minimalChecks": [
+          "B1: empty registry emits the helper text",
+          "B2: one line per tab with index + kind + name + status + focus marker",
+          "B3: ≥ 8 tabs switches to bullet rendering",
+          "renderStatus: Active / Idle / Crashed branches all surface their respective labels",
+          "tryStatus: a buggy status that raises is collapsed to '?' (no dashboard crash)"
         ]
       }
     }

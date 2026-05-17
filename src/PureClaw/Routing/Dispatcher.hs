@@ -68,8 +68,11 @@ module PureClaw.Routing.Dispatcher
   , DispatcherState (..)
   , newDispatcherState
   , dispatchOne
+  , dispatchOneWith
     -- * Crash redaction emit (S5)
   , emitCrashedRedacted
+    -- * Banner emit (exposed for AutoSpawn handlers)
+  , emitDispatcherBanner
     -- * Internal — exposed for tests
   , parseArgsForKind
   ) where
@@ -82,7 +85,6 @@ import Data.IORef
   , modifyIORef'
   , newIORef
   , readIORef
-  , writeIORef
   )
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
@@ -99,6 +101,11 @@ import Data.Time
 import Data.Foldable (for_)
 
 import PureClaw.Agent.Env
+import PureClaw.Agent.SlashCommands
+  ( ForceMode (..)
+  , SlashCommand (..)
+  , TabSlashCommand (..)
+  )
 import PureClaw.Core.Types (UserId)
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
@@ -113,13 +120,14 @@ import PureClaw.Handles.Tab
   , TabIndex
   , TabKind (..)
   , TabRunner (..)
-  , TabStatus (..)
   , toPublicTabError
   , unTabIndex
   )
 import PureClaw.Handles.Tab qualified as Tab
+import PureClaw.Routing.AutoSpawn qualified as AutoSpawn
 import PureClaw.Routing.ChannelOut qualified as ChannelOut
 import PureClaw.Routing.Parse qualified as Parse
+import PureClaw.Routing.PromptRenderer qualified as Prompt
 import PureClaw.Routing.Registry qualified as Registry
 import PureClaw.Routing.Types
   ( ChannelEvent (..)
@@ -127,6 +135,9 @@ import PureClaw.Routing.Types
   , ParsedInput (..)
   , RoutingConfig (..)
   )
+import PureClaw.Tab.Ai qualified as TabAi
+import PureClaw.Tab.Backend qualified as TabBackend
+import PureClaw.Tab.Harness qualified as TabHarness
 
 
 -- ---------------------------------------------------------------------------
@@ -145,20 +156,19 @@ type TabFactory = TabKind -> TabIndex -> [Text] -> IO (Either TabError TabHandle
 -- spawn arg blobs is shared with 'parseArgsForKind' so the per-kind
 -- projection is covered by 'parseArgsForKind' tests alone.
 --
--- /Coverage note (WU5):/ the body below dispatches to factory functions
--- that are still stubbed in WU1 ('Tab.mkTabAi' \/ 'Tab.mkTabHarness' \/
--- 'Tab.mkTabBackend' all @error \"not implemented\"@); calling
--- 'defaultTabFactory' from a test would trip those bottoms. The
--- function therefore stays uncovered in WU5 and lands fully exercised
--- in WU6\/WU7\/WU8 alongside the real factory bodies. See
--- @.coverage-thresholds.json@ stagedWaivers for the per-WU coverage
--- protocol.
-defaultTabFactory :: TabFactory
-defaultTabFactory kind idx args =
+-- /WU9 update:/ the body now dispatches to the real
+-- 'PureClaw.Tab.Ai.mkTabAi' \/ 'PureClaw.Tab.Harness.mkTabHarness' \/
+-- 'PureClaw.Tab.Backend.mkTabBackend' factories — each of which takes
+-- an 'AgentEnv' as an additional argument. 'defaultTabFactory' is now
+-- a function of 'AgentEnv' that returns a 'TabFactory'; the original
+-- 2-arg 'Tab.mkTabAi' stub bodies are kept in 'Handles.Tab' for the
+-- H2 type-shape pin but are no longer called from production paths.
+defaultTabFactory :: AgentEnv -> TabFactory
+defaultTabFactory env kind idx args =
   case parseArgsForKind kind args of
-    Left ai             -> Tab.mkTabAi idx ai
-    Right (Left harn)   -> Tab.mkTabHarness idx harn
-    Right (Right back)  -> Tab.mkTabBackend idx kind back
+    Left ai             -> TabAi.mkTabAi env idx ai
+    Right (Left harn)   -> TabHarness.mkTabHarness env idx harn
+    Right (Right back)  -> TabBackend.mkTabBackend env idx kind (_backend_args back)
 
 -- | Pure helper that surfaces how 'defaultTabFactory' projects its
 -- @[Text]@ arg list onto each per-kind spawn-args record. Exposed for
@@ -244,7 +254,7 @@ tryConsumeSpawnToken rl uid now = atomicModifyIORef' (_rl_buckets rl) $ \m ->
 --
 -- See 'spawnTabWith' for the parametrised variant used by tests.
 spawnTab :: AgentEnv -> TabKind -> [Text] -> IO (Either TabError TabIndex)
-spawnTab env = spawnTabWith env defaultTabFactory
+spawnTab env = spawnTabWith env (defaultTabFactory env)
 
 -- | Spawn a tab at the lowest free index, dispatching to the supplied
 -- factory. Wrapping in 'mask' guarantees atomicity of the
@@ -383,24 +393,43 @@ safeIgnore m = do
 -- | The pieces of per-run state the dispatcher carries across message
 -- cycles. Exposed so 'dispatchOne' can be driven from tests without
 -- running 'runDispatcher's infinite loop.
+--
+-- /WU9 additions:/ '_ds_spawnArgs' records the original
+-- @(TabKind, [Text])@ pair for each successful spawn so the X2 \/ X3
+-- crashed-tab retry path can replay the exact original arguments
+-- (per OQ-6). '_ds_promptRenderer' picks the channel-appropriate
+-- spawn-prompt rendering (text on CLI \/ Signal, inline-keyboard
+-- friendly on Telegram). '_ds_factory' is the per-kind tab factory
+-- the dispatcher will dispatch through for all WU9 spawn paths.
 data DispatcherState = DispatcherState
-  { _ds_rateLimiter :: !RateLimiter
+  { _ds_rateLimiter    :: !RateLimiter
     -- ^ Per-chat-user spawn token bucket (S7).
+  , _ds_spawnArgs      :: !(IORef (Map Int AutoSpawn.SpawnArgs))
+    -- ^ Per-tab original spawn args (kind + arg list) for X2 \/ X3
+    -- retry.
+  , _ds_promptRenderer :: !Prompt.PromptRenderer
+    -- ^ Channel-aware spawn-prompt renderer (A4 \/ A6).
+  , _ds_factory        :: !TabFactory
+    -- ^ The per-kind factory the dispatcher uses for spawning. Defaults
+    -- to 'defaultTabFactory env' for production; tests inject a
+    -- synthetic factory via 'newDispatcherState'.
   }
 
 -- | Build a fresh 'DispatcherState' from an 'AgentEnv'.
 --
--- The second argument is the per-kind factory the dispatcher will use
--- when wiring spawns later (WU9). For WU5 the factory is threaded
--- through the bracket boundary in 'runDispatcherWith' but is not yet
--- a field on this record — the WU5 spawn surface ('spawnTab' \/
--- 'spawnTabWith') is the only consumer and it takes the factory
--- explicitly.
+-- The factory argument is retained on the record so WU9's AutoSpawn
+-- handlers can drive spawns without re-passing the factory at every
+-- call site.
 newDispatcherState :: AgentEnv -> TabFactory -> IO DispatcherState
-newDispatcherState env _factory = do
-  rl <- newRateLimiter (_rc_spawnRateLimit (_env_routingConfig env))
+newDispatcherState env factory = do
+  rl       <- newRateLimiter (_rc_spawnRateLimit (_env_routingConfig env))
+  argsRef  <- newIORef Map.empty
+  let renderer = Prompt.mkDefaultPromptRenderer (_env_channel env)
   pure DispatcherState
-    { _ds_rateLimiter = rl
+    { _ds_rateLimiter    = rl
+    , _ds_spawnArgs      = argsRef
+    , _ds_promptRenderer = renderer
+    , _ds_factory        = factory
     }
 
 
@@ -426,7 +455,15 @@ newDispatcherState env _factory = do
 -- tests can drive it one message at a time with deterministic
 -- timestamps.
 dispatchOne :: AgentEnv -> DispatcherState -> UserId -> Text -> IO ()
-dispatchOne env ds uid raw = do
+dispatchOne = dispatchOneWith
+
+-- | Like 'dispatchOne' but explicitly named for the test-seam variant
+-- — at present they are identical (the 'DispatcherState' record
+-- carries every per-run knob WU9 needs); kept as a distinct symbol so
+-- future WUs can introduce an even-thinner test-only variant without
+-- breaking the public 'dispatchOne' contract.
+dispatchOneWith :: AgentEnv -> DispatcherState -> UserId -> Text -> IO ()
+dispatchOneWith env ds uid raw = do
   let rc = _env_routingConfig env
   case Parse.parseInput rc raw of
     Left _err ->
@@ -435,10 +472,16 @@ dispatchOne env ds uid raw = do
       -- (no constructor leaks).
       emitDispatcherBanner env "input not recognized"
 
-    Right (Switch idx) -> do
-      writeIORef (_env_focus env) (Just idx)
-      observeFocusedCrash env idx
-      emitDispatcherBanner env ("/" <> tShowIdx idx <> ": focused")
+    Right (Switch idx) ->
+      -- A1 \/ A3 \/ A4 \/ A5 \/ A6: route through the AutoSpawn handler
+      -- so the auto-spawn truth table (present-tab focus, missing-tab
+      -- auto-spawn, missing-tab prompt) is owned by ONE module.
+      AutoSpawn.handleSwitch env
+        (_ds_promptRenderer ds)
+        (ratelimitedSpawn env ds uid)
+        (emitDispatcherBanner env)
+        (_ds_spawnArgs ds)
+        idx
 
     Right (Inject idx payload) ->
       injectTo env idx payload
@@ -446,19 +489,19 @@ dispatchOne env ds uid raw = do
     Right (Default text) -> do
       mFocus <- readIORef (_env_focus env)
       case mFocus of
-        Nothing  -> emitDispatcherBanner env
-                      "no tab focused — use /N to focus a tab"
+        Nothing  ->
+          -- L6 \/ K3: empty focus + Default text → implicit auto-spawn
+          -- of '_rc_defaultKind' at the lowest free index, then
+          -- forward the text to it.
+          AutoSpawn.handleDefault env
+            (ratelimitedSpawn env ds uid)
+            (emitDispatcherBanner env)
+            (_ds_spawnArgs ds)
+            text
         Just idx -> injectTo env idx text
 
-    Right (ParsedSlashCmd _cmd) ->
-      -- WU5 lays the routing scaffold; the full /tab* and /tab-resume
-      -- handlers land in WU9. For now we acknowledge receipt to the
-      -- user via the dispatcher source so the LLM-free invariant
-      -- (P18) is preserved — we DO NOT forward this to a provider.
-      --
-      -- The S7 rate limit is checked here for the tab-spawn shapes so
-      -- tests can exercise the gate without WU9's spawn UX wiring.
-      ratelimitedSlashAck env ds uid
+    Right (ParsedSlashCmd cmd) ->
+      dispatchSlash env ds uid cmd
 
 
 -- | Acknowledge a slash command on the dispatcher's source without
@@ -472,6 +515,84 @@ ratelimitedSlashAck env ds uid = do
   if ok
     then emitDispatcherBanner env "(slash command queued)"
     else emitDispatcherBanner env "rate limit: too many recent spawns"
+
+
+-- | Spawn a tab via the dispatcher's configured factory, consuming
+-- one rate-limit token first (S7). Returns 'Left' with a redacted
+-- 'TabError' on either:
+--
+--   * rate-limit denial → 'TabConcurrencyLimit' (the closest
+--     semantically-correct redacted shape — the public projection
+--     renders as "tab: input queue full" which is acceptable v1
+--     coverage); or
+--   * factory failure → propagated as-is from 'spawnTabWith'.
+--
+-- AutoSpawn handlers consume this as their 'SpawnIO' callback so the
+-- spawn-rate limit is enforced uniformly across A-series spawn paths.
+ratelimitedSpawn
+  :: AgentEnv
+  -> DispatcherState
+  -> UserId
+  -> TabKind
+  -> [Text]
+  -> IO (Either TabError TabIndex)
+ratelimitedSpawn env ds uid kind args = do
+  now <- getCurrentTime
+  ok  <- tryConsumeSpawnToken (_ds_rateLimiter ds) uid now
+  if not ok
+    then pure (Left (TabConcurrencyLimit 0))
+    else spawnTabWith env (_ds_factory ds) kind args
+
+
+-- | Dispatch a slash command. The @\/tab*@ family lands here; non-tab
+-- commands fall through to the existing rate-limited slash-ack
+-- (preserving the WU5 behaviour for the non-tab surface — WU10 wires
+-- existing commands through the focused-tab's @_tabHandle_enqueueSlash@).
+dispatchSlash
+  :: AgentEnv -> DispatcherState -> UserId -> SlashCommand -> IO ()
+dispatchSlash env ds uid cmd = case cmd of
+  CmdTab tabCmd -> dispatchTab env ds uid tabCmd
+  _             -> ratelimitedSlashAck env ds uid
+
+-- | Dispatch a @\/tab*@ command to the AutoSpawn handlers. Each branch
+-- maps a 'TabSlashCommand' constructor to the appropriate handler.
+dispatchTab
+  :: AgentEnv -> DispatcherState -> UserId -> TabSlashCommand -> IO ()
+dispatchTab env ds uid tcmd = case tcmd of
+  TabNewCmd rawIdx mKind mArgs ->
+    AutoSpawn.handleNew env
+      (_ds_promptRenderer ds)
+      (ratelimitedSpawn env ds uid)
+      (emitDispatcherBanner env)
+      (_ds_spawnArgs ds)
+      rawIdx mKind mArgs
+
+  TabListCmd ->
+    AutoSpawn.handleListTabs env (emitDispatcherBanner env)
+
+  TabCloseCmd rawIdx force ->
+    AutoSpawn.handleClose env
+      (emitDispatcherBanner env)
+      (_ds_spawnArgs ds)
+      rawIdx
+      (force == ForceYes)
+
+  TabFocusCmd rawIdx ->
+    AutoSpawn.handleFocus env
+      (_ds_promptRenderer ds)
+      (ratelimitedSpawn env ds uid)
+      (emitDispatcherBanner env)
+      (_ds_spawnArgs ds)
+      rawIdx
+
+  TabResumeCmd sid ->
+    AutoSpawn.handleResume env (emitDispatcherBanner env) sid
+
+  TabRenameCmd rawIdx newName ->
+    AutoSpawn.handleRename env
+      (emitDispatcherBanner env)
+      Parse.sanitizeTabName
+      rawIdx newName
 
 
 -- | Enqueue text on a specific tab's input queue. Looks up the tab in
@@ -508,34 +629,15 @@ safeEnqueue th payload = do
 -- Crash redaction (S5)
 -- ---------------------------------------------------------------------------
 
--- | When the dispatcher observes a tab in 'Crashed' state, emit a
--- single dispatcher-sourced banner using the channel-safe
--- 'PublicTabError'. The raw payload of 'TabError' never reaches the
--- channel.
-observeFocusedCrash :: AgentEnv -> TabIndex -> IO ()
-observeFocusedCrash env idx = do
-  mTab <- Registry.lookupTab (_env_tabs env) idx
-  case mTab of
-    Nothing -> pure ()
-    Just th -> do
-      st <- safeStatus th
-      case st of
-        Just (Crashed pe) -> emitCrashedRedacted env idx pe
-        _                 -> pure ()
-
--- | Read '_tabHandle_status' tolerantly. The field is in IO; a buggy
--- factory could throw. We treat any exception as "unknown status" and
--- skip the crash banner.
-safeStatus :: TabHandle -> IO (Maybe TabStatus)
-safeStatus th = do
-  r <- try @SomeException (_tabHandle_status th)
-  pure $ case r of
-    Left _  -> Nothing
-    Right s -> Just s
-
 -- | Emit the S5 crashed-tab banner. The banner text uses the public
--- projection from 'toPublicTabError' and contains no raw 'TabError'
--- payload — neither host strings, paths, nor ssh stderr fragments.
+-- projection from 'PureClaw.Handles.Tab.toPublicTabError' and contains
+-- no raw 'TabError' payload — neither host strings, paths, nor ssh
+-- stderr fragments.
+--
+-- Exposed so tests can directly assert on the redacted wording without
+-- driving a full crashed-tab spawn. The WU9 AutoSpawn handler emits
+-- the same banner shape (extended with the @\"— [1] retry [2] close\"@
+-- prompt suffix) via its own 'focusExisting' helper.
 emitCrashedRedacted :: AgentEnv -> TabIndex -> PublicTabError -> IO ()
 emitCrashedRedacted env idx (PublicTabError pe) =
   emitDispatcherBanner env
@@ -570,7 +672,7 @@ tShowIdx = T.pack . show . unTabIndex
 -- graceful end-of-stream from '_ch_receive' triggers 'closeAllTabs'
 -- and tears down the channel-out writer.
 runDispatcher :: AgentEnv -> IO ()
-runDispatcher env = runDispatcherWith env defaultTabFactory
+runDispatcher env = runDispatcherWith env (defaultTabFactory env)
 
 -- | Run the dispatcher forever with a caller-supplied factory.
 --

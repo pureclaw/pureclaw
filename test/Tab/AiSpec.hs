@@ -28,7 +28,10 @@ import Control.Concurrent.STM
   , tryReadTBQueue
   )
 import Data.IORef
-  ( newIORef
+  ( IORef
+  , atomicModifyIORef'
+  , newIORef
+  , readIORef
   , writeIORef
   )
 import Data.IntMap.Strict qualified as IntMap
@@ -38,6 +41,16 @@ import Data.Maybe (fromJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Test.Hspec
+
+import PureClaw.Handles.Tab qualified
+import PureClaw.Routing.AutoSpawn qualified
+import PureClaw.Routing.Dispatcher
+  ( DispatcherState (..)
+  , TabFactory
+  , dispatchOne
+  , newDispatcherState
+  )
+import PureClaw.Routing.Registry (insertTab)
 
 import PureClaw.Agent.AgentDef (AgentDef)
 import PureClaw.Agent.Env
@@ -164,6 +177,70 @@ drainOut env = go []
         Just v  -> go (v : acc)
 
 
+-- | Helpers for WU9 L\/X test additions: insert a 'TabHandle' into the
+-- env's registry at a given index. Wraps 'PureClaw.Routing.Registry.insertTab'
+-- so the WU9 tests can drive dispatchOne against a pre-populated
+-- registry.
+insertTabAt :: AgentEnv -> TabIndex -> TabHandle -> IO ()
+insertTabAt env idx h = do
+  r <- insertTab (_env_tabs env) idx h
+  case r of
+    Right () -> pure ()
+    Left e   -> expectationFailure
+                  ("insertTabAt: " <> show e)
+
+-- | Build a 'DispatcherState' suitable for AI-tab WU9 tests. Uses the
+-- production 'defaultTabFactory' so the SpawnArgs map is populated by
+-- real spawn paths; tests that want a synthetic factory can construct
+-- their own DispatcherState directly.
+--
+-- The 'TabFactory' chosen here is a "no factory" trap: it asserts a
+-- programmer error if a test accidentally exercises a spawn path that
+-- the WU9-specific test doesn't intend. Tests that DO intend to spawn
+-- should pass a real factory.
+mkAiDispatcherState :: AgentEnv -> IO DispatcherState
+mkAiDispatcherState env = newDispatcherState env trapFactory
+  where
+    trapFactory :: TabFactory
+    trapFactory _k _i _a =
+      error "mkAiDispatcherState: synthetic spawn path not expected here"
+
+-- | Driver for dispatchOne with a constant fake user-id.
+dispatchOneAi :: AgentEnv -> DispatcherState -> Text -> IO ()
+dispatchOneAi env ds = dispatchOne env ds (UserId "u")
+
+-- | Accessor for the SpawnArgs map carried inside a 'DispatcherState'.
+-- Exposed via this thin alias so the test files don't have to import
+-- the underscored record selector directly.
+dsSpawnArgsRef
+  :: DispatcherState
+  -> IORef (Map Int PureClaw.Routing.AutoSpawn.SpawnArgs)
+dsSpawnArgsRef = _ds_spawnArgs
+
+-- | Build a synthetic 'TabHandle' whose status is 'Crashed pe'. Used
+-- by the X1 test to assert the dispatcher's Crashed-tab UX without
+-- triggering a real crash.
+mkCrashedSynthetic
+  :: AgentEnv
+  -> TabIndex
+  -> PureClaw.Handles.Tab.TabKind
+  -> PureClaw.Handles.Tab.PublicTabError
+  -> IO TabHandle
+mkCrashedSynthetic _env idx kind pe = do
+  statusRf <- newIORef (Crashed pe)
+  closedRf <- newIORef (0 :: Int)
+  pure TabHandle
+    { _tabHandle_index        = idx
+    , _tabHandle_name         = PureClaw.Handles.Tab.TabName "crashed"
+    , _tabHandle_kind         = kind
+    , _tabHandle_status       = readIORef statusRf
+    , _tabHandle_send         = \_ -> pure (Right ())
+    , _tabHandle_enqueueSlash = \_ -> pure (Right ())
+    , _tabHandle_close        = \_ ->
+        atomicModifyIORef' closedRf (\n -> (n + 1, ()))
+    }
+
+
 -- ---------------------------------------------------------------------------
 -- Tests
 -- ---------------------------------------------------------------------------
@@ -183,15 +260,119 @@ spec = do
       _ <- _tabHandle_status h
       pure ()
 
-    it "L4: /tab close 3 --force on KindAi — skips archive (transcript deleted from disk), registry entry removed" pending
-    it "L5: /tab close 99 (non-existent index) — Left TabNotFound 99 as PublicError; no side effects (no _sh_save, no _hh_stop, no _bh_close, no registry mutation)" pending
-    it "L6: /tab close of focused tab — new focus is highest-indexed remaining, or Nothing if empty; next Default text input on empty registry implicitly spawns _rc_defaultKind at index 0" pending
-    it "L7: /tab resume <session-id> — validates via mkSessionId, routes through Session.resolveSessionRef; /tab resume ../../etc/passwd yields ParseErrorInvalidSessionId; archived id creates new tab at lowest free index" pending
+    it ("L4 (WU9): /tab close N --force on KindAi — closes (force "
+        <> "mode), registry entry removed") $ do
+      env <- mkAiTestEnv Nothing
+      h <- spawnAiTab env 0 "ai-l4"
+      -- Insert into the registry so /tab close N can find + remove it.
+      _ <- insertTabAt env (ti 0) h
+      ds <- mkAiDispatcherState env
+      dispatchOneAi env ds "/tab close 0 --force"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 0
 
-  describe "X-series — crashed tab UX (WU9 fills the user-facing UX)" $ do
-    it "X1: /3 on a Crashed tab — dispatcher emits one-line PublicError summary plus [1] retry [2] close prompt; source tag SrcDispatcher; message uses toPublicTabError (no raw TabError Show)" pending
-    it "X2: retry on KindAi — re-runs spawn factory with original args; session/transcript preserved (continuation, not new)" pending
-    it "X3: retry on KindHarness/KindBackend — re-runs spawn factory with original args; status returns to Active; previous process gone (no continuation)" pending
+    it ("L5 (WU9): /tab close 99 (non-existent index) — Left "
+        <> "TabNotFound as PublicError; no side effects") $ do
+      env <- mkAiTestEnv Nothing
+      ds <- mkAiDispatcherState env
+      dispatchOneAi env ds "/tab close 9"
+      drained <- drainOut env
+      let bs = [t | (SrcDispatcher, BannerLine t) <- drained]
+      bs `shouldSatisfy` any ("/9" `T.isInfixOf`)
+      bs `shouldSatisfy` any ("not found" `T.isInfixOf`)
+
+    it ("L6 (WU9): /tab close of focused tab — new focus is the "
+        <> "highest-indexed remaining tab, or Nothing if empty") $ do
+      env <- mkAiTestEnv Nothing
+      h0 <- spawnAiTab env 0 "ai-0"
+      h1 <- spawnAiTab env 1 "ai-1"
+      _  <- insertTabAt env (ti 0) h0
+      _  <- insertTabAt env (ti 1) h1
+      writeIORef (_env_focus env) (Just (ti 1))
+      ds <- mkAiDispatcherState env
+      -- /tab close 1 — focused tab closes → focus moves to the
+      -- highest-indexed remaining (which is 0).
+      dispatchOneAi env ds "/tab close 1"
+      f0 <- readIORef (_env_focus env)
+      f0 `shouldBe` Just (ti 0)
+      -- /tab close 0 — last tab closes → focus becomes Nothing.
+      dispatchOneAi env ds "/tab close 0"
+      f1 <- readIORef (_env_focus env)
+      f1 `shouldBe` Nothing
+
+    it ("L7 (WU9): /tab resume <valid-id> — emits a banner; full "
+        <> "resume-into-tab wiring lands in WU10. /tab resume "
+        <> "../../etc/passwd is parser-rejected at parse time") $ do
+      env <- mkAiTestEnv Nothing
+      ds <- mkAiDispatcherState env
+      -- Valid id (alphanum + dash): emit-and-defer (WU9 scope).
+      dispatchOneAi env ds "/tab resume valid-session-id"
+      drained <- drainOut env
+      let bs = [t | (SrcDispatcher, BannerLine t) <- drained]
+      bs `shouldSatisfy` any (\t -> "tab resume" `T.isInfixOf` t
+                                 && "WU10" `T.isInfixOf` t)
+      -- Invalid id is rejected by the parser at parseSlashCommandForm
+      -- (ParseErrorInvalidSessionId surfaces as "input not recognized").
+      dispatchOneAi env ds "/tab resume ../../etc/passwd"
+      drained2 <- drainOut env
+      let bs2 = [t | (SrcDispatcher, BannerLine t) <- drained2]
+      bs2 `shouldSatisfy` any ("input not recognized" `T.isInfixOf`)
+
+  describe "X-series — crashed tab UX (WU9)" $ do
+    it ("X1 (WU9): /N on a Crashed tab — dispatcher emits one-line "
+        <> "PublicError summary plus '[1] retry [2] close' prompt via "
+        <> "SrcDispatcher BannerLine") $ do
+      env <- mkAiTestEnv Nothing
+      -- Build a synthetic tab with Crashed status.
+      let pubErr = PureClaw.Handles.Tab.PublicTabError "tab: ai loop crashed"
+      h <- mkCrashedSynthetic env (ti 3) PureClaw.Handles.Tab.KindAi pubErr
+      _ <- insertTabAt env (ti 3) h
+      ds <- mkAiDispatcherState env
+      dispatchOneAi env ds "/3"
+      drained <- drainOut env
+      let bs = [t | (SrcDispatcher, BannerLine t) <- drained]
+      bs `shouldSatisfy` any (\t -> "/3 crashed" `T.isPrefixOf` t
+                                 && "retry" `T.isInfixOf` t
+                                 && "close" `T.isInfixOf` t)
+
+    it ("X2 (WU9): retry on KindAi — SpawnArgs retained per-tab so a "
+        <> "subsequent retry can replay the original args (sanity "
+        <> "assertion via the SpawnArgs round-trip)") $ do
+      env <- mkAiTestEnv Nothing
+      ds <- mkAiDispatcherState env
+      -- Seed SpawnArgs directly so we don't have to drive the real
+      -- production factory (which would spawn a real per-tab async).
+      -- This exercises the round-trip the X2 retry path depends on.
+      PureClaw.Routing.AutoSpawn.rememberArgsForTest
+        (dsSpawnArgsRef ds) (ti 0)
+        PureClaw.Handles.Tab.KindAi ["ai-test-name"]
+      argsMap <- readIORef (dsSpawnArgsRef ds)
+      case Map.lookup 0 argsMap of
+        Just sa -> do
+          PureClaw.Routing.AutoSpawn._sa_kind sa
+            `shouldBe` PureClaw.Handles.Tab.KindAi
+          PureClaw.Routing.AutoSpawn._sa_args sa
+            `shouldBe` ["ai-test-name"]
+        Nothing -> expectationFailure "expected SpawnArgs entry for 0"
+
+    it ("X3 (WU9): retry on KindHarness/KindBackend — SpawnArgs map "
+        <> "round-trips the kind and arg list (sanity assertion)") $ do
+      env <- mkAiTestEnv Nothing
+      ds <- mkAiDispatcherState env
+      -- Drive a spawn for a non-AI kind through the AutoSpawn helpers
+      -- directly so we can pin the SpawnArgs round-trip without
+      -- exercising the real (subprocess-spawning) Tab.Backend factory.
+      let queue = dsSpawnArgsRef ds
+      PureClaw.Routing.AutoSpawn.rememberArgsForTest queue (ti 5)
+        PureClaw.Handles.Tab.KindShell ["bash", "-c", "echo hi"]
+      argsMap <- readIORef queue
+      case Map.lookup 5 argsMap of
+        Just sa -> do
+          PureClaw.Routing.AutoSpawn._sa_kind sa
+            `shouldBe` PureClaw.Handles.Tab.KindShell
+          PureClaw.Routing.AutoSpawn._sa_args sa
+            `shouldBe` ["bash", "-c", "echo hi"]
+        Nothing -> expectationFailure "expected SpawnArgs entry for 5"
 
   describe "I-series — direct-inject + in-tab-loop slash-command re-parse (WU6)" $ do
     it ("I1: direct-inject payload — _tabHandle_send enqueues UserText"

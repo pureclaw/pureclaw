@@ -16,12 +16,15 @@
 module Security.TabSpec (spec) where
 
 import Control.Concurrent.STM
-  ( atomically
+  ( TBQueue
+  , atomically
   , modifyTVar'
   , newTBQueueIO
   , newTVarIO
   , readTVar
   , readTVarIO
+  , tryReadTBQueue
+  , writeTBQueue
   )
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.IntMap.Strict qualified as IntMap
@@ -59,8 +62,10 @@ import PureClaw.Handles.Tab qualified as Tab
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)
 import PureClaw.Routing.Config (defaultRoutingConfig)
+import PureClaw.Routing.AutoSpawn qualified as AutoSpawn
 import PureClaw.Routing.Dispatcher qualified as Dispatcher
 import PureClaw.Routing.Parse qualified as Parse
+import PureClaw.Routing.Registry qualified as Registry
 import PureClaw.Routing.Types qualified as RT
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault (VaultHandle (..), VaultStatus (..))
@@ -311,7 +316,22 @@ spec = do
                     ) forbidden
             ) texts
 
-    it "S6: max-tab cap enforced at spawn — covered by A11; this entry exists for security audit traceability" pending
+    it ("S6 (WU9): max-tab cap enforced at spawn — spawning past "
+        <> "_rc_maxTabs surfaces 'Left TabLimitExceeded' (the same "
+        <> "guard exercised by A11 — this entry exists for security "
+        <> "audit traceability)") $ do
+      env <- mkS8Env mkNoOpChannelHandle
+      -- Shrink _rc_maxTabs to 0 so any spawn trips the cap.
+      let envFull = env
+            { _env_routingConfig = (_env_routingConfig env)
+                { RT._rc_maxTabs = 0 }
+            }
+      r <- Dispatcher.spawnTab envFull Tab.KindAi []
+      case r of
+        Left (Tab.TabLimitExceeded 0) -> pure ()
+        other -> expectationFailure
+                   ("S6: expected Left TabLimitExceeded 0; got "
+                     <> show other)
 
     it ("S7: spawn rate limit — token-bucket _rc_spawnRateLimit (default "
         <> "10 spawns/minute) per chat-user; exceeding yields PublicError, "
@@ -385,7 +405,48 @@ spec = do
       atomically (modifyTVar' (_env_activeCount env) (subtract 1))
       n2 <- readTVarIO (_env_activeCount env)
       n2 `shouldBe` 0
-    it "S10: /tab rename N <name> input sanitization — passes through sanitizeTabName (length cap, control-byte reject, ANSI reject, hostname/path/ssh-stderr redaction); rename rejected on NameRedactedToEmpty; success notes '(redacted host/path fragment)' when sanitization changed the name" pending
+    it ("S10 (WU9): /tab rename N <name> input sanitization — "
+        <> "passes through sanitizeTabName (length cap, control-byte "
+        <> "reject, ANSI reject, hostname redaction); rejected names "
+        <> "surface as 'TabInvalidName' PublicError; success notes "
+        <> "'(redacted host/path fragment)' when sanitization changed "
+        <> "the name") $ do
+      -- Build a minimal env + register a synthetic tab at index 3.
+      env <- mkS8Env mkNoOpChannelHandle
+      statusRf <- newIORef (Tab.Idle s10T0)
+      closedRf <- newIORef (0 :: Int)
+      let h = Tab.TabHandle
+            { Tab._tabHandle_index        = fromJust (Tab.mkTabIndex 3)
+            , Tab._tabHandle_name         = Tab.TabName "tab-3"
+            , Tab._tabHandle_kind         = Tab.KindAi
+            , Tab._tabHandle_status       = readIORef statusRf
+            , Tab._tabHandle_send         = \_ -> pure (Right ())
+            , Tab._tabHandle_enqueueSlash = \_ -> pure (Right ())
+            , Tab._tabHandle_close        = \_ ->
+                atomicModifyIORef' closedRf (\n -> (n + 1, ()))
+            }
+      _ <- Registry.insertTab (_env_tabs env)
+              (fromJust (Tab.mkTabIndex 3)) h
+      let emit txt = atomically $ writeTBQueue
+            (_env_channelOutQ env)
+            (RT.SrcDispatcher, RT.BannerLine txt)
+      -- Case 1: ANSI escape input → rejected with TabInvalidName.
+      AutoSpawn.handleRename env emit Parse.sanitizeTabName 3
+        "\ESC[31mboom"
+      -- Case 2: a name that survives sanitization unchanged.
+      AutoSpawn.handleRename env emit Parse.sanitizeTabName 3
+        "my-shell"
+      -- Case 3: name that gets reduced by redaction.
+      AutoSpawn.handleRename env emit Parse.sanitizeTabName 3
+        "ssh prod-db.internal"
+      drained <- drainDispatcherQ (_env_channelOutQ env)
+      let bs = [t | (RT.SrcDispatcher, RT.BannerLine t) <- drained]
+      -- ANSI rejection: surfaces "tab: invalid name".
+      bs `shouldSatisfy` any ("tab: invalid name" `T.isInfixOf`)
+      -- Successful rename emits "Renamed".
+      bs `shouldSatisfy` any ("Renamed" `T.isInfixOf`)
+      -- Redaction-noted suffix on the third case.
+      bs `shouldSatisfy` any ("(redacted host/path fragment)" `T.isInfixOf`)
 
 
 -- ---------------------------------------------------------------------------
@@ -435,6 +496,22 @@ mkS8Env ch = do
     , _env_routingConfig     = routing
     , _env_fork              = defaultEnvFork
     }
+
+-- | Baseline UTC for the S10 synthetic-tab fixture.
+s10T0 :: UTCTime
+s10T0 = UTCTime (fromGregorian 2026 5 17) (secondsToDiffTime 0)
+
+-- | Drain everything currently sitting in a bounded STM queue
+-- (non-blocking when empty). Local to this spec; mirrors the helper
+-- used by 'Routing.DispatcherSpec'.
+drainDispatcherQ :: TBQueue a -> IO [a]
+drainDispatcherQ q = go []
+  where
+    go acc = do
+      mv <- atomically (tryReadTBQueue q)
+      case mv of
+        Nothing -> pure (reverse acc)
+        Just v  -> go (v : acc)
 
 -- | Assertion combinator: the result must be 'Left' with the given
 -- 'RT.ParseError' value.
