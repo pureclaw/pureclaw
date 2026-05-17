@@ -131,6 +131,7 @@ import PureClaw.Handles.Tab
 import PureClaw.Handles.Tab qualified as Tab
 import PureClaw.Routing.AutoSpawn qualified as AutoSpawn
 import PureClaw.Routing.ChannelOut qualified as ChannelOut
+import PureClaw.Routing.Onboarding qualified as Onboarding
 import PureClaw.Routing.Parse qualified as Parse
 import PureClaw.Routing.PromptRenderer qualified as Prompt
 import PureClaw.Routing.Registry qualified as Registry
@@ -701,6 +702,13 @@ dispatchSlash
   :: AgentEnv -> DispatcherState -> UserId -> SlashCommand -> IO ()
 dispatchSlash env ds uid cmd = case cmd of
   CmdTab tabCmd -> dispatchTab env ds uid tabCmd
+  -- Onboarding (O1): handled at the dispatcher layer because the
+  -- response is a fixed orientation message — it must not depend on a
+  -- focused AI tab (a brand-new user has no tabs yet), and it must
+  -- not be enqueued into the focused tab's slash queue (which would
+  -- be wrong-channel-of-output for a UX greeting). Delegated to
+  -- 'Onboarding.handleStart' which emits via @_ch_send@ directly.
+  CmdStart      -> Onboarding.handleStart env
   _             -> routeToFocused env ds uid cmd
 
 -- | Route a non-@\/tab*@ slash command to the focused tab via

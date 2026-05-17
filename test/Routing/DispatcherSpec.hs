@@ -104,7 +104,9 @@ import PureClaw.Session.Handle
 import PureClaw.Tab.Ai qualified as TabAi
 import PureClaw.Tools.Registry (emptyRegistry)
 import Test.Fake.ChannelHandle
-  ( fakeChannelHandle
+  ( FakeChannelEvent (..)
+  , drainEvents
+  , fakeChannelHandle
   , feedIncoming
   , newFakeChannel
   )
@@ -542,6 +544,29 @@ spec = do
       -- Drain produces at least one dispatcher banner; no provider was
       -- ever touched (the test env has no provider at all).
       drained `shouldSatisfy` (not . null)
+
+    it ("ParsedSlashCmd /start is handled inside the dispatcher "
+        <> "(WU11 O1) — orientation message is emitted via _ch_send "
+        <> "rather than routed to the focused tab queue") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      st  <- mkSyntheticTab (ti 0) KindAi (Idle t0)
+      ds  <- newDispatcherState env (syntheticFactory st)
+      dispatchOne env ds (UserId "u") "/start"
+      -- Onboarding emits the orientation text via _ch_send, not
+      -- through _env_channelOutQ. The synthetic tab's send-IORef
+      -- must stay empty (no enqueue), and the channel must have
+      -- recorded one outgoing message that mentions all three
+      -- slash-prefix surfaces.
+      tabSent <- readIORef (_st_sentRf st)
+      tabSent `shouldBe` []
+      ch <- drainEvents fch
+      let bodies = [t | (_, FceSend (OutgoingMessage t)) <- ch]
+      length bodies `shouldBe` 1
+      let body = T.concat bodies
+      T.unpack body `shouldContain` "/0"
+      T.unpack body `shouldContain` "/tab new 0 shell"
+      T.unpack body `shouldContain` "/tabs"
 
 
   describe "S5 — Crashed PublicError redaction" $ do

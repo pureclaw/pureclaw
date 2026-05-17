@@ -136,6 +136,67 @@ spec = do
       result <- try @IOError (_ch_readSecret h)
       result `shouldSatisfy` isLeft
 
+  describe "botFatherCommands / registerBotFatherCommands (Tabbed Chat O3)" $ do
+    it "botFatherCommands re-exports the Onboarding list verbatim" $ do
+      length botFatherCommands `shouldBe` 13   -- 10 numerics + /tab + /tabs + /start
+
+    it "encodeBotFatherCommands strips the leading '/' from each \
+       \command word (Telegram setMyCommands API requirement)" $ do
+      let payload = encodeBotFatherCommands botFatherCommands
+          decoded = T.unpack (TE.decodeUtf8 payload)
+      decoded `shouldContain` "\"command\":\"0\""
+      decoded `shouldContain` "\"command\":\"start\""
+      decoded `shouldNotContain` "\"command\":\"/"
+
+    it "registerBotFatherCommands POSTs the encoded list to \
+       \setMyCommands at the Bot API base URL" $ do
+      postRef <- newIORef (Nothing :: Maybe (Text, ByteString))
+      let nh = mkNoOpNetworkHandle
+            { _nh_httpPost = \url body -> do
+                writeIORef postRef (Just (getAllowedUrl url, body))
+                pure HttpResponse { _hr_statusCode = 200, _hr_body = "{}" }
+            }
+      tc <- mkTelegramChannel
+              (TelegramConfig "tok" "https://api.telegram.org")
+              nh mkNoOpLogHandle
+      registerBotFatherCommands tc
+      posted <- readIORef postRef
+      case posted of
+        Nothing -> expectationFailure "expected setMyCommands POST"
+        Just (url, body) -> do
+          T.unpack url `shouldContain` "/bot"
+          T.unpack url `shouldContain` "tok"
+          T.unpack url `shouldContain` "setMyCommands"
+          T.unpack (TE.decodeUtf8 body) `shouldContain` "commands"
+          T.unpack (TE.decodeUtf8 body) `shouldContain` "start"
+
+    it "registerBotFatherCommands tolerates a non-200 response \
+       \(BotFather autocomplete is best-effort, not a boot blocker)" $ do
+      tc <- mkTelegramChannel
+              (TelegramConfig "tok" "https://api.telegram.org")
+              ( mkNoOpNetworkHandle
+                  { _nh_httpPost = \_ _ ->
+                      pure HttpResponse
+                        { _hr_statusCode = 500
+                        , _hr_body       = "boom"
+                        }
+                  }
+              )
+              mkNoOpLogHandle
+      registerBotFatherCommands tc `shouldReturn` ()
+
+    it "registerBotFatherCommands tolerates a network exception \
+       \(handler does not propagate)" $ do
+      tc <- mkTelegramChannel
+              (TelegramConfig "tok" "https://api.telegram.org")
+              ( mkNoOpNetworkHandle
+                  { _nh_httpPost = \_ _ ->
+                      throwIO (userError "network down")
+                  }
+              )
+              mkNoOpLogHandle
+      registerBotFatherCommands tc `shouldReturn` ()
+
 -- Helpers
 
 mkTestTelegramChannel :: IO TelegramChannel

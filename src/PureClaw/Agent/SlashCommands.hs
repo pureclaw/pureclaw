@@ -81,6 +81,7 @@ import PureClaw.Security.Vault.Plugin
 import PureClaw.Transcript.Types
 
 import Data.Time.Clock qualified as Time
+import PureClaw.Routing.Onboarding qualified as Onboarding
 import PureClaw.Session.Handle qualified as Session
 import PureClaw.Session.Types qualified as SessionTypes
 
@@ -267,6 +268,7 @@ data SlashCommand
   | CmdNew                          -- ^ Clear conversation, keep configuration
   | CmdStatus                       -- ^ Show session status
   | CmdCompact                      -- ^ Summarise conversation to save context
+  | CmdStart                        -- ^ Onboarding entry point (Tabbed Chat O1; Telegram @\/start@ convention)
   | CmdTarget (Maybe Text)            -- ^ Show or switch message target
   | CmdTargetList                    -- ^ List available targets (models + harnesses)
   | CmdTargetDefault (Maybe Text)    -- ^ View or set the default target for new sessions
@@ -301,6 +303,7 @@ sessionCommandSpecs =
   , CommandSpec "/new"     "Clear conversation, keep configuration"   GroupSession (exactP "/new"     CmdNew)
   , CommandSpec "/compact" "Summarise conversation to save context"   GroupSession (exactP "/compact" CmdCompact)
   , CommandSpec "/last"    "Resume the most recent session"           GroupSession (exactP "/last"    (CmdSession SessionLast))
+  , CommandSpec "/start"   "Tabbed Chat \x2014 onboarding orientation" GroupSession (exactP "/start"   CmdStart)
   ]
 
 -- | The '/session' command family. Subcommands manage the on-disk session
@@ -763,7 +766,21 @@ harnessUnknownFallback t =
 executeSlashCommand :: AgentEnv -> SlashCommand -> Context -> IO Context
 
 executeSlashCommand env CmdHelp ctx = do
-  _ch_send (_env_channel env) (OutgoingMessage (renderHelpText allCommandSpecs))
+  -- Render the full slash-command reference, then append the Tabbed
+  -- Chat \"Tab commands\" subsection from 'Onboarding.helpTabSection'
+  -- (O2). The subsection is appended (not interleaved) so the existing
+  -- group-by-group rendering remains untouched and the Tab vocabulary
+  -- appears as a discrete final block.
+  let body = renderHelpText allCommandSpecs <> "\n" <> Onboarding.helpTabSection
+  _ch_send (_env_channel env) (OutgoingMessage body)
+  pure ctx
+
+executeSlashCommand env CmdStart ctx = do
+  -- Tabbed Chat onboarding (O1). Delegated wholesale to
+  -- 'Onboarding.handleStart' so the orientation text + side-effect
+  -- (single _ch_send) live next to the BotFather registration list
+  -- they document. Returns the context unchanged.
+  Onboarding.handleStart env
   pure ctx
 
 executeSlashCommand env CmdNew ctx = do

@@ -9,11 +9,17 @@ module PureClaw.Channels.Telegram
   , TelegramMessage (..)
   , TelegramChat (..)
   , TelegramUser (..)
+    -- * BotFather command registration (Tabbed Chat O3)
+  , botFatherCommands
+  , registerBotFatherCommands
+  , encodeBotFatherCommands
   ) where
 
 import Control.Concurrent.STM
 import Control.Exception
 import Data.Aeson
+import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as BL
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -26,6 +32,7 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Handles.Network
+import PureClaw.Routing.Onboarding (botFatherCommandList)
 
 -- | Configuration for Telegram channel.
 data TelegramConfig = TelegramConfig
@@ -182,3 +189,76 @@ parseTelegramUpdate :: Value -> Either String TelegramUpdate
 parseTelegramUpdate v = case fromJSON v of
   Error err   -> Left err
   Success upd -> Right upd
+
+-- ---------------------------------------------------------------------------
+-- BotFather command registration (Tabbed Chat O3)
+-- ---------------------------------------------------------------------------
+
+-- | The list of @(command, description)@ tuples PureClaw registers
+-- with Telegram's @setMyCommands@ API at channel-startup time.
+--
+-- Re-exported from "PureClaw.Routing.Onboarding" so the golden file
+-- and the @\/help@ subsection live next to each other; the Telegram
+-- channel only needs to publish the list, not own it.
+--
+-- See @docs\/tabbed-chat.md@ §\"Channel autocomplete\" (registration
+-- list) and §\"Onboarding (O-series)\" O3 (the golden enumeration).
+botFatherCommands :: [(Text, Text)]
+botFatherCommands = botFatherCommandList
+
+-- | Encode 'botFatherCommands' as the JSON payload Telegram's
+-- @setMyCommands@ endpoint accepts.
+--
+-- The endpoint expects @{ \"commands\": [ { \"command\": \"...\",
+-- \"description\": \"...\" }, ... ] }@. The leading slash on each
+-- command is stripped (Telegram expects bare command words). The
+-- resulting payload is a strict 'ByteString' suitable for an
+-- @application\/json@ POST body.
+encodeBotFatherCommands :: [(Text, Text)] -> ByteString
+encodeBotFatherCommands cmds =
+  BL.toStrict (encode (object ["commands" .= map toEntry cmds]))
+  where
+    toEntry (c, d) = object
+      [ "command"     .= T.dropWhile (== '/') c
+      , "description" .= d
+      ]
+
+-- | Register 'botFatherCommands' with Telegram via the
+-- @setMyCommands@ Bot API method.
+--
+-- POSTs an @application\/json@ payload to
+-- @\<api-base\>\/bot\<token\>\/setMyCommands@. Logs (but does not
+-- throw) on failure: BotFather autocomplete is a UX enhancement, not
+-- a correctness requirement, so a transient failure at startup must
+-- not prevent the bot from booting.
+--
+-- Mirrors the existing 'postTelegram' helper for URL construction
+-- (same shape, different endpoint name and Content-Type).
+--
+-- Per Tabbed Chat O3 this is invoked once at channel startup by the
+-- gateway boot path (callers wire it in alongside 'mkTelegramChannel').
+registerBotFatherCommands :: TelegramChannel -> IO ()
+registerBotFatherCommands tc = do
+  let config = _tch_config tc
+      url    = _tc_apiBase config <> "/bot" <> _tc_botToken config
+            <> "/setMyCommands"
+      body   = encodeBotFatherCommands botFatherCommands
+  case mkAllowedUrl AllowAll url of
+    Left e ->
+      _lh_logError (_tch_log tc) $
+        "BotFather setMyCommands URL rejected: " <> T.pack (show e)
+    Right allowed -> do
+      result <- try @SomeException
+                  (_nh_httpPost (_tch_network tc) allowed body)
+      case result of
+        Left e ->
+          _lh_logError (_tch_log tc) $
+            "BotFather setMyCommands failed: " <> T.pack (show e)
+        Right resp
+          | _hr_statusCode resp == 200 ->
+              _lh_logInfo (_tch_log tc)
+                "BotFather setMyCommands registered tab commands"
+          | otherwise ->
+              _lh_logError (_tch_log tc) $
+                "BotFather setMyCommands HTTP "
+                  <> T.pack (show (_hr_statusCode resp))
