@@ -300,17 +300,20 @@ spec = do
       f1 <- readIORef (_env_focus env)
       f1 `shouldBe` Nothing
 
-    it ("L7 (WU9): /tab resume <valid-id> — emits a banner; full "
-        <> "resume-into-tab wiring lands in WU10. /tab resume "
+    it ("L7 (WU10): /tab resume <valid-id> — dispatcher walks the "
+        <> "resolveSessionRef + resumeSession + spawnTab chain; "
+        <> "session-not-found emits a redacted banner. /tab resume "
         <> "../../etc/passwd is parser-rejected at parse time") $ do
       env <- mkAiTestEnv Nothing
       ds <- mkAiDispatcherState env
-      -- Valid id (alphanum + dash): emit-and-defer (WU9 scope).
+      -- Valid id form (alphanum + dash) but no such session on disk
+      -- in the test env's HOME: dispatcher emits the redacted
+      -- 'no such session' banner from the L7 wiring (WU10).
       dispatchOneAi env ds "/tab resume valid-session-id"
       drained <- drainOut env
       let bs = [t | (SrcDispatcher, BannerLine t) <- drained]
       bs `shouldSatisfy` any (\t -> "tab resume" `T.isInfixOf` t
-                                 && "WU10" `T.isInfixOf` t)
+                                 && "valid-session-id" `T.isInfixOf` t)
       -- Invalid id is rejected by the parser at parseSlashCommandForm
       -- (ParseErrorInvalidSessionId surfaces as "input not recognized").
       dispatchOneAi env ds "/tab resume ../../etc/passwd"

@@ -79,12 +79,14 @@ module PureClaw.Routing.Dispatcher
 
 import Control.Concurrent.STM (atomically, writeTBQueue)
 import Control.Exception (SomeException, bracket, mask, mask_, onException, try)
+import Control.Monad (when)
 import Data.IORef
   ( IORef
   , atomicModifyIORef'
   , modifyIORef'
   , newIORef
   , readIORef
+  , writeIORef
   )
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
@@ -105,8 +107,10 @@ import PureClaw.Agent.SlashCommands
   ( ForceMode (..)
   , SlashCommand (..)
   , TabSlashCommand (..)
+  , getSessionsDir
   )
-import PureClaw.Core.Types (UserId)
+import PureClaw.Core.Types (SessionId (..), UserId, unSessionId)
+import PureClaw.Session.Handle qualified as Session
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Handles.Tab
@@ -120,6 +124,7 @@ import PureClaw.Handles.Tab
   , TabIndex
   , TabKind (..)
   , TabRunner (..)
+  , TabStatus (..)
   , toPublicTabError
   , unTabIndex
   )
@@ -401,6 +406,14 @@ safeIgnore m = do
 -- spawn-prompt rendering (text on CLI \/ Signal, inline-keyboard
 -- friendly on Telegram). '_ds_factory' is the per-kind tab factory
 -- the dispatcher will dispatch through for all WU9 spawn paths.
+--
+-- /WU10 addition:/ '_ds_pendingRetry' records per-user
+-- @(TabIndex, SpawnArgs)@ for the most-recently emitted X1 retry
+-- prompt. A subsequent \"1\" or \"2\" message from the same user is
+-- interpreted as a retry-or-close reply (X1 reply parsing — WU9
+-- emitted the prompt but did NOT interpret the reply). The map is
+-- single-entry-per-user; a new prompt overrides the previous
+-- expectation.
 data DispatcherState = DispatcherState
   { _ds_rateLimiter    :: !RateLimiter
     -- ^ Per-chat-user spawn token bucket (S7).
@@ -413,6 +426,10 @@ data DispatcherState = DispatcherState
     -- ^ The per-kind factory the dispatcher uses for spawning. Defaults
     -- to 'defaultTabFactory env' for production; tests inject a
     -- synthetic factory via 'newDispatcherState'.
+  , _ds_pendingRetry   :: !(IORef (Map UserId (TabIndex, AutoSpawn.SpawnArgs)))
+    -- ^ Per-user expectation of an X1 retry reply (WU10). Populated
+    -- by the focus path when it observes a 'Crashed' tab; cleared on
+    -- reply or on any other intervening user input.
   }
 
 -- | Build a fresh 'DispatcherState' from an 'AgentEnv'.
@@ -424,12 +441,14 @@ newDispatcherState :: AgentEnv -> TabFactory -> IO DispatcherState
 newDispatcherState env factory = do
   rl       <- newRateLimiter (_rc_spawnRateLimit (_env_routingConfig env))
   argsRef  <- newIORef Map.empty
+  pendRef  <- newIORef Map.empty
   let renderer = Prompt.mkDefaultPromptRenderer (_env_channel env)
   pure DispatcherState
     { _ds_rateLimiter    = rl
     , _ds_spawnArgs      = argsRef
     , _ds_promptRenderer = renderer
     , _ds_factory        = factory
+    , _ds_pendingRetry   = pendRef
     }
 
 
@@ -464,6 +483,19 @@ dispatchOne = dispatchOneWith
 -- breaking the public 'dispatchOne' contract.
 dispatchOneWith :: AgentEnv -> DispatcherState -> UserId -> Text -> IO ()
 dispatchOneWith env ds uid raw = do
+  -- WU10 — X1 retry-reply intercept: a bare "1" or "2" from a user with
+  -- a pending crashed-tab retry expectation is interpreted as a
+  -- retry/close reply. Any other input clears the pending expectation
+  -- (so a follow-up retry must be initiated by re-focusing the tab).
+  pendingHit <- tryRetryReply env ds uid raw
+  if pendingHit
+    then pure ()
+    else doDispatchOne env ds uid raw
+
+-- | Main dispatch body, factored out so the X1 retry-reply intercept
+-- in 'dispatchOneWith' can short-circuit without nesting.
+doDispatchOne :: AgentEnv -> DispatcherState -> UserId -> Text -> IO ()
+doDispatchOne env ds uid raw = do
   let rc = _env_routingConfig env
   case Parse.parseInput rc raw of
     Left _err ->
@@ -472,7 +504,7 @@ dispatchOneWith env ds uid raw = do
       -- (no constructor leaks).
       emitDispatcherBanner env "input not recognized"
 
-    Right (Switch idx) ->
+    Right (Switch idx) -> do
       -- A1 \/ A3 \/ A4 \/ A5 \/ A6: route through the AutoSpawn handler
       -- so the auto-spawn truth table (present-tab focus, missing-tab
       -- auto-spawn, missing-tab prompt) is owned by ONE module.
@@ -482,6 +514,10 @@ dispatchOneWith env ds uid raw = do
         (emitDispatcherBanner env)
         (_ds_spawnArgs ds)
         idx
+      -- WU10 — X1 expectation capture: if the focused tab is now
+      -- Crashed, record the spawn args under the user's pending-retry
+      -- map so a subsequent "1"/"2" reply lands somewhere.
+      noteCrashedExpectation env ds uid idx
 
     Right (Inject idx payload) ->
       injectTo env idx payload
@@ -504,17 +540,116 @@ dispatchOneWith env ds uid raw = do
       dispatchSlash env ds uid cmd
 
 
--- | Acknowledge a slash command on the dispatcher's source without
--- forwarding to any provider. Consumes one rate-limit token per call
--- so the S7 gate is exercised by the slash-command surface as well as
--- the explicit spawn UX in WU9.
-ratelimitedSlashAck :: AgentEnv -> DispatcherState -> UserId -> IO ()
-ratelimitedSlashAck env ds uid = do
-  now <- getCurrentTime
-  ok <- tryConsumeSpawnToken (_ds_rateLimiter ds) uid now
-  if ok
-    then emitDispatcherBanner env "(slash command queued)"
-    else emitDispatcherBanner env "rate limit: too many recent spawns"
+-- ---------------------------------------------------------------------------
+-- X1 retry-reply handling (WU10 fills in the WU9-deferred wiring)
+-- ---------------------------------------------------------------------------
+
+-- | Intercept a bare \"1\" or \"2\" reply from a user with a pending
+-- retry expectation. Returns 'True' if the input was consumed as a
+-- retry reply (and the caller should NOT continue dispatch), 'False'
+-- otherwise.
+--
+-- The pending-retry map is cleared on every non-reply input — sending
+-- any other message dismisses the prompt.
+tryRetryReply
+  :: AgentEnv -> DispatcherState -> UserId -> Text -> IO Bool
+tryRetryReply env ds uid raw = do
+  let trimmed = T.strip raw
+  pending <- readIORef (_ds_pendingRetry ds)
+  case Map.lookup uid pending of
+    Nothing -> pure False
+    Just (idx, sa) -> case trimmed of
+      "1" -> do
+        clearPendingRetry ds uid
+        retryCrashedTab env ds uid idx sa
+        pure True
+      "2" -> do
+        clearPendingRetry ds uid
+        closeCrashedTab env idx
+        pure True
+      _ -> do
+        -- Any other input dismisses the prompt — the user moved on.
+        clearPendingRetry ds uid
+        pure False
+
+-- | Record an X1 retry expectation for the user, if the focused tab
+-- is Crashed. No-op for any other status (Active / Idle) so non-crashed
+-- focus paths don't leak pending entries.
+noteCrashedExpectation
+  :: AgentEnv -> DispatcherState -> UserId -> TabIndex -> IO ()
+noteCrashedExpectation env ds uid idx = do
+  mTab <- Registry.lookupTab (_env_tabs env) idx
+  case mTab of
+    Nothing -> pure ()
+    Just th -> do
+      r <- try @SomeException (_tabHandle_status th)
+      case r of
+        Right (Crashed _) -> do
+          argsMap <- readIORef (_ds_spawnArgs ds)
+          case Map.lookup (unTabIndex idx) argsMap of
+            Just sa ->
+              atomicModifyIORef' (_ds_pendingRetry ds)
+                (\m -> (Map.insert uid (idx, sa) m, ()))
+            Nothing ->
+              -- No spawn args recorded — retry would have nothing to
+              -- replay. Skip the expectation entry rather than racing
+              -- the user into a dead-end "1" reply.
+              pure ()
+        _ -> pure ()
+
+-- | Retry a crashed tab: close the existing tab handle (idempotent +
+-- never-throws) and respawn with the original spawn args (X2 \/ X3).
+-- Spawning is rate-limited (S7) as usual.
+retryCrashedTab
+  :: AgentEnv
+  -> DispatcherState
+  -> UserId
+  -> TabIndex
+  -> AutoSpawn.SpawnArgs
+  -> IO ()
+retryCrashedTab env ds uid idx sa = do
+  -- Drive the close on the old (crashed) handle so resources are
+  -- released. The handle's _tabHandle_close is documented idempotent.
+  mTab <- Registry.lookupTab (_env_tabs env) idx
+  for_ mTab $ \th ->
+    safeIgnore (_tabHandle_close th CloseGraceful)
+  -- Remove the old entry from the registry so spawnTab can re-use
+  -- the index.
+  _ <- Registry.removeTab (_env_tabs env) idx
+  -- Respawn with the original args.
+  r <- ratelimitedSpawn env ds uid
+         (AutoSpawn._sa_kind sa) (AutoSpawn._sa_args sa)
+  case r of
+    Left tabErr ->
+      emitDispatcherBanner env
+        ("/" <> tShowIdx idx <> ": retry failed — "
+          <> unPublicTabError (toPublicTabError tabErr))
+    Right newIdx -> do
+      writeIORef (_env_focus env) (Just newIdx)
+      emitDispatcherBanner env
+        ("/" <> tShowIdx newIdx <> ": retried")
+
+-- | Close a crashed tab without retrying. The handle's
+-- '_tabHandle_close' is invoked (idempotent) and the registry entry
+-- is removed so the index is free for re-use.
+closeCrashedTab :: AgentEnv -> TabIndex -> IO ()
+closeCrashedTab env idx = do
+  mTab <- Registry.lookupTab (_env_tabs env) idx
+  for_ mTab $ \th -> safeIgnore (_tabHandle_close th CloseGraceful)
+  _ <- Registry.removeTab (_env_tabs env) idx
+  -- If the closed tab was focused, clear focus so the next Default
+  -- input either implicit-spawns or routes correctly.
+  mFocus <- readIORef (_env_focus env)
+  when (mFocus == Just idx) $
+    writeIORef (_env_focus env) Nothing
+  emitDispatcherBanner env
+    ("/" <> tShowIdx idx <> ": closed")
+
+-- | Drop the pending retry entry for the user. Idempotent.
+clearPendingRetry :: DispatcherState -> UserId -> IO ()
+clearPendingRetry ds uid =
+  atomicModifyIORef' (_ds_pendingRetry ds)
+    (\m -> (Map.delete uid m, ()))
 
 
 -- | Spawn a tab via the dispatcher's configured factory, consuming
@@ -544,15 +679,170 @@ ratelimitedSpawn env ds uid kind args = do
     else spawnTabWith env (_ds_factory ds) kind args
 
 
--- | Dispatch a slash command. The @\/tab*@ family lands here; non-tab
--- commands fall through to the existing rate-limited slash-ack
--- (preserving the WU5 behaviour for the non-tab surface — WU10 wires
--- existing commands through the focused-tab's @_tabHandle_enqueueSlash@).
+-- | Dispatch a slash command. The @\/tab*@ family is routed to the
+-- AutoSpawn handlers; every other slash command is delivered to the
+-- focused AI tab via '_tabHandle_enqueueSlash' (WU10 — I5 wiring).
+--
+-- The focused-tab projection rules:
+--
+--   * Focused 'KindAi' tab → enqueue 'SlashCmd' on the tab's input queue;
+--     the tab loop runs @executeSlashCommand env cmd ctx@ against its
+--     per-tab context (E5 single-writer invariant).
+--   * Focused non-AI tab → emit a redacted PublicError
+--     (\"@\/N\: tab kind does not support this command@\") and do NOT
+--     enqueue. The 'TabUnsupportedCommand' is the canonical surface
+--     mirroring K5's @\/target@ pattern.
+--   * No focus → fall back to the in-dispatcher legacy executor against
+--     an empty 'Context'. This preserves single-tab behaviour for
+--     channels that have not yet auto-spawned a tab and is also what
+--     drives the empty-registry K3 implicit-spawn path through the
+--     normal channel flow.
 dispatchSlash
   :: AgentEnv -> DispatcherState -> UserId -> SlashCommand -> IO ()
 dispatchSlash env ds uid cmd = case cmd of
   CmdTab tabCmd -> dispatchTab env ds uid tabCmd
-  _             -> ratelimitedSlashAck env ds uid
+  _             -> routeToFocused env ds uid cmd
+
+-- | Route a non-@\/tab*@ slash command to the focused tab via
+-- '_tabHandle_enqueueSlash' (WU10 — I5 wiring).
+--
+-- Returns immediately without blocking on the tab loop's processing.
+-- Per E5, the tab loop is the single writer to its per-tab context.
+routeToFocused
+  :: AgentEnv -> DispatcherState -> UserId -> SlashCommand -> IO ()
+routeToFocused env ds uid cmd = do
+  -- Consume one rate-limit token (S7) per slash dispatch — exercises the
+  -- same gate the pre-WU10 'ratelimitedSlashAck' walked.
+  now <- getCurrentTime
+  ok  <- tryConsumeSpawnToken (_ds_rateLimiter ds) uid now
+  if not ok
+    then emitDispatcherBanner env "rate limit: too many recent spawns"
+    else do
+      mFocus <- readIORef (_env_focus env)
+      case mFocus of
+        Nothing  -> emitDispatcherBanner env (noFocusBanner cmd)
+        Just idx -> enqueueOnFocused env idx cmd
+
+-- | Look up the focused tab and dispatch the slash command per kind.
+-- On 'KindAi' the command is enqueued; on any other kind we surface a
+-- redacted PublicError without enqueueing (K5 pattern, generalised).
+enqueueOnFocused :: AgentEnv -> TabIndex -> SlashCommand -> IO ()
+enqueueOnFocused env idx cmd = do
+  mTab <- Registry.lookupTab (_env_tabs env) idx
+  case mTab of
+    Nothing -> emitDispatcherBanner env
+                 ("/" <> tShowIdx idx <> ": no such tab")
+    Just th -> case _tabHandle_kind th of
+      KindAi -> do
+        r <- safeEnqueueSlash th cmd
+        case r of
+          Right () -> pure ()
+          Left  e  -> emitDispatcherBanner env
+                        ("/" <> tShowIdx idx <> ": "
+                         <> unPublicTabError (toPublicTabError e))
+      _ ->
+        -- Non-AI focused tab: per the K5 generalisation, surface a
+        -- redacted PublicError and do NOT enqueue.
+        emitDispatcherBanner env
+          ("/" <> tShowIdx idx
+            <> ": tab kind does not support this command")
+
+-- | Banner shown when a non-@\/tab*@ slash command is received but
+-- nothing is focused. The cases are too disparate to render a fully
+-- contextual message; we emit a short hint to spawn or focus a tab so
+-- the slash command can land somewhere.
+noFocusBanner :: SlashCommand -> Text
+noFocusBanner _ =
+  "no focused tab — focus one with /N or spawn one with /tab new N"
+
+-- | Wrap '_tabHandle_enqueueSlash' so any synchronous exception
+-- becomes a redacted 'TabConcurrencyLimit' rather than a dispatcher
+-- crash. Mirrors 'safeEnqueue' for the 'UserText' path.
+safeEnqueueSlash :: TabHandle -> SlashCommand -> IO (Either TabError ())
+safeEnqueueSlash th cmd = do
+  r <- try @SomeException (_tabHandle_enqueueSlash th cmd)
+  pure $ case r of
+    Left  _e   -> Left (TabConcurrencyLimit 0)
+    Right inner -> inner
+
+
+-- ---------------------------------------------------------------------------
+-- handleResumeIntoTab — L7 (WU10 fills in the WU9-deferred wiring)
+-- ---------------------------------------------------------------------------
+
+-- | Handle @\/tab resume \<id\>@. The parser already validated the
+-- 'SessionId' via 'mkSessionId' (P15a). WU10 wires the L7 chain:
+--
+--   1. 'Session.resolveSessionRef' — resolve the id under
+--      @~\/.pureclaw\/sessions@.
+--   2. 'Session.resumeSession' — load metadata + open transcript.
+--   3. @writeIORef '_env_session'@ — make the resumed session the
+--      active one so the spawned tab's factory snapshots it.
+--   4. @'spawnTab' env 'KindAi' []@ — create a new KindAi tab via the
+--      dispatcher's configured factory (rate-limited per S7).
+--
+-- On any failure the dispatcher emits a redacted banner and aborts
+-- without touching '_env_session' (the previous active session
+-- remains).
+handleResumeIntoTab
+  :: AgentEnv -> DispatcherState -> UserId -> SessionId -> IO ()
+handleResumeIntoTab env ds uid sid = do
+  sessionsDir <- getSessionsDir
+  resolved <- try @SomeException
+                (Session.resolveSessionRef sessionsDir (unSessionId sid))
+  case resolved of
+    Left _e ->
+      emitDispatcherBanner env
+        ("/tab resume " <> unSessionId sid <> ": resolve failed")
+    Right (Left Session.NotFound) ->
+      emitDispatcherBanner env
+        ("/tab resume " <> unSessionId sid <> ": no such session")
+    Right (Left (Session.Ambiguous _matches)) ->
+      emitDispatcherBanner env
+        ("/tab resume " <> unSessionId sid <> ": ambiguous session id")
+    Right (Right realSid) -> do
+      handleResolved env ds uid sessionsDir realSid
+
+-- | Common tail of 'handleResumeIntoTab': resume the session, swap it
+-- into 'AgentEnv', then spawn a new AI tab. Factored out so the
+-- top-level handler stays readable.
+handleResolved
+  :: AgentEnv
+  -> DispatcherState
+  -> UserId
+  -> FilePath
+  -> SessionId
+  -> IO ()
+handleResolved env ds uid sessionsDir realSid = do
+  resumed <- try @SomeException
+               (Session.resumeSession (_env_logger env) sessionsDir realSid)
+  case resumed of
+    Left _e ->
+      emitDispatcherBanner env
+        ("/tab resume " <> unSessionId realSid <> ": resume failed")
+    Right (Left _err) ->
+      emitDispatcherBanner env
+        ("/tab resume " <> unSessionId realSid <> ": resume failed")
+    Right (Right newSession) -> do
+      -- L7 design: replace the active session in place so the spawned
+      -- tab's factory snapshot picks it up. Prior tabs that already
+      -- snapshotted '_env_session' keep their handles (v1 limitation
+      -- noted in design's K7 §). The new tab will own the resumed
+      -- session.
+      writeIORef (_env_session env) newSession
+      spawnResult <- ratelimitedSpawn env ds uid KindAi []
+      case spawnResult of
+        Left tabErr ->
+          emitDispatcherBanner env
+            ("/tab resume " <> unSessionId realSid <> ": "
+              <> unPublicTabError (toPublicTabError tabErr))
+        Right newIdx -> do
+          -- Set focus to the newly-spawned tab so the user lands on
+          -- it immediately.
+          writeIORef (_env_focus env) (Just newIdx)
+          emitDispatcherBanner env
+            ("/tab resume " <> unSessionId realSid <> ": resumed at /"
+              <> tShowIdx newIdx)
 
 -- | Dispatch a @\/tab*@ command to the AutoSpawn handlers. Each branch
 -- maps a 'TabSlashCommand' constructor to the appropriate handler.
@@ -586,7 +876,7 @@ dispatchTab env ds uid tcmd = case tcmd of
       rawIdx
 
   TabResumeCmd sid ->
-    AutoSpawn.handleResume env (emitDispatcherBanner env) sid
+    handleResumeIntoTab env ds uid sid
 
   TabRenameCmd rawIdx newName ->
     AutoSpawn.handleRename env

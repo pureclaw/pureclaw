@@ -994,19 +994,23 @@ executeSlashCommand env (CmdSession sub) ctx = do
 executeSlashCommand env (CmdMcp sub) ctx = do
   executeMcpCommand env sub ctx
 
--- | Tabbed Chat @\/tab*@ handler stub.
+-- | Tabbed Chat @\/tab*@ fallback handler.
 --
--- WU2 (Tabbed Chat #51) introduces the 'CmdTab' constructor so the
--- parser ('PureClaw.Routing.Parse.parseInput') can recognise the
--- @\/tab*@ command family at parser-test time. Real per-command
--- handlers (auto-spawn UX, close, rename, resume, focus, dashboard)
--- land in WU9 ('PureClaw.Routing.AutoSpawn' \/ @Dashboard@). Until
--- then, an in-loop dispatch through this function emits a single
--- user-visible breadcrumb so a smoke-test still produces an
--- observable reply rather than silent no-op.
+-- The canonical @\/tab*@ surface is owned by
+-- 'PureClaw.Routing.Dispatcher.dispatchTab' (WU9) — the dispatcher
+-- intercepts every 'CmdTab' before it reaches this executor, so
+-- production paths NEVER call this branch.
+--
+-- This case remains as a defensive fallback for two situations:
+-- (1) the legacy single-tab 'PureClaw.Agent.Loop.runAgentLoop' is in
+-- use and the user typed a @\/tab*@ command (Tabbed Chat isn't wired
+-- in that path); (2) an AI tab loop somehow received a 'CmdTab' via
+-- '_tabHandle_enqueueSlash' (the I5 path) — defensive coverage.
 executeSlashCommand env (CmdTab _) ctx = do
   _ch_send (_env_channel env)
-    (OutgoingMessage "Tab commands are wired in WU9 (Tabbed Chat #51).")
+    (OutgoingMessage
+       "Tab commands require the tabbed-chat dispatcher \
+       \(PureClaw.Routing.Dispatcher.runDispatcher).")
   pure ctx
 
 executeSlashCommand env (CmdVault sub) ctx = do

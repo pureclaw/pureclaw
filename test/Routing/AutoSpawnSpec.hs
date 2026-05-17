@@ -579,7 +579,9 @@ spec = do
       PureClaw.Routing.AutoSpawn.splitArgs Nothing `shouldBe` []
       PureClaw.Routing.AutoSpawn.splitArgs (Just "a b  c") `shouldBe` ["a","b","c"]
 
-    it "handleResume emits a banner mentioning WU10" $ do
+    it ("handleResume (now wired in WU10) — dispatcher walks the "
+        <> "resolveSessionRef + resumeSession chain; a not-found "
+        <> "session emits the redacted 'no such session' banner") $ do
       env <- mkAutoSpawnEnv
       queue <- newIORef []
       ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
@@ -587,7 +589,7 @@ spec = do
       drained <- drainQueue (_env_channelOutQ env)
       banners drained `shouldSatisfy`
         any (\t -> "tab resume" `T.isInfixOf` t
-                && "WU10" `T.isInfixOf` t)
+                && "good-id" `T.isInfixOf` t)
 
     it "handleDefault: spawn failure (factory Left) emits PublicError" $ do
       env <- mkAutoSpawnEnv

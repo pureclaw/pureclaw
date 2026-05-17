@@ -73,6 +73,8 @@ import PureClaw.Providers.Class (SomeProvider)
 import PureClaw.Routing.Config (defaultRoutingConfig)
 import PureClaw.Routing.Dispatcher
   ( TabFactory
+  , _ds_pendingRetry
+  , _ds_spawnArgs
   , closeAllTabs
   , dispatchOne
   , emitCrashedRedacted
@@ -85,6 +87,7 @@ import PureClaw.Routing.Dispatcher
   , spawnTabWith
   , tryConsumeSpawnToken
   )
+import PureClaw.Routing.AutoSpawn qualified
 import PureClaw.Routing.Registry (insertTab)
 import PureClaw.Routing.Types
   ( ChannelEvent (..)
@@ -754,8 +757,9 @@ spec = do
            BannerLine t -> "input not recognized" `T.isInfixOf` t
            _            -> False)
 
-    it ("dispatchOne — slash command success path emits "
-        <> "'(slash command queued)' banner") $ do
+    it ("dispatchOne — slash command with no focus emits the "
+        <> "no-focused-tab hint (WU10 — was '(slash command queued)' "
+        <> "in WU5; WU10 routes through focused-tab projection)") $ do
       fch <- newFakeChannel
       env <- mkDispatcherEnv (fakeChannelHandle fch)
       st  <- mkSyntheticTab (ti 0) KindAi (Idle t0)
@@ -764,7 +768,7 @@ spec = do
       drained <- drainQueue (_env_channelOutQ env)
       drained `shouldSatisfy` any
         (\(_, ev) -> case ev of
-           BannerLine t -> "slash command queued" `T.isInfixOf` t
+           BannerLine t -> "no focused tab" `T.isInfixOf` t
            _            -> False)
 
     it ("Inject — _tabHandle_send returning Left propagates as a "
@@ -939,6 +943,153 @@ spec = do
       _ <- readIORef callCount
       _ <- readIORef (_env_runners env)
       pure ()
+
+  describe "X1 retry-reply (WU10 fills in WU9-deferred wiring)" $ do
+    let pubErr = PublicTabError "tab: ai loop crashed"
+
+    it ("/N on a crashed tab arms the pending-retry expectation; a "
+        <> "subsequent '1' triggers retry (close + respawn with the "
+        <> "original args)") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      crashedTab <- mkSyntheticTab (ti 0) KindAi (Crashed pubErr)
+      _ <- insertTab (_env_tabs env) (ti 0) (_st_handle crashedTab)
+      -- Track spawn invocations so we can confirm respawn happened.
+      respawnLog <- newIORef ([] :: [(TabKind, [Text])])
+      let factory _kind _idx args = do
+            atomicModifyIORef' respawnLog
+              (\xs -> ((KindAi, args) : xs, ()))
+            -- Return a new synthetic tab so spawnTab succeeds.
+            new <- mkSyntheticTab (ti 0) KindAi (Idle t0)
+            pure (Right (_st_handle new))
+      ds <- newDispatcherState env factory
+      -- Pre-seed the spawn args so retryCrashedTab has something to
+      -- replay (this is the same surface AutoSpawn fills on a
+      -- successful spawn).
+      let saMap = _ds_spawnArgs ds
+      atomicModifyIORef' saMap
+        (\m -> (Map.insert 0 PureClaw.Routing.AutoSpawn.SpawnArgs
+                              { PureClaw.Routing.AutoSpawn._sa_kind = KindAi
+                              , PureClaw.Routing.AutoSpawn._sa_args = ["ai-name"]
+                              } m, ()))
+      -- Step 1: /0 on the crashed tab — emits crashed banner + arms
+      -- the pending-retry map.
+      dispatchOne env ds (UserId "u") "/0"
+      _ <- drainQueue (_env_channelOutQ env)  -- discard initial banners
+      -- Step 2: "1" reply — should trigger retry path.
+      dispatchOne env ds (UserId "u") "1"
+      respawns <- readIORef respawnLog
+      length respawns `shouldBe` 1
+      case respawns of
+        ((KindAi, ["ai-name"]) : _) -> pure ()
+        other -> expectationFailure
+                   ("expected respawn with original args; got " <> show other)
+      -- After consumption, the pending-retry slot is cleared.
+      let pendRef = _ds_pendingRetry ds
+      pend <- readIORef pendRef
+      Map.lookup (UserId "u") pend `shouldBe` Nothing
+
+    it ("/N on a crashed tab arms the pending-retry expectation; a "
+        <> "subsequent '2' triggers close (no respawn)") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      crashedTab <- mkSyntheticTab (ti 0) KindAi (Crashed pubErr)
+      _ <- insertTab (_env_tabs env) (ti 0) (_st_handle crashedTab)
+      respawnLog <- newIORef ([] :: [(TabKind, [Text])])
+      let factory _kind _idx args = do
+            atomicModifyIORef' respawnLog
+              (\xs -> ((KindAi, args) : xs, ()))
+            new <- mkSyntheticTab (ti 0) KindAi (Idle t0)
+            pure (Right (_st_handle new))
+      ds <- newDispatcherState env factory
+      atomicModifyIORef' (_ds_spawnArgs ds)
+        (\m -> (Map.insert 0 PureClaw.Routing.AutoSpawn.SpawnArgs
+                              { PureClaw.Routing.AutoSpawn._sa_kind = KindAi
+                              , PureClaw.Routing.AutoSpawn._sa_args = ["x"]
+                              } m, ()))
+      dispatchOne env ds (UserId "u") "/0"
+      _ <- drainQueue (_env_channelOutQ env)
+      dispatchOne env ds (UserId "u") "2"
+      respawns <- readIORef respawnLog
+      respawns `shouldBe` []
+      -- Tab 0 removed from registry.
+      tabs <- readIORef (_env_tabs env)
+      IntMap.member 0 tabs `shouldBe` False
+      -- Close banner emitted.
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy` any ("closed" `T.isInfixOf`)
+
+    it ("a non-'1'/'2' input from a user with a pending-retry "
+        <> "expectation clears the expectation and proceeds with "
+        <> "normal dispatch") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      crashedTab <- mkSyntheticTab (ti 0) KindAi (Crashed pubErr)
+      _ <- insertTab (_env_tabs env) (ti 0) (_st_handle crashedTab)
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      atomicModifyIORef' (_ds_spawnArgs ds)
+        (\m -> (Map.insert 0 PureClaw.Routing.AutoSpawn.SpawnArgs
+                              { PureClaw.Routing.AutoSpawn._sa_kind = KindAi
+                              , PureClaw.Routing.AutoSpawn._sa_args = []
+                              } m, ()))
+      dispatchOne env ds (UserId "u") "/0"
+      _ <- drainQueue (_env_channelOutQ env)
+      -- Send unrelated input → clears pending-retry slot.
+      -- (a Default text input would normally enqueue on the focused
+      -- tab; here the focused tab is crashed but the synthetic tab's
+      -- enqueueSlash returns Right () so no error fires.)
+      dispatchOne env ds (UserId "u") "unrelated"
+      pend <- readIORef (_ds_pendingRetry ds)
+      Map.lookup (UserId "u") pend `shouldBe` Nothing
+
+    it ("noteCrashedExpectation skips when no spawn args are "
+        <> "recorded for the tab (so '1' would have nothing to "
+        <> "replay — surfacing a banner makes more sense than a "
+        <> "dead-end reply)") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      crashedTab <- mkSyntheticTab (ti 0) KindAi (Crashed pubErr)
+      _ <- insertTab (_env_tabs env) (ti 0) (_st_handle crashedTab)
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      -- NO spawn args recorded for /0.
+      dispatchOne env ds (UserId "u") "/0"
+      pend <- readIORef (_ds_pendingRetry ds)
+      Map.lookup (UserId "u") pend `shouldBe` Nothing
+
+    it ("the retry path emits a redacted banner when the respawn "
+        <> "factory returns Left") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      crashedTab <- mkSyntheticTab (ti 0) KindAi (Crashed pubErr)
+      _ <- insertTab (_env_tabs env) (ti 0) (_st_handle crashedTab)
+      let badFactory _ _ _ = pure (Left (TabLimitExceeded 42))
+      ds <- newDispatcherState env badFactory
+      atomicModifyIORef' (_ds_spawnArgs ds)
+        (\m -> (Map.insert 0 PureClaw.Routing.AutoSpawn.SpawnArgs
+                              { PureClaw.Routing.AutoSpawn._sa_kind = KindAi
+                              , PureClaw.Routing.AutoSpawn._sa_args = ["x"]
+                              } m, ()))
+      dispatchOne env ds (UserId "u") "/0"
+      _ <- drainQueue (_env_channelOutQ env)
+      dispatchOne env ds (UserId "u") "1"
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy` any ("retry failed" `T.isInfixOf`)
+
+  describe "L7 resume-into-tab (WU10 fills in WU9-deferred wiring)" $ do
+    it ("a session id that does not resolve emits the redacted "
+        <> "'no such session' banner") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      -- The session id is well-formed but won't resolve under the
+      -- test env's HOME → resolveSessionRef returns NotFound.
+      dispatchOne env ds (UserId "u") "/tab resume nonexistent-session"
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy`
+        any (\t -> "nonexistent-session" `T.isInfixOf` t)
 
 
 -- | A factory that intentionally errors when invoked — used as a

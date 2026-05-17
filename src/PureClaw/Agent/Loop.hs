@@ -43,6 +43,26 @@ import PureClaw.Transcript.Provider
 --
 -- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
 -- Provider errors are logged and a 'PublicError' is sent to the channel.
+--
+-- == WU10 (Tabbed Chat #51) refactor status
+--
+-- The original WU10 plan called for 'runAgentLoop' to become a thin
+-- wrapper around 'PureClaw.Routing.Dispatcher.runDispatcher'. WU10
+-- escalated this part of the refactor: the WU6 AI tab loop in
+-- 'PureClaw.Tab.Ai' is not yet a drop-in replacement for the
+-- single-tab semantics this loop owns (model prefix emission on
+-- channel output, tool-call execution cycle, transcript provider
+-- wrapping via 'PureClaw.Transcript.Provider.mkTranscriptProvider',
+-- '_env_onFirstStreamDone' callback, harness routing via
+-- 'PureClaw.Handles.Harness.HarnessHandle'). Migrating all of those
+-- features into 'Tab.Ai' is itself a multi-WU refactor and was
+-- deferred to WU11\/WU12.
+--
+-- For now 'runAgentLoop' is the production entry-point for the
+-- single-tab CLI flow; tabbed-chat is exercised via
+-- 'PureClaw.Routing.Dispatcher.runDispatcher' (which the K-series
+-- tests in @test\/Coexistence\/SlashCmdSpec.hs@ drive directly). The
+-- two entry points coexist until the Tab.Ai feature gap closes.
 runAgentLoop :: AgentEnv -> IO ()
 runAgentLoop env = runAgentLoopWith env []
 
