@@ -93,6 +93,20 @@ import qualified Transcript.ProviderSpec
 import qualified Session.TypesSpec
 import qualified Session.HandleSpec
 
+-- WU0 (tabbed-chat) red-phase scaffold specs
+import qualified Routing.ParseSpec
+import qualified Handles.TabSpec
+import qualified Routing.RegistrySpec
+import qualified Routing.DispatcherSpec
+import qualified Routing.ChannelOutSpec
+import qualified Routing.AutoSpawnSpec
+import qualified Tab.AiSpec
+import qualified Tab.HarnessSpec
+import qualified Tab.BackendSpec
+import qualified Coexistence.SlashCmdSpec
+import qualified Security.TabSpec
+import qualified Onboarding.StartSpec
+
 main :: IO ()
 main = hspec $ do
   describe "Auth.AnthropicOAuth" Auth.AnthropicOAuthSpec.spec
@@ -185,3 +199,16 @@ main = hspec $ do
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
   describe "Session.Types" Session.TypesSpec.spec
   describe "Session.Handle" Session.HandleSpec.spec
+  -- WU0 (tabbed-chat) red-phase scaffold specs
+  describe "Routing.Parse"        Routing.ParseSpec.spec
+  describe "Handles.Tab"          Handles.TabSpec.spec
+  describe "Routing.Registry"     Routing.RegistrySpec.spec
+  describe "Routing.Dispatcher"   Routing.DispatcherSpec.spec
+  describe "Routing.ChannelOut"   Routing.ChannelOutSpec.spec
+  describe "Routing.AutoSpawn"    Routing.AutoSpawnSpec.spec
+  describe "Tab.Ai"               Tab.AiSpec.spec
+  describe "Tab.Harness"          Tab.HarnessSpec.spec
+  describe "Tab.Backend"          Tab.BackendSpec.spec
+  describe "Coexistence.SlashCmd" Coexistence.SlashCmdSpec.spec
+  describe "Security.Tab"         Security.TabSpec.spec
+  describe "Onboarding.Start"     Onboarding.StartSpec.spec
