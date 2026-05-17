@@ -1,90 +1,112 @@
 ---
-issue: 49
-pr: 48
-design_doc: docs/terminal-backend-abstractions.md
-status: draft
-date_drafted: 2026-05-14
+issue: 51
+pr: pending
+design_doc: docs/tabbed-chat.md
+status: approved — in-progress
+date_drafted: 2026-05-16
+date_approved: 2026-05-16
+gate-iterations: 2
+plan-review-gate: PASS (Feasibility + Completeness + Scope & Alignment, round 2)
+design-review-gate: PASS (PM + Architect + Designer + Security + CTO, round 5)
+user-approved: true
+branch: feat/terminal-backends-design
 ---
 
-# Implementation Plan — Foundational Terminal Backends
+# Implementation Plan — Tabbed Chat (Mobile-Friendly Multiplexing)
 
-**Issue:** [#49](https://github.com/pureclaw/pureclaw/issues/49)
-**Design PR:** [#48](https://github.com/pureclaw/pureclaw/pull/48)
-**Design doc:** `docs/terminal-backend-abstractions.md` (5/5 APPROVED, gate iter 3)
+**Issue:** [#51](https://github.com/pureclaw/pureclaw/issues/51)
+**Design doc:** `docs/tabbed-chat.md` (APPROVED by all 5 design-review agents over 5 rounds, commit 7562502)
+**Sibling design:** `docs/terminal-backend-abstractions.md` (Issue #49, already landed on this branch)
 
 ## Strategy
 
-13 work units (WU0–WU11, plus WU9.5 cross-cutting), ordered by
-dependency. The plan front-loads the type layer (`Handles.Backend`,
-`Redact`, no-op/in-memory backends, PtyIO seam, `Security.Path`
-additions, `Security.Policy` migration) before any concrete backend
-factory, so each factory ships against a stable foundation. Work units
-WU2 / WU4 / WU5 / WU6 are parallelisable once WU1 lands.
+13 work units (WU0–WU12), ordered by dependency. The plan front-loads test seams + type layer (WU0–WU1) so subsequent WUs flip ~120 failing tests green incrementally. Each WU is independently committable with green tests for its declared DoD scope. WU6/WU7/WU8 (Tab.Ai/Harness/Backend factories) are parallelisable once WU3–WU5 land.
 
-**Critical TDD discipline:** WU0 commits the 24 enumerated failing tests
-(one per DoD in the design doc's Acceptance Criteria) before any
-production code. Subsequent work units flip them green one by one. No
-work unit is "done" until its DoDs in the test suite are green AND
-coverage thresholds are met for the modules it adds.
+**Critical TDD discipline:** WU0 commits all ~120 failing tests (matching the design's DoD enumeration) marked `pending` where the production-code dependency hasn't landed. Subsequent WUs flip them green one by one. No WU is "done" until its declared DoDs in the test suite are green AND coverage thresholds are met for the modules it adds.
+
+**Security distribution:** S-series DoDs (S1–S11) are distributed across WUs (not in a standalone "security WU") because they're cross-cutting concerns. Each WU that touches a security-relevant code path lands the corresponding S-DoD. **S11 is a documented-assumption-only invariant (not a failing test)**: provider connection-pool isolation. It lands as a haddock note + a code-review checklist item, both attached to WU1's `Handles.Tab` module docs. No WU "covers" S11 in the test-flipping sense; verification is by code review.
+
+**Plan persistence (post-approval flow):** This plan file currently lives at `.beads/plans/tabbed-chat-plan.md`. After the plan-review-gate approves AND the user approves, the plan-review-gate skill is responsible for `cp .beads/plans/tabbed-chat-plan.md .beads/plans/active-plan.md` (preserving the source file). The terminal-backends plan currently at `active-plan.md` is moved to `.beads/plans/terminal-backends-plan.md` to retain its history. WU0 starts only after this rename.
 
 ## Pre-Flight (Plan Validation)
 
-- [x] Architecture aligned with codebase (`Handles.*` pattern, no effect system, ReaderT AppEnv IO)
-- [x] Dependency graph acyclic (WU1 is the root; all others depend on it transitively)
-- [x] API contracts spelled out in the design doc (types, signatures, examples)
-- [x] Security review passed (Security agent APPROVED iter 3)
-- [x] UI/UX (none — library-level work; no end-user UI surface)
-- [x] External dependencies identified: **`posix-pty`** (new cabal dep; firewalled to `PureClaw.Backend.Pty`)
-- [ ] **Pre-flight blocker to clear before WU0**: verify `posix-pty` builds under Nix flake on **both** `x86_64-linux` and `aarch64-darwin`. Doc lists this as DoD-eligible; the plan elevates it to a pre-flight gate because failure makes the entire SSH/Pty branch dead-on-arrival.
+- [x] Architecture aligned with codebase (Handle pattern, no effect system, ReaderT AppEnv IO).
+- [x] Dependency graph acyclic (Handles.Tab → Routing.Types → Agent.Env → Routing.{Parse,Registry,...} → Tab.* → Routing.Dispatcher → Agent.{SlashCommands,Loop}).
+- [x] API contracts spelled out in design doc (types, signatures, examples).
+- [x] Security review passed (Security agent APPROVED round 4 + post-revision mitigations).
+- [x] UI/UX (PM + Designer approved; mobile flow, onboarding, recap window all specified).
+- [x] External dependencies identified: none new (containers, stm, async already in pureclaw.cabal).
+- [ ] **Pre-flight blockers to clear before WU0**:
+  - **PF1**: Verify `Session.resolveSessionRef` is exported and stable (L7 reuses it). The design's L7 relies on this being the canonical safe path. (10-min spike: check `src/PureClaw/Session/Handle.hs:311–341` is exported via the module's export list.)
+  - **PF2**: Verify the `Provider` typeclass (`src/PureClaw/Providers/Class.hs`) and `SomeProvider` existential are stable enough for `Test.Fake.Provider` (T1) to live behind. (10-min spike: confirm the typeclass exports + check whether existing test code already fakes it.)
+  - **PF3**: Confirm `_sh_save` is sufficient for AI-tab close, or whether a new `_sh_archive` action is needed. (15-min spike: trace `_sh_save` at `src/PureClaw/Session/Handle.hs` and decide whether transcript flushing is implicit or needs separate handling.)
+  - **PF4**: Verify the existing `SlashCommand` ADT can absorb `CmdTabNew`, `CmdTabList`, `CmdTabClose`, `CmdTabFocus`, `CmdTabResume`, `CmdTabRename` without breaking exhaustiveness in unrelated handler code (`-Wincomplete-patterns -Werror`). (10-min spike: grep for SlashCommand pattern-matches.)
+
+If any pre-flight fails, fix-or-update the design BEFORE WU0 commits.
 
 ## Work Units
 
-### WU0 — TDD red-phase scaffold
+### WU0 — TDD red-phase scaffold + test seams
 
-**Purpose:** Enumerate every DoD as a failing top-level test so progress is trackable from day 1.
+**Purpose:** Enumerate every DoD as a failing top-level test so progress is trackable from day 1. Also lands the test seams (T1–T4) without which downstream WUs can't write deterministic tests.
 
-**Spec:** Create `test/Handles/BackendSpec.hs` plus per-factory spec stubs. Write one failing `it` per DoD item (**24 total** — re-count the design doc's `## Acceptance Criteria (v1)` checklist; if the count differs at WU0 commit time, scaffold for whatever the doc currently enumerates), marked `pending` if the production-code dependency hasn't landed yet. The test file structure mirrors the module layout (one Spec per factory module).
+**Spec:**
+- Create `test/Routing/ParseSpec.hs`, `test/Handles/TabSpec.hs`, `test/Routing/{RegistrySpec,DispatcherSpec,ChannelOutSpec,AutoSpawnSpec}.hs`, `test/Tab/{AiSpec,HarnessSpec,BackendSpec}.hs` plus Coexistence, Security, Onboarding spec stubs.
+- Write one failing `it` per DoD across all 14 series (P, H, E, C, D, A, L, X, B, S, K, I, O, T). Mark `pending` if production-code dependency hasn't landed yet. The test file structure mirrors the module layout.
+- Land test seams T1–T4 inside `test/Test/Fake/`:
+  - `Test.Fake.Provider`: `Provider` impl backed by `TVar [CompletionRequest]` plus TMVar-blocking variants.
+  - `Test.Fake.ChannelHandle`: `ChannelHandle` impl backed by `TVar [(UTCTime, ChannelEvent)]` plus injected `TQueue` input.
+  - `Test.Fake.TabFactory`: pure `mkFakeTabAi`/`mkFakeTabHarness`/`mkFakeTabBackend` for dispatcher/registry tests.
+  - Synchronous `_env_fork` variant returning a `TabRunner` whose `_trun_cancel` is observable via `IORef Bool`.
 
 **File scope (write):**
-- `test/Handles/BackendSpec.hs` (new)
-- `test/Backend/PtySpec.hs` (new)
-- `test/Backend/LocalSpec.hs` (new)
-- `test/Backend/SSHSpec.hs` (new)
-- `test/Backend/TmuxSpec.hs` (new)
-- `test/Internal/ShellQuoteSpec.hs` (new)
-- `test/Internal/RedactSpec.hs` (new)
-- `pureclaw.cabal` (test-suite stanza updates)
+- `test/Routing/ParseSpec.hs` (new)
+- `test/Handles/TabSpec.hs` (new)
+- `test/Routing/RegistrySpec.hs` (new)
+- `test/Routing/DispatcherSpec.hs` (new)
+- `test/Routing/ChannelOutSpec.hs` (new)
+- `test/Routing/AutoSpawnSpec.hs` (new)
+- `test/Tab/AiSpec.hs` (new)
+- `test/Tab/HarnessSpec.hs` (new)
+- `test/Tab/BackendSpec.hs` (new)
+- `test/Coexistence/SlashCmdSpec.hs` (new)
+- `test/Security/TabSpec.hs` (new)
+- `test/Onboarding/StartSpec.hs` (new)
+- `test/Test/Fake/Provider.hs` (new)
+- `test/Test/Fake/ChannelHandle.hs` (new)
+- `test/Test/Fake/TabFactory.hs` (new)
+- `pureclaw.cabal` (test-suite stanza updates + Test.Fake.* exposure)
 
-**DoDs covered:** scaffolding for 1–24 (all 24 DoDs appear as a pending `it`).
+**DoDs covered:** scaffolding for all ~115 testable DoDs across 14 series P/H/E/C/D/A/L/X/B/S/K/I/O (S11 is documented-only, not scaffolded), plus T1–T4 fully implemented. WU0 commits these as `pending` tests; they go green in the WU that lands the production code.
 
-**Dependencies:** Pre-flight (posix-pty build verification).
+**Dependencies:** Pre-flight (PF1–PF4) cleared.
 
-**Human checkpoint:** **No.**
+**Human checkpoint:** **No.** (Pure test scaffold, no production code.)
 
 ---
 
-### WU1 — `PureClaw.Handles.Backend` core types
+### WU1 — `PureClaw.Handles.Tab` + `PureClaw.Routing.Types` (type layer)
 
-**Purpose:** Land the type layer that every subsequent work unit depends on.
+**Purpose:** Land the foundational types that every subsequent WU depends on.
 
 **Spec:**
-- Define: `BackendHandle`, `BackendKind`, `RecvResult` (with `Functor`/`Foldable`/`Traversable`/`Ord`), `IdleSpec` (smart-constructor, non-negative + `idleMinFirstByte ≤ idleTimeoutMs`), `Cols`/`Rows` (with `Ord`), `EnvMap`, `EnvValue` (redacted `Show`), `BackendError` (including `BackendBufferQuotaExceeded !Int` and `BackendBrokenTmuxTarget !TmuxTargetRef`), `BackendException`, `PublicBackendError`, `SshConnectFailure`, `PtyAllocFailure`, `TmuxTargetRef`, `InvalidOptionDetail`, `CommandName` re-export.
-- Enumerate the fixed `_be_context` vocabulary as a `BackendContext` newtype with a closed set of constructors / named pattern-matchable strings: `"send"`, `"recv"`, `"close"`, `"ssh-write"`, `"ssh-disconnect"`, `"pty-eof"`, `"concurrent-use"`, `"tmux-detach"`, `"buffer-overflow"`. Document in haddock that new contexts MUST be added here (not freelanced at throw sites).
-- Constants/defaults: `forbiddenEnvVars`, `localIdle`, `sshIdle`, `tmuxIdle`, `testIdleSpec`, `defaultCredentialRedactor`, `defaultPipeOpts`, `defaultPtyOpts`, `defaultSshOpts`, `defaultSshPipeOpts`, `defaultTmuxOpts`.
-- Helpers: `runBackend`, `recvBytes`, `recvOutcome`, `mkIdleSpec`, `mkEnvMap`, `withBackendHandle`, `withBackendHandleE`, top-level `recv`/`recvWith`.
-- Hand-written `Show` instances for `BackendError` / `BackendException` route through `redactErr` (a stub for now, real impl in WU2).
-- Field naming: `_bh_*` (handle), `_pto_*` / `_po_*` / `_so_*` / `_spo_*` / `_co_*` / `_to_*` / `_imc_*` / `_fpc_*` / `_tt_*` (opts records — leading underscore consistent with `_eo_*`/`_pst_*` in existing code).
-- Module-level haddock includes the choose-a-kind decision tree (Pipe vs Pty vs future TmuxRpc).
+- `src/PureClaw/Handles/Tab.hs`: `TabHandle` (record of IO actions, `_tabHandle_*` prefix), `TabIndex` newtype, `mkTabIndex :: Int -> Maybe TabIndex`, `TabKind = KindAi | KindHarness | KindShell | KindSsh | KindTmux` (with `Bounded, Enum`), `TabStatus = Active | Idle UTCTime | Crashed PublicTabError`, `TabError` ADT with manual redacted `Show` instance (H14), `NameError` ADT, `TabRunner = TabRunner { _trun_cancel, _trun_wait }`.
+- `src/PureClaw/Routing/Types.hs`: `RoutingConfig`, `RoutingError`, `ParsedInput = Switch !TabIndex | Inject !TabIndex !Text | Default !Text | SlashCmd !SlashCommand`, `InputEvent = UserText !Text | SlashCmd !SlashCommand`, `OutputSource = SrcDispatcher | SrcTab !TabIndex`, `StreamId` newtype (Word64-backed), `ChannelEvent = StreamStart | ChunkOf | StreamEnd | FullMsg | BannerLine`.
+- All `TabHandle` factory signatures declared (`mkTabAi`, `mkTabHarness`, `mkTabBackend`) but implementations stubbed with `error "not implemented"` — WU6–WU8 fill them in.
+- Hand-written redacted `Show` for `TabError` and (later) `PublicTabError`. Constructors enumerate exactly per H3.
+- Module-level haddock includes a short "user-facing primitive: a tab" overview cross-referenced to `docs/tabbed-chat.md`.
 
 **File scope (write):**
-- `src/PureClaw/Handles/Backend.hs` (new)
-- `pureclaw.cabal` (expose the module)
+- `src/PureClaw/Handles/Tab.hs` (new)
+- `src/PureClaw/Routing/Types.hs` (new)
+- `pureclaw.cabal` (expose new modules)
 
 **File scope (read-only):**
-- `src/PureClaw/Handles/{Process,File,Shell,Harness}.hs` (style reference)
+- `src/PureClaw/Handles/{Backend,Channel,Harness,Transcript}.hs` (Handle-pattern style reference)
+- `src/PureClaw/Session/Handle.hs` (SessionHandle reference; note path under `Session/`, not `Handles/`)
 - `src/PureClaw/Security/Command.hs`
 
-**DoDs covered:** 19 (haddock decision tree); foundations for all others.
+**DoDs covered:** H1, H2 (signatures only), H3, H5, H12, H13, H14 plus Routing.Types ADT scaffolding.
 
 **Dependencies:** WU0.
 
@@ -92,23 +114,25 @@ coverage thresholds are met for the modules it adds.
 
 ---
 
-### WU2 — `PureClaw.Internal.Redact`
+### WU2 — `PureClaw.Routing.Parse` + `sanitizeTabName`
 
-**Purpose:** Property-tested redaction helpers powering hand-written `Show` instances.
+**Purpose:** Implement the parser and shared input sanitization functions.
 
 **Spec:**
-- `redactErr :: SomeException -> Text` — strips workspace paths, key paths, runtime paths, hostnames, identity-file basenames, ssh stderr fragments.
-- `redactBackendError :: BackendError -> Text`, `redactBackendException :: BackendException -> Text`.
-- QuickCheck property tests: fuzz with byteString-embedded hostnames + key path basenames; assert none of the input substrings appear in the rendered output.
-- Wire into the `Show` instances declared in WU1 (replace stubs).
+- `src/PureClaw/Routing/Parse.hs`: `parseInput :: RoutingConfig -> Text -> Either ParseError ParsedInput`. Implements grammar at design line 75–93 including: greedy DIGITS, no leading-zero rejection, `/0 0 run` payload preservation, `_rc_maxTabs` bounds check, `@botname` strip, multi-line handling, `parseSlashCommand :: Text -> Maybe SlashCommand` for in-tab-loop re-parse (I2).
+- `mkTabIndex :: Int -> Maybe TabIndex` — bounds-checks against `_rc_maxTabs`.
+- `mkSessionId :: Text -> Either ParseError SessionId` — rejects `/`, `\`, `..`, NUL, non-`[a-zA-Z0-9_-]` (per S3 + P15a + L7).
+- `sanitizeTabName :: Text -> Either NameError Text` — shared by every `_tabHandle_name` construction path (H11) AND `/tab rename` handler (S10): length cap, control-byte rejection, ANSI rejection, hostname/path/ssh-stderr redaction. Property test asserts the four rules on the output of every code path.
 
 **File scope (write):**
-- `src/PureClaw/Internal/Redact.hs` (new)
-- `src/PureClaw/Handles/Backend.hs` (replace `Show` stubs with real `redactErr` calls)
-- `test/Internal/RedactSpec.hs` (move from WU0 pending to green)
-- `pureclaw.cabal`
+- `src/PureClaw/Routing/Parse.hs` (new)
+- `pureclaw.cabal` (expose)
 
-**DoDs covered:** 16 (Show redaction).
+**File scope (read-only):**
+- `src/PureClaw/Agent/SlashCommands.hs` (existing slash-command grammar for no-regression)
+- `src/PureClaw/Core/Types.hs` (SessionId)
+
+**DoDs covered:** P1–P17, P15a (parser-level only; P18's dispatcher-integrated property test lands in WU5 because it needs the dispatcher + fake Provider seam from T1), S3 (parser-side smart constructors), S10's `sanitizeTabName` function (the call sites that USE it land in WU6/WU7/WU8/WU9), H11's property-test machinery (the test definition; the construction-site call sites land in WU6/WU7/WU8).
 
 **Dependencies:** WU1.
 
@@ -116,369 +140,354 @@ coverage thresholds are met for the modules it adds.
 
 ---
 
-### WU3 — No-op + in-memory backends
+### WU3 — `AgentEnv` additions + `PureClaw.Routing.Registry`
 
-**Purpose:** Provide the test seam every downstream factory uses.
+**Purpose:** Land AgentEnv field additions and the pure tab CRUD registry. After this, AgentEnv compiles with all new fields wired but no live tabs yet.
 
 **Spec:**
-- `mkNoOpBackendHandle :: BackendKind -> BackendHandle` — pure. `Pty` recv yields `RecvSettled ""`; `_bh_resize` silent no-op for BOTH kinds (verified by separate `Pipe` and `Pty` tests asserting `_bh_resize (Cols 0) (Rows 0)` returns without throwing — DoD added in plan-review-iter-2 revision).
-- `mkInMemoryBackendHandle :: BackendKind -> InMemoryConfig -> IO BackendHandle` — IORef-backed; deterministic; supports scripted replies + fake clock + simulated EOF. Resize behaviour: silent no-op on `Pipe`, IORef-recorded on `Pty` (for test introspection).
-- `FakeClock` lives in `PureClaw.Internal.FakeClock` (new internal module) so it's reusable across `fakePtyIO` (WU7) and `mkInMemoryBackendHandle`.
-- `toPublicError`, `toPublicException` (symmetry).
+- `src/PureClaw/Agent/Env.hs` (modified): add `_env_tabs :: IORef (IntMap TabHandle)`, `_env_focus :: IORef (Maybe TabIndex)`, `_env_activeCount :: TVar Int`, `_env_runners :: IORef (IntMap (IORef (Maybe TabRunner)))`, `_env_channelOutQ :: TBQueue (OutputSource, ChannelEvent)`, `_env_routingConfig :: RoutingConfig`, `_env_fork :: IO () -> IO TabRunner`. All construction sites updated (per `-Werror` field-completion rule).
+- `src/PureClaw/Routing/Registry.hs`: pure tab CRUD over `IORef (IntMap TabHandle)` — `lookupTab`, `insertTab`, `removeTab`, `lowestFreeIndex`. No factory dispatch (that's WU5).
+- `src/PureClaw/Routing/Config.hs`: `RoutingConfig` parser from `~/.pureclaw/config.toml [routing]`.
 
 **File scope (write):**
-- `src/PureClaw/Handles/Backend.hs` (extend with `mkNoOpBackendHandle`, `mkInMemoryBackendHandle`, `toPublicError`, `toPublicException`)
-- `src/PureClaw/Internal/FakeClock.hs` (new)
-- `test/Handles/BackendSpec.hs` (move DoD #11, #13, #14 from pending to green)
+- `src/PureClaw/Routing/Registry.hs` (new)
+- `src/PureClaw/Routing/Config.hs` (new)
+- `src/PureClaw/Agent/Env.hs` (modified — add fields + update constructors)
+- `src/PureClaw/CLI/Config.hs` or wherever `RoutingConfig` is loaded (modified)
+- All AgentEnv construction sites in production code (modified — record-completion)
 - `pureclaw.cabal`
 
-**DoDs covered:** 11 (idempotent close), 13 (no-op shapes), 14 (in-memory round-trip).
+**File scope (read-only):**
+- `src/PureClaw/Core/Config.hs` (existing config pattern)
+
+**DoDs covered:** E1, E2 (declaration; reads in subsequent WUs), E4 (the field is there, default `_env_fork` impl in WU5).
 
 **Dependencies:** WU1, WU2.
 
-**Human checkpoint:** **No.**
+**Human checkpoint:** **Yes.** AgentEnv changes touch every constructor; pause for sign-off.
 
 ---
 
-### WU4 — `PureClaw.Internal.ShellQuote` (canonical quoter)
+### WU4 — `PureClaw.Routing.ChannelOut` writer thread + breadcrumb
 
-**Purpose:** Single source of truth for shell quoting, ahead of any caller that needs it.
+**Purpose:** Implement the single-writer channel-emission thread with focus-gated drop, breadcrumb logic, and StreamId state tracking.
 
 **Spec:**
-- `shellQuote :: Text -> Text` — single-quote wrapping with embedded-quote escaping (matches existing `Harness.Tmux.shellEscape`).
-- Migrate `Harness.Tmux.shellEscape` and `shellEscapeStr` to delegate to `shellQuote`. **Do NOT touch** `escapeForShell` or `stealthShellCommand` (those stay; will retire with future TmuxRpc).
-- Add haddock banner to `Harness/Tmux.hs` pointing readers to `Internal.ShellQuote` for new code.
-- Property tests: round-trip through `bash -c` of `shellQuote "<adversarial>"` recovers the original; metacharacters never interpreted.
+- `src/PureClaw/Routing/ChannelOut.hs`: writer thread consumes from `_env_channelOutQ`. For `SrcDispatcher` events: emit unconditionally. For `SrcTab n` events: read `_env_focus`; drop if `/= Just n`. On first drop per `StreamId`, emit one `SrcDispatcher BannerLine "/N has new output — /N to view"` (D5); subsequent drops same `StreamId` silent. Cleanup on `StreamEnd`. Producer-side focus pre-check (D4) helper exposed for tab loops to use.
+- Map state: `IORef (Map StreamId BreadcrumbState)` where `BreadcrumbState = Pending | Emitted`.
+- Threading: writer runs in its own thread, launched at dispatcher startup via `_env_fork`.
 
 **File scope (write):**
-- `src/PureClaw/Internal/ShellQuote.hs` (new)
-- `src/PureClaw/Harness/Tmux.hs` (delegate `shellEscape`/`shellEscapeStr`; add banner haddock)
-- `test/Internal/ShellQuoteSpec.hs` (green)
+- `src/PureClaw/Routing/ChannelOut.hs` (new)
 - `pureclaw.cabal`
 
-**DoDs covered:** prerequisite for 10 (remote arg quoting); no DoD directly green.
+**DoDs covered:** D1, D2, D3, D4, D5, D6.
 
-**Dependencies:** WU0.
-
-**Human checkpoint:** **No.**
-
----
-
-### WU5 — `Security.Path` additions
-
-**Purpose:** Typed paths for ssh identity files and runtime sockets, distinct from workspace.
-
-**Spec:**
-- New: `newtype KeysRoot = KeysRoot FilePath`, `newtype RuntimeRoot = RuntimeRoot FilePath` (exported constructors; configuration values).
-- New: `data SafeKeyPath`, `data SafeRuntimePath` (constructors NOT exported).
-- `mkSafeKeyPath :: KeysRoot -> FilePath -> IO (Either PathError SafeKeyPath)`. Validation rules (match `mkSafePath` rigor):
-  1. Reject `..` traversal in the requested path.
-  2. Canonicalize via `canonicalizePath` and verify the result is under `KeysRoot`.
-  3. Reject absolute paths that resolve outside the root.
-  4. Reject non-existent roots.
-  5. After creation/write of a key file, `fstat` and verify `mode == 0400` and `owner uid == geteuid()`; surface `PathError` (new variant `PathInsecureMode`) otherwise.
-
-**Cascading change:** adding `PathInsecureMode` extends `PathError`. The Plan Review Gate Feasibility scan found one external pattern-match site (`test/Security/PathSpec.hs:80-91`); it is non-exhaustive so the cascade is bounded. Verify no other exhaustive pattern matches exist via `git grep -nE '\bcase\s+\w+\s+::\s+PathError\b' src/ test/ app/` before landing. Add `BackendInvalidOption` mapping inside `Backend/SSH.hs` factories so callers see a `BackendError`, not a raw `PathInsecureMode`.
-- `mkSafeRuntimePath :: RuntimeRoot -> FilePath -> IO (Either PathError SafeRuntimePath)` — same rules; mode check is `0600` for known_hosts, socket-creation mode handled by ssh itself.
-- Redacted `Show` instances for `SafeKeyPath` and `SafeRuntimePath` (matching existing `SafePath`).
-- Setup helper: `ensureKeysRoot :: IO KeysRoot` and `ensureRuntimeRoot :: IO RuntimeRoot` create the directories mode 0700 atomically if missing.
-
-**File scope (write):**
-- `src/PureClaw/Security/Path.hs` (extend)
-- `test/Security/PathSpec.hs` (extend with `..`-traversal, symlink-escape, mode-check tests)
-
-**DoDs covered:** prerequisite for 5 (SSH defaults), supports 16 (path redaction).
-
-**Dependencies:** WU0.
-
-**Human checkpoint:** **Yes.** Security-typed boundary; auditor sign-off.
-
----
-
-### WU6 — `Security.Policy` migration
-
-**Purpose:** Extend `SecurityPolicy` with a remote-command allowlist; update every construction site.
-
-**Spec:**
-- Add `_sp_allowedRemoteCommands :: AllowList CommandName` to `SecurityPolicy`.
-- Helpers: `isRemoteCommandAllowed`, `allowRemoteCommand`, `denyRemoteCommand`.
-- Set `_sp_allowedRemoteCommands = AllowList Set.empty` in `defaultPolicy` (deny by default).
-- **Enumerate all construction sites up front**: `git grep -nE '\bSecurityPolicy\b' src/ test/ app/` (the broader regex catches both brace-form `SecurityPolicy {...}` AND positional-form `SecurityPolicy AllowAll Full` — the latter exists at `test/Security/CommandSpec.hs:46` per Plan Review Gate Feasibility findings). List each. Update every one.
-- `-Werror -Wmissing-fields` (construction sites) and `-Werror -Wincomplete-record-updates` (record-update sites) make any miss a compile error.
-
-**File scope (write):**
-- `src/PureClaw/Security/Policy.hs` (extend)
-- Every file listed by the grep above (estimated 5–10 sites across src/test/app)
-- `test/Security/PolicySpec.hs` (extend)
-
-**DoDs covered:** 17.
-
-**Dependencies:** WU0. (Independent of WU1–WU5 but touches surface that many downstream modules import — finish before WU9.)
-
-**Human checkpoint:** **Yes.** Touches every construction site; sanity-check the enumeration.
-
----
-
-### WU7 — `PureClaw.Backend.Pty` (real + fake)
-
-**Purpose:** The PTY allocation seam; the ONLY module importing `posix-pty`.
-
-**Spec:**
-- New cabal dep: `posix-pty` (added to `pureclaw.cabal` library `build-depends`; Nix flake input if needed).
-- Define: opaque `data PtyFds = RealPtyFds <internal> | FakePtyFds <internal>` (constructors NOT exported). The opaque ADT is the **type-level firewall**: a future swap to direct `System.Posix.Terminal` is a single-file change because no downstream module can pattern-match on the constructors.
-- `PtyIO` record: `pio_open :: IO PtyFds`, `pio_resize :: PtyFds -> Cols -> Rows -> IO ()`, `pio_close :: PtyFds -> IO ()`.
-- `realPtyIO :: PtyIO` — backed by `posix-pty`.
-- `fakePtyIO :: FakePtyConfig -> IO PtyIO` — IORef-backed; driven by `FakeClock` from WU3; supports `fpc_initialOutput`, `fpc_eofAfterBytes`.
-- Drainer infrastructure: `DrainState` (STM-based: `TBQueue RecvSignal`, `TVar Bool` for truncate latch, `TVar (Maybe Time)` for last-byte-at, `TVar Bool` for drainerDone), drainer-async helper that pushes `RsEof` sentinel on close for deterministic STM wake.
-- **Process-wide buffer quota**: `Handles.Backend` maintains a process-wide `QSem` (capacity = aggregate-cap-MiB; configurable via `PURECLAW_BACKEND_AGGREGATE_CAP_MIB` env var, default 64). Pty-bearing factories `bracket`/`finally`-acquire `_pto_recvBufferCap` MiB from the QSem at construction; release on `_bh_close` (idempotent — release is in the close action, protected against double-release by an internal `TVar Bool` flag). On oversubscription, construction returns `Left (BackendBufferQuotaExceeded _pto_recvBufferCap)`.
-- **Idle state machine test coverage**: include a property test that exercises every path in the diagram, including the no-bytes-ever path (`RecvTimedOut ""` when `idleTimeoutMs` expires with the drainer never producing a chunk). DoD #21 in the design doc (or current numbering of "RecvTimedOut on no bytes").
-- Idle state machine (per design doc): `waiting-for-first-byte → draining → settled|timed-out|eof|truncated`; property-tested against `fakePtyIO` + `testIdleSpec`.
-- **CI grep gate**: a CI step (`scripts/check-pty-firewall.sh`) that fails the build on any `import` of `Posix.Pty` outside the firewalled module path. Uses a path-based whitelist (NOT `--exclude-dir`, which would not protect the file `src/PureClaw/Backend/Pty.hs` itself): `grep -RIn 'import\s\+\(qualified\s\+\)\?Posix\.Pty' src/ | grep -v -E '^src/PureClaw/Backend/Pty(\.hs|/Fake\.hs):'` — fails if anything is left. Wired into the project's CI workflow at `.github/workflows/ci.yml`.
-- **aarch64-darwin compile smoke**: ensure CI runs `nix develop . --command cabal build` on both flake targets. The existing `.github/workflows/ci.yml` already has a matrix with `x86_64-linux` and `aarch64-darwin` (per Feasibility finding); the WU's task is to verify `posix-pty` builds cleanly on both, not to introduce a new matrix.
-- **`realPtyIO` coverage policy**: `realPtyIO` (the `posix-pty`-backed `PtyIO`) is exercised only via integration tests that spawn real subprocesses (DoD #2 bash, DoD #3 ssh) — those tests do cover the real PTY path. Lines exclusively in `realPtyIO` that cannot be reached without a real PTY (kernel-error paths) are excluded from the line-coverage gate via `-- HPC:Exclude` annotations; the threshold in `.coverage-thresholds.json` accounts for this. `fakePtyIO` carries 100% branch coverage. State this explicitly in `Backend/Pty.hs` module haddock.
-
-**File scope (write):**
-- `src/PureClaw/Backend/Pty.hs` (new)
-- `src/PureClaw/Backend/Pty/Fake.hs` (new)
-- `test/Backend/PtySpec.hs` (move from pending: drainer state-machine property tests)
-- `pureclaw.cabal` (+ posix-pty; expose modules)
-- `flake.nix` (verify posix-pty closure on both targets)
-- `scripts/check-pty-firewall.sh` (new)
-- `.github/workflows/*` (wire firewall gate + aarch64-darwin smoke; if no workflow exists yet, add a minimal one)
-
-**DoDs covered:** 12 (truncation latch), 18 (coverage on Pty); enables 6/7/8/9 via test seam.
-
-**Dependencies:** WU0, WU1, WU3.
-
-**Human checkpoint:** **Yes.** First use of posix-pty + first CI gate addition.
-
----
-
-### WU8 — `PureClaw.Backend.Local`
-
-**Purpose:** Local subprocess backends — Pipe (one-shot) and Pty (conversational).
-
-**Spec:**
-- `mkLocalBackendHandle :: AuthorizedCommand -> PipeOpts -> IO (Either BackendError BackendHandle)` — pipe-based, stdin/stdout/stderr merged at OS level via `setStderr (useHandleOpen stdoutH)`; close stdin after `_po_stdinBytes`; read until EOF.
-- `mkLocalPtyBackendHandle :: AuthorizedCommand -> PtyOpts -> IO (Either BackendError BackendHandle)` — spawns inside PTY via `pto_io.pio_open`; drainer + STM signalling per WU7; complete env from `_pto_env` + minimal `TERM`/`PATH` if absent.
-- Idempotent `_bh_close` releases process + PTY.
-
-**File scope (write):**
-- `src/PureClaw/Backend/Local.hs` (new)
-- `test/Backend/LocalSpec.hs` (move DoD #1, #2 to green)
-- `pureclaw.cabal`
-
-**DoDs covered:** 1 (`echo hi` → `RecvSettled "hi\n"`), 2 (bash `cd /tmp; pwd` three-turn).
-
-**Dependencies:** WU1, WU2, WU3, WU7.
+**Dependencies:** WU1, WU3.
 
 **Human checkpoint:** **No.**
 
 ---
 
-### WU9 — `PureClaw.Backend.SSH`
+### WU5 — `PureClaw.Routing.Dispatcher` + `spawnTab` + exception discipline
 
-**Purpose:** SSH backends, with all security defaults hardcoded.
+**Purpose:** Implement the core dispatcher: read from channel, classify input, route. Also lands `spawnTab` indirection (Architect/CTO blocker-fix from rounds 1–2), the bracket+cancelAll pattern, async exception discipline, the placeholder-runner registration, and the LLM-free invariant tests.
 
 **Spec:**
-- `mkSshBackendHandle`, `mkSshPipeBackendHandle` with the full hardened argv (see design doc § SSH Security Defaults — `-F /dev/null`, `StrictHostKeyChecking=accept-new`, etc., plus `-o PermitLocalCommand=no` defensive override).
-- `SshTarget`, `SshHost` (validated newtype with RFC 1123 hostname charset + bracketed-IPv6; rejects leading `-`).
-- `SshOpts` (Pty), `SshPipeOpts` (Pipe — distinct opts type, no ignored fields).
-- `ControlOpts` (`_co_controlPath :: SafeRuntimePath`, `_co_persistSecs :: Int`); `closeSshMultiplex :: AuthorizedCommand -> ControlOpts -> IO ()` — takes the `AuthorizedCommand` that opened the multiplex (preserves §5.1 invariant); unlinks the socket file on close; `mkSshBackendHandle` with `_so_control = Just _` fails closed if `_co_controlPath` already exists at construction (stale-multiplex defense).
-- `RemoteCommand` (constructor NOT exported), `authorizeRemote :: SecurityPolicy -> FilePath -> [Text] -> Either CommandError RemoteCommand`, accessors `getRemoteProgram`/`getRemoteArgs`.
-- v1 credential model: Vault loads the (passphrase-less) key; backend writes to ephemeral `SafeKeyPath` mode 0400, ssh uses `-i`, file unlinked + best-effort zero on close.
-- Extend `forbiddenEnvVars` in `Handles.Backend` to include `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`, `SSH_AGENT_PID`, `BASH_ENV`, `ENV`, `GIT_SSH_COMMAND`, `GIT_SSH`, `PROMPT_COMMAND`, `PS4`.
-- Construction errors as `Left BackendError`; send/recv errors as `BackendException`; failure modes structured (no free Text).
+- `src/PureClaw/Routing/Dispatcher.hs`: `runDispatcher :: AgentEnv -> IO ()` wrapped in `bracket (newIORef IntMap.empty) cancelAll dispatcherBody`. Reads `_ch_receive` → `parseInput` → routes `Switch`/`Inject`/`Default`/`SlashCmd`. Per E3: only between message cycles can focus change; handlers run synchronously in dispatcher thread.
+- `spawnTab :: AgentEnv -> TabKind -> [Text] -> IO (Either TabError TabIndex)` — under `mask`: register placeholder in `_env_runners` BEFORE `_env_fork`, then fill post-fork. Dispatches to `mkTabAi`/`mkTabHarness`/`mkTabBackend` via case match on `TabKind`.
+- Default `_env_fork :: IO () -> IO TabRunner` impl wrapping `Control.Concurrent.Async.async`. `TabRunner._trun_cancel = cancel a; _trun_wait = wait a` for the production variant.
+- `closeAllTabs :: AgentEnv -> IO ()` (the `cancelAll`): walks `_env_runners`, derefs each inner `IORef (Maybe TabRunner)`, `traverse_ _trun_cancel`.
+- `forkIO` is forbidden in this module (and any tab-related module); discipline test asserts via static-grep code-review checklist.
+- Crashed PublicError redaction wiring for the `SrcDispatcher` emit path (S5).
+- Spawn rate limit (S7) — token-bucket per chat-user, fail-fast (parallel to S9's pattern).
+- User-allowlist invariant (S8) — runtime test asserts dispatcher never sees messages from non-allowlisted users.
 
 **File scope (write):**
-- `src/PureClaw/Backend/SSH.hs` (new)
-- `src/PureClaw/Handles/Backend.hs` (extend `forbiddenEnvVars`)
-- `test/Backend/SSHSpec.hs` (move DoD #3, #4, #5, #15 to green)
+- `src/PureClaw/Routing/Dispatcher.hs` (new)
 - `pureclaw.cabal`
 
-**DoDs covered:** 3 (3-turn ssh bash), 4 (unresolvable host), 5 (argv flags), 15 (`SshHost` rejects leading `-`).
+**File scope (read-only):**
+- `src/PureClaw/Channels/Signal.hs`, `Telegram.hs`, `CLI.hs` (user-allowlist gating reference)
+- `src/PureClaw/Agent/Loop.hs` (existing main loop — to be refactored in WU10)
 
-**Dependencies:** WU1–WU8.
+**DoDs covered:** C3, C4, C5 (dispatcher-side crash isolation — does not crash when a tab crashes; WU6 owns the AI-loop-side assertion), E3 (focus invariant), S5 (Crashed redaction), S7 (spawn rate limit), S8 (allowlist invariant), P18 (property test for LLM-free invariant integrated here using T1).
 
-**Human checkpoint:** **Yes.** First real ssh + network failure modes.
+**Dependencies:** WU1, WU2, WU3, WU4.
+
+**Human checkpoint:** **Yes.** Dispatcher is the highest-risk WU (refactors the agent loop's structure); pause for sign-off.
 
 ---
 
-### WU10 — `PureClaw.Backend.Tmux`
+### WU6 — `PureClaw.Tab.Ai` factory (AI tab loop + single-writer Context)
 
-**Purpose:** Tmux Attach mode, local and over ssh, with detach-only close.
+**Purpose:** Implement the AI tab loop body, the `_ats_context` single-writer model, AsyncCancelled propagation, provider-cancel transcript safety.
 
 **Spec:**
-- `TmuxSession`, `TmuxWindow`, `TmuxPane` (smart constructors; charset `[A-Za-z0-9_./@:=+-]` no leading `-`; haddock as a numbered checklist matching `mkSafePath` style).
-- `TmuxTarget`, `TmuxOpts` (`_to_pty :: PtyOpts`, `_to_socketPath :: Maybe SafeRuntimePath` validated local-fs-only).
-- `SshLocation = LocalHost !AuthorizedCommand | RemoteHost !SshTarget !AuthorizedCommand !RemoteCommand` — type-enforced authorization split.
-- `mkTmuxBackendHandle :: SshLocation -> TmuxTarget -> TmuxOpts -> IO (Either BackendError BackendHandle)`. Pin-resolution at construction: `tmux <socket?> display-message -p -t '<session>:<window>' '#{window_id}'`, validate output against `^@\d+$`; reject hostile injection.
-- Remote-side composition: shell-quote both program path and args via `Internal.ShellQuote.shellQuote`. v1 does NOT share `ControlMaster` for tmux (always fresh ssh hop).
-- Internal `TmuxCloseAction = TmuxDetach` (one-constructor sum, constructor NOT exported). `_bh_close` writes the detach key sequence into the existing PTY (does NOT open a new ssh); tolerates write failure as "already detached"; cancels drainer; releases local PTY. Idempotent and never throws.
-- **Mid-session destruction test**: a `fakePtyIO`-driven test simulates the pinned `@window_id` being destroyed and re-created with the same name mid-conversation. Asserts that the next `_bh_send`/`_bh_recv` raises `BackendException` with `_be_cause` containing a `BackendBrokenTmuxTarget` payload (or returns it as a `RecvResult`-equivalent — pick the surface that matches the implementation but cover the path). DoD added in plan-review-iter-2 revision.
+- `src/PureClaw/Tab/Ai.hs`: `mkTabAi :: AgentEnv -> TabIndex -> AiSpawnArgs -> IO (Either TabError TabHandle)`.
+- `AiTabState` per-tab (private to factory closure): `_ats_inputQ :: TBQueue InputEvent`, `_ats_provider :: IORef SomeProvider`, `_ats_model :: IORef ModelId`, `_ats_target :: IORef MessageTarget`, `_ats_context :: IORef Context`, `_ats_runner :: TabRunner`.
+- Loop body: dequeue `InputEvent`. `UserText t` → if starts with `/` re-parse via `parseSlashCommand` and treat as `SlashCmd` (I2); else feed to provider, run one turn, emit `StreamStart`/`ChunkOf`/`StreamEnd` events, append response to context AND _sh_transcript. `SlashCmd cmd` → run `executeSlashCommand env cmd =<< readIORef _ats_context`, write back.
+- `_tabHandle_enqueueSlash`: atomically enqueue `SlashCmd cmd` to `_ats_inputQ` (for AI tabs — returns `Right ()`).
+- `_tabHandle_close`: `throwTo` AsyncCancelled to the loop thread (via `_trun_cancel`); bracket cleanup runs `_sh_save` (metadata archive) + `_th_close` on the SessionHandle's `_sh_transcript` (transcript flush — NOT `_sh_close`, which doesn't exist; the transcript is reached via `_sh_transcript :: TranscriptHandle` on `SessionHandle`). Idempotent + never-throws (H6, H7, H8 for KindAi, H10). Pre-flight PF3 should confirm this two-step archive is the right pattern, or whether a new `_sh_archive` helper is warranted.
+- `_tabHandle_name` constructed via `sanitizeTabName` (H11).
+- AsyncCancelled handling: catches `SomeException` EXCEPT AsyncCancelled (which propagates through bracket per C5).
+- Context-mutation atomicity: every loop iteration is `readIORef → process → writeIORef`. Since the loop is single-writer (dispatcher uses `enqueueSlash`, not direct write), there's no race.
+- Concurrent provider cancel safety: bracket around provider call ensures transcript is either fully-written-with-cancel-marker or unwritten (C6).
+- S9 atomic active-count: status transitions to/from Active happen inside `atomically` together with `modifyTVar' _env_activeCount`. Cap check is fail-fast (per the S9 STM pseudocode).
 
 **File scope (write):**
-- `src/PureClaw/Backend/Tmux.hs` (new)
-- `test/Backend/TmuxSpec.hs` (move DoD #6, #7, #8, #9, #10 to green)
+- `src/PureClaw/Tab/Ai.hs` (new)
 - `pureclaw.cabal`
 
-**Additional DoD #20** (added in plan-review iter-2 revision): `mkTmuxBackendHandle` with `RemoteHost` attaches to a pre-existing remote window over ssh, sends a command, captures output, and `_bh_close` detaches without destroying the window. The remote target window is still present after close, verified by a second short-lived ssh + `tmux list-windows` from the test harness. (Parallels DoD #6 for the local case.)
+**File scope (read-only):**
+- `src/PureClaw/Agent/Loop.hs` (existing AI loop body — port the streaming/tool-call logic)
+- `src/PureClaw/Agent/SlashCommands.hs` (executeSlashCommand — used inside loop)
 
-**DoDs covered:** 6 (local attach + survive close), 7 (no auto-create), 8 (invalid session at construction), 9 (RemoteHost two-auth + ssh fail surfacing), 10 (program-path + args quoted, `/opt/my tools/tmux` case), 20 (remote attach + survive close), 21 (BackendBrokenTmuxTarget mid-session — added iter-2).
+**DoDs covered:** C1 (behavioral concurrent-tabs test — Tab.Ai factory is what makes this go green; the WU5 dispatcher scaffolds it but cannot pass alone), C2, C5 (AI-loop side of crash isolation; WU5 owns the dispatcher-side assertion), C6, H4 (TBQueue bounded `_rc_inputQueueBound` + overflow PublicError + never blocks dispatcher), H6, H7, H8 (KindAi), H9 (KindAi `--force` skips archive), H10, H11 (KindAi name path), I1, I2, I3, I5, S9 (atomic counter wiring for KindAi), E5 (via enqueueSlash for AI tabs).
 
-**Dependencies:** WU1–WU9.
+**Dependencies:** WU1, WU2 (sanitizeTabName), WU3, WU5.
 
-**Human checkpoint:** **Yes.** TmuxCloseAction typed close + TOCTOU pin.
+**Human checkpoint:** **Yes.** AI loop refactor is non-trivial; pause for sign-off.
 
 ---
 
-### WU9.5 — SSH disconnect-mid-recv test (cross-cutting)
+### WU7 — `PureClaw.Tab.Harness` factory
 
-**Purpose:** Cover the edge case Plan Review Gate Completeness called out — transport drops during a live conversation, not at construction.
+**Purpose:** Wrap the existing `HarnessHandle` as a Tabbed Chat tab kind.
 
-**Spec:** A test under `test/Backend/SSHSpec.hs` that, using `fakePtyIO`, simulates ssh subprocess exit mid-recv and asserts (a) `_bh_recv` returns `RecvEof <bytes-so-far>` deterministically, (b) a subsequent `_bh_send` throws `BackendException` with `_be_context = "ssh-write"`, (c) `_bh_close` is idempotent and never throws. No real ssh required.
-
-Similarly a test for the documented concurrency invariant: two threads call `_bh_send` on the same handle; the second observes `BackendException` with `_be_context = "concurrent-use"` rather than corrupting state. (Implementation may use a guarding `MVar` to detect concurrent entry; doc rule says single-threaded so this is enforcement of the documented contract.)
+**Spec:**
+- `src/PureClaw/Tab/Harness.hs`: `mkTabHarness :: AgentEnv -> TabIndex -> HarnessSpawnArgs -> IO (Either TabError TabHandle)`.
+- Internal state: a `HarnessHandle` plus a drainer thread reading harness stdout and emitting `FullMsg !TabIndex !Text` per chunk via `_env_channelOutQ`.
+- `_tabHandle_send :: Text -> IO ()`: writes to harness stdin via existing API.
+- `_tabHandle_enqueueSlash`: returns `Left (TabUnsupportedCommand cmd)` (non-AI tab can't handle slash commands).
+- `_tabHandle_close`: calls existing `_hh_stop` (H8 for KindHarness — destructive, no archive).
 
 **File scope (write):**
-- `test/Backend/SSHSpec.hs` (extend)
-- `src/PureClaw/Handles/Backend.hs` (add concurrent-use detection MVar guard if not already present)
+- `src/PureClaw/Tab/Harness.hs` (new)
 
-**DoDs covered:** edge cases identified by Plan Review Gate Completeness ("SSH disconnect mid-recv", "concurrent _bh_send / _bh_recv").
+**DoDs covered:** H4 (TBQueue bounded for harness `_tabHandle_send`), H8 (KindHarness destructive close), H9 (`--force` no-op on KindHarness), H11 (KindHarness name path via `sanitizeTabName`), I4 (slash-prefix opaque to backend), parts of D5 (FullMsg emission).
 
-**Dependencies:** WU9.
+**Dependencies:** WU1, WU3.
 
 **Human checkpoint:** **No.**
 
 ---
 
-### WU11 — Final cross-unit review + coverage gate + PR
+### WU8 — `PureClaw.Tab.Backend` factory (KindShell/KindSsh/KindTmux)
 
-**Purpose:** Cross-unit integration; verify coverage; create implementation PR.
+**Purpose:** Wrap `BackendHandle` (from #49) factories as Tabbed Chat tab kinds. All security smart-constructor validation lands here.
 
 **Spec:**
-- Run full test suite under coverage (`cabal test --enable-coverage`).
-- Enforce thresholds from `.coverage-thresholds.json` (100% lines/branches/functions/statements on new modules).
-- Verify `posix-pty` import firewall CI gate passes.
-- Verify aarch64-darwin + x86_64-linux build smoke passes.
-- Run `/self-reflect` to extract learnings into the knowledge base.
-- Commit knowledge base updates.
-- Create implementation PR; link Issue #49; cite design PR #48.
+- `src/PureClaw/Tab/Backend.hs`: `mkTabBackend :: AgentEnv -> TabIndex -> TabKind -> [Text] -> IO (Either TabError TabHandle)`. Dispatches to `KindShell`/`KindSsh`/`KindTmux` sub-factories.
+- KindShell: parses `[Text]` args → `AuthorizedCommand` (via `authorize` per S1). Calls `mkLocalBackendHandle` from #49.
+- KindSsh: parses args → host via `mkSshHost` (S2/S3); identity via Vault slot `_rc_sshIdentityKey` (S4); calls `mkSshBackendHandle`. No inline identity acceptance.
+- KindTmux: parses args → tmux target via `mkTmuxSession`/`mkTmuxWindow`/`mkTmuxPane` (S3). Calls `mkTmuxBackendHandle`.
+- Internal drainer thread: reads `_bh_recv`, emits `FullMsg !TabIndex !Text` per chunk (per D5 backend rule).
+- `_tabHandle_send :: Text -> IO ()`: writes via `_bh_send` (UTF-8 encode).
+- `_tabHandle_enqueueSlash`: returns `Left TabUnsupportedCommand`.
+- `_tabHandle_close`: calls `_bh_close` (H8 destructive).
+- `_tabHandle_name` via `sanitizeTabName` (H11 — strips hostnames per the redaction rule, so an ssh tab against `prod-db.internal` shows as redacted label).
 
 **File scope (write):**
-- `.beads/knowledge/*` (if `/self-reflect` updates)
+- `src/PureClaw/Tab/Backend.hs` (new)
 
-**DoDs covered:** 18 (coverage thresholds).
+**File scope (read-only):**
+- `src/PureClaw/Backend/{Local,SSH,Tmux}.hs` (#49 factories)
+- `src/PureClaw/Security/Command.hs` (`authorize`, `authorizeRemote` — note: in Command.hs, NOT Policy.hs)
+- `src/PureClaw/Security/Policy.hs` (SecurityPolicy record + AllowList types)
+- `src/PureClaw/Security/Vault.hs` (VaultHandle for SSH identity slot — note path under `Security/`, not `Handles/`)
 
-**Dependencies:** WU0–WU10, WU9.5.
+**DoDs covered:** H4 (TBQueue bounded for backend `_tabHandle_send`), H8 (KindShell/KindSsh/KindTmux destructive close), H9 (`--force` no-op on backend kinds), H11 (backend-tab name redaction), I4, S1, S2, S3, S4, D5 (backend FullMsg path).
 
-**Human checkpoint:** **Yes.** Final pre-PR review.
+**Dependencies:** WU1, WU3.
+
+**Human checkpoint:** **Yes.** Security-relevant; pause for sign-off.
+
+---
+
+### WU9 — Auto-spawn UX + Close + Crashed (A/L/X/B series)
+
+**Purpose:** Implement the user-visible UX for tab creation, close, resume, rename, and crashed-tab handling.
+
+**Spec:**
+- Auto-spawn (A-series): `/N` on missing index → if `_rc_defaultKind` set, silent spawn; else prompt for kind. Force-prompt via `/tab new N` (no kind).
+- A4/A6 channel-specific prompt rendering: inline-keyboard on Telegram, text reply on Signal/CLI. Specify a `PromptRenderer` typeclass or function passed via `ChannelHandle`.
+- Close (L-series): `/tab close N` → kind-dispatch via `_tabHandle_close`. `--force` on KindAi skips archive.
+- Resume (L7): `/tab resume <session-id>` → `parser → mkSessionId → resolveSessionRef → Session.resumeSession → new tab at lowest free index`.
+- Rename (P16 + S10): `/tab rename N <name>` → `sanitizeTabName` → on success update `_tabHandle_name`, emit confirmation (with redaction-was-applied suffix); on failure emit PublicError.
+- Crashed UX (X-series): `/N` on crashed tab → `SrcDispatcher` PublicError + retry/close prompt. Retry semantics differ for AI (continuation) vs non-AI (fresh).
+- Dashboard (B-series): `/tabs` (alias for `/tab list`) → render registry. ≥8 tabs use bullets. Empty registry shows helper text.
+- Empty-focus L6 + K3: `Default` text input with `_env_focus = Nothing` auto-spawns `_rc_defaultKind` at index 0.
+- Max-tab cap (A11, S6) and spawn rate limit (S7 already in WU5).
+
+**File scope (write):**
+- `src/PureClaw/Routing/AutoSpawn.hs` (new)
+- `src/PureClaw/Routing/Dashboard.hs` (new — `/tabs` rendering)
+- `src/PureClaw/Routing/PromptRenderer.hs` (new — channel-dispatch for spawn prompt UX)
+
+**File scope (modified):**
+- `src/PureClaw/Routing/Dispatcher.hs` (wire the new commands)
+- `src/PureClaw/Agent/SlashCommands.hs` (add `CmdTabNew`, `CmdTabList`, `CmdTabClose`, `CmdTabFocus`, `CmdTabResume`, `CmdTabRename` constructors to the existing ADT + dispatch through Routing.Dispatcher)
+
+**DoDs covered:** A1–A12, L1–L7, X1–X3, B1–B3, S6, S10 (rename handler — `sanitizeTabName` already in WU2).
+
+**Dependencies:** WU2, WU3, WU5, WU6, WU7, WU8.
+
+**Human checkpoint:** **Yes.** User-facing UX surface; pause for sign-off.
+
+---
+
+### WU10 — Coexistence with existing slash commands (K-series + I-series wiring)
+
+**Purpose:** Ensure existing slash commands (`/help`, `/session`, `/target`, `/provider`, `/model`, `/vault`, `/harness`, `/mcp`, `/channel`, `/transcript`, `/agent`, `/new`, `/last`, `/compact`) continue to work under the new tabbed model. Wire the dispatcher's `_tabHandle_enqueueSlash` for Context-mutating commands.
+
+**Spec:**
+- Parser no-regression (P17): asserts each existing slash command routes to its existing `SlashCommand` constructor.
+- K1, K2, K3: `/session new` interaction with tabs (attaches to focused AI tab; empty-registry implicit-spawn; error on non-AI focused tab).
+- K4, K5: `/target` operates on focused KindAi tab; errors on non-AI.
+- K6.1–K6.8: existing commands operate on focused tab via focused-tab projection (E2) for simple-value mutations (provider, model, agent) and via E5/I5 queue for Context-mutating commands (`/new`, `/compact`, `/last`).
+- K7: `/session resume` while focused on AI tab — replaces the focused tab's session (decided in design).
+- K8: `/session last` routes through K6.7.
+- The existing main loop in `src/PureClaw/Agent/Loop.hs` is refactored: the body becomes the AI-tab loop (now in `Tab.Ai`); `Agent.Loop.runAgentLoop` becomes a thin wrapper that calls `runDispatcher`.
+
+**File scope (write):**
+- (none new — all modifications)
+
+**File scope (modified):**
+- `src/PureClaw/Agent/Loop.hs` (significant refactor — body moves to Tab.Ai; this becomes a wrapper)
+- `src/PureClaw/Agent/SlashCommands.hs` (handlers for /session new, /target, /provider, etc. updated to operate on focused tab via projections or enqueueSlash)
+
+**DoDs covered:** P17 semantic preservation (parser-level routing tested in WU2; WU10 asserts each command still produces correct behavior post-refactor through the dispatcher), I1–I5 (wiring), K1, K2, K3, K4, K5, K6.1–K6.8, K7, K8.
+
+**Dependencies:** WU5, WU6.
+
+**Human checkpoint:** **Yes.** Existing-command preservation is the highest no-regression risk; pause for sign-off.
+
+---
+
+### WU11 — Onboarding (O-series) + final security polish
+
+**Purpose:** Land user-facing onboarding (Telegram `/start`, `/help` rendering, BotFather command registration). Also any remaining S-series items not yet covered.
+
+**Spec:**
+- O1: `/start` handler. Telegram channel registers `/start` slash command (or CLI/Signal equivalent — error gracefully if non-Telegram channels invoke it). Response includes value prop + `/0` + `/tab new 0 shell` + `/tabs`.
+- O2: `/help` rendering updated to include "Tab commands" subsection enumerating tab vocabulary.
+- O3: BotFather command registration list — `/0`–`/9`, `/tab`, `/tabs`, `/start` with golden-file descriptions per O3.
+- Security final pass: confirm S8 (allowlist invariant) test passes end-to-end with real channels. Confirm S5 (PublicError redaction) under real backend failures.
+
+**File scope (write):**
+- `src/PureClaw/Routing/Onboarding.hs` (new — `/start` handler + `/help` extension hook)
+
+**File scope (modified):**
+- `src/PureClaw/Channels/Telegram.hs` (BotFather command registration at startup)
+- `src/PureClaw/Agent/SlashCommands.hs` (CmdHelp rendering extension)
+
+**DoDs covered:** O1, O2, O3.
+
+**Dependencies:** WU2, WU5, WU10.
+
+**Human checkpoint:** **No.**
+
+---
+
+### WU12 — Final cross-unit review + coverage gate + knowledge capture
+
+**Purpose:** Cross-cutting review of the entire feature; coverage gate enforcement; pre-PR knowledge capture per CLAUDE.md's "Pre-PR Knowledge Capture" rule.
+
+**Spec:**
+- Run full test suite under `nix develop . --command cabal test`; all ~120 DoDs green.
+- Run coverage under `nix develop . --command cabal test --enable-coverage`; verify thresholds in `.coverage-thresholds.json` met for new modules.
+- Run hlint; clean.
+- Run `/self-reflect` to extract knowledge-base learnings.
+- Commit knowledge updates so they land in the PR atomically with code.
+- Cross-unit check: verify no module imports a `Tab.*` factory except `Routing.Dispatcher` (the cycle-killer invariant from rounds 1–3).
+- Smoke-test the design's "Examples" section by hand-running each example through the running binary (Telegram CLI? Local CLI?).
+
+**File scope (write):**
+- `.beads/knowledge/*.md` or via `bd remember` (per project convention; CLAUDE.md says use `bd remember` rather than direct files)
+- `.beads/plans/active-plan.md` (mark this plan complete via status frontmatter)
+
+**DoDs covered:** none directly (validation phase); ensures every prior WU's DoDs are still green.
+
+**Dependencies:** WU0–WU11.
+
+**Human checkpoint:** **Yes.** Final go/no-go for PR creation.
 
 ---
 
 ## Dependency Graph
 
 ```
-              pre-flight (posix-pty Nix build verification)
-                        │
-                        ▼
-                       WU0  ◄──── independent: WU4, WU5, WU6 can also start
-                        │
-                        ▼
-                       WU1 ─── types layer (universal dependency)
-                        │
-            ┌───────────┼───────────┬────────────┐
-            ▼           ▼           ▼            ▼
-           WU2         WU3         WU5          WU6
-        (Redact)  (NoOp+InMem)  (Sec.Path)  (Sec.Policy)
-            │           │           │            │
-            └─────┬─────┘           │            │
-                  ▼                 │            │
-                 WU7              (used by ssh in WU9)
-                (PtyIO)             │
-                  │                 │
-                  ▼                 │
-                 WU8  (Local)       │
-                  │                 │
-                  └────────────┬────┘
-                               ▼
-                              WU9  (SSH; uses WU4 quoter, WU5 paths, WU6 policy)
-                               │
-                               ▼
-                              WU10  (Tmux; uses WU9 SSH for RemoteHost)
-                               │
-                               ▼
-                              WU11  (final review + coverage + PR)
+                       Pre-flight (PF1–PF4)
+                              |
+                              ▼
+                            WU0 (scaffold + seams)
+                              |
+                              ▼
+                            WU1 (types)
+                              |
+                ┌─────────────┼─────────────┐
+                ▼             ▼             ▼
+              WU2          WU3           (wait for WU3)
+            (parser)    (Env+Reg)
+                              |
+                              ▼
+                            WU4 (ChannelOut)
+                              |
+                              ▼
+                            WU5 (Dispatcher + spawnTab)
+                              |
+                ┌─────────────┼─────────────┐
+                ▼             ▼             ▼
+              WU6          WU7           WU8
+            (Tab.Ai)    (Tab.Harness) (Tab.Backend)
+                └─────────────┼─────────────┘
+                              ▼
+                            WU9 (Auto-spawn UX + L + X + B)
+                              |
+                              ▼
+                            WU10 (Coexistence)
+                              |
+                              ▼
+                            WU11 (Onboarding)
+                              |
+                              ▼
+                            WU12 (Final review + coverage + self-reflect)
 ```
 
-**Parallelisation opportunity:** WU2, WU4, WU5, WU6 can run concurrently after WU1. WU7 starts after WU3.
+WU6/WU7/WU8 are parallelisable. Estimated total: ~13 work units, ~3–4 weeks of focused work (cadence-comparable to #49 which had 13 WUs).
 
 ## Recovery Protocol
 
-Per CLAUDE.md context-recovery section:
-- Approved plan: this file (`.beads/plans/active-plan.md`).
-- Execution state: `.beads/context/execution-state.md` (updated after each phase transition).
-- Project context: `.beads/context/project-context.md` (updated after each WU commits).
+If an agent loses context mid-execution: run `bd prime --work-type recovery`. This reloads:
+- This plan (`.beads/plans/tabbed-chat-plan.md`) once renamed to `active-plan.md` post-approval.
+- Current work-unit position (from `.beads/context/execution-state.md`).
+- Completed-WU log (from `.beads/context/project-context.md`).
 
-On compaction or interruption, the next agent runs `bd prime --work-type recovery` (if available) or reads this file directly.
+Max 3 retries per work unit before escalating with failure history.
 
 ## Anti-Patterns to Avoid
 
-- **No `--no-verify`** on commits. Pre-commit hooks exist for a reason.
-- **No self-certification.** The orchestrator validates independently against the spec.
-- **No file-scope creep.** Stay within the listed paths per WU.
-- **No skipping the red phase.** Every DoD has its failing test committed before production code.
-- **No coverage shortcuts.** `.coverage-thresholds.json` is the source of truth; failures block PR creation.
-- **No new dependencies** beyond `posix-pty`. The plan enumerates this one explicitly.
-- **No `Harness.Tmux` refactor beyond `shellEscape`/`shellEscapeStr` migration.** That stays in scope; deeper migration is v2.
+Carried forward from #49's plan and design lessons learned in rounds 1–5:
 
-## Iter-3 Revision Notes (Plan Review Gate)
+- **No `--no-verify` on commits.** Pre-commit hooks exist for reasons.
+- **No `git push --force` without explicit user approval.**
+- **No self-certifying.** Adversarial review runs per WU.
+- **No scope creep.** If you discover a need that isn't in the design's ~120 DoDs, log it as a v1.5 deferred item, don't sneak it in.
+- **No `forkIO` in `Tab.*` or `Routing.*` modules.** Always go through `_env_fork`.
+- **No direct `_ch_send` from tab loops.** All output goes through `_env_channelOutQ`.
+- **No mutation of `_ats_context` outside the AI tab loop.** Single-writer invariant.
+- **No new `Show` deriving on `TabError`-like internal types.** Manual redacted Show only (H14).
+- **No bare `Text` for `_tabHandle_name`.** Always via `sanitizeTabName`.
+- **No path concatenation of user-supplied session-id.** Always via `mkSessionId` + `Session.resolveSessionRef`.
 
-Changes vs iter-2 in response to Plan Review Gate iter-2 findings:
+## Open questions deferred to per-WU resolution
 
-**Completeness blockers addressed:**
-- Updated DoD count from 19 → 24 throughout the plan (Strategy + WU0 spec + WU0 DoD-coverage line). Design doc's `## Acceptance Criteria (v1)` now enumerates 24 DoDs after additions for `BackendBrokenTmuxTarget` mid-session, `RecvTimedOut ""` on no-bytes, `BackendBufferQuotaExceeded` on oversubscription, and `mkNoOpBackendHandle Pipe`/`Pty` resize no-op verification.
-- Added process-wide `QSem` buffer-quota infrastructure to WU7 spec: capacity from env var `PURECLAW_BACKEND_AGGREGATE_CAP_MIB` (default 64); `bracket`/`finally`-protected acquire/release; double-release defended by internal `TVar Bool`; oversubscription returns `Left (BackendBufferQuotaExceeded n)`.
-- Added explicit test for `RecvTimedOut ""` on no-bytes path to WU7 idle-state-machine property tests.
-- Added explicit test for mid-session tmux destruction (`BackendBrokenTmuxTarget`) to WU10.
-- Added explicit `_bh_resize` no-op assertions for both kinds in WU3.
-
-**Completeness warnings addressed:**
-- Updated Strategy: now correctly says "13 work units (WU0–WU11, plus WU9.5)".
-- Enumerated `_be_context` vocabulary in WU1 spec as a closed set documented in haddock: `"send"`, `"recv"`, `"close"`, `"ssh-write"`, `"ssh-disconnect"`, `"pty-eof"`, `"concurrent-use"`, `"tmux-detach"`, `"buffer-overflow"`.
-- DoD #24 (haddock decision tree) verification: lightweight doctest asserting the haddock contains the strings `"Pipe"`, `"Pty"`, `"decision tree"` so deletion fails CI.
-
-**Feasibility warnings addressed:**
-- Fixed `_p_to_*` → `_pto_*` regression in the design doc (the `to_` → `_to_` replace_all mid-iter-2 corrupted the longer prefix; restored to `_pto_*`).
-- Acknowledged that `-Wmissing-fields` is implicit in `-Wall` (project conventions section) rather than separately declared.
-- Noted `recv`/`recvWith` top-level helpers (plan) are not yet in design doc's exported-symbol list — to be reconciled at implementation time.
-
-## Iter-2 Revision Notes
-
-Changes vs iter-1 draft (in response to Plan Review Gate iter-1 findings):
-
-**Completeness blockers addressed:**
-- Added DoD #20 (remote tmux window survival after close) to design doc + WU10 coverage.
-- Added 3 missing examples to design doc: direct ssh Pty (no tmux), `mkSshPipeBackendHandle` one-shot, `try @BackendException` recovery.
-- Moved the "Tmux Attach shares the screen" v1 limitation into a prominent callout at the top of the design doc (before Motivation), not buried in V1 Known Limitations.
-- Added honest doc note: "best-effort overwrite-with-zero before unlink is theatre on COW/SSD filesystems" — clarifies that the real mitigations are short lifetime + 0400 mode + per-process KeysRoot.
-
-**Completeness warnings addressed:**
-- Added new WU9.5 covering SSH disconnect-mid-recv test and concurrent-use invariant test (both edge cases the Completeness reviewer flagged as unenforced).
-- Added explicit note that `_bh_send` on a closed pipe / dead transport throws `BackendException` with fixed-vocabulary `_be_context` tags (`"ssh-write"`, `"concurrent-use"`).
-
-**Feasibility warnings addressed:**
-- Broadened the SecurityPolicy enumeration regex to `\bSecurityPolicy\b` (catches positional ctor at `test/Security/CommandSpec.hs:46` that brace-form-only regex misses).
-- Fixed the CI grep firewall to use a path-based whitelist instead of `--exclude-dir` (the directory exclude does not protect the file `src/PureClaw/Backend/Pty.hs` itself).
-- Updated design doc to use leading-underscore field names (`_pto_*` etc.) consistently — was internally inconsistent with project convention and the plan.
-- Acknowledged `PathError` new-constructor cascade in WU5 with a grep-driven verification step.
-- Noted aarch64-darwin CI matrix already exists in `.github/workflows/ci.yml`; WU7's task is verification of `posix-pty` on that matrix, not introducing a new one.
-
-**Scope warnings addressed:**
-- Added `defaultCredentialRedactor` to WU1's exported constants (was missing from earlier draft; referenced as `_pto_redactor` default).
-- Added `realPtyIO` coverage policy: integration tests cover real-PTY path; kernel-error lines `-- HPC:Exclude`'d explicitly; `fakePtyIO` carries 100% branch coverage.
-- Clarified CI matrix enforcement uses the existing pre-merge workflow (no new infrastructure).
-
-## Open Questions
-
-- None at draft-time. The Plan Review Gate iter-2 reviewers will surface anything missed.
+The design doc's 7 remaining open questions (lines 803–816 of `docs/tabbed-chat.md`) are non-blocking. The WUs listed there will revisit them if friction is observed. Specifically:
+- OQ-1 (recap on self-switch) — WU9.
+- OQ-2 (idle-timeout) — WU6.
+- OQ-3 (ssh tab default name) — WU8.
+- OQ-4 (recap window size) — WU9.
+- OQ-5 (recap output bound vs Telegram 4096-char limit) — WU11 (testable against fake Telegram).
+- OQ-6 (retry preservation of spawn args) — WU9 (X2/X3 testing).
+- OQ-7 (CLI channel scope for v1) — WU11 (smoke test).
