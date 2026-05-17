@@ -1,7 +1,7 @@
 # Tabbed Chat — Mobile-Friendly Multiplexing
 
 **Issue:** [#51](https://github.com/pureclaw/pureclaw/issues/51)
-**Status:** design — revised after design-review round 2
+**Status:** design — APPROVED by all 5 review-gate agents (PM, Architect, Designer, Security, CTO) over rounds 1–5
 **Branch:** `feat/terminal-backends-design`
 **Authors:** Doug Beardsley, Claude
 **Builds on:** [Terminal / Backend Abstractions](terminal-backend-abstractions.md) — Tabbed Chat's `KindBackend` tabs wrap `BackendHandle` factories landing on this branch.
@@ -290,7 +290,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | I2  | **AI tab loop processes both event types**: when an AI tab's loop dequeues from `_ats_inputQ`, it handles either constructor: `UserText t` → if `t` starts with `/` after trimming, re-parse via `parseSlashCommand` and treat as if it were a SlashCmd event (re-parse path for direct-inject of slash-shaped payload like `/0 /new`); otherwise feed `t` to the provider as user input, run one turn, write response to `_ats_context`. `SlashCmd cmd` → run `ctx' <- executeSlashCommand env cmd =<< readIORef _ats_context; writeIORef _ats_context ctx'`. **`_ats_context` is mutated only by this code path** (the tab loop thread). |
 | I3  | **LLM-free invariant under direct-inject**: a direct-inject of slash-command-shaped payload (`/0 /new`) routed through the AI tab loop and re-parsed (I2) must satisfy P18 — no slash-command-shaped payload reaches the provider. Test: fake `Provider`'s `complete` is never invoked when the AI tab processes `/new` via I2's re-parse path. Also assert `parseSlashCommand` recognised it as `CmdNew`. |
 | I4  | **Non-AI tabs treat slash-prefix on direct-inject as opaque text**: a `KindShell`/`KindSsh`/`KindTmux` tab that receives `/0 ls -la` via direct-inject treats the payload as opaque text and writes it to the backend via `_bh_send`. Non-AI tabs do NOT host a slash-command parser. Test: `/0 /pwd` direct-injected to a KindShell tab sends literal `/pwd` to the shell. |
-| I5  | **Dispatcher routes E5 commands via `_tabHandle_enqueueSlash`**: when the dispatcher processes a Context-mutating slash command (`/new`, `/last`, `/compact`, `/transcript`, `/agent`) against the focused AI tab, it calls `_tabHandle_enqueueSlash` on that tab. The dispatcher does NOT call `executeSlashCommand` against the tab's context. Test: dispatcher receives `/new` while focused on /0; `/0`'s input queue receives a `SlashCmd CmdNew` event; dispatcher returns to read the next channel message immediately (no blocking wait for the tab to process). |
+| I5  | **Dispatcher routes E5 commands via `_tabHandle_enqueueSlash`**: when the dispatcher processes a Context-mutating slash command (`/new`, `/last`, `/compact`, `/transcript`, `/agent`) against the focused AI tab, it calls `_tabHandle_enqueueSlash` on that tab. The dispatcher does NOT call `executeSlashCommand` against the tab's context. On `Left TabUnsupportedCommand` (focused tab is non-AI), the dispatcher emits a `SrcDispatcher` PublicError `"/N: tab kind does not support this command"` (mirrors K5's `/target` pattern). Test: dispatcher receives `/new` while focused on /0; `/0`'s input queue receives a `SlashCmd CmdNew` event; dispatcher returns to read the next channel message immediately (no blocking wait for the tab to process). Separate test: same command while focused on a `KindShell` tab produces PublicError, no enqueue. |
 
 ### Onboarding (O-series)
 
@@ -312,7 +312,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 ### Total: ~115 DoDs across 14 series (P/H/E/C/D/A/L/X/B/S/K/I/O/T).
 
 P-series: 19 (P1–P18 + P15a) — parser + LLM-free invariant.
-H-series: 14 (H1–H14) — TabHandle abstraction (incl. H13 `_tabHandle_context`, H14 manual `Show TabError`).
+H-series: 14 (H1–H14) — TabHandle abstraction (incl. H13 `_tabHandle_enqueueSlash`, H14 manual `Show TabError`).
 E-series: 5 (E1–E5) — registry + AgentEnv + Context flow.
 C-series: 6 (C1–C6) — concurrency + exception safety + provider cancel safety.
 D-series: 6 (D1–D6) — channel emission + focused-only display + breadcrumb.
