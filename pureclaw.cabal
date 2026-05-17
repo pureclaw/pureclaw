@@ -70,6 +70,7 @@ library
     PureClaw.Routing.Registry
     PureClaw.Routing.Config
     PureClaw.Routing.ChannelOut
+    PureClaw.Routing.Dispatcher
     -- Backend
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake

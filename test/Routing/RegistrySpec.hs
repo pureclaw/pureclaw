@@ -39,17 +39,21 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness (HarnessHandle)
 import PureClaw.Handles.Log
+import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+
 import PureClaw.Handles.Tab
   ( TabHandle (..)
   , TabIndex
   , TabKind (..)
   , TabName (..)
   , TabRunner (..)
+  , TabStatus (..)
   , mkTabIndex
   )
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)
 import PureClaw.Routing.Config (defaultRoutingConfig)
+import PureClaw.Routing.Dispatcher qualified as Dispatcher
 import PureClaw.Routing.Registry
   ( insertTab
   , lookupTab
@@ -176,6 +180,21 @@ idx0 = fromJust (mkTabIndex 0)
 idx1 = fromJust (mkTabIndex 1)
 idx2 = fromJust (mkTabIndex 2)
 
+-- | E3 helper: synthetic tab whose '_tabHandle_send' is a silent no-op
+-- and whose status is permanently 'Idle' (no crash banner side
+-- effects). Sufficient for the focus-invariant assertions.
+mkSyntheticTabForE3 :: TabIndex -> TabKind -> IO TabHandle
+mkSyntheticTabForE3 idx kind = pure TabHandle
+  { _tabHandle_index        = idx
+  , _tabHandle_name         = TabName "e3"
+  , _tabHandle_kind         = kind
+  , _tabHandle_status       = pure (Idle (UTCTime (fromGregorian 2026 5 17)
+                                                   (secondsToDiffTime 0)))
+  , _tabHandle_send         = \_ -> pure (Right ())
+  , _tabHandle_enqueueSlash = \_ -> pure (Right ())
+  , _tabHandle_close        = \_ -> pure ()
+  }
+
 -- ---------------------------------------------------------------------------
 -- E-series
 -- ---------------------------------------------------------------------------
@@ -228,7 +247,35 @@ spec = do
       model    <- readIORef (_env_model env)
       model `shouldSatisfy` isNothing
 
-    it "E3: focus invariant — _env_focus written only by dispatcher between message cycles (WU5 dispatcher)" pending
+    it "E3: focus invariant — _env_focus written only by dispatcher between message cycles (WU5 dispatcher)" $ do
+      -- WU5: 'dispatchOne' is the only function in the routing layer
+      -- that writes '_env_focus'; it runs synchronously in the
+      -- dispatcher's thread. We assert the invariant operationally:
+      -- drive a sequence of inputs through 'dispatchOne' on a single
+      -- thread and confirm focus is consistent with the LAST accepted
+      -- 'Switch' (sequential reads/writes — no TOCTOU).
+      env <- mkE3TestEnv
+      st  <- mkSyntheticTabForE3 idx0 KindAi
+      _   <- insertTab (_env_tabs env) idx0 st
+      st1 <- mkSyntheticTabForE3 idx1 KindAi
+      _   <- insertTab (_env_tabs env) idx1 st1
+      ds  <- Dispatcher.newDispatcherState env
+               (\_k _i _a -> pure (Right st))
+      -- Initial focus: Nothing.
+      readIORef (_env_focus env) `shouldReturn` Nothing
+      -- After /0: focus = Just 0.
+      Dispatcher.dispatchOne env ds (UserId "u") "/0"
+      readIORef (_env_focus env) `shouldReturn` Just idx0
+      -- After /1: focus = Just 1 (write happened synchronously inside
+      -- the same dispatchOne call; no interleaving possible).
+      Dispatcher.dispatchOne env ds (UserId "u") "/1"
+      readIORef (_env_focus env) `shouldReturn` Just idx1
+      -- An Inject does NOT change focus (E3 contract: only Switch can).
+      Dispatcher.dispatchOne env ds (UserId "u") "/0 hello"
+      readIORef (_env_focus env) `shouldReturn` Just idx1
+      -- A Default also does NOT change focus.
+      Dispatcher.dispatchOne env ds (UserId "u") "plain text"
+      readIORef (_env_focus env) `shouldReturn` Just idx1
 
     it "E4: _env_fork :: IO () -> IO TabRunner is part of AgentEnv (default wraps Control.Concurrent.Async.async)" $ do
       env <- mkE3TestEnv

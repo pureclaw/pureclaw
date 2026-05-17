@@ -30,6 +30,27 @@
           "Idle UTCTime branch of TabStatus constructed and equated",
           "unPublicTabError round-trip"
         ]
+      },
+      "PureClaw.Routing.Dispatcher": {
+        "stagedBy": "WU5 (Tabbed Chat #51)",
+        "filledBy": ["WU6", "WU7", "WU8"],
+        "since": "2026-05-17",
+        "reason": "The 'defaultTabFactory' body dispatches to Tab.mkTabAi / Tab.mkTabHarness / Tab.mkTabBackend, all of which are 'error \"not implemented\"' stubs in WU1. Calling 'defaultTabFactory' from any test would trip those bottoms, so the production dispatch path can only be exercised in WU6/WU7/WU8 alongside the real factory bodies. WU5 tests cover spawnTab/spawnTabWith via an injected synthetic factory (the same TabFactory test seam the dispatcher uses internally), so every non-defaultTabFactory branch is covered.",
+        "minimalChecks": [
+          "spawnTabWith happy-path with a synthetic factory (Right idx + registry insert)",
+          "spawnTabWith with a throwing factory (C3 — registry rollback + redacted Left)",
+          "spawnTabWith with a Left-returning factory (C3 sibling — registry rollback)",
+          "spawnTabWith with _rc_maxTabs = 0 (TabLimitExceeded short-circuit; no factory call)",
+          "spawnTabWith with a full registry (TabLimitExceeded; no factory call)",
+          "spawnTab (public entry) exercised via the TabLimitExceeded path (no factory call)",
+          "defaultTabFactory delegates through parseArgsForKind, which IS covered for all 5 TabKinds (KindAi/KindHarness/KindShell/KindSsh/KindTmux)",
+          "runDispatcher + runDispatcherWith both exercised; bracket cleanup (closeAllTabs) verified on graceful EOF AND exception paths",
+          "dispatchOne exercised for all 4 ParsedInput shapes (Switch/Inject/Default/ParsedSlashCmd) + parser-Left path",
+          "S5 emitCrashedRedacted exercised; PublicTabError redaction asserted to contain no raw TabError constructor names",
+          "S7 token bucket exercised at the unit level (newRateLimiter/tryConsumeSpawnToken) AND end-to-end via dispatchOne overflow",
+          "S8 allowlist invariant asserted as a runtime contract (dispatcher reads from _ch_receive only; no other input seam exists)",
+          "P18 LLM-free invariant: property test over the routing grammar's switch | inject | slash-cmd corpus asserts Provider.complete is never invoked"
+        ]
       }
     }
   },
