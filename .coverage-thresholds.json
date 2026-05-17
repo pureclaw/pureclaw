@@ -18,9 +18,9 @@
     "modules": {
       "PureClaw.Handles.Tab": {
         "stagedBy": "WU1 (commit 9458567, Tabbed Chat #51)",
-        "filledBy": ["WU7", "WU8"],
+        "filledBy": ["WU8"],
         "since": "2026-05-17",
-        "reason": "Factory bodies mkTabHarness/mkTabBackend are `error \"not implemented\"` stubs in WU1 by plan design; real bodies arrive in WU7/WU8. The WU6 AI tab factory lives at `PureClaw.Tab.Ai.mkTabAi` (which takes `AgentEnv`); the 2-arg `Handles.Tab.mkTabAi` stub here is kept unchanged to preserve the H2 type-shape pin (`_h2_mkTabAi_sig`) and the existing `defaultTabFactory` wiring. The stub is now effectively superseded by `Tab.Ai.mkTabAi` — when `defaultTabFactory` is updated in WU9 to plumb `AgentEnv`, this entry will be removed.",
+        "reason": "Factory body mkTabBackend is an `error \"not implemented\"` stub in WU1 by plan design; the real body arrives in WU8. The WU6 AI tab factory lives at `PureClaw.Tab.Ai.mkTabAi` and the WU7 harness tab factory lives at `PureClaw.Tab.Harness.mkTabHarness`; the 2-arg `Handles.Tab.mkTabAi` / `Handles.Tab.mkTabHarness` stubs here are kept unchanged to preserve the H2 type-shape pins (`_h2_mkTabAi_sig`, `_h2_mkTabHarness_sig`) and the existing `defaultTabFactory` wiring. The stubs are now effectively superseded by the `Tab.Ai` / `Tab.Harness` factories — when `defaultTabFactory` is updated in WU9 to plumb `AgentEnv`, this entry will be removed.",
         "minimalChecks": [
           "all 3 factory stubs throw ErrorCall containing 'not implemented' (shouldThrow tests)",
           "all 10 TabError arms reached via Show + toPublicTabError",
@@ -53,9 +53,29 @@
           "AsyncCancelled propagates from loop body via safelyRunLoop (C5 AI slice — exercised by close-path cancel)"
         ]
       },
+      "PureClaw.Tab.Harness": {
+        "stagedBy": "WU7 (Tabbed Chat #51)",
+        "filledBy": ["WU9"],
+        "since": "2026-05-17",
+        "reason": "WU7 lands the harness tab factory + drainer/writer helper threads. Top-level declaration coverage is 86% (25/29); alternative coverage 100% (13/13); expression coverage 97% (261/268). The top-level gap is dominated by HPC's per-instance-method accounting (the auto-derived `Show HarnessExitedSignal` instance, required by the `Exception` constraint, contributes 3 uncovered declarations because HPC treats each derived method body as a separate top-level decl). The remaining expression gaps are: the close-handler's `env` parameter binding (HPC accounting quirk — the function IS invoked), and the sentinel `Active` value written to `_hts_statusRef` at allocation (replaced with `Idle now` before `mkTabHarness` returns; observable in coverage only via the brief window). Functional coverage is complete for the WU7 spec scope. The waiver removes when WU9 adds the auto-spawn UX tests that exercise the helper-thread lifecycle end-to-end through the dispatcher.",
+        "minimalChecks": [
+          "mkTabHarness happy-path returns Right TabHandle (drainer + writer + close)",
+          "mkTabHarness sanitize-name reject returns Left TabInvalidName (covers Parse.sanitizeTabName Left arm)",
+          "mkTabHarness unknown name returns Left TabNotFound (covers harness-lookup Nothing branch)",
+          "_tabHandle_send (KindHarness) returns Left TabConcurrencyLimit on TBQueue overflow (H4)",
+          "_tabHandle_enqueueSlash (KindHarness) returns Left TabUnsupportedCommand without enqueueing (H13 / I4)",
+          "_tabHandle_close graceful + force + idempotent + never-throws (H6/H7/H8/H9)",
+          "Focus-gated FullMsg emission: focused tab emits (SrcTab idx, FullMsg idx text); non-focused tab skips producer-side enqueue (D3/D4)",
+          "I4 opaque-slash: '/pwd' sent via _tabHandle_send reaches harness as literal bytes",
+          "Drainer terminates silently on HarnessExited (HarnessExitedSignal swallowed, status stays Idle)",
+          "Crash handler: a misbehaving _hh_status transitions status to Crashed (safelyRun synchronous-exception branch)",
+          "Writer thread forwards bytes to _hh_send (round-trip through the bounded queue)",
+          "TabName constructed via sanitizeTabName (H11)"
+        ]
+      },
       "PureClaw.Routing.Dispatcher": {
         "stagedBy": "WU5 (Tabbed Chat #51)",
-        "filledBy": ["WU6", "WU7", "WU8"],
+        "filledBy": ["WU8"],
         "since": "2026-05-17",
         "reason": "The 'defaultTabFactory' body dispatches to Tab.mkTabAi / Tab.mkTabHarness / Tab.mkTabBackend, all of which are 'error \"not implemented\"' stubs in WU1. Calling 'defaultTabFactory' from any test would trip those bottoms, so the production dispatch path can only be exercised in WU6/WU7/WU8 alongside the real factory bodies. WU5 tests cover spawnTab/spawnTabWith via an injected synthetic factory (the same TabFactory test seam the dispatcher uses internally), so every non-defaultTabFactory branch is covered.",
         "minimalChecks": [
