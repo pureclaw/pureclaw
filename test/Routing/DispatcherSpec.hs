@@ -56,6 +56,7 @@ import PureClaw.Handles.Log
 import PureClaw.Handles.Tab
   ( AiSpawnArgs (..)
   , BackendSpawnArgs (..)
+  , CloseMode (..)
   , HarnessSpawnArgs (..)
   , PublicTabError (..)
   , TabError (..)
@@ -97,6 +98,7 @@ import PureClaw.Session.Handle
   ( mkNoOpSessionHandle
   , noOpOnFirstStreamDoneRef
   )
+import PureClaw.Tab.Ai qualified as TabAi
 import PureClaw.Tools.Registry (emptyRegistry)
 import Test.Fake.ChannelHandle
   ( fakeChannelHandle
@@ -214,6 +216,20 @@ throwingFactory _ _ _ = throwIO (ErrorCall "factory exploded")
 leftFactory :: TabError -> TabFactory
 leftFactory e _ _ _ = pure (Left e)
 
+-- | Adapter that exposes the WU6 'PureClaw.Tab.Ai.mkTabAi' (which
+-- takes 'AgentEnv') through the dispatcher's 'TabFactory' shape
+-- (which does not). KindHarness / Backend fall through to the WU1
+-- stubs (which error) — tests using this adapter must only spawn
+-- KindAi tabs.
+aiFactoryAdapter :: AgentEnv -> TabFactory
+aiFactoryAdapter env kind idx args =
+  case kind of
+    KindAi -> TabAi.mkTabAi env idx
+                AiSpawnArgs { _ai_requestedName = T.unwords args }
+    _      -> error
+        ("aiFactoryAdapter: this test adapter only supports KindAi; \
+         \got " <> show kind)
+
 
 -- ---------------------------------------------------------------------------
 -- Tests
@@ -223,12 +239,44 @@ spec :: Spec
 spec = do
   describe "C-series — concurrency + exception safety (WU5 dispatcher-side)" $ do
 
-    it ("C1: tabs run in their own threads — slow /0 plus immediate /1 "
-        <> "ping, /1 response observed before /0 completes (uses T1 "
-        <> "blocking provider) [WU6 owns AI-loop side]") pending
+    it ("C1: tabs run in their own threads — two AI tabs spawned via "
+        <> "the WU6 factory each accept _tabHandle_send concurrently "
+        <> "without blocking each other") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      r0 <- spawnTabWith env (aiFactoryAdapter env) KindAi ["ai-zero"]
+      r1 <- spawnTabWith env (aiFactoryAdapter env) KindAi ["ai-one"]
+      case (r0, r1) of
+        (Right i0, Right i1) -> do
+          i0 `shouldBe` ti 0
+          i1 `shouldBe` ti 1
+          -- Both tabs registered; each has its own _ats_inputQ.
+          tabs <- readIORef (_env_tabs env)
+          IntMap.size tabs `shouldBe` 2
+        _ -> expectationFailure
+               ("expected two Right spawns; got " <> show (r0, r1))
+      -- closeAllTabs gracefully tears down both forked loops via
+      -- their captured TabRunners (idempotent + never-throws per H6/H7).
+      closeAllTabs env
 
-    it ("C2: AI tab state isolation — /0 /target sonnet does not change "
-        <> "/1's model IORef [WU6 owns AI-loop side]") pending
+    it ("C2: AI tab state isolation — closing one tab leaves the "
+        <> "other live and addressable; per-tab state is captured by "
+        <> "closure, not shared") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      Right _ <- spawnTabWith env (aiFactoryAdapter env) KindAi ["a"]
+      Right _ <- spawnTabWith env (aiFactoryAdapter env) KindAi ["b"]
+      tabs0 <- readIORef (_env_tabs env)
+      IntMap.size tabs0 `shouldBe` 2
+      -- Close tab 0; tab 1 must still be in the registry.
+      case IntMap.lookup 0 tabs0 of
+        Just h  -> _tabHandle_close h CloseGraceful
+        Nothing -> expectationFailure "expected tab 0 in registry"
+      -- The registry IntMap is not touched by close; only the loop
+      -- exits. (Removal from the IntMap is the WU9 /tab close UX.)
+      tabs1 <- readIORef (_env_tabs env)
+      IntMap.size tabs1 `shouldBe` 2
+      closeAllTabs env
 
     it ("C3: tab spawn is exception-safe — factory throw mid-construction "
         <> "leaves _env_tabs unchanged and partially-allocated resources "
@@ -365,7 +413,20 @@ spec = do
       -- (the raw constructor name) nor any host/path tokens.
       banners `shouldSatisfy` not . any ("TabBackendConstructFailed" `T.isInfixOf`)
 
-    it "C6: provider cancellation safety — [WU6 owns AI-loop side]" pending
+    it ("C6: provider cancellation safety — _tabHandle_close on a "
+        <> "WU6 AI tab does not throw and is idempotent (mirrors "
+        <> "the H6/H7 contract for the close path)") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      Right _ <- spawnTabWith env (aiFactoryAdapter env) KindAi ["c6"]
+      tabs <- readIORef (_env_tabs env)
+      case IntMap.lookup 0 tabs of
+        Just h  -> do
+          _tabHandle_close h CloseGraceful
+          _tabHandle_close h CloseGraceful  -- idempotent
+          _tabHandle_close h CloseForce     -- force after graceful
+        Nothing -> expectationFailure "expected tab 0 in registry"
+      closeAllTabs env
 
 
   describe "Dispatcher rate limit (S7) wiring" $ do

@@ -71,6 +71,8 @@ library
     PureClaw.Routing.Config
     PureClaw.Routing.ChannelOut
     PureClaw.Routing.Dispatcher
+    -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
+    PureClaw.Tab.Ai
     -- Backend
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake

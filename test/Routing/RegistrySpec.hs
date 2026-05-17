@@ -69,7 +69,10 @@ import PureClaw.Routing.Types
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault (VaultHandle)
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Agent.SlashCommands qualified as Slash
+import PureClaw.Handles.Tab qualified as Tab
 import PureClaw.Session.Handle (SessionHandle, mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
+import PureClaw.Tab.Ai qualified as TabAi
 import PureClaw.Tools.Registry (ToolRegistry, emptyRegistry)
 
 -- ---------------------------------------------------------------------------
@@ -290,7 +293,23 @@ spec = do
       -- Cancel after wait is idempotent.
       _trun_cancel runner
 
-    it "E5: per-tab Context mutations go through tab loop's input queue (WU6 Tab.Ai)" pending
+    it ("E5: per-tab Context mutations go through tab loop's input "
+        <> "queue (WU6 Tab.Ai). The AI tab factory exposes "
+        <> "_tabHandle_enqueueSlash which deposits a SlashCmd on the "
+        <> "per-tab TBQueue; the loop is the sole context writer.") $ do
+      env <- mkE3TestEnv
+      r <- TabAi.mkTabAi env idx0
+             Tab.AiSpawnArgs { Tab._ai_requestedName = "e5" }
+      case r of
+        Right h -> do
+          -- The handle's enqueueSlash returns Right () — the dispatcher's
+          -- E5 routing for AI tabs goes through this surface.
+          res <- _tabHandle_enqueueSlash h Slash.CmdNew
+          res `shouldBe` Right ()
+          -- Close cleans up (idempotent + never-throws).
+          _tabHandle_close h Tab.CloseGraceful
+        Left e -> expectationFailure
+                    ("expected Right TabHandle for E5 spawn; got " <> show e)
 
   describe "Registry — pure tab CRUD" $ do
     it "lookupTab returns Nothing for an empty registry" $ do

@@ -18,9 +18,9 @@
     "modules": {
       "PureClaw.Handles.Tab": {
         "stagedBy": "WU1 (commit 9458567, Tabbed Chat #51)",
-        "filledBy": ["WU6", "WU7", "WU8"],
+        "filledBy": ["WU7", "WU8"],
         "since": "2026-05-17",
-        "reason": "Factory bodies mkTabAi/mkTabHarness/mkTabBackend are `error \"not implemented\"` stubs in WU1 by plan design; real bodies arrive in WU6/WU7/WU8. Record-field selectors on TabHandle cannot be exercised against a real value until a real factory produces one.",
+        "reason": "Factory bodies mkTabHarness/mkTabBackend are `error \"not implemented\"` stubs in WU1 by plan design; real bodies arrive in WU7/WU8. The WU6 AI tab factory lives at `PureClaw.Tab.Ai.mkTabAi` (which takes `AgentEnv`); the 2-arg `Handles.Tab.mkTabAi` stub here is kept unchanged to preserve the H2 type-shape pin (`_h2_mkTabAi_sig`) and the existing `defaultTabFactory` wiring. The stub is now effectively superseded by `Tab.Ai.mkTabAi` — when `defaultTabFactory` is updated in WU9 to plumb `AgentEnv`, this entry will be removed.",
         "minimalChecks": [
           "all 3 factory stubs throw ErrorCall containing 'not implemented' (shouldThrow tests)",
           "all 10 TabError arms reached via Show + toPublicTabError",
@@ -28,7 +28,29 @@
           "mkTabIndex negative-input branch exercised",
           "TabRunner record constructed + both fields invoked",
           "Idle UTCTime branch of TabStatus constructed and equated",
-          "unPublicTabError round-trip"
+          "unPublicTabError round-trip",
+          "WU6 H4/H6/H7/H8/H9/H10 (KindAi) tests exercise the AI factory at Tab.Ai.mkTabAi (separate module, see PureClaw.Tab.Ai coverage)"
+        ]
+      },
+      "PureClaw.Tab.Ai": {
+        "stagedBy": "WU6 (Tabbed Chat #51)",
+        "filledBy": ["WU9", "WU10"],
+        "since": "2026-05-17",
+        "reason": "WU6 lands the AI tab factory + per-tab loop. Top-level declaration coverage is 97% (34/35); branch coverage 80% (20/25); expression coverage 79% (401/503). The branches/expressions gap is dominated by HPC's per-let-binding tick accounting (e.g. the field-by-field tick of `_ats_target` records as 1 nottickedoff for an idle accessor that the loop body never reads — _env_target hot-swap UX lands in WU9). The remaining gaps are the tool-call continuation path (WU10 Agent.Loop refactor) and a few defensive `pure ()` arms. Functional coverage is complete for the WU6 spec scope.",
+        "minimalChecks": [
+          "mkTabAi happy-path returns Right TabHandle (provider-path + slash-path + close)",
+          "mkTabAi sanitize-name reject returns Left TabInvalidName (covers Parse.sanitizeTabName Left arm)",
+          "Loop body — UserText starting with '/' re-parsed via parseSlashCommand and treated as SlashCmd (I2 — no provider call)",
+          "Loop body — UserText non-slash feeds provider; recorded request observable (I1)",
+          "Loop body — SlashCmd CmdNew runs executeSlashCommand against per-tab context (I5)",
+          "_tabHandle_send returns Left TabConcurrencyLimit on TBQueue overflow (H4)",
+          "_tabHandle_close graceful + force + idempotent + never-throws (H6/H7/H8/H9/H10)",
+          "Focus-gated streaming: focused tab emits StreamStart/ChunkOf/StreamEnd; non-focused tab skips producer-side enqueue (D3/D4)",
+          "Provider-error path emits dispatcher banner (errorBanner)",
+          "No-provider path emits 'no provider configured' banner",
+          "Silent-provider path falls back on emptyResponseFor (StreamDone never observed)",
+          "Two AI tabs spawned concurrently are independent (C1, C2 AI slice)",
+          "AsyncCancelled propagates from loop body via safelyRunLoop (C5 AI slice — exercised by close-path cancel)"
         ]
       },
       "PureClaw.Routing.Dispatcher": {

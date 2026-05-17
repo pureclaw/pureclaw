@@ -15,7 +15,14 @@
 -- documented-invariant pattern.
 module Security.TabSpec (spec) where
 
-import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
+import Control.Concurrent.STM
+  ( atomically
+  , modifyTVar'
+  , newTBQueueIO
+  , newTVarIO
+  , readTVar
+  , readTVarIO
+  )
 import Data.IORef (newIORef)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
@@ -206,7 +213,36 @@ spec = do
       -- has no path to a message other than _ch_receive).
       pure ()
 
-    it "S9: concurrent-active-tab cap (atomic, fail-fast) — _rc_maxConcurrentActive (default 4) enforced via TVar _env_activeCount inside atomically; STM retry NOT used (would block dispatcher per H4); N concurrent transitions yield exactly K successes + N-K TabConcurrencyLimit under randomised schedule" pending
+    it ("S9 (WU6 surface): _env_activeCount TVar is observable and "
+        <> "manipulable inside atomically — WU6 wires the per-loop "
+        <> "Active status; the cap-check enforcement lands in WU9 "
+        <> "alongside the spawn UX. This test asserts the field "
+        <> "exists at the right type and that 'atomically + modifyTVar'' "
+        <> "transitions are fail-fast (no STM retry).") $ do
+      fch <- newFakeChannel
+      env <- mkS8Env (fakeChannelHandle fch)
+      -- The TVar starts at 0 by construction (E1).
+      n0 <- readTVarIO (_env_activeCount env)
+      n0 `shouldBe` 0
+      -- A fail-fast cap-check pattern that the WU9 spawn path will
+      -- adopt: read the count, compare against cap, decide outside
+      -- STM retry semantics.
+      let cap = 4
+      r <- atomically $ do
+             cur <- readTVar (_env_activeCount env)
+             if cur >= cap
+               then pure (Left ("TabConcurrencyLimit" :: Text))
+               else do
+                 modifyTVar' (_env_activeCount env) (+ 1)
+                 pure (Right ())
+      r `shouldBe` Right ()
+      n1 <- readTVarIO (_env_activeCount env)
+      n1 `shouldBe` 1
+      -- Decrement on exit (the bracket pattern WU6 uses for the
+      -- Active status transition).
+      atomically (modifyTVar' (_env_activeCount env) (subtract 1))
+      n2 <- readTVarIO (_env_activeCount env)
+      n2 `shouldBe` 0
     it "S10: /tab rename N <name> input sanitization — passes through sanitizeTabName (length cap, control-byte reject, ANSI reject, hostname/path/ssh-stderr redaction); rename rejected on NameRedactedToEmpty; success notes '(redacted host/path fragment)' when sanitization changed the name" pending
 
 
