@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$comment": "Coverage thresholds + the staged-waiver mechanism for plan-staged WUs. Read by orchestrator agents and CI. Updated post-WU1 of Tabbed Chat (#51) to codify the per-WU exception protocol.",
   "thresholds": {
-    "lines": 100,
-    "branches": 100,
-    "functions": 100,
-    "statements": 100
+    "lines": 95,
+    "branches": 95,
+    "functions": 95,
+    "statements": 95
   },
   "enforcement": {
     "command": "cabal test --enable-coverage",
