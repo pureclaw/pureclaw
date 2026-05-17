@@ -9,6 +9,9 @@ module PureClaw.Agent.SlashCommands
   , AgentSubCommand (..)
   , SessionSubCommand (..)
   , McpSubCommand (..)
+  , TabSlashCommand (..)
+  , TabKindArg (..)
+  , ForceMode (..)
     -- * Known harnesses
   , knownHarnesses
     -- * Agent name tab completion helper
@@ -194,6 +197,66 @@ data McpSubCommand
   | McpUnknown Text           -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
+-- | A redacted enumeration of @TabKind@ as it appears in the @/tab new@
+-- command. Local to this module to avoid an import cycle through
+-- 'PureClaw.Handles.Tab' (which imports this module for 'SlashCommand'
+-- in its 'TabUnsupportedCommand' constructor). WU2 introduces this type
+-- alongside the @/tab@ command family; downstream WUs that need a
+-- 'PureClaw.Handles.Tab.TabKind' translate via a trivial total
+-- conversion at the handler layer (WU9).
+data TabKindArg
+  = TkaAi
+  | TkaHarness
+  | TkaShell
+  | TkaSsh
+  | TkaTmux
+  deriving stock (Show, Eq, Ord, Bounded, Enum)
+
+-- | Whether @/tab close N@ was passed the @--force@ flag.
+--
+-- For @KindAi@ tabs, @ForceYes@ skips the session archive on close
+-- (transcript deleted from disk). For non-AI tabs the close path is
+-- already destructive so the flag is a no-op semantically — the
+-- distinction is preserved here so 'executeSlashCommand' (WU9) can
+-- still echo what the user asked for.
+data ForceMode
+  = ForceNo
+  | ForceYes
+  deriving stock (Show, Eq, Ord, Bounded, Enum)
+
+-- | The @/tab@ command family (introduced by WU2 of Tabbed Chat #51).
+--
+-- Tab indices are stored as plain 'Int' rather than as
+-- 'PureClaw.Handles.Tab.TabIndex' to avoid an import cycle. The parser
+-- ('PureClaw.Routing.Parse.parseInput') validates the index against
+-- @_rc_maxTabs@ via @mkTabIndex@ before constructing these values, so
+-- callers may treat the contained 'Int' as well-formed for the
+-- configured cap; downstream handlers (WU9) are still expected to
+-- re-wrap via @mkTabIndex@ when crossing into 'TabIndex'-typed APIs.
+--
+-- @TabResumeCmd@ carries the validated 'SessionId' produced by
+-- @mkSessionId@ (WU2 smart constructor).
+data TabSlashCommand
+  = TabNewCmd !Int !(Maybe TabKindArg) !(Maybe Text)
+    -- ^ @\/tab new \<N\> [\<kind\> [\<arg-text\>]]@. The third field
+    --   is the remainder of the line after the kind, captured as a
+    --   single 'Text' for the handler to split further.
+  | TabListCmd
+    -- ^ @\/tab list@ (and the @\/tabs@ alias).
+  | TabCloseCmd !Int !ForceMode
+    -- ^ @\/tab close \<N\> [--force]@.
+  | TabFocusCmd !Int
+    -- ^ @\/tab focus \<N\>@ (functional alias of @\/N@).
+  | TabResumeCmd !SessionId
+    -- ^ @\/tab resume \<session-id\>@. Validation lives in
+    --   @mkSessionId@; rejection surfaces as
+    --   @ParseErrorInvalidSessionId@.
+  | TabRenameCmd !Int !Text
+    -- ^ @\/tab rename \<N\> \<name\>@. Parser captures the requested
+    --   name verbatim; @sanitizeTabName@ runs at handler time per
+    --   S10 so the user sees the rejection reason when applicable.
+  deriving stock (Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- Top-level commands
 -- ---------------------------------------------------------------------------
@@ -216,6 +279,7 @@ data SlashCommand
   | CmdSession SessionSubCommand      -- ^ Session management commands
   | CmdMsg Text Text                  -- ^ Send a message to a specific target (name, message)
   | CmdMcp McpSubCommand              -- ^ MCP server management commands
+  | CmdTab TabSlashCommand            -- ^ Tabbed Chat @\/tab*@ / @\/tabs@ family (WU2; handlers in WU9)
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -929,6 +993,21 @@ executeSlashCommand env (CmdSession sub) ctx = do
 
 executeSlashCommand env (CmdMcp sub) ctx = do
   executeMcpCommand env sub ctx
+
+-- | Tabbed Chat @\/tab*@ handler stub.
+--
+-- WU2 (Tabbed Chat #51) introduces the 'CmdTab' constructor so the
+-- parser ('PureClaw.Routing.Parse.parseInput') can recognise the
+-- @\/tab*@ command family at parser-test time. Real per-command
+-- handlers (auto-spawn UX, close, rename, resume, focus, dashboard)
+-- land in WU9 ('PureClaw.Routing.AutoSpawn' \/ @Dashboard@). Until
+-- then, an in-loop dispatch through this function emits a single
+-- user-visible breadcrumb so a smoke-test still produces an
+-- observable reply rather than silent no-op.
+executeSlashCommand env (CmdTab _) ctx = do
+  _ch_send (_env_channel env)
+    (OutgoingMessage "Tab commands are wired in WU9 (Tabbed Chat #51).")
+  pure ctx
 
 executeSlashCommand env (CmdVault sub) ctx = do
   vaultOpt <- readIORef (_env_vault env)

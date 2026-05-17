@@ -66,6 +66,7 @@ library
     PureClaw.Handles.Tab
     -- Routing
     PureClaw.Routing.Types
+    PureClaw.Routing.Parse
     -- Backend
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake
