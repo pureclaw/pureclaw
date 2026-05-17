@@ -13,9 +13,11 @@ module PureClaw.CLI.Commands
   ) where
 
 import Control.Concurrent (forkIO)
+import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (IOException, bracket_, try)
 import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
+import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -42,6 +44,8 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
 import PureClaw.Agent.SlashCommands
+import PureClaw.Routing.Config qualified as Routing
+import PureClaw.Routing.Types qualified as Routing
 import PureClaw.Session.Handle
   ( ResumeError (..)
   , SessionHandle (..)
@@ -604,6 +608,16 @@ runChat opts = do
         onFirstStreamDoneRef <- newIORef
           =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         mcpRef <- newIORef Map.empty
+        -- WU3 (Tabbed Chat #51) — load routing config from disk and
+        -- pre-allocate the tab registry, focus pointer, active-count
+        -- TVar, runner placeholder map, and bounded channel-out queue.
+        -- All start empty / Nothing / 0; live tabs land in WU5+.
+        routingCfg     <- Routing.loadRoutingConfig pureclawDir
+        tabsRef        <- newIORef IntMap.empty
+        focusRef       <- newIORef Nothing
+        activeCountTv  <- newTVarIO 0
+        runnersRef     <- newIORef IntMap.empty
+        channelOutQ    <- newTBQueueIO (fromIntegral (Routing._rc_channelOutQBound routingCfg))
         -- Use lazy circular binding: delegateTaskTool captures env, and
         -- env.registry includes the delegate tool. Haskell's laziness
         -- makes this safe — the tool closure only forces env when invoked.
@@ -625,6 +639,13 @@ runChat opts = do
               , _env_session      = sessionRef
               , _env_onFirstStreamDone = onFirstStreamDoneRef
               , _env_mcpServers   = mcpRef
+              , _env_tabs             = tabsRef
+              , _env_focus            = focusRef
+              , _env_activeCount      = activeCountTv
+              , _env_runners          = runnersRef
+              , _env_channelOutQ      = channelOutQ
+              , _env_routingConfig    = routingCfg
+              , _env_fork             = defaultEnvFork
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)

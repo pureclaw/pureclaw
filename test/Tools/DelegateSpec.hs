@@ -1,7 +1,9 @@
 module Tools.DelegateSpec (spec) where
 
+import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Data.Aeson
 import Data.IORef
+import Data.IntMap.Strict qualified as IntMap
 import Data.Text qualified as T
 import Test.Hspec
 
@@ -12,6 +14,8 @@ import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
+import PureClaw.Routing.Config (defaultRoutingConfig)
+import PureClaw.Routing.Types (RoutingConfig (..))
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Session.Handle
@@ -74,6 +78,13 @@ mkTestEnv mProvider = do
   sessionRef  <- newIORef noOpSession
   onFirstRef  <- newIORef Nothing
   mcpRef      <- newIORef Map.empty
+  -- WU3 (Tabbed Chat #51) defaults
+  tabsRef       <- newIORef IntMap.empty
+  focusRef      <- newIORef Nothing
+  activeCountTv <- newTVarIO 0
+  runnersRef    <- newIORef IntMap.empty
+  let routing = defaultRoutingConfig
+  channelOutQ   <- newTBQueueIO (fromIntegral (_rc_channelOutQBound routing))
   pure AgentEnv
     { _env_provider         = providerRef
     , _env_model            = modelRef
@@ -91,4 +102,11 @@ mkTestEnv mProvider = do
     , _env_session          = sessionRef
     , _env_onFirstStreamDone = onFirstRef
     , _env_mcpServers       = mcpRef
+    , _env_tabs             = tabsRef
+    , _env_focus            = focusRef
+    , _env_activeCount      = activeCountTv
+    , _env_runners          = runnersRef
+    , _env_channelOutQ      = channelOutQ
+    , _env_routingConfig    = routing
+    , _env_fork             = defaultEnvFork
     }

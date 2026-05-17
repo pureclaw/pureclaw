@@ -97,6 +97,7 @@ import qualified Session.HandleSpec
 import qualified Routing.ParseSpec
 import qualified Handles.TabSpec
 import qualified Routing.RegistrySpec
+import qualified Routing.ConfigSpec
 import qualified Routing.DispatcherSpec
 import qualified Routing.ChannelOutSpec
 import qualified Routing.AutoSpawnSpec
@@ -203,6 +204,7 @@ main = hspec $ do
   describe "Routing.Parse"        Routing.ParseSpec.spec
   describe "Handles.Tab"          Handles.TabSpec.spec
   describe "Routing.Registry"     Routing.RegistrySpec.spec
+  describe "Routing.Config"       Routing.ConfigSpec.spec
   describe "Routing.Dispatcher"   Routing.DispatcherSpec.spec
   describe "Routing.ChannelOut"   Routing.ChannelOutSpec.spec
   describe "Routing.AutoSpawn"    Routing.AutoSpawnSpec.spec

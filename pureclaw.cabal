@@ -67,6 +67,8 @@ library
     -- Routing
     PureClaw.Routing.Types
     PureClaw.Routing.Parse
+    PureClaw.Routing.Registry
+    PureClaw.Routing.Config
     -- Backend
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake
@@ -312,6 +314,7 @@ test-suite pureclaw-test
     Routing.ParseSpec
     Handles.TabSpec
     Routing.RegistrySpec
+    Routing.ConfigSpec
     Routing.DispatcherSpec
     Routing.ChannelOutSpec
     Routing.AutoSpawnSpec
@@ -347,6 +350,7 @@ test-suite pureclaw-test
     temporary,
     text,
     time,
+    tomland,
     wai,
     warp,
     hspec,
