@@ -63,6 +63,9 @@ library
     PureClaw.Handles.Transcript
     PureClaw.Handles.Harness
     PureClaw.Handles.Backend
+    PureClaw.Handles.Tab
+    -- Routing
+    PureClaw.Routing.Types
     -- Backend
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake
