@@ -162,8 +162,10 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | H8  | `_tabHandle_close` semantics are kind-specific: for `KindAi`, archives the session (calls `_sh_save`) and removes from registry. For `KindHarness` and `KindBackend`, destroys (calls `_hh_stop` or `_bh_close` respectively). |
 | H9  | `_tabHandle_close --force` on `KindAi` skips archive (deletes transcript). On other kinds it is a no-op (close is already destructive). |
 | H10 | `_tabHandle_close` cancels any in-flight provider call or backend recv via `throwTo … AsyncCancelled`; cleanup runs in a `bracket` wrapper so per-kind resources (BackendHandle, HarnessHandle, SessionHandle) are released even on exception. |
-| H11 | `_tabHandle_name` redacts hostnames, filesystem paths, and ssh-stderr fragments. (Test: a tab spawned against `ssh prod-db.internal` exposes `_tabHandle_name = "ssh tab"` or a safe label, NOT the host.) Same bar as terminal-backend-abstractions's `Information Disclosure / Redaction`. |
+| H11 | `_tabHandle_name` is constructed via the shared `sanitizeTabName :: Text -> Either NameError Text` function which enforces (a) length cap `_rc_maxNameLen` (default 32), (b) reject control bytes `< 0x20` except space, (c) reject ANSI escape sequences (`\\x1b[`, `\\x9b`), AND (d) redact hostnames, filesystem paths, and ssh-stderr fragments per `terminal-backend-abstractions`'s `Information Disclosure / Redaction`. **Every** path that sets `_tabHandle_name` (factory construction AND `/tab rename`, per S10) routes through `sanitizeTabName`. Test: property test asserts `_tabHandle_name` of every constructed tab satisfies all four predicates regardless of input. Specific assertions: a tab spawned against `ssh prod-db.internal` exposes `_tabHandle_name = "ssh tab"` or a safe label, NOT the host; a factory-supplied name carrying `\\x1b[31m` gets stripped or rejected; a 10kB name is rejected. |
 | H12 | `_tabHandle_kind` is a pure field (parallel to `_bh_kind`); no IO read.                                             |
+| H13 | `_tabHandle_context :: Maybe (IORef Context)` — `Just` for `KindAi`, `Nothing` for `KindHarness`, `KindShell`, `KindSsh`, `KindTmux`. This is the exposed handle the dispatcher uses for E5's Context swap; AI factories return `Just (the same IORef as _ats_context)`. **Why on TabHandle, not hidden in AiTabState**: the dispatcher needs to read/write Context for slash-command handling; routing the swap through TabHandle keeps `AiTabState` private and avoids exporting it. Non-AI factories return `Nothing`; the dispatcher's E5 swap is a no-op in that case (the focused tab simply isn't a `KindAi`). |
+| H14 | `Show TabError` is implemented manually (NOT `deriving Show`) to enforce the redacted-error contract: constructor names are shown but argument values are elided (e.g. `TabBackendConstructFailed _`). The redacted projection for channel-bound errors is `toPublicTabError`. Test: `show err` for any `TabError` value contains no path, no hostname, no internal text. |
 
 ### Registry & AgentEnv (E-series)
 
@@ -173,7 +175,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | E2  | Existing `_env_target`, `_env_session`, `_env_provider`, `_env_model` remain in `AgentEnv` as **focused-tab projections**. Reads of these fields are valid only inside the dispatcher's message-processing window. The dispatcher updates them when focus changes; tab loops do NOT read these fields (they hold their own per-tab state). |
 | E3  | **Focus invariant** (key safety property): `_env_focus` is written **only** by the dispatcher, **only** between message cycles. Slash-command handlers that mutate focused-tab projection fields (`_env_target`, etc.) execute synchronously in the dispatcher thread and complete before the next message is read. This eliminates TOCTOU between handler reads/writes. **Test**: spawn N concurrent input emitters writing to a fake channel's input `TBQueue`; run dispatcher for K message cycles; assert focus is consistent at end-of-cycle k against the input sequence accepted at cycle k. |
 | E4  | `_env_fork :: IO () -> IO TabRunner` is part of AgentEnv (test seam; default wraps `Control.Concurrent.Async.async`). `data TabRunner = TabRunner { _trun_cancel :: IO (), _trun_wait :: IO () }` exposes start + cancel. **Rationale**: `IO () -> IO ThreadId` cannot carry the `Async ()` handle needed by C4's `withAsync`+`cancel` discipline, and a synchronous test seam returning a real `ThreadId` is impossible. The `TabRunner` indirection lets the synchronous test variant record start, expose `_trun_cancel` as an `IORef` that the test can observe, and run the action inline. All tab-spawning code paths use `_env_fork`. |
-| E5  | **Per-tab Context flow into existing slash-command handlers.** `executeSlashCommand :: AgentEnv -> SlashCommand -> Context -> IO Context` (existing signature, unchanged). When the dispatcher invokes `executeSlashCommand` for a slash command targeting an AI tab (e.g. focused tab is `KindAi` and the command is `/new`, `/transcript`, `/agent`, `/last`, or any other Context-mutating command), the dispatcher: (1) reads `ctx <- readIORef (_ats_context focusedTab)`; (2) calls `ctx' <- executeSlashCommand env cmd ctx`; (3) writes `writeIORef (_ats_context focusedTab) ctx'`. For commands that target a non-focused tab (e.g. via `/N /new` direct-inject — although `/new` is rarely directed cross-tab), the same swap happens against the target tab's `_ats_context`. For commands targeting non-AI tabs that don't own a Context, the dispatcher returns the input Context unchanged. **Test**: `/0 /new` clears `/0`'s history (via the focused-tab's `_ats_context`) but leaves `/1`'s history intact. |
+| E5  | **Per-tab Context flow into existing slash-command handlers.** `executeSlashCommand :: AgentEnv -> SlashCommand -> Context -> IO Context` (existing signature, unchanged). When the dispatcher invokes `executeSlashCommand` for a slash command, it: (1) reads the focused tab from `_env_focus`/`_env_tabs`; (2) inspects `_tabHandle_context focusedTab`; (3) if `Just ctxRef`, runs `ctx <- readIORef ctxRef; ctx' <- executeSlashCommand env cmd ctx; writeIORef ctxRef ctx'`; (4) if `Nothing` (non-AI focused tab), calls `_ <- executeSlashCommand env cmd emptyContext` (any returned context is discarded). **Test**: `/0 /new` (focused on `/0`) clears `/0`'s history via the focused tab's `_tabHandle_context`; `/1`'s history intact. Note: direct-inject `/N <slash-cmd-payload>` (e.g. `/0 /new` while focused on `/1`) does NOT go through dispatcher E5 swap — see I-series below for the in-tab-loop re-parse path. |
 
 ### Concurrency & exception safety (C-series)
 
@@ -182,7 +184,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | C1  | **Tabs run in their own threads.** Behavioral test (using a fake `Provider` that blocks on a `TMVar`): two AI tabs `/0` and `/1`; `/0` is given a slow request, immediately followed by `/1 ping`; `/1`'s response is observed in `/1`'s transcript *before* `/0`'s response completes. |
 | C2  | **AI tab state isolation.** Two AI tabs each hold distinct `IORef (Maybe ModelId)`. `/0 /target sonnet` (per-tab) does not change `/1`'s model. |
 | C3  | **Tab spawn is exception-safe.** Spawning uses `mask` so a partial registration cannot leak a half-initialised tab in `_env_tabs` on async exception. Test: a spawn whose factory throws mid-construction leaves `_env_tabs` unchanged AND any partially-allocated resource (e.g. a started BackendHandle) is closed. |
-| C4  | **Dispatcher death cancels all tabs.** Dispatcher uses `withAsync` (or equivalent `bracket`+`uninterruptibleCancel`) for each tab so dispatcher termination triggers `_tabHandle_close` on every live tab. Test: simulate dispatcher exception; assert all forked tab threads receive `AsyncCancelled` and `_tabHandle_close` runs. |
+| C4  | **Dispatcher death cancels all tabs.** Dispatcher's `runDispatcher` is wrapped in `bracket (newIORef IntMap.empty) cancelAll dispatcherBody` where `cancelAll runners = readIORef runners >>= traverse_ _trun_cancel`. Each `spawnTab` registers its `TabRunner` (returned by `_env_fork`) in the IORef. **`withAsync` is NOT used** because it is lexically scoped and doesn't compose for a dynamically-spawned set of tabs over the dispatcher's lifetime. Test: simulate dispatcher exception; assert all forked tab threads receive cancellation and `_tabHandle_close` runs to completion. |
 | C5  | **Crash isolation.** A tab loop catches `SomeException` **except `AsyncCancelled`** (which propagates through bracketed cleanup unchanged — async cancellation is the normal close path, not a crash). On synchronous exception, the loop sets `_tabHandle_status` to `Crashed`, attempts a single channel emit of the PublicError through `SrcDispatcher` (which the writer-thread emits unconditionally), and exits its thread. The dispatcher does not crash when a tab does; the registry entry persists with `Crashed` status until `/tab close N` or `/tab resume <session>`. Test: a tab whose factory throws `SomeException` after registration leaves dispatcher alive and registry consistent. Separate test: `_tabHandle_close` (which sends `AsyncCancelled` via H10) leaves status `Closing`, not `Crashed`. |
 | C6  | **Provider cancellation safety.** A tab close mid-stream that delivers `AsyncCancelled` to the provider call must leave the transcript in one of two states: (a) the full prefix streamed so far, terminated by a cancel-marker entry, OR (b) no partial entry at all. No half-written entries. Test: fake `Provider` that streams 5 chunks then blocks on a `TMVar`; cancel mid-stream; assert transcript state is one of the two valid forms. |
 
@@ -194,7 +196,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | D2  | **Non-focused tab output still lands in its transcript.** Same test as D1: `/1`'s transcript (`_sh_transcript` on the tab's `SessionHandle`) contains its complete response even though the channel saw none of it. |
 | D3  | **Channel writes are serialized.** Single output-writer thread consumes from a **bounded** `TBQueue (Source, ChannelEvent)` (`_env_channelOutQ` with capacity `_rc_channelOutQBound`, default 1024) where `Source = SrcDispatcher | SrcTab TabIndex`. **The writer thread is the authoritative focus gate** — on consume, it reads `_env_focus` and drops `SrcTab N` events when focus `/= Just N`. `SrcDispatcher` events (switch confirms, dashboard, command errors, footer breadcrumbs) always emit. Test: concurrent emits from 3 tabs + dispatcher produce no garbled output; only `SrcDispatcher` + the focused-tab's events reach the channel. |
 | D4  | **Producer-side focus pre-check (optimization, not the gate).** Tab loops perform a cheap `_env_focus` check before enqueueing `SrcTab` events. If the loop is non-focused, the emit is silently dropped (transcript still records). This avoids unbounded growth on the writer queue when a non-focused tab streams fast. Authoritative gating is still at the writer per D3. Test: simulate non-focused tab streaming 10,000 chunks; assert `_env_channelOutQ` length never exceeds a small bound. |
-| D5  | **Mid-stream switch breadcrumb.** When the writer thread drops the *first* `SrcTab N` event of a logical message because focus has moved away from N, it emits **one** `SrcDispatcher` line `"/N still streaming — switch to /N for full output"` to the channel. Subsequent drops of the same message are silent. This keeps the user informed about backgrounded streams without spamming. Test: focus on `/0`, switch to `/1` mid-stream of `/0`'s 10-chunk response; assert exactly one breadcrumb line emitted; subsequent chunks of `/0` are silently dropped from channel; `/0`'s transcript still has all 10 chunks. |
+| D5  | **Mid-stream switch breadcrumb.** `ChannelEvent` is an ADT with constructors `StreamStart !StreamId !TabIndex`, `ChunkOf !StreamId !Text`, `StreamEnd !StreamId`, `FullMsg !TabIndex !Text`, `BannerLine !Text`. Tab loops emit `StreamStart` once per logical message, then `ChunkOf` per chunk, then `StreamEnd`. The writer maintains `Map StreamId BreadcrumbState` (`Pending | Emitted`). When the writer drops a `ChunkOf sid` because focus has moved away from the stream's owner tab, it checks the map: if `Pending`, emit one `SrcDispatcher BannerLine "/N has new output — /N to view"` (status-neutral wording, since the stream may be complete by the time the user returns) and set state to `Emitted`. Subsequent drops with same `sid` are silent. State entries are GC'd on `StreamEnd` reception (whether emitted or dropped). Test: focus on `/0`, switch to `/1` mid-stream of `/0`'s 10-chunk response (sid = S); writer drops chunks 2–10 under `_env_focus = Just 1`; exactly one `BannerLine` emitted to channel; subsequent chunks silent; `/0`'s transcript still records all 10 chunks. |
 | D6  | **No other proactive non-focus notifications.** When a non-focused tab finishes work, crashes, or changes status (outside the mid-stream breadcrumb above), no channel message is emitted. The user must `/tabs` or `/M` to observe. Test: `/0` (non-focused) crashes; channel sees zero new messages beyond any in-flight breadcrumb. |
 
 ### Auto-spawn behavior (A-series)
@@ -256,8 +258,8 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | S6  | **Max-tab cap enforced at spawn**: covered by A11; cross-referenced here for security audit traceability. |
 | S7  | **Spawn rate limit**: each chat-user is limited to `_rc_spawnRateLimit` spawns/minute (default 10). Token-bucket implementation. Exceeding it → PublicError; no spawn. Defends against close-spawn cycling resource leak. |
 | S8  | **User-allowlist invariant**: the user-allowlist check (e.g. `_sc_allowFrom` in Signal channel) is the canonical gate. The dispatcher reads from `_ch_receive` only — no other input path exists. Test: a fake non-allowlisted user emits messages into the channel's lower-level input queue; the dispatcher's `runDispatcher` is observed to invoke no handler. (Runtime test; static grep is a code-review checklist item, not a unit test.) |
-| S9  | **Concurrent-active-tab cap**: `_rc_maxConcurrentActive` (default 4) limits the number of tabs in `_tabHandle_status = Active` simultaneously. A direct-inject into a tab whose enqueue would push the active count over the cap returns `Left TabConcurrencyLimit` via `_tabHandle_send`; the dispatcher surfaces this as PublicError. Test: with `_rc_maxConcurrentActive = 2` and three AI tabs each direct-injected with a TMVar-blocked provider call, the third call's `_tabHandle_send` returns `Left TabConcurrencyLimit`; no provider invocation is recorded by `Test.Fake.Provider`. |
-| S10 | **`/tab rename N <name>` input sanitization**: user-supplied name passes through (a) length cap `_rc_maxNameLen` (default 32 chars); (b) reject if it contains any control byte (`< 0x20` except space) or any ANSI escape (`\\x1b[`); (c) the same redactor that runs on factory-supplied names (H11). On rejection: `Left TabInvalidName` as PublicError; `_tabHandle_name` unchanged. Test: rename with ESC `\\x1b[31m`, with `\\x00`, with a 10kB string each produces `TabInvalidName`; a name like `prod-shell` passes. |
+| S9  | **Concurrent-active-tab cap (atomic)**: `_rc_maxConcurrentActive` (default 4) limits tabs in `Active` status simultaneously. An atomic counter `_env_activeCount :: TVar Int` is maintained in `AgentEnv`. Status transitions to `Active` and away from `Active` happen inside `atomically` together with `modifyTVar' _env_activeCount`. The cap check + increment is one atomic step: `atomically $ do n <- readTVar _env_activeCount; if n >= cap then retry-or-fail else writeTVar _env_activeCount (n+1)`. Pre-spawn cap exceeded: `_tabHandle_send` returns to dispatcher with `Left TabConcurrencyLimit`. Concurrency test: N concurrent direct-injects into N idle tabs with cap=K result in exactly K successful transitions to Active and N-K `TabConcurrencyLimit` errors, regardless of interleaving. (Verified by repeating the test M times with randomised forkIO schedule under the production async-based `_env_fork`.) |
+| S10 | **`/tab rename N <name>` input sanitization**: user-supplied name passes through `sanitizeTabName` (the same function H11 mandates for every factory-construction path). All four rules apply: length cap, control-byte rejection, ANSI rejection, hostname/path/ssh-stderr redaction. On `Left NameError`: surface as `Left (TabInvalidName err)` PublicError; `_tabHandle_name` unchanged. Test: rename with ESC `\\x1b[31m`, with `\\x00`, with a 10kB string each produces `TabInvalidName`; rename `my-shell` succeeds; rename `prod-db.internal` is REDACTED (the user is informed via channel: `Renamed /3 to <redacted>`) — design choice to keep the redaction invariant. |
 | S11 | **Provider connection-pool isolation (documented assumption)**: this is NOT a DoD that produces a test, but a documented invariant the design relies on. Per-tab `_ats_provider :: IORef SomeProvider` may reference a `Provider` whose underlying transport (HTTP client pool, etc.) is shared across tabs. Tab isolation is guaranteed at the conversation-state level (`_ats_context`, `_ats_model`, `_ats_target`) but NOT at the HTTP-transport level. Anthropic/OpenAI APIs are stateless per-request, so this is safe for v1. A future stateful-transport provider (e.g. WebSocket-based) must add a per-tab transport instance or a documented "stateless transport" capability constraint. |
 
 ### Coexistence with existing slash commands (K-series)
@@ -274,8 +276,28 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | K6.3 | `/vault` operations while focused on `KindAi`: operate on the AgentEnv-level `_env_vault` (which is process-wide, not per-tab); test asserts vault access works from any focused AI tab. |
 | K6.4 | `/transcript` while focused on `KindAi`: renders the focused tab's transcript (`_sh_transcript` via the tab's SessionHandle). Test: with two AI tabs, `/transcript` shows the focused tab's history, not the other tab's. |
 | K6.5 | `/agent <name>` while focused on `KindAi`: changes the focused tab's agent label (which the spawn factory uses to look up agent-specific defaults). Same-tab-only assertion. |
-| K6.6 | `/new` while focused on `KindAi`: per E5, the dispatcher reads `_ats_context`, calls `executeSlashCommand env CmdNew ctx` which returns `ctx { _ctx_messages = [] }`, and writes back. Test: `/0 /new` clears `/0`'s history; `/1`'s history intact. |
+| K6.6 | `/new` while focused on `KindAi`: per E5, the dispatcher reads `_tabHandle_context`, calls `executeSlashCommand env CmdNew ctx` which returns `ctx { _ctx_messages = [] }`, and writes back. Test: `/0 /new` clears `/0`'s history; `/1`'s history intact. |
 | K6.7 | `/last` while focused on `KindAi`: per E5, retrieves the focused tab's last completion via the context flow. Same-tab-only assertion. |
+| K6.8 | `/compact` while focused on `KindAi`: per E5, the dispatcher reads `_tabHandle_context`, calls `executeSlashCommand env CmdCompact ctx` (which invokes `compactContext`), writes back. Same-tab-only assertion. |
+| K7  | `/session resume <id>` while focused on a `KindAi` tab: rather than mutating `_env_session` as today, this command **replaces the focused tab's `_tabHandle_session`** by spawning a new AI tab loop with the resumed session and closing the old one. Index is preserved. (Alternative: error with "use /tab resume to load an archived session into a new tab." Decide before WU0.) v1 default: replace the focused tab's session in place. |
+| K8  | `/session last` while focused on a `KindAi` tab: shows the last completion of the focused tab's session; routes through the same path as K6.7 (`/last`). |
+
+### Direct-inject and in-tab-loop slash-command re-parse (I-series)
+
+| #   | DoD                                                                                                              |
+|-----|------------------------------------------------------------------------------------------------------------------|
+| I1  | **Direct-inject payload handling**: `/N <payload>` enqueues `payload` to tab N's input queue via `_tabHandle_send`. The dispatcher does **not** re-classify the payload. The dispatcher's E5 swap **does not run** for direct-inject. |
+| I2  | **In-tab-loop slash-command re-parse (AI tabs only)**: when an AI tab's loop dequeues an input from its `_ats_inputQ`, it first checks whether the input starts with `/` (after trimming). If yes, the tab loop calls `parseSlashCommand input` (note: NOT the full `parseInput` — only the slash-command parser, since switch/inject/default are dispatcher-level routing concerns). If the result is a recognised `SlashCommand`, the tab loop runs `ctx' <- executeSlashCommand env cmd =<< readIORef ctxRef; writeIORef ctxRef ctx'` against its OWN `_ats_context`. If the result is an unknown slash command, the tab loop emits a one-line PublicError to its transcript (`/N: unknown command <slash-cmd>`) — but does NOT emit to channel (focused-only display applies). |
+| I3  | **LLM-free invariant under direct-inject**: a direct-inject of slash-command-shaped payload (`/0 /new`) routed through the AI tab loop and re-parsed (I2) must still satisfy P18 — no slash-command-shaped payload reaches the provider. Test: fake `Provider`'s `complete` is never invoked when the AI tab processes `/new` via I2. |
+| I4  | **Non-AI tabs ignore the slash-prefix on direct-inject**: a `KindShell`/`KindBackend` tab that receives `/0 ls -la` via direct-inject treats the payload as opaque text and writes it to the backend via `_bh_send`. Shell tabs do NOT host a slash-command parser. Test: `/0 /pwd` direct-injected to a KindShell tab sends literal `/pwd` to the shell. |
+
+### Onboarding (O-series)
+
+| #   | DoD                                                                                                              |
+|-----|------------------------------------------------------------------------------------------------------------------|
+| O1  | **`/start` (Telegram convention)**: the channel-startup handler registers a `/start` slash command whose response includes (a) one-line value prop; (b) `/0` shortcut for AI; (c) `/tab new 0 shell` for shell users; (d) `/tabs` for dashboard. Test: a fresh `/start` from a new user gets a response containing all three slash-prefix mentions. |
+| O2  | **`/help`** rendering post-Tabbed-Chat includes a "Tab commands" subsection enumerating `/N`, `/N <payload>`, `/tabs`, `/tab new`, `/tab close`, `/tab focus`, `/tab resume`, `/tab rename`. Test: `/help` output (after this work lands) contains the literal strings "Tab commands" and "/tabs". |
+| O3  | **BotFather command descriptions**: the registration list (already enumerated in the "Channel autocomplete" section) ships with the following descriptions: `/0`–`/9` → "Switch to tab N"; `/tab` → "Tabs: new, list, close, focus, resume, rename"; `/tabs` → "List all tabs"; `/start` → "Tabbed Chat — see /help for tab commands". Test: BotFather registration payload (a list of `(command, description)` tuples) matches a golden file. |
 
 ### Test seams (T-series)
 
@@ -286,10 +308,10 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | T3  | `Test.Fake.TabFactory` exists: pure factories `mkFakeTabAi`, `mkFakeTabHarness`, `mkFakeTabBackend` that produce `TabHandle`s without external resources. Used by dispatcher/registry tests. |
 | T4  | `_env_fork :: IO () -> IO TabRunner` substitution: tests use a synchronous variant where `_trun_cancel` writes to an `IORef Bool` the test asserts on, and the body runs inline. Where concurrency is essential to the test (C1, C6), tests use the production async-based variant with deterministic synchronization via `TMVar`. |
 
-### Total: ~100 DoDs across 12 series (P/H/E/C/D/A/L/X/B/S/K/T).
+### Total: ~115 DoDs across 14 series (P/H/E/C/D/A/L/X/B/S/K/I/O/T).
 
 P-series: 19 (P1–P18 + P15a) — parser + LLM-free invariant.
-H-series: 12 (H1–H12) — TabHandle abstraction.
+H-series: 14 (H1–H14) — TabHandle abstraction (incl. H13 `_tabHandle_context`, H14 manual `Show TabError`).
 E-series: 5 (E1–E5) — registry + AgentEnv + Context flow.
 C-series: 6 (C1–C6) — concurrency + exception safety + provider cancel safety.
 D-series: 6 (D1–D6) — channel emission + focused-only display + breadcrumb.
@@ -298,10 +320,12 @@ L-series: 7 (L1–L7) — close/lifecycle.
 X-series: 3 (X1–X3) — crashed tab UX.
 B-series: 3 (B1–B3) — dashboard.
 S-series: 11 (S1–S11) — security (S11 is a documented assumption, not a test).
-K-series: 12 (K1–K5 + K6.1–K6.7) — coexistence with existing slash commands.
+K-series: 15 (K1–K5 + K6.1–K6.8 + K7, K8) — coexistence with existing slash commands.
+I-series: 4 (I1–I4) — direct-inject and in-tab-loop slash-command re-parse.
+O-series: 3 (O1–O3) — onboarding (`/start`, `/help`, BotFather descriptions).
 T-series: 4 (T1–T4) — test seams.
 
-Sum: 100 DoDs. (S11 is documented-assumption-only, so ~99 produce failing tests in WU0.)
+Sum: ~115 DoDs. (S11 is documented-assumption-only, so ~114 produce failing tests in WU0.)
 
 (Final count for WU0 should be re-checked against this doc when WU0 lands; if K6 sub-DoDs combine into a single property test that asserts "for each of these 7 commands, …", the count compresses but the coverage doesn't.)
 
@@ -338,6 +362,8 @@ data TabHandle = TabHandle
   , _tabHandle_status  :: IO TabStatus
   , _tabHandle_send    :: Text -> IO ()  -- enqueue via TBQueue, never blocks the dispatcher
   , _tabHandle_close   :: IO ()          -- idempotent, never-throws, kind-specific
+  , _tabHandle_context :: Maybe (IORef Context)
+                                         -- Just for KindAi; Nothing otherwise (H13)
   }
 
 data TabError
@@ -348,8 +374,28 @@ data TabError
   | TabSessionCreateFailed !SessionError
   | TabSpawnAuthDenied !PublicAuthError
   | TabNotFound !Int
+  | TabConcurrencyLimit !Int
+  | TabInvalidName !NameError     -- NameError is a redacted ADT, never raw input
+  deriving (Eq)
+  -- NB: no `deriving Show`. Show is implemented manually per H14 so argument
+  -- values are elided (constructor names only). The redacted projection for
+  -- channel-bound errors is `toPublicTabError`.
+
+instance Show TabError where
+  show e = case e of
+    TabIndexInUse{}              -> "TabIndexInUse"
+    TabIndexOutOfRange{}         -> "TabIndexOutOfRange"
+    TabLimitExceeded{}           -> "TabLimitExceeded"
+    TabBackendConstructFailed{}  -> "TabBackendConstructFailed"
+    TabSessionCreateFailed{}     -> "TabSessionCreateFailed"
+    TabSpawnAuthDenied{}         -> "TabSpawnAuthDenied"
+    TabNotFound{}                -> "TabNotFound"
+    TabConcurrencyLimit{}        -> "TabConcurrencyLimit"
+    TabInvalidName{}             -> "TabInvalidName"
+
+data NameError
+  = NameTooLong | NameContainsControlBytes | NameContainsAnsi | NameRedactedToEmpty
   deriving (Eq, Show)
--- Show instance is redacted. Internal-only.
 
 data PublicTabError = ... -- mirror with channel-safe field set
 toPublicTabError :: TabError -> PublicTabError
@@ -381,6 +427,8 @@ data AgentEnv = AgentEnv
   { ... existing fields ...
   , _env_tabs          :: !(IORef (IntMap TabHandle))         -- key = unTabIndex
   , _env_focus         :: !(IORef (Maybe TabIndex))           -- Nothing when empty registry
+  , _env_activeCount   :: !(TVar Int)                         -- atomic counter for S9 cap
+  , _env_runners       :: !(IORef (IntMap TabRunner))         -- per-tab runners; cancelled on dispatcher exit
   , _env_routingConfig :: !RoutingConfig
   , _env_fork          :: !(IO () -> IO TabRunner)            -- test seam; default = async-based
   , _env_channelOutQ   :: !(TBQueue (OutputSource, ChannelEvent))
@@ -389,11 +437,39 @@ data AgentEnv = AgentEnv
 
 data OutputSource = SrcDispatcher | SrcTab !TabIndex
 
+newtype StreamId = StreamId Word64
+  deriving (Eq, Ord, Show)
+
+data ChannelEvent
+  = StreamStart !StreamId !TabIndex   -- begin a logical multi-chunk message
+  | ChunkOf !StreamId !Text           -- one chunk
+  | StreamEnd !StreamId               -- end of logical message
+  | FullMsg !TabIndex !Text           -- single-shot non-streaming message
+  | BannerLine !Text                  -- dispatcher one-shot line (e.g. breadcrumb)
+  deriving (Eq, Show)
+
 data TabRunner = TabRunner
-  { _trun_cancel :: IO ()        -- safe to call multiple times
-  , _trun_wait   :: IO ()        -- blocks until tab loop exits
+  { _trun_cancel :: IO ()        -- safe to call multiple times (idempotent)
+  , _trun_wait   :: IO ()        -- blocks until tab loop exits; in the synchronous
+                                 --   test variant, returns () immediately since the
+                                 --   body has already run inline.
   }
 ```
+
+**TabRunner bootstrapping during spawn.** `_tabHandle_close` is established at registration time but must be able to call `_trun_cancel` on a `TabRunner` that doesn't exist until after `_env_fork` returns. Spawn sequence:
+
+```haskell
+spawnTab env kind args = mask $ \restore -> do
+  runnerRef <- newIORef Nothing                    -- placeholder
+  th <- buildTabHandle env kind args runnerRef     -- close reads runnerRef
+  insertIntoRegistry env th                        -- register before fork
+  runner <- _env_fork env (restore (tabLoop th))   -- launch loop
+  writeIORef runnerRef (Just runner)               -- fill placeholder
+  modifyIORef' (_env_runners env) (IntMap.insert idx runner)
+  pure (Right (_tabHandle_index th))
+```
+
+`_tabHandle_close th` reads `runnerRef` and calls `_trun_cancel` if `Just`; otherwise no-op (pre-fork state). This handles the bootstrap ordering cleanly.
 
 Existing `_env_target`, `_env_session`, `_env_provider`, `_env_model`, `_env_harnesses` remain — they become **focused-tab projections**, updated by the dispatcher on focus change and read by existing slash-command handlers. They are NOT read by tab loops; tab loops use their own internal state. This is transitional architecture; see v1.5 deferred (retire projections).
 
@@ -456,13 +532,14 @@ Loaded from `~/.pureclaw/config.toml` under `[routing]`. Runtime-mutable via `/c
 
 ### Channel emission via `ChannelOut` writer
 
-* `_env_channelOutQ :: TQueue (OutputSource, ChannelEvent)` — a single STM queue.
-* A dedicated writer thread consumes from the queue and calls `_ch_send`/`_ch_sendChunk`.
-* For `SrcTab n` events: writer reads `_env_focus` and drops the event if `Just n /= focus`.
+* `_env_channelOutQ :: TBQueue (OutputSource, ChannelEvent)` — a single bounded STM queue (capacity `_rc_channelOutQBound = 1024`).
+* `ChannelEvent` is the ADT defined above: `StreamStart | ChunkOf | StreamEnd | FullMsg | BannerLine`.
+* A dedicated writer thread consumes from the queue and calls `_ch_send`/`_ch_sendChunk` against the underlying `ChannelHandle`.
+* For `SrcTab n` events: writer reads `_env_focus` and drops the event if `Just n /= focus`. On the first drop per `StreamId`, the writer emits one `SrcDispatcher BannerLine "/N has new output — /N to view"` (per D5) and records the drop state in `Map StreamId BreadcrumbState`. Subsequent drops with the same StreamId are silent. StreamEnd cleans up the map entry.
 * For `SrcDispatcher` events: always emit.
-* Per-event focus snapshot, not per-stream. If focus changes mid-stream, the rest of the stream is silently elided from the channel; the user catches up via switch + recap.
+* Producer-side optimisation (D4): tab loops do a cheap `_env_focus` check before enqueueing `SrcTab` events; non-focused loops silently drop the event (no enqueue, transcript still records).
 
-Trade-off: a user who switches to `/1` mid-stream from `/0` sees an abrupt cut. The recap on `/0` switch-back shows the full message from transcript. We judge this acceptable for v1 — alternative behaviors (continue streaming, pause, switch-and-resume) all add complexity for a corner case.
+Trade-off: a user who switches to `/1` mid-stream from `/0` sees an abrupt cut in the channel, plus one breadcrumb. The recap on `/0` switch-back shows the full message from transcript. We judge this acceptable for v1 — alternative behaviors (continue streaming, pause, switch-and-resume) all add complexity for a corner case.
 
 ### Async exception discipline
 
@@ -662,25 +739,26 @@ test/
 **Import DAG (no cycles):**
 
 ```
-Handles.Tab               (leaf types)
+Handles.Tab                   (leaf types: TabHandle, TabError, TabRunner, TabIndex, TabKind, TabStatus)
   ↑
-Routing.Types             (parser ADTs, RoutingConfig — leaf)
+Routing.Types                 (parser ADTs, ChannelEvent, OutputSource, StreamId, RoutingConfig — leaf)
+  ↑
+Agent.Env                     (AgentEnv record; depends on Handles.Tab + Routing.Types because
+                               _env_tabs holds TabHandles and _env_channelOutQ carries ChannelEvent)
   ↑
 Routing.{Parse, Registry, ChannelOut, AutoSpawn, Config}
-                          (independent siblings; depend only on Types + Handles.Tab)
+                              (independent siblings; depend on Agent.Env + leaves)
   ↑
-Tab.{Ai, Harness, Backend}
-                          (factories; depend on Handles.Tab + Routing.Registry + Routing.Types)
+Tab.{Ai, Harness, Backend}    (factories; depend on Agent.Env + Routing.{Registry, Types})
   ↑
-Routing.Dispatcher        (depends on Routing.Registry, Routing.AutoSpawn, Routing.ChannelOut,
-                           AND Tab.{Ai,Harness,Backend} — orchestrates spawn dispatch.
-                           This is the ONLY place that imports Tab.*)
+Routing.Dispatcher            (depends on Routing.{Registry, AutoSpawn, ChannelOut} AND
+                               Tab.{Ai, Harness, Backend} — orchestrates spawn dispatch via
+                               exported spawnTab. This is the ONLY place that imports Tab.*)
   ↑
-Agent.SlashCommands       (existing + new tab commands; imports Routing.Dispatcher
-                           for the exported spawnTab/closeTab indirection; does NOT
-                           import Tab.* directly)
+Agent.SlashCommands           (existing + new tab commands; imports Routing.Dispatcher
+                               for the spawnTab/closeTab indirection; does NOT import Tab.*)
   ↑
-Agent.Loop                (top-level: starts dispatcher)
+Agent.Loop                    (top-level: starts dispatcher)
 ```
 
 **The key inversion**: `spawnTab` lives in `Routing.Dispatcher`, not `Routing.Registry`. Registry stays pure (tab CRUD over `IORef IntMap`). Dispatcher is the only module that imports both Registry and `Tab.*`, so it's the only place where the factory dispatch can happen. `Agent.SlashCommands` imports `Routing.Dispatcher.spawnTab` and gets the indirection without ever importing `Tab.*`. This kills the cycle Architect/CTO flagged in rounds 1 and 2.
