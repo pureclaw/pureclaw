@@ -138,7 +138,7 @@ spec = do
 
   describe "botFatherCommands / registerBotFatherCommands (Tabbed Chat O3)" $ do
     it "botFatherCommands re-exports the Onboarding list verbatim" $ do
-      length botFatherCommands `shouldBe` 13   -- 10 numerics + /tab + /tabs + /start
+      length botFatherCommands `shouldBe` 39   -- 10 digits + 26 letters + /tab + /tabs + /start
 
     it "encodeBotFatherCommands strips the leading '/' from each \
        \command word (Telegram setMyCommands API requirement)" $ do

@@ -87,8 +87,14 @@ data RoutingConfig = RoutingConfig
   , _rc_switchRecap         :: !Int
     -- ^ Default 3 recent messages emitted on @\/N@ switch.
   , _rc_maxTabs             :: !Int
-    -- ^ Default 10. Parser bounds-checks against this; dispatcher
-    --   refuses to spawn beyond this cap with 'Tab.TabLimitExceeded'.
+    -- ^ Default 36, matching the single-char @[0-9a-z]@ index
+    --   alphabet of the @\/N@ routing grammar (10 digits + 26
+    --   lowercase letters). Parser bounds-checks against this;
+    --   dispatcher refuses to spawn beyond this cap with
+    --   'Tab.TabLimitExceeded'. Configuring a value above 36 is
+    --   permitted but only the first 36 slots are addressable
+    --   through the @\/N@ shortcut; the higher slots remain
+    --   reachable through @\/tab focus N@ and the dashboard.
   , _rc_inputQueueBound     :: !Int
     -- ^ Default 64. Per-tab @TBQueue InputEvent@ capacity.
   , _rc_channelOutQBound    :: !Int
@@ -116,10 +122,13 @@ data RoutingConfig = RoutingConfig
 -- Constructors carry only bounded primitives — no free 'Text', no raw
 -- input — so the redacted-error contract is preserved when these
 -- bubble up into 'RoutingError'.
+--
+-- The legacy 'ParseErrorLeadingZero' code was removed when the
+-- routing grammar switched from multi-digit indices to single-char
+-- @[0-9a-z]@ indices — multi-char shapes (@\/01@, @\/12@, @\/1a@)
+-- now surface as 'ParseErrorMalformed'.
 data ParseError
-  = ParseErrorLeadingZero
-    -- ^ @\/01@ — disambiguates intent.
-  | ParseErrorIndexOutOfRange !Int
+  = ParseErrorIndexOutOfRange !Int
     -- ^ Parsed index @>= _rc_maxTabs@.
   | ParseErrorInvalidSessionId
     -- ^ @\/tab resume \<id\>@ where @\<id\>@ contains @\/@, @\\@,

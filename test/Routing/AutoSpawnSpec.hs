@@ -364,13 +364,12 @@ spec = do
       banners drained `shouldSatisfy`
         any ("already exists" `T.isInfixOf`)
 
-    it ("A11 \\/ S6: /tab new 11 when _rc_maxTabs = 10 — Left "
+    it ("A11 \\/ S6: spawn past _rc_maxTabs cap — Left "
         <> "TabLimitExceeded as redacted PublicError; no spawn") $ do
       env0 <- mkAutoSpawnEnv
-      -- Default _rc_maxTabs = 10; the parser rejects /tab new 11 via
-      -- the parseDecimalIndex shape OR by surfacing the cap. To make
-      -- the A11 PathReady, we fill the registry to cap and then try
-      -- to spawn via /tab new N <kind>.
+      -- _rc_maxTabs is overridden to 2 below so the cap can be tripped
+      -- with two synthetic tabs; the new default (36) is too large to
+      -- exercise here without exhausting the test fixture.
       let envFull = env0
             { _env_routingConfig = (_env_routingConfig env0)
                 { _rc_maxTabs = 2 }

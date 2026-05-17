@@ -667,7 +667,7 @@ spec = do
         , "/help"        -- Slash command
         , "/tabs"        -- Slash command
         , "/tab list"    -- Slash command
-        , "/01"          -- ParseErrorLeadingZero
+        , "/01"          -- ParseErrorMalformed (multi-char index)
         , "/12abc"       -- ParseErrorMalformed
         , ""             -- ParseErrorEmptyInput
         ]
@@ -775,7 +775,7 @@ spec = do
       env <- mkDispatcherEnv (fakeChannelHandle fch)
       st  <- mkSyntheticTab (ti 0) KindAi (Idle t0)
       ds  <- newDispatcherState env (syntheticFactory st)
-      dispatchOne env ds (UserId "u") "/01"  -- leading-zero parser error
+      dispatchOne env ds (UserId "u") "/01"  -- multi-char index → malformed
       drained <- drainQueue (_env_channelOutQ env)
       drained `shouldSatisfy` any
         (\(_, ev) -> case ev of

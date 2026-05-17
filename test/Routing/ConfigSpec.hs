@@ -31,7 +31,7 @@ spec = do
       _aid_modelId    (_rc_defaultAi c) `shouldBe` ModelId "claude-sonnet-4-5"
       _sd_command     (_rc_defaultShell c) `shouldBe` "bash"
       _rc_switchRecap c         `shouldBe` 3
-      _rc_maxTabs c             `shouldBe` 10
+      _rc_maxTabs c             `shouldBe` 36
       _rc_inputQueueBound c     `shouldBe` 64
       _rc_channelOutQBound c    `shouldBe` 1024
       _rc_spawnRateLimit c      `shouldBe` 10

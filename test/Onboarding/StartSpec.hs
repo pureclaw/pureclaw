@@ -169,9 +169,10 @@ spec = describe "O-series \x2014 onboarding (WU11 wires)" $ do
 
   describe "O3: BotFather command descriptions" $ do
 
-    it "botFatherCommandList matches the golden enumeration from \
-       \docs/tabbed-chat.md (in order: /0..9 \x2192 'Switch to tab N', \
-       \then /tab, /tabs, /start with their canonical descriptions)" $
+    it "botFatherCommandList matches the golden enumeration: /0..9 \
+       \then /a..z \x2192 'Switch to tab N', then /tab, /tabs, /start \
+       \with their canonical descriptions (39 entries total, well \
+       \under Telegram's 100-command BotFather cap)" $
       botFatherCommandList `shouldBe` expectedBotFatherCommands
 
     it "PureClaw.Channels.Telegram.botFatherCommands re-exports the \
@@ -210,7 +211,8 @@ spec = describe "O-series \x2014 onboarding (WU11 wires)" $ do
 -- ---------------------------------------------------------------------------
 
 -- | The exhaustive expected BotFather command list, exactly as
--- documented in @docs\/tabbed-chat.md@ §"Onboarding (O-series)" O3.
+-- documented in @docs\/tabbed-chat.md@ §"Onboarding (O-series)" O3
+-- (updated to single-char @[0-9a-z]@ index grammar).
 -- Authored here as a separate value so the O3 test is verifiably
 -- comparing against a string the test author wrote (not a re-derived
 -- value coupled to the production code).
@@ -226,6 +228,32 @@ expectedBotFatherCommands =
   , ("/7", "Switch to tab N")
   , ("/8", "Switch to tab N")
   , ("/9", "Switch to tab N")
+  , ("/a", "Switch to tab N")
+  , ("/b", "Switch to tab N")
+  , ("/c", "Switch to tab N")
+  , ("/d", "Switch to tab N")
+  , ("/e", "Switch to tab N")
+  , ("/f", "Switch to tab N")
+  , ("/g", "Switch to tab N")
+  , ("/h", "Switch to tab N")
+  , ("/i", "Switch to tab N")
+  , ("/j", "Switch to tab N")
+  , ("/k", "Switch to tab N")
+  , ("/l", "Switch to tab N")
+  , ("/m", "Switch to tab N")
+  , ("/n", "Switch to tab N")
+  , ("/o", "Switch to tab N")
+  , ("/p", "Switch to tab N")
+  , ("/q", "Switch to tab N")
+  , ("/r", "Switch to tab N")
+  , ("/s", "Switch to tab N")
+  , ("/t", "Switch to tab N")
+  , ("/u", "Switch to tab N")
+  , ("/v", "Switch to tab N")
+  , ("/w", "Switch to tab N")
+  , ("/x", "Switch to tab N")
+  , ("/y", "Switch to tab N")
+  , ("/z", "Switch to tab N")
   , ("/tab",   "Tabs: new, list, close, focus, resume, rename")
   , ("/tabs",  "List all tabs")
   , ("/start", "Tabbed Chat \x2014 see /help for tab commands")

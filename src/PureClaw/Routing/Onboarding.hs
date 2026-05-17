@@ -100,7 +100,8 @@ handleStart env =
 -- Authored as a single 'Text' so the O1 test can assert against
 -- specific substrings without re-deriving them from a builder.
 -- Mentions all three slash-prefix surfaces explicitly (value prop,
--- @\/0@, @\/tab new 0 shell@, @\/tabs@).
+-- @\/0@, @\/tab new 0 shell@, @\/tabs@). The @\/N@ shortcut accepts
+-- any single digit @0-9@ or lowercase letter @a-z@ (36 tabs total).
 onboardingMessage :: Text
 onboardingMessage = T.intercalate "\n"
   [ "Welcome to PureClaw."
@@ -111,6 +112,9 @@ onboardingMessage = T.intercalate "\n"
   , "  /0                 \x2014 talk to an AI agent (auto-spawned)"
   , "  /tab new 0 shell   \x2014 open a shell tab at index 0"
   , "  /tabs              \x2014 list your tabs"
+  , ""
+  , "Tab shortcut /N accepts any digit 0\x20139 or lowercase letter a\x2013z"
+  , "(36 tabs total)."
   , ""
   , "See /help for the full command reference."
   ]
@@ -132,10 +136,13 @@ onboardingMessage = T.intercalate "\n"
 -- All Tab-Chat verbs enumerated per O2: @\/N@, @\/N \<payload\>@,
 -- @\/tabs@, @\/tab new@, @\/tab close@, @\/tab focus@, @\/tab resume@,
 -- @\/tab rename@.
+--
+-- The leading-line note documents the @\/N@ grammar (single char,
+-- digit @0-9@ or lowercase letter @a-z@; 36 tabs maximum).
 helpTabSection :: Text
 helpTabSection = T.intercalate "\n"
   [ ""
-  , "  Tab commands:"
+  , "  Tab commands (N is one char: digit 0\x20139 or letter a\x2013z; 36 tabs max):"
   , "    /N                          Switch focus to tab N (auto-spawn if missing)"
   , "    /N <payload>                Direct-inject payload to tab N (focus unchanged)"
   , "    /tabs                       List all tabs (alias of /tab list)"
@@ -160,9 +167,16 @@ helpTabSection = T.intercalate "\n"
 -- @docs\/tabbed-chat.md@ §\"Channel autocomplete (Telegram-specific)\"
 -- without spinning up a live channel.
 --
+-- The 36 single-char tab-switch shortcuts (@\/0@..@\/9@, @\/a@..@\/z@)
+-- are emitted in their full glory because Telegram's
+-- @setMyCommands@ API permits up to 100 entries per bot and visible
+-- autocomplete on mobile is the primary discovery affordance for the
+-- @\/N@ grammar. The 36 + 3 long-form entries fit comfortably under
+-- the limit (39 total).
+--
 -- Per O3 the descriptions are:
 --
---   * @\/0@..@\/9@ → @\"Switch to tab N\"@
+--   * @\/0@..@\/9@, @\/a@..@\/z@ → @\"Switch to tab N\"@
 --   * @\/tab@      → @\"Tabs: new, list, close, focus, resume, rename\"@
 --   * @\/tabs@     → @\"List all tabs\"@
 --   * @\/start@    → @\"Tabbed Chat \x2014 see \/help for tab commands\"@
@@ -175,6 +189,10 @@ botFatherCommandList =
   [ (cmd, "Switch to tab N")
   | n <- [0 .. 9 :: Int]
   , let cmd = T.pack ('/' : show n)
+  ]
+  ++
+  [ (T.pack ['/', c], "Switch to tab N")
+  | c <- ['a' .. 'z']
   ]
   ++
   [ ("/tab",   "Tabs: new, list, close, focus, resume, rename")

@@ -18,23 +18,28 @@
 --     sanitization function used by every code path that sets
 --     @_tabHandle_name@ (H11) AND the @\/tab rename@ handler (S10).
 --
--- == Grammar (greedy DIGITS, leading-zero rejected)
+-- == Grammar (single-char index, [0-9a-z])
 --
 -- @
 -- input        ::= switch | inject | default | slash-cmd
--- switch       ::= \'\/\' DIGITS
--- inject       ::= \'\/\' DIGITS WS payload
+-- switch       ::= \'\/\' IDX
+-- inject       ::= \'\/\' IDX WS payload
 -- default      ::= payload
 -- slash-cmd    ::= \'\/\' WORD ...
 --              |   \'\/tab\' WS action [WS args]
 --              |   \'\/tabs\'
--- DIGITS       ::= [1-9][0-9]* | \'0\'
+-- IDX          ::= [0-9a-z]        -- exactly one character
 -- WS           ::= one or more spaces\/tabs
 -- @
 --
--- The parser is greedy on leading digits. @\/0 0 run@ parses as
--- @Inject 0 \"0 run\"@ — the payload digits are preserved verbatim per
--- P4.
+-- The index is exactly one character; digits @0-9@ map to tab indices
+-- @0..9@ and lowercase letters @a-z@ map to tab indices @10..35@. This
+-- gives a 36-tab maximum (matching @_rc_maxTabs@ default). Multi-char
+-- indices like @\/10@, @\/12@, @\/aa@, or @\/1a@ are rejected as
+-- 'ParseErrorMalformed' — there is no greedy digit run any more.
+--
+-- @\/0 0 run@ parses as @Inject 0 \"0 run\"@ — the payload character
+-- after the WS separator is preserved verbatim per P4.
 --
 -- The @\/0@ vs @\/0 \<text\>@ disambiguation is whitespace-driven:
 -- @\/0@ alone (or with trailing whitespace only) is a 'Switch';
@@ -49,10 +54,9 @@
 --   * Index bounds-checking uses 'RoutingConfig._rc_maxTabs'. WU1's
 --     'mkTabIndex' enforces the floor only; the parser enforces the
 --     ceiling and emits 'ParseErrorIndexOutOfRange' on failure.
---   * @\/0@ with a non-numeric tail (e.g. @\/01abc@) is parsed as a
---     'ParsedSlashCmd' if the tail looks like a slash-command,
---     otherwise 'ParseErrorMalformed'. The leading-zero check is
---     applied only when the digit run forms the entire index.
+--   * @\/0@ with a non-whitespace tail (e.g. @\/01@) is rejected as
+--     'ParseErrorMalformed' — the single-char grammar admits no
+--     multi-char numeric or alphanumeric indices.
 --   * @\/tab resume \<id\>@ runs the id through 'mkSessionId' at parse
 --     time per P15a (so the dispatcher never sees an unvalidated id);
 --     rejection surfaces as 'ParseErrorInvalidSessionId'.
@@ -104,9 +108,21 @@ parseInput rc raw
       Just ('/', _) -> True
       _             -> False
 
--- | Dispatch on the first character after the leading @\/@ — digit
--- means a 'Switch' or 'Inject' candidate; letter means a slash-command
--- candidate.
+-- | Dispatch on the shape after the leading @\/@.
+--
+--   * If the body is a single index char @c \in [0-9a-z]@ followed
+--     by end-of-input or whitespace, we have a 'Switch' (no payload)
+--     or 'Inject' (with payload).
+--   * Anything longer that starts with a digit (e.g. @\/12@,
+--     @\/1a@) is malformed — there is no greedy index any more.
+--     Bonus: @\/01@ \/ @\/02@ also fall here.
+--   * Anything longer that starts with a letter (e.g. @\/help@,
+--     @\/session new@) is routed through the slash-command parser.
+--
+-- The whitespace-or-EOI lookahead on the second character is what
+-- disambiguates @\/s@ (Switch to tab 28) from @\/session new@
+-- (slash command). The lookahead is a single 'T.uncons' on the
+-- tail; no second pass over the input.
 classifySlashy
   :: RT.RoutingConfig
   -> Text   -- ^ leading-whitespace-stripped input (starts with @\/@)
@@ -116,79 +132,65 @@ classifySlashy rc t orig =
   let body = T.drop 1 t   -- drop the leading '/'
   in case T.uncons body of
        Nothing -> Left RT.ParseErrorMalformed
-       Just (c, _)
-         | Char.isDigit c -> parseDigitsForm rc body
-         | otherwise      -> parseSlashCommandForm orig
+       Just (c, rest)
+         | Just n  <- parseTabIndexChar c
+         , isIndexBoundary rest         -> parseIndexCharForm rc n rest
+         | Char.isDigit c               ->
+             -- Digit followed by more (non-WS) characters: legacy
+             -- multi-digit shapes (@\/12@, @\/01@, @\/1a@) are no
+             -- longer in the grammar. They cannot be slash commands
+             -- either (commands start with a letter), so reject.
+             Left RT.ParseErrorMalformed
+         | otherwise                    -> parseSlashCommandForm orig
 
--- | Parse the @\/DIGITS [WS payload]@ form. @body@ starts with at
--- least one digit (caller's invariant). Returns:
+-- | True when the byte following the single index char is end-of-input
+-- or whitespace (space, tab, newline, carriage return). Anything else
+-- means the index char was the first letter of a word — punt to the
+-- slash-command parser.
+isIndexBoundary :: Text -> Bool
+isIndexBoundary rest = case T.uncons rest of
+  Nothing     -> True
+  Just (c, _) -> isHSpace c || c == '\n' || c == '\r'
+
+-- | Map a single ASCII character to its tab index.
 --
---   * 'Switch' if the digit run is followed by end-of-input or
---     whitespace-only tail;
---   * 'Inject' if the digit run is followed by a single-WS separator
---     and a non-empty rest-of-line payload;
---   * 'ParseErrorLeadingZero' if the digit run is exactly @\/00@,
---     @\/01@, etc. (multi-digit run beginning with @0@), even when
---     followed by whitespace.
+--   * @\'0\'-\'9\'@ → @0..9@
+--   * @\'a\'-\'z\'@ → @10..35@
+--   * anything else → 'Nothing'
 --
--- Error ordering matters: shape errors (leading-zero, malformed
--- non-WS tail) take priority over bounds errors so a syntactically
--- broken input doesn't masquerade as a numerically-out-of-range one
--- (e.g. @\/12abc@ is malformed, not out-of-range, even when 12 is
--- above @_rc_maxTabs@).
-parseDigitsForm
+-- This is the only place the single-char index alphabet is encoded;
+-- the parser, dashboard, and any future readers should reuse this
+-- function rather than re-implementing the mapping.
+parseTabIndexChar :: Char -> Maybe Int
+parseTabIndexChar c
+  | Char.isDigit c        = Just (Char.ord c - Char.ord '0')
+  | Char.isAsciiLower c   = Just (10 + Char.ord c - Char.ord 'a')
+  | otherwise             = Nothing
+
+-- | Parse the @\/IDX [WS payload]@ form. The caller has already
+-- (a) decoded the index char to an 'Int' and (b) confirmed via
+-- 'isIndexBoundary' that @rest@ is empty or starts with whitespace.
+-- We bounds-check the index against @_rc_maxTabs@ and hand off to
+-- 'classifyAfterIndex' to decide Switch vs Inject.
+parseIndexCharForm
   :: RT.RoutingConfig
-  -> Text
+  -> Int    -- ^ decoded index from the single index character
+  -> Text   -- ^ everything after the index character (WS or empty by caller invariant)
   -> Either RT.ParseError RT.ParsedInput
-parseDigitsForm rc body = do
-  let (digitRun, rest) = T.span Char.isDigit body
-  n <- checkDigitForm digitRun
-  () <- shapeCheckRest rest
+parseIndexCharForm rc n rest = do
   ti <- boundedTabIndex rc n
   classifyAfterIndex ti rest
-
--- | Reject digit runs followed by non-WS / non-newline characters
--- BEFORE running the bounds check, so @\/12abc@ surfaces as
--- 'ParseErrorMalformed' rather than as @'ParseErrorIndexOutOfRange' 12@.
-shapeCheckRest :: Text -> Either RT.ParseError ()
-shapeCheckRest rest = case T.uncons rest of
-  Nothing                                              -> Right ()
-  Just (c, _) | isHSpace c || c == '\n' || c == '\r' -> Right ()
-  _                                                    -> Left RT.ParseErrorMalformed
-
--- | Validate the digit run and parse it as an 'Int'. Rejects
--- multi-digit runs beginning with @0@ (the leading-zero
--- disambiguator).
---
--- Folds the digit characters by hand rather than going through
--- 'TR.decimal' so the result has no 'Maybe' \/ 'Left' arm to leave
--- a defensive dead branch in the coverage report. Overflow is
--- structurally bounded by @_rc_maxTabs@: a digit run long enough to
--- overflow 'Int' would have been rejected by 'boundedTabIndex' first
--- (in practice no sensible @_rc_maxTabs@ approaches @maxBound :: Int@).
---
--- Caller invariant: @digitRun@ is non-empty and contains only ASCII
--- digits.
-checkDigitForm :: Text -> Either RT.ParseError Int
-checkDigitForm digitRun
-  | T.length digitRun > 1 && T.head digitRun == '0'
-      = Left RT.ParseErrorLeadingZero
-  | otherwise = Right (T.foldl' step 0 digitRun)
-  where
-    step :: Int -> Char -> Int
-    step acc c = acc * 10 + (Char.ord c - Char.ord '0')
 
 -- | Bounds-check an 'Int' against @_rc_maxTabs@ and build a
 -- 'Tab.TabIndex' on success.
 --
 -- WU1's 'Tab.mkTabIndex' enforces only the floor (@n >= 0@); we
--- enforce the ceiling here. Caller invariant: @n >= 0@ (the digit
--- run produced by 'checkDigitForm' folds ASCII digits into an
--- 'Int' starting at @0@, which cannot go negative), so
--- 'Tab.mkTabIndex' always returns 'Just'. We collapse the
--- structurally-unreachable 'Nothing' branch into a single
--- 'error' call via 'Maybe.fromMaybe' so the HPC report has no
--- defensive dead arm to flag.
+-- enforce the ceiling here. Caller invariant: @n >= 0@ — the single
+-- index character produced by 'parseTabIndexChar' is always in
+-- @[0..35]@, so 'Tab.mkTabIndex' always returns 'Just'. We collapse
+-- the structurally-unreachable 'Nothing' branch into a single 'error'
+-- call via 'Maybe.fromMaybe' so the HPC report has no defensive dead
+-- arm to flag.
 boundedTabIndex
   :: RT.RoutingConfig
   -> Int

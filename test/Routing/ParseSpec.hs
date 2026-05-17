@@ -83,7 +83,8 @@ import Test.Fake.Provider
 
 
 -- | A 'RT.RoutingConfig' value sufficient for parser tests.
--- @_rc_maxTabs = 10@ matches the design's default.
+-- @_rc_maxTabs = 36@ matches the design's default (single-char
+-- @[0-9a-z]@ index alphabet).
 testRoutingConfig :: RT.RoutingConfig
 testRoutingConfig = RT.RoutingConfig
   { RT._rc_defaultKind         = Tab.KindAi
@@ -94,7 +95,7 @@ testRoutingConfig = RT.RoutingConfig
   , RT._rc_defaultShell        = RT.ShellDefaults
       { RT._sd_command = "bash" }
   , RT._rc_switchRecap         = 3
-  , RT._rc_maxTabs             = 10
+  , RT._rc_maxTabs             = 36
   , RT._rc_inputQueueBound     = 64
   , RT._rc_channelOutQBound    = 1024
   , RT._rc_spawnRateLimit      = 10
@@ -122,9 +123,8 @@ spec = do
     it "P1: parseInput \"/0\" yields Switch (TabIndex 0)" $
       parse "/0" `shouldBe` Right (RT.Switch (ti 0))
 
-    it "P2: parseInput \"/12\" yields Switch (TabIndex 12) (greedy digits)" $ do
-      let big = testRoutingConfig { RT._rc_maxTabs = 100 }
-      Parse.parseInput big "/12" `shouldBe` Right (RT.Switch (ti 12))
+    it "P2: parseInput \"/12\" is malformed (single-char grammar; multi-char index rejected)" $
+      parse "/12" `shouldBe` Left RT.ParseErrorMalformed
 
     it "P3: parseInput \"/0 run tests\" yields Inject (TabIndex 0) \"run tests\"" $
       parse "/0 run tests" `shouldBe` Right (RT.Inject (ti 0) "run tests")
@@ -135,11 +135,11 @@ spec = do
     it "P5: parseInput \"hello world\" yields Default \"hello world\"" $
       parse "hello world" `shouldBe` Right (RT.Default "hello world")
 
-    it "P6: parseInput \"/01\" yields Left ParseErrorLeadingZero" $
-      parse "/01" `shouldBe` Left RT.ParseErrorLeadingZero
+    it "P6: parseInput \"/01\" is malformed (single-char grammar; \"01\" is two chars)" $
+      parse "/01" `shouldBe` Left RT.ParseErrorMalformed
 
-    it "P7: parseInput (rc{_rc_maxTabs=10}) \"/9999\" yields Left ParseErrorIndexOutOfRange" $
-      parse "/9999" `shouldBe` Left (RT.ParseErrorIndexOutOfRange 9999)
+    it "P7: parseInput \"/9999\" is malformed (single-char grammar; not greedy)" $
+      parse "/9999" `shouldBe` Left RT.ParseErrorMalformed
 
     it "P8: parseInput \"/tabs\" yields ParsedSlashCmd (CmdTab TabListCmd)" $
       parse "/tabs" `shouldBe` Right (RT.ParsedSlashCmd (Slash.CmdTab Slash.TabListCmd))
@@ -256,7 +256,7 @@ spec = do
     it "treats /0\\nfoo as Inject 0 \"\\nfoo\" (multi-line rule)" $ do
       parse "/0\nfoo" `shouldBe` Right (RT.Inject (ti 0) "\nfoo")
 
-    it "/12abc (non-WS after digits) is malformed" $ do
+    it "/12abc (multi-char after slash) is malformed" $ do
       parse "/12abc" `shouldBe` Left RT.ParseErrorMalformed
 
     it "/ alone is malformed" $
@@ -272,6 +272,37 @@ spec = do
       let rc = testRoutingConfig { RT._rc_maxTabs = 5 }
       Parse.parseInput rc "/5" `shouldBe` Left (RT.ParseErrorIndexOutOfRange 5)
       Parse.parseInput rc "/4" `shouldBe` Right (RT.Switch (ti 4))
+
+    it "single-char letter index /a..z maps to TabIndex 10..35" $ do
+      parse "/a" `shouldBe` Right (RT.Switch (ti 10))
+      parse "/b" `shouldBe` Right (RT.Switch (ti 11))
+      parse "/z" `shouldBe` Right (RT.Switch (ti 35))
+
+    it "/a payload yields Inject (TabIndex 10) payload" $
+      parse "/a hello there" `shouldBe` Right (RT.Inject (ti 10) "hello there")
+
+    it "letter index is bounds-checked against _rc_maxTabs" $ do
+      let rc = testRoutingConfig { RT._rc_maxTabs = 15 }
+      Parse.parseInput rc "/e" `shouldBe` Right (RT.Switch (ti 14))
+      Parse.parseInput rc "/f" `shouldBe` Left (RT.ParseErrorIndexOutOfRange 15)
+      Parse.parseInput rc "/z" `shouldBe` Left (RT.ParseErrorIndexOutOfRange 35)
+
+    it "default _rc_maxTabs = 36 admits every letter [a-z]" $ do
+      -- Sanity check at the configured ceiling.
+      parse "/a" `shouldBe` Right (RT.Switch (ti 10))
+      parse "/z" `shouldBe` Right (RT.Switch (ti 35))
+
+    it "multi-char index forms are malformed (/aa, /1a, /ab, /a0)" $ do
+      parse "/aa" `shouldBe` Left RT.ParseErrorMalformed
+      parse "/1a" `shouldBe` Left RT.ParseErrorMalformed
+      parse "/ab" `shouldBe` Left RT.ParseErrorMalformed
+      parse "/a0" `shouldBe` Left RT.ParseErrorMalformed
+
+    it "uppercase letters are not valid index chars (grammar is lowercase)" $ do
+      -- /A is treated as a slash-command candidate; slash-cmd grammar
+      -- rejects "/A" as unknown, so we get ParseErrorMalformed.
+      parse "/A" `shouldBe` Left RT.ParseErrorMalformed
+      parse "/Z" `shouldBe` Left RT.ParseErrorMalformed
 
     it "Default 'hello' (no slash) preserved verbatim including leading space" $ do
       parse " hello" `shouldBe` Right (RT.Default " hello")
@@ -585,13 +616,20 @@ mkP18Env = do
 -- side of the routing grammar — i.e. NEVER the 'Default' branch.
 genNonDefaultInput :: Gen Text
 genNonDefaultInput = oneof
-  [ -- /N — switch
+  [ -- /N — switch (digit form)
     do n <- elements [0 .. 9 :: Int]
        pure (T.pack ('/' : show n))
-    -- /N <payload> — inject
+    -- /N — switch (letter form)
+  , do c <- elements ['a' .. 'z']
+       pure (T.pack ['/', c])
+    -- /N <payload> — inject (digit form)
   , do n <- elements [0 .. 9 :: Int]
        p <- genPayload
        pure (T.pack ('/' : show n) <> " " <> p)
+    -- /N <payload> — inject (letter form)
+  , do c <- elements ['a' .. 'z']
+       p <- genPayload
+       pure (T.pack ['/', c] <> " " <> p)
     -- Slash commands (existing + tab family).
   , elements
       [ "/help", "/status", "/new", "/last", "/compact"
@@ -605,7 +643,8 @@ genNonDefaultInput = oneof
       ]
     -- Malformed slashy inputs (parser errors — also LLM-free).
   , elements
-      [ "/01", "/12abc", "/9999", "/tab", "/tab bogus"
+      [ "/01", "/12", "/12abc", "/9999", "/tab", "/tab bogus"
+      , "/aa", "/1a", "/ab"
       , "/tab close 3 --bogus", "/", "/totally-unknown"
       ]
   ]
