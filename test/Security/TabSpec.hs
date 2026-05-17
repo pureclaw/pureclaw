@@ -23,7 +23,7 @@ import Control.Concurrent.STM
   , readTVar
   , readTVarIO
   )
-import Data.IORef (newIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -63,12 +63,16 @@ import PureClaw.Routing.Dispatcher qualified as Dispatcher
 import PureClaw.Routing.Parse qualified as Parse
 import PureClaw.Routing.Types qualified as RT
 import PureClaw.Security.Policy
-import PureClaw.Security.Vault (VaultHandle)
+import PureClaw.Security.Vault (VaultHandle (..), VaultStatus (..))
+import PureClaw.Security.Vault.Age (VaultError (..))
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Session.Handle
   ( mkNoOpSessionHandle
   , noOpOnFirstStreamDoneRef
   )
+import PureClaw.Backend.SSH qualified as SSH
+import PureClaw.Backend.Tmux qualified as Tmux
+import PureClaw.Tab.Backend qualified as TabBackend
 import PureClaw.Tools.Registry (emptyRegistry)
 import Test.Fake.ChannelHandle
   ( fakeChannelHandle
@@ -79,8 +83,71 @@ import Test.Fake.ChannelHandle
 spec :: Spec
 spec = do
   describe "S-series — tabbed-chat security (WU0 scaffold; WU2/WU5/WU6/WU8/WU9 fill in)" $ do
-    it "S1: spawn authorization (local) — /tab new N shell <cmd...> calls authorize cmd _env_policy before any subprocess; rejection yields TabSpawnAuthDenied PublicError, no process spawned" pending
-    it "S2: spawn authorization (remote) — /tab new N ssh <host> <cmd...> calls authorizeRemote + mkSshHost host; rejected hosts (whitespace, leading -, NUL, shell metachars) yield BackendInvalidOption PublicError, no ssh subprocess" pending
+    it ("S1: spawn authorization (local) — /tab new N shell <cmd...> "
+        <> "calls authorize cmd _env_policy before any subprocess; "
+        <> "rejection yields TabSpawnAuthDenied PublicError, no "
+        <> "process spawned") $ do
+      -- defaultPolicy has autonomy=Deny and an empty allowlist.
+      env <- mkS8Env mkNoOpChannelHandle  -- policy is defaultPolicy
+      seamCalled <- newIORef (0 :: Int)
+      let recordingBio = TabBackend.BackendIO
+            { TabBackend._bio_mkShell = \_ -> do
+                modifyIORefCount seamCalled
+                error "S1: seam must not be invoked (authorize must reject first)"
+            , TabBackend._bio_mkSsh   = \_ _ _ -> do
+                modifyIORefCount seamCalled
+                error "S1: seam must not be invoked"
+            , TabBackend._bio_mkTmux  = \_ _ -> do
+                modifyIORefCount seamCalled
+                error "S1: seam must not be invoked"
+            }
+          tidx = fromJust (Tab.mkTabIndex 0)
+      r <- TabBackend.mkTabBackendWith recordingBio env tidx
+             Tab.KindShell ["ls", "-la"]
+      case r of
+        Left (Tab.TabSpawnAuthDenied _) -> pure ()
+        other -> expectationFailure
+                   ("S1: expected Left TabSpawnAuthDenied; got "
+                     <> showS1Either other)
+      n <- readIORef seamCalled
+      n `shouldBe` 0   -- no subprocess invocation
+
+    it ("S2: spawn authorization (remote) — /tab new N ssh <host> "
+        <> "<cmd...> calls authorizeRemote + mkSshHost host; rejected "
+        <> "hosts (whitespace, leading -, NUL, shell metachars) yield "
+        <> "BackendInvalidOption PublicError, no ssh subprocess") $ do
+      env <- mkS8Env mkNoOpChannelHandle
+      seamCalled <- newIORef (0 :: Int)
+      let recordingBio = TabBackend.BackendIO
+            { TabBackend._bio_mkShell = \_ -> do
+                modifyIORefCount seamCalled
+                error "S2: seam must not be invoked"
+            , TabBackend._bio_mkSsh   = \_ _ _ -> do
+                modifyIORefCount seamCalled
+                error "S2: seam must not be invoked"
+            , TabBackend._bio_mkTmux  = \_ _ -> do
+                modifyIORefCount seamCalled
+                error "S2: seam must not be invoked"
+            }
+          tidx = fromJust (Tab.mkTabIndex 0)
+      -- Whitespace.
+      r1 <- TabBackend.mkTabBackendWith recordingBio env tidx
+              Tab.KindSsh ["user@bad host", "bash"]
+      shouldBeAuthDenied "S2 whitespace" r1
+      -- Leading dash.
+      r2 <- TabBackend.mkTabBackendWith recordingBio env tidx
+              Tab.KindSsh ["user@-evil", "bash"]
+      shouldBeAuthDenied "S2 leading-dash" r2
+      -- Shell metachar.
+      r3 <- TabBackend.mkTabBackendWith recordingBio env tidx
+              Tab.KindSsh ["user@evil;rm", "bash"]
+      shouldBeAuthDenied "S2 shell-meta" r3
+      -- NUL byte.
+      r4 <- TabBackend.mkTabBackendWith recordingBio env tidx
+              Tab.KindSsh ["user@evil\0name", "bash"]
+      shouldBeAuthDenied "S2 NUL" r4
+      n <- readIORef seamCalled
+      n `shouldBe` 0
 
     -- S3 — smart-constructor validation. WU2 lands the parser-side
     -- smart constructors ('Parse.mkSessionId' and
@@ -133,7 +200,82 @@ spec = do
         -- Empty after trim.
         Parse.sanitizeTabName "    "           `shouldBe` Left Tab.NameRedactedToEmpty
 
-    it "S4: SSH identity sourcing — ssh tabs source SafeKeyPath from Vault slot _rc_sshIdentityKey; identities NEVER typed inline by user; missing Vault slot yields PublicError" pending
+      it ("backend-side: mkSshHost rejects every adversarial host "
+          <> "(whitespace, leading dash, NUL, shell metacharacters)") $ do
+        -- Whitespace.
+        SSH.mkSshHost "bad host"           `shouldSatisfy` isLeftBackend
+        SSH.mkSshHost "tab\there"          `shouldSatisfy` isLeftBackend
+        -- Leading dash.
+        SSH.mkSshHost "-oProxyCommand=ev"  `shouldSatisfy` isLeftBackend
+        -- NUL byte.
+        SSH.mkSshHost "host\0name"         `shouldSatisfy` isLeftBackend
+        -- Shell metacharacters.
+        SSH.mkSshHost "evil;rm"            `shouldSatisfy` isLeftBackend
+        SSH.mkSshHost "h|pipe"             `shouldSatisfy` isLeftBackend
+        SSH.mkSshHost "h$cmd"              `shouldSatisfy` isLeftBackend
+        SSH.mkSshHost "h`cmd`"             `shouldSatisfy` isLeftBackend
+        -- Empty.
+        SSH.mkSshHost ""                   `shouldSatisfy` isLeftBackend
+        -- A valid hostname goes through (positive control).
+        SSH.mkSshHost "good.example.com"   `shouldSatisfy` isRightBackend
+
+      it ("backend-side: mkTmuxSession/mkTmuxWindow/mkTmuxPane reject "
+          <> "leading dash, NUL byte, empty input, and out-of-charset "
+          <> "characters") $ do
+        Tmux.mkTmuxSession ""          `shouldSatisfy` isLeftTmux
+        Tmux.mkTmuxSession "-evil"     `shouldSatisfy` isLeftTmux
+        Tmux.mkTmuxSession "sess\0"    `shouldSatisfy` isLeftTmux
+        Tmux.mkTmuxSession "sess space" `shouldSatisfy` isLeftTmux
+        Tmux.mkTmuxWindow  ""          `shouldSatisfy` isLeftTmux
+        Tmux.mkTmuxWindow  "-win"      `shouldSatisfy` isLeftTmux
+        Tmux.mkTmuxPane    "-pane"     `shouldSatisfy` isLeftTmux
+        -- Positive controls.
+        Tmux.mkTmuxSession "good-sess" `shouldSatisfy` isRightTmux
+        Tmux.mkTmuxWindow  "main"      `shouldSatisfy` isRightTmux
+        Tmux.mkTmuxPane    "p0"        `shouldSatisfy` isRightTmux
+
+    it ("S4: SSH identity sourcing — ssh tabs source SafeKeyPath from "
+        <> "Vault slot _rc_sshIdentityKey; identities NEVER typed "
+        <> "inline by user; missing Vault slot yields PublicError") $ do
+      -- The S4 invariant has three parts:
+      --   1. The factory consults the Vault slot named by
+      --      _rc_sshIdentityKey rather than an inline argument.
+      --   2. A missing slot (no vault OR slot not present) yields
+      --      Left TabSpawnAuthDenied — no SSH subprocess.
+      --   3. No way for the user to supply an inline identity (the
+      --      KindSsh args are [user@host, prog, args...] — there is
+      --      no identity slot in the args grammar).
+      env <- mkS8Env mkNoOpChannelHandle
+      -- Allow ssh locally and bash remotely so we reach the Vault
+      -- lookup. Use mkS8Env's default policy override.
+      let policy = withAutonomy Full
+                 $ allowCommand (CommandName "ssh")
+                 $ allowRemoteCommand (CommandName "bash") defaultPolicy
+          env' = env { _env_policy = policy }
+      seamCalled <- newIORef (0 :: Int)
+      let recordingBio = TabBackend.BackendIO
+            { TabBackend._bio_mkShell = \_ -> do
+                modifyIORefCount seamCalled
+                error "S4: seam must not be invoked"
+            , TabBackend._bio_mkSsh   = \_ _ _ -> do
+                modifyIORefCount seamCalled
+                error "S4: seam must not be invoked (no Vault slot)"
+            , TabBackend._bio_mkTmux  = \_ _ -> do
+                modifyIORefCount seamCalled
+                error "S4: seam must not be invoked"
+            }
+          tidx = fromJust (Tab.mkTabIndex 0)
+      -- Case 1: no vault configured at all.
+      r1 <- TabBackend.mkTabBackendWith recordingBio env' tidx
+              Tab.KindSsh ["user@host.example.com", "bash"]
+      shouldBeAuthDenied "S4 no-vault" r1
+      -- Case 2: vault configured but slot missing.
+      writeIORef (_env_vault env') (Just s4MissingSlotVault)
+      r2 <- TabBackend.mkTabBackendWith recordingBio env' tidx
+              Tab.KindSsh ["user@host.example.com", "bash"]
+      shouldBeAuthDenied "S4 missing-slot" r2
+      n <- readIORef seamCalled
+      n `shouldBe` 0
 
     it ("S5: Crashed PublicError — Crashed e is internal; channel emit "
         <> "uses toPublicTabError; failure message contains neither host "
@@ -301,6 +443,68 @@ shouldRejectAs (Left actual) expected =
   actual `shouldBe` expected
 shouldRejectAs (Right _)     expected =
   expectationFailure $ "expected Left " <> show expected <> "; got Right"
+
+-- ---------------------------------------------------------------------------
+-- Helpers used by S1, S2, S3 (backend-side), S4
+-- ---------------------------------------------------------------------------
+
+-- | Increment an 'IORef' Int counter atomically.
+modifyIORefCount :: IORef Int -> IO ()
+modifyIORefCount ref = atomicModifyIORef' ref (\n -> (n + 1, ()))
+
+-- | Render an @Either Tab.TabError Tab.TabHandle@ without requiring a
+-- 'Show' instance for 'Tab.TabHandle'.
+showS1Either :: Either Tab.TabError Tab.TabHandle -> String
+showS1Either (Left e)  = "Left " <> show e
+showS1Either (Right _) = "Right TabHandle"
+
+-- | Assertion helper: the result must be
+-- @Left (Tab.TabSpawnAuthDenied ...)@.
+shouldBeAuthDenied
+  :: String -> Either Tab.TabError Tab.TabHandle -> Expectation
+shouldBeAuthDenied ctx r = case r of
+  Left (Tab.TabSpawnAuthDenied _) -> pure ()
+  other -> expectationFailure
+             (ctx <> ": expected Left TabSpawnAuthDenied; got "
+               <> showS1Either other)
+
+-- | 'isLeft' specialised to the SSH host constructor's error type.
+isLeftBackend :: Either Backend.BackendError a -> Bool
+isLeftBackend (Left _)  = True
+isLeftBackend (Right _) = False
+
+-- | 'isRight' specialised to the SSH host constructor's error type.
+isRightBackend :: Either Backend.BackendError a -> Bool
+isRightBackend = not . isLeftBackend
+
+-- | 'isLeft' specialised to the Tmux smart-constructor error type.
+isLeftTmux :: Either Backend.InvalidOptionDetail a -> Bool
+isLeftTmux (Left _)  = True
+isLeftTmux (Right _) = False
+
+-- | 'isRight' specialised to the Tmux smart-constructor error type.
+isRightTmux :: Either Backend.InvalidOptionDetail a -> Bool
+isRightTmux = not . isLeftTmux
+
+-- | A no-op 'VaultHandle' for the S4 missing-slot test: every getter
+-- returns @Left _@. Other operations are total no-ops so the test
+-- exerciser doesn't crash if they're called.
+s4MissingSlotVault :: VaultHandle
+s4MissingSlotVault = VaultHandle
+  { _vh_init   = pure (Right ())
+  , _vh_get    = \_ -> pure (Left (VaultCorrupted "no such key"))
+  , _vh_put    = \_ _ -> pure (Right ())
+  , _vh_delete = \_ -> pure (Right ())
+  , _vh_list   = pure (Right [])
+  , _vh_lock   = pure ()
+  , _vh_unlock = pure (Right ())
+  , _vh_status = pure VaultStatus
+      { _vs_locked      = True
+      , _vs_secretCount = 0
+      , _vs_keyType     = "no-op"
+      }
+  , _vh_rekey  = \_ _ _ -> pure (Right ())
+  }
 
 
 -- ---------------------------------------------------------------------------

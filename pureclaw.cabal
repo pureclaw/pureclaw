@@ -74,6 +74,7 @@ library
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
     PureClaw.Tab.Ai
     PureClaw.Tab.Harness
+    PureClaw.Tab.Backend
     -- Backend
     PureClaw.Backend.Pty
     PureClaw.Backend.Pty.Fake

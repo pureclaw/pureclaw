@@ -18,9 +18,9 @@
     "modules": {
       "PureClaw.Handles.Tab": {
         "stagedBy": "WU1 (commit 9458567, Tabbed Chat #51)",
-        "filledBy": ["WU8"],
+        "filledBy": ["WU9"],
         "since": "2026-05-17",
-        "reason": "Factory body mkTabBackend is an `error \"not implemented\"` stub in WU1 by plan design; the real body arrives in WU8. The WU6 AI tab factory lives at `PureClaw.Tab.Ai.mkTabAi` and the WU7 harness tab factory lives at `PureClaw.Tab.Harness.mkTabHarness`; the 2-arg `Handles.Tab.mkTabAi` / `Handles.Tab.mkTabHarness` stubs here are kept unchanged to preserve the H2 type-shape pins (`_h2_mkTabAi_sig`, `_h2_mkTabHarness_sig`) and the existing `defaultTabFactory` wiring. The stubs are now effectively superseded by the `Tab.Ai` / `Tab.Harness` factories — when `defaultTabFactory` is updated in WU9 to plumb `AgentEnv`, this entry will be removed.",
+        "reason": "All 3 factory bodies (`mkTabAi`, `mkTabHarness`, `mkTabBackend`) are `error \"not implemented\"` stubs in WU1 by plan design. The WU6 AI tab factory lives at `PureClaw.Tab.Ai.mkTabAi`, the WU7 harness tab factory at `PureClaw.Tab.Harness.mkTabHarness`, and the WU8 backend tab factory at `PureClaw.Tab.Backend.mkTabBackend`; the 2-arg/3-arg `Handles.Tab` stubs are kept unchanged to preserve the H2 type-shape pins (`_h2_mkTabAi_sig`, `_h2_mkTabHarness_sig`, `_h2_mkTabBackend_sig`) and the existing `defaultTabFactory` wiring. The stubs are now effectively superseded by the `Tab.Ai` / `Tab.Harness` / `Tab.Backend` factories — when `defaultTabFactory` is updated in WU9 to plumb `AgentEnv`, this entry will be removed.",
         "minimalChecks": [
           "all 3 factory stubs throw ErrorCall containing 'not implemented' (shouldThrow tests)",
           "all 10 TabError arms reached via Show + toPublicTabError",
@@ -73,11 +73,40 @@
           "TabName constructed via sanitizeTabName (H11)"
         ]
       },
+      "PureClaw.Tab.Backend": {
+        "stagedBy": "WU8 (Tabbed Chat #51)",
+        "filledBy": ["WU9"],
+        "since": "2026-05-17",
+        "reason": "WU8 lands the backend tab factory + per-tab drainer/writer + the three sub-factory security validation paths (S1 KindShell, S2/S3/S4 KindSsh, S3 KindTmux). Top-level declaration coverage is 93% (31/33); branch coverage 85% (51/60); expression coverage 83% (427/514). The gaps are dominated by two categories: (1) `realBackendIO`'s field lambdas (the three production wirings into `Local.mkLocalBackendHandle`, `SSH.mkSshBackendHandle`, `Tmux.mkTmuxBackendHandle`) which are not invoked in unit tests because they spawn real subprocesses — these are exercised by the WU9 auto-spawn UX tests end-to-end; (2) the SSH `Right identityPath` arm of `resolveSshIdentity` which is unreachable in v1 by design (the v1 stub policy always returns Left to satisfy the S4 audit invariant without materialising the Vault payload to disk — the production on-disk materialisation lands in WU9 with the real `KeysRoot` from `PureClaw.CLI.Config`). Functional coverage is complete for the WU8 spec scope (the security-critical S1/S2/S3/S4 invariants are exercised end-to-end via the BackendIO seam).",
+        "minimalChecks": [
+          "mkTabBackend dispatches all 5 TabKinds (KindShell/KindSsh/KindTmux happy paths + KindAi/KindHarness reject-with-TabSpawnAuthDenied)",
+          "S1 (KindShell): allowed command spawns; rejected command returns Left TabSpawnAuthDenied with NO _bio_mkShell invocation (recorded via IORef counter)",
+          "S1 (KindShell): autonomy=Deny rejects every command even if on the allowlist",
+          "S2 (KindSsh): mkSshHost rejects whitespace, leading dash, NUL, shell metachars; each rejection surfaces as Left TabSpawnAuthDenied with NO _bio_mkSsh invocation",
+          "S2 (KindSsh): local 'ssh' missing from allowlist rejects",
+          "S2 (KindSsh): remote command must be on the remote allowlist (separate from local)",
+          "S3 (backend-side smart constructors): mkSshHost / mkTmuxSession / mkTmuxWindow / mkTmuxPane each reject leading dash, NUL, empty, out-of-charset (asserted in Security.TabSpec backend-side block)",
+          "S4 (KindSsh): no Vault configured yields Left TabSpawnAuthDenied with NO _bio_mkSsh invocation",
+          "S4 (KindSsh): Vault present but slot named by _rc_sshIdentityKey missing yields Left TabSpawnAuthDenied",
+          "_tabHandle_send (KindBackend) returns Left TabConcurrencyLimit on TBQueue overflow (H4)",
+          "_tabHandle_enqueueSlash (KindBackend) returns Left TabUnsupportedCommand without enqueueing (H13 / I4)",
+          "_tabHandle_close graceful + force + idempotent + never-throws (H6/H7/H8/H9)",
+          "Focus-gated FullMsg emission: focused tab emits (SrcTab idx, FullMsg idx text); non-focused tab skips producer-side enqueue (D3/D4/D5 backend rule)",
+          "I4 opaque-slash: '/pwd' sent via _tabHandle_send reaches backend as literal bytes via the writer thread",
+          "Drainer terminates silently on RecvEof (status stays Idle); RecvTruncated also terminates",
+          "Crash handler: a misbehaving _bh_recv transitions status to Crashed (safelyRun synchronous-exception branch)",
+          "Writer thread forwards bytes to _bh_send (round-trip through bounded queue)",
+          "TabName constructed via sanitizeTabName (H11)",
+          "TabBackendConstructFailed surfaces from a failing BackendIO sub-factory",
+          "parseUserAtHost rejects malformed forms (empty, missing @, multiple @)",
+          "parseTmuxTarget rejects malformed specs (no colon, too many dots) and accepts session:window + session:window.pane"
+        ]
+      },
       "PureClaw.Routing.Dispatcher": {
         "stagedBy": "WU5 (Tabbed Chat #51)",
-        "filledBy": ["WU8"],
+        "filledBy": ["WU9"],
         "since": "2026-05-17",
-        "reason": "The 'defaultTabFactory' body dispatches to Tab.mkTabAi / Tab.mkTabHarness / Tab.mkTabBackend, all of which are 'error \"not implemented\"' stubs in WU1. Calling 'defaultTabFactory' from any test would trip those bottoms, so the production dispatch path can only be exercised in WU6/WU7/WU8 alongside the real factory bodies. WU5 tests cover spawnTab/spawnTabWith via an injected synthetic factory (the same TabFactory test seam the dispatcher uses internally), so every non-defaultTabFactory branch is covered.",
+        "reason": "The 'defaultTabFactory' body dispatches to the 2-arg `Handles.Tab.mkTabAi` / `Handles.Tab.mkTabHarness` / `Handles.Tab.mkTabBackend` stubs (still 'error \"not implemented\"' bottoms — the WU6/WU7/WU8 factories live at `PureClaw.Tab.Ai.mkTabAi`, `PureClaw.Tab.Harness.mkTabHarness`, and `PureClaw.Tab.Backend.mkTabBackend` respectively, taking AgentEnv as an extra argument). Calling 'defaultTabFactory' from any test would trip those bottoms, so the production dispatch path can only be exercised in WU9 when the dispatcher is updated to plumb AgentEnv into the real factories. WU5 tests cover spawnTab/spawnTabWith via an injected synthetic factory (the same TabFactory test seam the dispatcher uses internally), so every non-defaultTabFactory branch is covered.",
         "minimalChecks": [
           "spawnTabWith happy-path with a synthetic factory (Right idx + registry insert)",
           "spawnTabWith with a throwing factory (C3 — registry rollback + redacted Left)",
