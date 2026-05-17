@@ -2,7 +2,7 @@
 issue: 51
 pr: pending
 design_doc: docs/tabbed-chat.md
-status: approved — in-progress
+status: complete
 date_drafted: 2026-05-16
 date_approved: 2026-05-16
 gate-iterations: 2
