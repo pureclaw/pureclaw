@@ -43,13 +43,17 @@ WhatsApp's linked-device protocol is the same mechanism WhatsApp Web uses, but a
 
 1. **First-run** in `/channel whatsapp pair` output, before showing the QR — a single paragraph explaining the risk, with a Y/N confirmation in interactive mode.
 2. **README** section on the WhatsApp channel — same paragraph plus a link to OpenClaw's gap-analysis doc for context.
-3. **`pureclaw doctor`** — if the channel is configured, surface a one-liner reminder that the linked account carries ban risk.
+3. **`pureclaw doctor`** — if the channel is configured, surface two one-liner reminders:
+   - The linked account carries Meta TOS/ban risk.
+   - **(Security NEW-5)** Until upstream wacli adds env-var support for the webhook secret (Work Unit 0), the HMAC secret passed via `--webhook-secret` argv is visible to other local users via `ps`/`/proc/<pid>/cmdline`. Acceptable on single-user laptops; not acceptable on shared hosts. The doctor message should name the wacli version and link to the upstream issue once filed.
 
 ---
 
-## Design Review — Iteration 2 (2026-05-15)
+## Design Review — Iterations 2 & 3 (2026-05-15 / 2026-05-17)
 
-The first design-review-gate iteration returned NEEDS_REVISION from 4 of 5 reviewers (Architect approved). Key blockers and the resolutions folded into this revision:
+The first design-review-gate iteration returned NEEDS_REVISION from 4 of 5 reviewers (Architect approved). Iteration 2 resolved 14 of 15 blockers; Security raised one new blocker (NEW-1, request-body cap) and the Architect found an inconsistent `Webhook`/`Inbox` rename — both fixed in iteration 3.
+
+Key blockers and the resolutions folded into this revision:
 
 | Blocker | Source | Resolution |
 |---|---|---|
@@ -72,12 +76,19 @@ The first design-review-gate iteration returned NEEDS_REVISION from 4 of 5 revie
 Non-blocking suggestions also rolled in:
 - `chunkMessage` promoted to a shared module before WhatsApp imports it (Designer)
 - `--events` reader EOF propagates to make `_ch_receive` throw (Architect zombie detection)
-- `mkInboxApp :: WebhookSecret -> TBQueue ParsedMessage -> Application` exposed as a testable seam (Architect)
+- `mkInboxApp :: WebhookSecret -> TBQueue ParsedMessage -> LogHandle -> Application` exposed as a testable seam (Architect)
 - `newtype E164 = E164 Text` for recipient slot (Designer)
 - Partial E.164 redaction in warn logs (Security)
 - Time Machine / FileVault assumption documented in user docs (Security)
 - Tests assert no message body or `qr_code` payload leaks via `--events` (Security)
 - `Channels.WhatsApp.Webhook` renamed to `Channels.WhatsApp.Inbox` (Architect)
+
+**Iteration 3 additions (2026-05-17):**
+- `mkInboxApp` body-size cap (`maxRequestBodyBytes = 1 MiB`) enforced before HMAC verify; bounded streaming reader, not `strictRequestBody` (Security NEW-1)
+- `_ch_receive` STM pattern spelled out as drain-then-check (`readTBQueue inbox \`orElse\` terminated-sentinel`) so in-flight POSTs after wacli exit aren't dropped (Security NEW-2 + Architect polish)
+- `pureclaw doctor` second one-liner for `--webhook-secret` argv exposure separate from TOS warning (Security NEW-5)
+- `Webhook` → `Inbox` sweep across Q3 module list and Q9 spec names (Architect inconsistency)
+- "Planning-phase polish" section captures Designer/Architect/CTO/Security non-blocker items for `superpowers:writing-plans`
 
 ---
 
@@ -185,6 +196,10 @@ Per Architect feedback: extract the WAI `Application` from the lifecycle so it's
 
 ```haskell
 -- Channels.WhatsApp.Inbox
+
+maxRequestBodyBytes :: Int
+maxRequestBodyBytes = 1 * 1024 * 1024  -- 1 MiB; ParsedMessage JSON is well under this
+
 mkInboxApp
   :: WebhookSecret
   -> TBQueue ParsedMessage
@@ -192,7 +207,13 @@ mkInboxApp
   -> Application
 ```
 
-Tests use `Network.Wai.Test.runSession` to drive `mkInboxApp` with valid/invalid signatures, oversized payloads, malformed JSON, etc. — all pure-IO, no real socket. Coverage of HMAC + parse + queue-push branches lives here.
+**Body-size enforcement (Security NEW-1):** the handler must bound the request body *before* HMAC verification, otherwise an attacker who can hit the loopback port can stream gigabytes and OOM the listener before the 413 fires. Implementation:
+
+1. Check `requestBodyLength req`: if `KnownLength n` and `n > maxRequestBodyBytes`, return HTTP 413 immediately (no body read).
+2. Otherwise read the body with a bounded streaming reader that aborts and returns 413 after `maxRequestBodyBytes` bytes — do *not* use `Network.Wai.strictRequestBody` (unbounded). Use a chunk-loop on `getRequestBodyChunk req` with a running counter.
+3. Only after the body is fully read into a strict `ByteString` ≤ 1 MiB does HMAC verification run.
+
+Tests use `Network.Wai.Test.runSession` to drive `mkInboxApp` with valid/invalid signatures, oversized payloads (synthetic via `defaultRequest { requestBodyLength = KnownLength 2_000_000 }`), malformed JSON, etc. — all pure-IO, no real socket. Coverage of HMAC + parse + queue-push branches lives here.
 
 ### Event/payload reference
 
@@ -232,7 +253,7 @@ The webhook listener is embedded *in the WhatsApp channel itself*, not in `Gatew
 A `Channels.WhatsApp` module set:
 - `Channels.WhatsApp` — `withWhatsAppChannel`, `ChannelHandle` instance.
 - `Channels.WhatsApp.Wacli` — `WacliProcess` + lifecycle (`startWacliSync`, `stopWacliSync`); shells out for `send …`.
-- `Channels.WhatsApp.Webhook` — Warp listener, HMAC validation, `ParsedMessage` JSON parsing, `TQueue` push.
+- `Channels.WhatsApp.Inbox` — Warp listener, HMAC validation, `ParsedMessage` JSON parsing, `TBQueue` push.
 - `Channels.WhatsApp.Events` — `--events` NDJSON reader thread, `LogHandle` routing.
 
 Test seam: a `WacliTransport` record (mirroring `SignalTransport`) so tests inject canned `ParsedMessage` POSTs and assert on captured `wacli send` invocations.
@@ -320,7 +341,7 @@ Decision (2026-05-15): pureclaw does not auto-restart wacli. Mirror `Channels.Si
 |---|---|---|
 | WhatsApp Web socket drops (network blip, server-side disconnect) | wacli `sync --follow` | nothing — wacli reconnects internally with its own backoff |
 | App-state LTHash mismatch | wacli | log the `warning` event from `--events` stream; wacli requests recovery automatically |
-| wacli process crashes (panic, OOM, signal) | OS | `--events` reader sees EOF on stderr → set a `terminated :: TVar Bool` → next `_ch_receive` reads `terminated` and throws `IOException` → agent loop exits cleanly → user restarts pureclaw |
+| wacli process crashes (panic, OOM, signal) | OS | `--events` reader sees EOF on stderr → set a `terminated :: TVar Bool` → next `_ch_receive` drains any queued `ParsedMessage` first, *then* checks `terminated` and throws `IOException` → agent loop exits cleanly → user restarts pureclaw. The drain-then-check ordering prevents in-flight HMAC-verified POSTs that arrived between wacli exit and EOF detection from being silently dropped (Security NEW-2). |
 | Webhook listener crashes (Warp exception) | pureclaw | propagate to channel handle so the whole channel tears down — partial state (wacli running but no inbox consumer) would be worse than a clean restart |
 | `--events` reader thread crashes *but wacli still running* | pureclaw | log; do not bring down the channel — events are auxiliary, the webhook path keeps working. Distinct from EOF-on-wacli-exit above |
 | Zombie state (wacli dead, webhook listener still listening) | pureclaw | the EOF detection above prevents this — the `terminated` flag is the single source of truth for "wacli is gone" |
@@ -334,6 +355,7 @@ Decision (2026-05-15): pureclaw does not auto-restart wacli. Mirror `Channels.Si
   - return `ChannelHandle`
   - cleanup: kill wacli, shut Warp, kill reader thread
 - One supervised-failure point: if wacli exits non-zero, log its last 50 lines of stderr (so the user can diagnose) before the channel handle throws.
+- **`_ch_receive` STM pattern**: drain-then-check, not a poll loop. The body is `atomically $ (readTBQueue inbox) \`orElse\` (readTVar terminated >>= \t -> if t then pure terminatedSentinel else retry)`. STM blocks on either side; queued messages take priority over the terminated flag so late-arriving in-flight POSTs don't get dropped (Security NEW-2 ordering invariant). The `terminatedSentinel` is mapped to `IOException` at the `_ch_receive` boundary so the agent loop's existing exception handler (`Agent/Loop.hs:75`) fires.
 
 ### What we don't build
 
@@ -437,11 +459,11 @@ data WhatsAppTransport = WhatsAppTransport
 
 ### Test surfaces (mock-backed, run in CI)
 
-1. **HMAC validation** (`Channels.WhatsApp.WebhookSpec`) — driven via `Network.Wai.Test.runSession` against `mkInboxApp`:
+1. **HMAC validation** (`Channels.WhatsApp.InboxSpec`) — driven via `Network.Wai.Test.runSession` against `mkInboxApp`:
    - Valid signature → payload accepted.
    - Wrong/missing signature → 401, no inbox push, warning logged.
    - Constant-time-compare check: a signature that differs only in the last byte takes the same code path as a signature that differs in the first byte (assert via property test, not timing).
-2. **`ParsedMessage` parsing** (`Channels.WhatsApp.WebhookSpec`):
+2. **`ParsedMessage` parsing** (`Channels.WhatsApp.InboxSpec`):
    - Text-only DM → `IncomingMessage { _im_userId, _im_content }`.
    - Media-only → drop (v1: log + skip).
    - Group JID (`@g.us`) → drop.
@@ -449,7 +471,7 @@ data WhatsAppTransport = WhatsAppTransport
    - `FromMe = true` → drop (self-echo).
    - Sender not in `allow_from` → drop with partially-redacted-E.164 log (`+1555***4567`).
    - **Multi-peer `allow_from`**: messages from any listed peer accepted; `lastSender` updated per inbound.
-   - Oversized payload (>1MB) → 413, no parse.
+   - **Body-size cap (Security NEW-1)**: request with `Content-Length: 2000000` (> `maxRequestBodyBytes`) → 413 before any body read, no HMAC verify attempted. Request with no `Content-Length` but a body that exceeds the cap mid-stream → 413, the streaming reader aborts at the cap, no HMAC verify, no parse, no queue push.
    - `TBQueue` full → 429, log warn.
 3. **Outbound routing** (`Channels.WhatsApp.WacliSpec`):
    - `_ch_send` calls `_wat_send` with the `lastSender` E.164 and the message text.
@@ -506,7 +528,7 @@ All nine questions resolved; iteration 1 review feedback fully addressed.
 | Q6 | Inbound filters | Subsumed by Q2 |
 | Q7 | Multi-account | Deferred to v2 |
 | Q8 | Config schema | Flat `[whatsapp]` TOML block; multi-peer `allow_from`; codec mirrors `FileSignalConfig` |
-| Q9 | Testing | `WhatsAppTransport` mock, six spec files (`Webhook`, `Wacli`, `Events`, `QR`, `Pair`, `Lifecycle`); `pendingWith`-gated integration test; coverage matches Signal's de-facto pattern (pure helpers 100%, IO glue no minimum) |
+| Q9 | Testing | `WhatsAppTransport` mock, six spec files (`Inbox`, `Wacli`, `Events`, `QR`, `Pair`, `Lifecycle`); `pendingWith`-gated integration test; coverage matches Signal's de-facto pattern (pure helpers 100%, IO glue no minimum) |
 
 ### Iteration 2 changes
 
@@ -521,6 +543,28 @@ All 15 blockers from iteration 1 addressed inline in their respective Q sections
 
 - **Work Unit -1**: update `.coverage-thresholds.json` to match observed reality. Single-PR scope. Precedes WhatsApp implementation.
 - **Work Unit 0**: file upstream PR on wacli adding `WACLI_WEBHOOK_SECRET` env-var support. Blocks the long-term fix to Security blocker #7 but doesn't block v1 (v1 documents the `ps` exposure as a known limitation).
+
+### Planning-phase polish (not design blockers)
+
+Items the design-review gate flagged as belonging in `superpowers:writing-plans` rather than this design doc, captured here so they don't get lost:
+
+**From Designer iteration 2:**
+- **`ChannelPair` constructor shape**: specify in the planning phase. Current `ChannelSubCommand` has only `ChannelList | ChannelSetup Text | ChannelUnknown Text` (`SlashCommands.hs:147-149`); adding `ChannelPair Text` needs an explicit signature, decision whether `pair` is whatsapp-only or generic, and a new `CommandSpec` row.
+- **`lastSender` empty-state behavior**: define what `_ch_send` does before any inbound has arrived. Options: throw, drop with warn, or use a configured `default_peer`. Spec in implementation plan.
+- **TOS Y/N confirmation non-TTY handling**: detect `hIsTerminalDevice stdin` and require either `--accept-whatsapp-tos` flag or `PURECLAW_WHATSAPP_TOS_ACCEPTED=1` env var when piped/scripted; otherwise exit with actionable error. Optionally persist acceptance to `<store>/.tos-accepted` with timestamp to avoid re-prompting on every re-pair.
+- **`/channel` listing whatsapp row**: when `whatsappConfigured`, add a row to the `ChannelList` output in `SlashCommands.hs`.
+- **CLI dispatch fallback message**: when wacli isn't authenticated, the exact user-facing string in `CLI/Commands.hs` should be `"WhatsApp not paired. Run pureclaw interactively and execute /channel whatsapp pair. Falling back to CLI channel."` (not just "not authenticated").
+
+**From Architect iteration 2:**
+- Consider bounding `_wat_inboundEvents` (`TBQueue 256`, drop-oldest) for symmetry with the message queue — `event_handler_panic` payloads can carry large stack traces.
+
+**From CTO iteration 2:**
+- Rename WU-1 / WU0 in the work-unit plan to "WU1: coverage policy reset" / "WU2: upstream wacli PR (optional, parallel)" / "WU3+: WhatsApp implementation" for clarity.
+- Pick the error-mode strategy for `Codec.QRCode.encode`'s `Maybe QRImage` return (probably `error` on `Nothing` since input is bounded-size from wacli).
+- Cross-reference Work Unit -1 from inside the Q9 Coverage Policy subsection for readability.
+
+**From Security iteration 2 (non-blocking):**
+- Add a newtype `QRPayload = QRPayload Text` with redacted `Show` in `Channels.WhatsApp.QR` for defense-in-depth (so a future `traceShow` debug doesn't leak the QR payload).
 
 ### Ready for `/review-design` iteration 2
 
