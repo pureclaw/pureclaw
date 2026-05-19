@@ -23,12 +23,11 @@ The user-facing primitive is a **tab**. A tab is a sub-stream within the user's 
 ## TL;DR — What does this look like to a user?
 
 ```
-User: /0
-Bot:  /0: ai (claude-opus-4-7) ready.       ← auto-spawn AI by default
-User: explain RFC 7807
-Bot:  RFC 7807 is "Problem Details ..."
+User: explain RFC 7807                       ← plain text on empty registry: K3 first-run
+Bot:  /0: ai (claude-opus-4-7) ready.       ← implicit spawn of default kind at /0
+      RFC 7807 is "Problem Details ..."
 
-User: /tab new 1 shell
+User: /tab new shell                         ← spawns at next free slot (/1)
 Bot:  /1: shell ready.
 User: /1 uptime                              ← direct-inject; stays on /0
 Bot:  (no visible reply — /1's output goes to /1's transcript)
@@ -41,6 +40,16 @@ Bot:  * /1  shell                idle  3s
 ```
 
 Numeric switches (`/0`, `/1`, ...) and a `/tab <verb>` family are the entire user surface. Only the focused tab's responses appear in chat; the others accumulate silently and surface on switch. No cross-tab muxing, no proactive notifications.
+
+## Evolution (post-merge, v1.5)
+
+The implementation that landed after PR #51 made three semantic changes from the originally-approved design. They are summarised here so readers can reconcile the rest of the doc with the code; the affected sections below have been rewritten to match.
+
+1. **Index grammar widened to letters.** The index is now exactly one character drawn from `[0-9a-z]` (36 values) rather than a greedy decimal run. `/12`, `/aa`, `/1a`, `/01` are all `ParseErrorMalformed` (multi-char). `_rc_maxTabs` default is `36` (was `10`). `ParseErrorLeadingZero` no longer exists — it became structurally unreachable.
+2. **Tabs are always packed at the lowest free slot (tmux model).** `/tab new` no longer accepts a user-specified index — it always allocates at `Registry.lowestFreeIndex`. `/tab close N` shifts every remaining tab `> N` down by one (matches tmux `renumber-windows on`). The `TabHandle._tabHandle_index` field becomes advisory after a renumber — the authoritative current slot is the registry key.
+3. **`/N` no longer auto-spawns on a missing index.** Because tabs are always packed in the lowest slots, a `/N` referring to an empty slot is unambiguously user error. The dispatcher emits an error banner (`"/N: no such tab — use /tab new to create one"`) and discards any payload. The K3 first-run UX (empty registry + plain `Default` text → auto-spawn at `/0`) is preserved.
+
+Where the rest of this doc says "switch (or auto-spawn)" or "`/tab new N`", read "switch only" and "`/tab new`" respectively. A-series, L-series, the parser grammar, and the slash-command surface table have been updated in place.
 
 ## Motivation
 
@@ -77,17 +86,21 @@ All routing happens in the slash-command preprocessor — **before** any provide
 
 ```
 input            ::= switch | inject | default | slash-cmd
-switch           ::= '/' DIGITS                              -- e.g. /0, /12
-inject           ::= '/' DIGITS WS payload                   -- e.g. /0 run tests
+switch           ::= '/' IDX                                 -- e.g. /0, /a
+inject           ::= '/' IDX WS payload                      -- e.g. /0 run tests
 default          ::= payload                                 -- to current focus
 slash-cmd        ::= '/' WORD ...                            -- existing commands
                  |   '/tab' WS action [WS args]              -- new: tab family
                  |   '/tabs'                                 -- alias for `/tab list`
 action           ::= 'new' | 'list' | 'close' | 'focus' | 'resume' | 'rename'
-DIGITS           ::= [1-9][0-9]* | '0'                       -- no leading zeros except "0" itself
+IDX              ::= [0-9a-z]                                -- exactly one char (digit or lowercase letter)
 WS               ::= one or more spaces/tabs
 payload          ::= rest of line, free text
 ```
+
+The index is exactly one character: `'0'..'9'` maps to tab indices `0..9`; `'a'..'z'` maps to tab indices `10..35`. The mapping is case-sensitive — uppercase letters are not part of the index alphabet. Multi-char shapes (`/12`, `/01`, `/aa`, `/1a`) are all `ParseErrorMalformed`; there is no greedy digit run any more.
+
+The single index character must be followed by **end-of-input or whitespace**; otherwise the input falls through to the slash-command parser. So `/s` parses as `/session` (slash command), not as tab 28 — the disambiguator is whether the second byte is alphanumeric (slash command) or blank/EOI (switch).
 
 ### Parser signature
 
@@ -99,12 +112,13 @@ The parser is two-argument because `_rc_maxTabs` bounds-checks the index. `mkTab
 
 ### Parser invariants
 
-* `/12` parses as tab 12 (greedy digits, no leading zeros except `0`).
-* `/01` is a **parse error** (`ParseErrorLeadingZero`) — disambiguates intent.
+* `/a` parses as tab 10; `/z` parses as tab 35 (single-char letter alphabet).
+* `/12`, `/aa`, `/1a`, `/01` are all `ParseErrorMalformed` (multi-char index; the grammar admits no greedy run).
 * `/0 0 run` parses as `Inject 0 "0 run"` (payload digits preserved).
 * `/word` (non-numeric after `/`) routes to existing slash-command dispatch unchanged.
+* **Single index char must be followed by EOI or whitespace.** `/s` is the `/session` slash command (the index char `s` would map to tab 28, but it's followed by `e` — a non-blank byte — so the parser falls through to the slash-command form). This is what makes letters in the index alphabet safe.
 * `/0@botname` (Telegram group-chat bot mention): the `@botname` suffix is stripped by the channel's incoming preprocessor before parser sees the message. Parser invariant: never receives `@` characters.
-* `TabIndex` is bounded at parse time using the `RoutingConfig` argument: `0 <= n < _rc_maxTabs` (default 10). Out-of-range produces `ParseErrorIndexOutOfRange`.
+* `TabIndex` is bounded at parse time using the `RoutingConfig` argument: `0 <= n < _rc_maxTabs` (default 36 — matches the single-char alphabet size). Out-of-range can only arise via the decimal `/tab new` / `/tab close` / `/tab focus` paths because single-char `/N` always lands in `0..35`; rejection is `ParseErrorIndexOutOfRange`.
 * Trailing-whitespace-only payload (`/0 ` with only space after) → `Switch 0` (treat as bare switch).
 * Multi-line payload (`/0\nfoo`) → `Switch 0` followed by `Default "foo"` as a separate incoming message; the channel layer is responsible for splitting at newlines if applicable, otherwise parser sees one input with embedded `\n` and treats the body after `/0` (incl. `\n`) as payload, i.e. `Inject 0 "\nfoo"`.
 
@@ -112,11 +126,12 @@ The parser is two-argument because `_rc_maxTabs` bounds-checks the index. `mkTab
 
 Telegram's BotFather command list only autocompletes registered word-prefixed commands. To deliver real autocomplete on mobile, the channel-startup code registers these commands:
 
-* `/0`, `/1`, `/2`, `/3`, `/4`, `/5`, `/6`, `/7`, `/8`, `/9` — "Switch to tab N (auto-spawns if missing)"
-* `/tab` — "Tab family: new/list/close/focus/resume/rename"
+* `/0`–`/9`, `/a`–`/z` — 36 single-char tab switches, each described as "Switch to tab N"
+* `/tab` — "Tabs: new, list, close, focus, resume, rename"
 * `/tabs` — "List all tabs"
+* `/start` — "Tabbed Chat — see /help for tab commands"
 
-For `N >= 10`, mobile autocomplete is not available; users must type the full index. This is acceptable because `_rc_maxTabs = 10` by default — power users opting into more set the cap explicitly.
+Telegram's `setMyCommands` accepts up to 100 entries per bot; 39 total (36 + 3 long-form + `/start`) fits comfortably under the limit. Because the entire index alphabet `[0-9a-z]` fits in single-char shortcuts, mobile autocomplete now covers every reachable tab index — there is no "above-N type the digits manually" caveat any more.
 
 ## Acceptance Criteria (v1)
 
@@ -124,21 +139,25 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 
 ### Parser & LLM-free invariant (P-series)
 
-> Notation: tests are written as `parseInput rc input → result` where `rc :: RoutingConfig` is the test's RoutingConfig. P-series examples below elide `rc` for brevity and assume `rc = defaultRoutingConfig` (with `_rc_maxTabs = 10`) unless otherwise specified.
+> Notation: tests are written as `parseInput rc input → result` where `rc :: RoutingConfig` is the test's RoutingConfig. P-series examples below elide `rc` for brevity and assume `rc = defaultRoutingConfig` (with `_rc_maxTabs = 36`) unless otherwise specified.
 
 | #   | DoD                                                                                                         |
 |-----|-------------------------------------------------------------------------------------------------------------|
 | P1  | `parseInput "/0"` → `Right (Switch (TabIndex 0))`.                                                          |
-| P2  | `parseInput "/12"` → `Switch (TabIndex 12)`.                                                                 |
+| P2  | `parseInput "/12"` → `Left ParseErrorMalformed` (multi-char index; no greedy digit run).                    |
 | P3  | `parseInput "/0 run tests"` → `Inject (TabIndex 0) "run tests"`.                                            |
 | P4  | `parseInput "/0 0 run"` → `Inject (TabIndex 0) "0 run"` (preserves payload digits).                         |
 | P5  | `parseInput "hello world"` → `Default "hello world"`.                                                       |
-| P6  | `parseInput "/01"` → `Left ParseErrorLeadingZero`.                                                          |
-| P7  | `parseInput (rc { _rc_maxTabs = 10 }) "/9999"` → `Left ParseErrorIndexOutOfRange`. (Demonstrates that the parser uses `rc._rc_maxTabs` for bounds-checking; not a hardcoded constant.) |
+| P6  | `parseInput "/01"` → `Left ParseErrorMalformed` (multi-char index; `ParseErrorLeadingZero` no longer exists — it became structurally unreachable under the single-char grammar). |
+| P7  | `parseInput "/9999"` → `Left ParseErrorMalformed` (multi-char index). `ParseErrorIndexOutOfRange` can only arise via the decimal `/tab new` / `/tab close` / `/tab focus` paths, never via `/N`. |
+| P7a | `parseInput "/a"` → `Switch (TabIndex 10)` (letter alphabet: `'a'` → 10, `'z'` → 35).                       |
+| P7b | `parseInput "/z"` → `Switch (TabIndex 35)`.                                                                  |
+| P7c | `parseInput "/aa"` → `Left ParseErrorMalformed` (multi-char).                                               |
+| P7d | `parseInput "/s"` → `SlashCmd CmdSession` (single index char must be followed by EOI/WS; `s` is followed by `e` so the input falls through to the slash-command parser). |
 | P8  | `parseInput "/tabs"` → `SlashCmd CmdTabList`.                                                               |
 | P9  | `parseInput "/tab list"` → `SlashCmd CmdTabList` (alias of /tabs).                                          |
-| P10 | `parseInput "/tab new 3"` → `SlashCmd (CmdTabNew (TabIndex 3) Nothing Nothing)` (kind+args slot empty).      |
-| P11 | `parseInput "/tab new 3 shell"` → `SlashCmd (CmdTabNew (TabIndex 3) (Just KindShell) Nothing)`.             |
+| P10 | `parseInput "/tab new"` → `SlashCmd (CmdTabNew Nothing Nothing)` — no index argument (tmux packing model; handler allocates lowest free slot). |
+| P11 | `parseInput "/tab new shell"` → `SlashCmd (CmdTabNew (Just KindShell) Nothing)`.                            |
 | P12 | `parseInput "/tab close 3"` → `SlashCmd (CmdTabClose (TabIndex 3) ForceNo)`.                                |
 | P13 | `parseInput "/tab close 3 --force"` → `SlashCmd (CmdTabClose (TabIndex 3) ForceYes)`.                       |
 | P14 | `parseInput "/tab focus 3"` → `SlashCmd (CmdTabFocus (TabIndex 3))` (alias of `/3`).                        |
@@ -203,20 +222,23 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 
 `_rc_defaultKind` ships pre-set to `KindAi` (with provider/model defaults from `_rc_defaultAi`) so the common case is one keystroke.
 
-| #   | Scenario                                              | DoD                                                                                                  |
-|-----|-------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+**v1.5 semantics (tmux packing model):** Tabs are always packed at the lowest free slot — the user no longer picks the index. `/N` for an empty slot is unambiguously user error and does NOT auto-spawn; the dispatcher emits an error banner. The K3 first-run UX (empty registry + `Default` text → auto-spawn at `/0` via `_rc_defaultKind`) is preserved as the one and only "implicit spawn" path.
+
+| #   | Scenario                                              | Behavior                                                                                              |
+|-----|-------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
 | A1  | `/3`, N exists                                        | switch focus, emit recap of last `_rc_switchRecap` messages from N's transcript                       |
 | A2  | `/3 payload`, N exists                                | enqueue `payload` to N's input, focus unchanged, channel sees no immediate output                    |
-| A3  | `/3`, N missing, default set                          | spawn with default kind, focus, emit one-line confirmation                                            |
-| A4  | `/3`, N missing, default unset                        | dispatcher returns `NeedsKindPrompt 3 Nothing`; dispatcher renders prompt UI via channel-specific renderer |
-| A5  | `/3 payload`, N missing, default set                  | spawn with default, focus, enqueue payload, single-message confirmation                              |
-| A6  | `/3 payload`, N missing, default unset                | dispatcher returns `NeedsKindPrompt 3 (Just "payload")`; payload is buffered, enqueued after user picks kind |
-| A7  | `/tab new 3` (no kind), N missing                     | **force-prompt** — ignores `_rc_defaultKind`; renders prompt UI                                        |
-| A8  | `/tab new 3` (no kind), N exists                      | error: `/3 already exists. Use /tab close 3 to replace.`                                              |
-| A9  | `/tab new 3 shell`, N missing                         | spawn with KindShell, focus                                                                          |
-| A10 | `/tab new 3 shell`, N exists                          | error as A8                                                                                          |
-| A11 | `/tab new 11` when `_rc_maxTabs = 10`                 | `Left TabLimitExceeded 10` as `PublicError`; no process spawned                                       |
-| A12 | After `/tab close 3`, index 3 is **immediately reusable**. Next `/tab new <kind>` (no explicit index) allocates the lowest free index. |
+| A3  | `/3`, N missing                                       | ERROR banner `"/3: no such tab — use /tab new to create one"`; **no auto-spawn**. Source tag `SrcDispatcher` so the banner emits regardless of current focus. |
+| A4  | *(deprecated v1.5)* — was "prompt UI on missing /N, default unset". No longer applicable now that `/N` never spawns. |
+| A5  | `/3 payload`, N missing                               | Same as A3: ERROR banner; payload is **discarded** (not buffered). User must explicitly `/tab new` first. |
+| A6  | *(deprecated v1.5)* — see A5.                                                                                                                                |
+| A7  | `/tab new` (no kind)                                  | **force-prompt** — ignores `_rc_defaultKind`; renders prompt UI for the lowest free slot.            |
+| A8  | *(deprecated v1.5)* — was "`/tab new N` (no kind), N exists → error". The user can no longer pick N, so the collision scenario does not arise. |
+| A9  | `/tab new shell`                                      | spawn with `KindShell` at lowest free slot, focus, confirmation banner `/<n>: spawned (shell)`.       |
+| A10 | *(deprecated v1.5)* — see A8.                                                                                                                                |
+| A11 | `/tab new` when `_rc_maxTabs = 36` cap reached        | `Left (TabLimitExceeded 36)` as `PublicError`; no process spawned. (Force-prompt path emits the same redacted error when `Registry.lowestFreeIndex` returns `Nothing`.) |
+| A12 | `/tab close N` (any N): tmux-style packing — every remaining tab at index `> N` shifts down by one. After the close, the next `/tab new <kind>` allocates at the new lowest free slot (which may be `N` if the registry had a hole there, or `len(registry)` if everything was contiguous below). |
+| A13 | Empty registry + `Default` text input (no slash prefix) → K3 first-run path: implicitly spawn `_rc_defaultKind` at the lowest free slot (typically `/0`), focus it, enqueue the text. This is the only `Default`-text-triggered auto-spawn; once at least one tab exists, plain text routes to the focused tab and `/N` for missing indices errors. |
 
 ### Close / lifecycle (L-series)
 
@@ -227,7 +249,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | L3  | `/tab close 3` on `KindBackend`: destructive — `_bh_close` runs; registry entry removed; transcript NOT archived. |
 | L4  | `/tab close 3 --force` on `KindAi`: skips archive (transcript deleted from disk); registry entry removed.        |
 | L5  | `/tab close 99` (non-existent index): `Left TabNotFound 99` as PublicError; no side effects.                      |
-| L6  | `/tab close` of focused tab: new focus is the highest-indexed remaining tab, or `Nothing` if empty. When `_env_focus = Nothing`, a subsequent `Default` text input (no slash prefix) implicitly spawns `_rc_defaultKind` at index 0 and routes to it (mirroring K3's empty-registry implicit spawn). Test: `/tab close 0` on a single-tab registry leaves `_env_focus = Nothing`; the next `Default "hi"` input results in `/0` spawned with `_rc_defaultKind` and `"hi"` enqueued. |
+| L6  | `/tab close N` (tmux packing): every remaining tab at index `> N` shifts down by one so the registry stays contiguous from `0`. Focus reconciliation: `focus == N` → `Nothing`; `focus > N` → `focus - 1`; `focus < N` → unchanged. When the registry becomes empty (`_env_focus = Nothing`), a subsequent `Default` text input (no slash prefix) implicitly spawns `_rc_defaultKind` at the lowest free slot (typically `/0`) and routes to it — the K3 first-run path. Test: `/tab close 0` on a single-tab registry leaves `_env_focus = Nothing`; the next `Default "hi"` input results in `/0` spawned with `_rc_defaultKind` and `"hi"` enqueued. Separate test: `/tab close 1` on a 3-tab registry shifts `/2` down to `/1`; if `_env_focus = Just 2`, focus becomes `Just 1`. |
 | L7  | `/tab resume <session-id>` validates the supplied id and routes it through `Session.resolveSessionRef` (the existing canonical safe path). The parser uses `mkSessionId :: Text -> Either ParseError SessionId` which rejects `/`, `\`, `..`, NUL, and any character not in `[a-zA-Z0-9_-]`. Test: `/tab resume ../../etc/passwd` produces `ParseErrorInvalidSessionId` at parse time with no `Session.resumeSession` call; `/tab resume <valid-id-not-in-registry>` produces `Left SessionNotFound` via `resolveSessionRef`'s `listDirectory` lookup; `/tab resume <valid-archived-id>` creates a new tab with the saved session, allocates lowest free index, focuses. |
 
 ### Crashed tab UX (X-series)
@@ -242,7 +264,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 
 | #   | DoD                                                                                                              |
 |-----|------------------------------------------------------------------------------------------------------------------|
-| B1  | `/tabs` (or `/tab list`) with empty registry: emits `"No tabs open. Use /N or /tab new N <kind> to create one."` |
+| B1  | `/tabs` (or `/tab list`) with empty registry: emits `"No tabs open. Use /tab new <kind> to create one."` (The previous wording suggested `/N` as a creation path — under v1.5's tmux model `/N` only switches and errors on missing tabs, so the hint is gone.) |
 | B2  | `/tabs` with N tabs: emits one line per tab containing index, kind, redacted name, status, and an asterisk marker for the focused tab. Test: dashboard output for 3 tabs matches a golden-file render. |
 | B3  | `/tabs` rendering for ≥ 8 tabs uses bullets (no fixed-width table) so it wraps cleanly on small mobile screens.   |
 
@@ -250,10 +272,10 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 
 | #   | DoD                                                                                                              |
 |-----|------------------------------------------------------------------------------------------------------------------|
-| S1  | **Spawn authorization (local)**: `/tab new N shell <cmd...>` calls `authorize cmd _env_policy` BEFORE any subprocess. Test: `cmd` not in `_sp_allowedCommands` → `Left TabSpawnAuthDenied`; no process spawned; channel error is PublicError. |
-| S2  | **Spawn authorization (remote/tmux-over-ssh)**: `/tab new N ssh <host> <cmd...>` calls `authorizeRemote cmd _env_policy` and `mkSshHost host`. Test: rejected `host` strings (whitespace, leading `-`, NUL, shell metachars) all produce `Left BackendInvalidOption` as PublicError; no ssh subprocess. |
+| S1  | **Spawn authorization (local)**: `/tab new shell <cmd...>` calls `authorize cmd _env_policy` BEFORE any subprocess. Test: `cmd` not in `_sp_allowedCommands` → `Left TabSpawnAuthDenied`; no process spawned; channel error is PublicError. |
+| S2  | **Spawn authorization (remote/tmux-over-ssh)**: `/tab new ssh <host> <cmd...>` calls `authorizeRemote cmd _env_policy` and `mkSshHost host`. Test: rejected `host` strings (whitespace, leading `-`, NUL, shell metachars) all produce `Left BackendInvalidOption` as PublicError; no ssh subprocess. |
 | S3  | **Smart-constructor validation**: every kind-specific spawn arg passes through its smart constructor (`mkSshHost`, `mkTmuxSession`, `mkTmuxWindow`, `mkTmuxPane`, `mkLocalCommand`). Rejection produces `BackendInvalidOption`. Property test enumerates rejected patterns from terminal-backend-abstractions's adversarial list. |
-| S4  | **SSH identity sourcing**: ssh tabs source their `SafeKeyPath` from a Vault slot named by `_rc_sshIdentityKey` (config field, default `"default-ssh-key"`). Identities are NEVER typed inline by the user. Test: `/tab new 3 ssh user@host` with no Vault slot present → PublicError; user-supplied identity arg is rejected by the parser. |
+| S4  | **SSH identity sourcing**: ssh tabs source their `SafeKeyPath` from a Vault slot named by `_rc_sshIdentityKey` (config field, default `"default-ssh-key"`). Identities are NEVER typed inline by the user. Test: `/tab new ssh user@host` with no Vault slot present → PublicError; user-supplied identity arg is rejected by the parser. |
 | S5  | **Crashed PublicError**: `Crashed e` is the *internal* representation; channel emit goes through `toPublicTabError`. Test: a tab whose backend factory returns `BackendSshConnectFailed (SshHostKeyMismatch ...)` produces a channel message containing neither the host string, nor any path, nor any ssh stderr. |
 | S6  | **Max-tab cap enforced at spawn**: covered by A11; cross-referenced here for security audit traceability. |
 | S7  | **Spawn rate limit**: each chat-user is limited to `_rc_spawnRateLimit` spawns/minute (default 10). Token-bucket implementation. Exceeding it → PublicError; no spawn. Defends against close-spawn cycling resource leak. |
@@ -267,7 +289,7 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 | #   | DoD                                                                                                              |
 |-----|------------------------------------------------------------------------------------------------------------------|
 | K1  | `/session new` while a focused tab exists: creates a new SessionHandle and **attaches to the focused tab** (per K2, if focused tab is `KindAi`). If the focused tab is `KindHarness`/`KindBackend`, `/session new` errors with a PublicError explaining "this tab does not own a session." |
-| K2  | `/tab new N ai` automatically creates a new SessionHandle for the tab. (Tab-creation → session-creation direction.) |
+| K2  | `/tab new ai` automatically creates a new SessionHandle for the tab. (Tab-creation → session-creation direction.) |
 | K3  | `/session new` with empty registry implicitly spawns a `KindAi` tab at the lowest free index (default behavior). |
 | K4  | `/target <name>` while focused on a `KindAi` tab: sets that tab's target via the focused-tab projection. Does NOT persist across pureclaw restarts (per-tab target is in-memory). To make a tab spawn with a specific target on restart, edit defaults in config. |
 | K5  | `/target <name>` while focused on a `KindHarness` or `KindBackend` tab: PublicError "tab kind does not support /target." |
@@ -296,9 +318,9 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 
 | #   | DoD                                                                                                              |
 |-----|------------------------------------------------------------------------------------------------------------------|
-| O1  | **`/start` (Telegram convention)**: the channel-startup handler registers a `/start` slash command whose response includes (a) one-line value prop; (b) `/0` shortcut for AI; (c) `/tab new 0 shell` for shell users; (d) `/tabs` for dashboard. Test: a fresh `/start` from a new user gets a response containing all three slash-prefix mentions. |
+| O1  | **`/start` (Telegram convention)**: the channel-startup handler registers a `/start` slash command whose response includes (a) one-line value prop; (b) `/0` shortcut for AI; (c) `/tab new shell` for shell users; (d) `/tabs` for dashboard. Test: a fresh `/start` from a new user gets a response containing all three slash-prefix mentions. |
 | O2  | **`/help`** rendering post-Tabbed-Chat includes a "Tab commands" subsection enumerating `/N`, `/N <payload>`, `/tabs`, `/tab new`, `/tab close`, `/tab focus`, `/tab resume`, `/tab rename`. Test: `/help` output (after this work lands) contains the literal strings "Tab commands" and "/tabs". |
-| O3  | **BotFather command descriptions**: the registration list (already enumerated in the "Channel autocomplete" section) ships with the following descriptions: `/0`–`/9` → "Switch to tab N"; `/tab` → "Tabs: new, list, close, focus, resume, rename"; `/tabs` → "List all tabs"; `/start` → "Tabbed Chat — see /help for tab commands". Test: BotFather registration payload (a list of `(command, description)` tuples) matches a golden file. |
+| O3  | **BotFather command descriptions**: the registration list (already enumerated in the "Channel autocomplete" section) ships with the following descriptions: `/0`–`/9` and `/a`–`/z` → "Switch to tab N"; `/tab` → "Tabs: new, list, close, focus, resume, rename"; `/tabs` → "List all tabs"; `/start` → "Tabbed Chat — see /help for tab commands". 39 entries total (36 + 3). Test: BotFather registration payload (a list of `(command, description)` tuples) matches a golden file. |
 
 ### Test seams (T-series)
 
@@ -311,12 +333,12 @@ For `N >= 10`, mobile autocomplete is not available; users must type the full in
 
 ### Total: ~115 DoDs across 14 series (P/H/E/C/D/A/L/X/B/S/K/I/O/T).
 
-P-series: 19 (P1–P18 + P15a) — parser + LLM-free invariant.
+P-series: 23 (P1–P18 + P15a + P7a–P7d) — parser + LLM-free invariant. (P7a/P7b/P7c/P7d added in v1.5 for letter alphabet + multi-char rejection + slash-command-disambiguation.)
 H-series: 14 (H1–H14) — TabHandle abstraction (incl. H13 `_tabHandle_enqueueSlash`, H14 manual `Show TabError`).
 E-series: 5 (E1–E5) — registry + AgentEnv + Context flow.
 C-series: 6 (C1–C6) — concurrency + exception safety + provider cancel safety.
 D-series: 6 (D1–D6) — channel emission + focused-only display + breadcrumb.
-A-series: 12 (A1–A12) — auto-spawn truth table.
+A-series: 9 active + 4 deprecated (A1–A13; A4, A6, A8, A10 deprecated in v1.5 because they only made sense under the user-picks-index model) — auto-spawn truth table.
 L-series: 7 (L1–L7) — close/lifecycle.
 X-series: 3 (X1–X3) — crashed tab UX.
 B-series: 3 (B1–B3) — dashboard.
@@ -497,7 +519,7 @@ data RoutingConfig = RoutingConfig
   , _rc_defaultAi          :: !AiDefaults
   , _rc_defaultShell       :: !ShellDefaults
   , _rc_switchRecap        :: !Int                -- default 3 recent messages on /N switch
-  , _rc_maxTabs            :: !Int                -- default 10
+  , _rc_maxTabs            :: !Int                -- default 36 (single-char index alphabet [0-9a-z])
   , _rc_inputQueueBound    :: !Int                -- default 64
   , _rc_channelOutQBound   :: !Int                -- default 1024 (bounded TBQueue)
   , _rc_spawnRateLimit     :: !Int                -- default 10 spawns/minute
@@ -569,14 +591,15 @@ Trade-off: a user who switches to `/1` mid-stream from `/0` sees an abrupt cut i
 
 ## Auto-spawn behavior
 
-`_rc_defaultKind = KindAi` is the shipped default. So:
+`_rc_defaultKind = KindAi` is the shipped default. Under the v1.5 tmux packing model there is exactly one implicit-spawn path; everything else is explicit.
 
-* **First-time user types `/0`** → silently spawns `KindAi` with default provider/model from `_rc_defaultAi`. One-line confirmation: `/0: ai (claude-opus-4-7) ready.`
-* **First-time user types `/tab new 0`** → force-prompt: `Spawn /0 as: [1] AI [2] shell [3] tmux [4] ssh`. User taps 1-4.
-* **User wants a shell as a first tab**: types `/tab new 0 shell`. Single command, no prompt.
+* **First-time user types plain text (no slash)** → K3 first-run path: registry is empty, dispatcher sees a `Default` input, implicitly spawns `_rc_defaultKind` at the lowest free slot (`/0`), focuses, and enqueues the text. One-line confirmation: `/0: ai (claude-opus-4-7) ready.` This is the only auto-spawn path that survives v1.5.
+* **First-time user types `/tab new`** → force-prompt: `Spawn /0 as: [1] AI [2] shell [3] tmux [4] ssh`. User taps 1-4. The slot number in the prompt reflects `Registry.lowestFreeIndex`.
+* **User wants a shell as a first tab**: types `/tab new shell`. Single command, no prompt. Lands at `/0` (lowest free slot).
+* **User types `/0` on an empty registry** → ERROR banner `"/0: no such tab — use /tab new to create one"` — `/N` no longer auto-spawns under tmux packing. Users who don't know about `/tab new` will discover it via the banner; users who type plain text first hit the K3 path and never need to know about it.
 * **User wants to change the default**: edit `~/.pureclaw/config.toml` directly, or `/config routing.default_kind=shell` once that command lands (v1.5).
 
-This default eliminates the 3-tap auto-spawn flow that Designer flagged as a blocker. The "set as default" inline affordance from the round-1 design is dropped — users who want a non-AI default set it once in config.
+The "set as default" inline affordance from the round-1 design is dropped — users who want a non-AI default set it once in config.
 
 ## Channel Feature Matrix
 
@@ -596,11 +619,11 @@ This default eliminates the 3-tap auto-spawn flow that Designer flagged as a blo
 
 | Command                          | Behavior                                                                  |
 |----------------------------------|---------------------------------------------------------------------------|
-| `/N` (digits only)               | switch (or auto-spawn) focus to tab N                                     |
-| `/N <payload>`                   | direct-inject payload to tab N (no focus change)                           |
+| `/N` (one char: digit `0-9` or letter `a-z`) | switch focus to tab N; **errors if missing** — `/N` no longer auto-spawns (use `/tab new`) |
+| `/N <payload>`                   | direct-inject payload to tab N (no focus change); errors if N missing      |
 | `/tabs`                          | alias for `/tab list`                                                     |
 | `/tab list`                      | dashboard: list all tabs with status                                       |
-| `/tab new N [kind] [args]`       | spawn; no kind → force-prompt; with kind → explicit                        |
+| `/tab new [kind] [args]`         | spawn at the lowest free slot (tmux packing); no kind → force-prompt; with kind → explicit |
 | `/tab close N [--force]`         | close (kind-specific semantics; --force on AI skips archive)               |
 | `/tab focus N`                   | alias for `/N` (BotFather-autocomplete-discoverable)                       |
 | `/tab resume <session-id>`       | re-open an archived AI tab from disk                                       |
@@ -618,7 +641,7 @@ Bot:  /0: ai (claude-opus-4-7) ready.
 User: explain RFC 7807
 Bot:  RFC 7807 is "Problem Details for HTTP APIs"...
 
-User: /tab new 1 shell
+User: /tab new shell                         ← lands at /1 (next free slot)
 Bot:  /1: shell ready.
 User: /1
 Bot:  (focused /1; no recap, just-created)
@@ -650,19 +673,19 @@ Bot:  (recap of last 3 messages from /0's transcript:)
 User whose primary use case is shell access, not AI:
 
 ```
-User: /tab new 0 shell
+User: /tab new shell                         ← lands at /0 (empty registry)
 Bot:  /0: shell ready.
 User: uptime
 Bot:  10:32:01 up 14 days, ...
 
-User: /tab new 1 ssh user@staging
+User: /tab new ssh user@staging              ← lands at /1
 Bot:  /1: ssh tab ready.
 User: /1
 Bot:  (focused /1; just-created, no recap)
 User: tail /var/log/app.log
 Bot:  ...
 
-User: /tab new 2 ai
+User: /tab new ai                            ← lands at /2
 Bot:  /2: ai (claude-opus-4-7) ready.
 User: /2 why is staging emitting 503s for /api/v1/users?
 Bot:  (response goes to /2's transcript; channel doesn't see it yet — focused on /1)
@@ -688,7 +711,7 @@ Bot:  (recap of last 3 messages from /0's transcript:)
 ### Crashed tab
 
 ```
-User: /tab new 2 ssh user@prod-db.internal
+User: /tab new ssh user@prod-db.internal     ← would have landed at /2
 Bot:  /2 crashed: ssh connect failed (host key mismatch).
       [1] retry [2] close
 User: 2
@@ -815,14 +838,15 @@ These are NON-blocking and can be revisited during implementation, with sensible
 ## Terminology
 
 * **Tab** — a routing slot; user-facing primitive.
-* **TabIndex** — the integer the user types after `/`; 0-based, bounded by `_rc_maxTabs`.
-* **TabHandle** — Handle-pattern record of IO actions for one tab.
+* **TabIndex** — the integer the user references via a single index character `[0-9a-z]` after `/`. At the parse layer the index is one char (digits `'0'-'9'` → 0..9, lowercase letters `'a'-'z'` → 10..35); internally it is represented as an `Int` in the range `0..35`, bounded by `_rc_maxTabs` (default 36).
+* **TabHandle** — Handle-pattern record of IO actions for one tab. The `_tabHandle_index` field reflects the creation slot and is advisory after a `/tab close` renumber; the authoritative current slot is the registry key.
 * **TabKind** — `KindAi | KindHarness | KindShell | KindSsh | KindTmux`.
 * **TabStatus** — runtime state: `Active | Idle | Crashed`.
 * **Focus** — the tab whose output reaches the channel.
 * **Direct-inject** — sending payload to a non-focused tab via `/N <payload>`.
-* **Auto-spawn** — creating a tab on first reference to its index (uses `_rc_defaultKind`).
-* **Force-prompt** — `/tab new N` with no kind argument; ignores default.
+* **Auto-spawn** — under v1.5 the term refers exclusively to the K3 first-run path: empty registry + plain `Default` text → implicit spawn of `_rc_defaultKind` at `/0`. `/N` for a missing index no longer auto-spawns.
+* **Force-prompt** — `/tab new` with no kind argument; ignores `_rc_defaultKind` and renders a kind-picker UI at the lowest free slot.
+* **Tmux packing** — tabs are always packed at the lowest free index. `/tab new` allocates at `Registry.lowestFreeIndex`; `/tab close N` shifts every tab `> N` down by one. Matches tmux `renumber-windows on`.
 * **Dispatcher** — the single thread reading from the channel, classifying, and routing.
 * **ChannelOut writer** — the single thread serializing channel writes; gated on focus for `SrcTab` events.
 * **Focused-only display** — invariant: non-focused tab output reaches each tab's transcript but never the channel during v1.
