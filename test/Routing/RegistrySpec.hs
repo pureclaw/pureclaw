@@ -58,6 +58,7 @@ import PureClaw.Routing.Registry
   ( insertTab
   , lookupTab
   , lowestFreeIndex
+  , packAfterRemove
   , removeTab
   )
 import PureClaw.Routing.Types
@@ -380,3 +381,19 @@ spec = do
       ref <- newIORef IntMap.empty
       r <- lowestFreeIndex ref 0
       r `shouldBe` Nothing
+
+    it "packAfterRemove shifts keys > k down by 1; keys < k untouched" $ do
+      -- Initial map (after removing entry at 1): keys [0,2,3] map to ['a','c','d'].
+      -- After packAfterRemove 1: keys [0,1,2] (former 2→1, former 3→2).
+      let m0 = IntMap.fromList [(0 :: Int, 'a'), (2, 'c'), (3, 'd')]
+          m1 = packAfterRemove 1 m0
+      IntMap.toAscList m1 `shouldBe` [(0, 'a'), (1, 'c'), (2, 'd')]
+
+    it "packAfterRemove with no keys > k is the identity" $ do
+      let m0 = IntMap.fromList [(0 :: Int, 'a'), (1, 'b')]
+          m1 = packAfterRemove 5 m0
+      m1 `shouldBe` m0
+
+    it "packAfterRemove on the empty map is the empty map" $ do
+      packAfterRemove 3 (IntMap.empty :: IntMap.IntMap Char)
+        `shouldBe` IntMap.empty

@@ -147,13 +147,13 @@ spec = do
     it "P9: parseInput \"/tab list\" yields ParsedSlashCmd (CmdTab TabListCmd) (alias of /tabs)" $
       parse "/tab list" `shouldBe` Right (RT.ParsedSlashCmd (Slash.CmdTab Slash.TabListCmd))
 
-    it "P10: parseInput \"/tab new 3\" yields ParsedSlashCmd (CmdTab (TabNewCmd 3 Nothing Nothing))" $
-      parse "/tab new 3" `shouldBe`
-        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd 3 Nothing Nothing)))
+    it "P10: parseInput \"/tab new\" yields ParsedSlashCmd (CmdTab (TabNewCmd Nothing Nothing)) [tmux-packing: no index arg]" $
+      parse "/tab new" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd Nothing Nothing)))
 
-    it "P11: parseInput \"/tab new 3 shell\" yields ParsedSlashCmd (CmdTab (TabNewCmd 3 (Just TkaShell) Nothing))" $
-      parse "/tab new 3 shell" `shouldBe`
-        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd 3 (Just Slash.TkaShell) Nothing)))
+    it "P11: parseInput \"/tab new shell\" yields ParsedSlashCmd (CmdTab (TabNewCmd (Just TkaShell) Nothing)) [tmux-packing]" $
+      parse "/tab new shell" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaShell) Nothing)))
 
     it "P12: parseInput \"/tab close 3\" yields ParsedSlashCmd (CmdTab (TabCloseCmd 3 ForceNo))" $
       parse "/tab close 3" `shouldBe`
@@ -316,6 +316,9 @@ spec = do
       parse "/tab focus a b" `shouldBe` Left RT.ParseErrorMalformed
 
     it "/tab new with leading-zero N is malformed" $
+      -- "/tab new 03" — under the tmux-packing grammar, 03 is read
+      -- as a (literal) kind keyword which doesn't match any known kind,
+      -- so the result is malformed (not "leading-zero index").
       parse "/tab new 03" `shouldBe` Left RT.ParseErrorMalformed
 
     it "/tab rename without name is malformed" $
@@ -335,29 +338,29 @@ spec = do
         Right (RT.ParsedSlashCmd (Slash.CmdTab Slash.TabListCmd))
       parse "/TAB LIST" `shouldBe`
         Right (RT.ParsedSlashCmd (Slash.CmdTab Slash.TabListCmd))
-      parse "/tab New 3 SHELL" `shouldBe`
+      parse "/tab New SHELL" `shouldBe`
         Right (RT.ParsedSlashCmd
-          (Slash.CmdTab (Slash.TabNewCmd 3 (Just Slash.TkaShell) Nothing)))
+          (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaShell) Nothing)))
 
-    it "parses each TabKindArg keyword" $ do
-      parse "/tab new 1 ai"      `shouldBe` Right (RT.ParsedSlashCmd
-        (Slash.CmdTab (Slash.TabNewCmd 1 (Just Slash.TkaAi)      Nothing)))
-      parse "/tab new 1 harness" `shouldBe` Right (RT.ParsedSlashCmd
-        (Slash.CmdTab (Slash.TabNewCmd 1 (Just Slash.TkaHarness) Nothing)))
-      parse "/tab new 1 shell"   `shouldBe` Right (RT.ParsedSlashCmd
-        (Slash.CmdTab (Slash.TabNewCmd 1 (Just Slash.TkaShell)   Nothing)))
-      parse "/tab new 1 ssh"     `shouldBe` Right (RT.ParsedSlashCmd
-        (Slash.CmdTab (Slash.TabNewCmd 1 (Just Slash.TkaSsh)     Nothing)))
-      parse "/tab new 1 tmux"    `shouldBe` Right (RT.ParsedSlashCmd
-        (Slash.CmdTab (Slash.TabNewCmd 1 (Just Slash.TkaTmux)    Nothing)))
+    it "parses each TabKindArg keyword (tmux-packing: no index arg)" $ do
+      parse "/tab new ai"      `shouldBe` Right (RT.ParsedSlashCmd
+        (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaAi)      Nothing)))
+      parse "/tab new harness" `shouldBe` Right (RT.ParsedSlashCmd
+        (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaHarness) Nothing)))
+      parse "/tab new shell"   `shouldBe` Right (RT.ParsedSlashCmd
+        (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaShell)   Nothing)))
+      parse "/tab new ssh"     `shouldBe` Right (RT.ParsedSlashCmd
+        (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaSsh)     Nothing)))
+      parse "/tab new tmux"    `shouldBe` Right (RT.ParsedSlashCmd
+        (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaTmux)    Nothing)))
 
     it "/tab new with unknown kind is malformed" $
-      parse "/tab new 1 bogus" `shouldBe` Left RT.ParseErrorMalformed
+      parse "/tab new bogus" `shouldBe` Left RT.ParseErrorMalformed
 
-    it "/tab new 3 shell extra-arg-text captured as final field" $
-      parse "/tab new 3 shell run me" `shouldBe`
+    it "/tab new shell extra-arg-text captured as final field (tmux-packing)" $
+      parse "/tab new shell run me" `shouldBe`
         Right (RT.ParsedSlashCmd
-          (Slash.CmdTab (Slash.TabNewCmd 3 (Just Slash.TkaShell) (Just "run me"))))
+          (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaShell) (Just "run me"))))
 
     it "/tab resume <bad-id> surfaces ParseErrorInvalidSessionId via the dedicated branch" $ do
       parse "/tab resume foo.bar"  `shouldBe` Left RT.ParseErrorInvalidSessionId
@@ -369,8 +372,9 @@ spec = do
     it "/tab close with no index is malformed" $
       parse "/tab close" `shouldBe` Left RT.ParseErrorMalformed
 
-    it "/tab new with no index is malformed" $
-      parse "/tab new" `shouldBe` Left RT.ParseErrorMalformed
+    it "/tab new (no kind, no args) is the force-prompt form (tmux-packing)" $
+      parse "/tab new" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd Nothing Nothing)))
 
     it "/tab rename with no args is malformed" $
       parse "/tab rename" `shouldBe` Left RT.ParseErrorMalformed
@@ -408,8 +412,8 @@ spec = do
     it "recognises tab-family commands" $ do
       Parse.parseSlashCommand "/tabs" `shouldBe`
         Just (Slash.CmdTab Slash.TabListCmd)
-      Parse.parseSlashCommand "/tab new 3 shell" `shouldBe`
-        Just (Slash.CmdTab (Slash.TabNewCmd 3 (Just Slash.TkaShell) Nothing))
+      Parse.parseSlashCommand "/tab new shell" `shouldBe`
+        Just (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaShell) Nothing))
 
     it "delegates to existing slash-command grammar for everything else" $ do
       Parse.parseSlashCommand "/help" `shouldBe` Just Slash.CmdHelp
@@ -637,7 +641,7 @@ genNonDefaultInput = oneof
       , "/harness list", "/mcp list", "/channel"
       , "/transcript path", "/agent list"
       , "/tabs", "/tab list"
-      , "/tab new 3", "/tab new 3 shell", "/tab close 3"
+      , "/tab new", "/tab new shell", "/tab close 3"
       , "/tab focus 3", "/tab rename 3 mytab"
       , "/tab resume sess001"
       ]

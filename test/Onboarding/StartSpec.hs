@@ -90,7 +90,8 @@ spec = describe "O-series \x2014 onboarding (WU11 wires)" $ do
 
     it "handleStart emits exactly one message whose body contains the \
        \value prop and all three slash-prefix mentions \
-       \(/0, /tab new 0 shell, /tabs)" $ do
+       \(/0, /tab new shell, /tabs); /tab new no longer takes an index \
+       \(tmux-packing)" $ do
       sentRef <- newIORef ([] :: [Text])
       env <- mkOnboardingEnv (recordingChannel sentRef)
       handleStart env
@@ -101,10 +102,13 @@ spec = describe "O-series \x2014 onboarding (WU11 wires)" $ do
           T.unpack body `shouldContain` "Tabbed Chat lets you drive"
           -- (a) /0 shortcut for AI
           T.unpack body `shouldContain` "/0"
-          -- (b) /tab new 0 shell for shell users
-          T.unpack body `shouldContain` "/tab new 0 shell"
+          -- (b) /tab new shell for shell users (no index — tmux packing)
+          T.unpack body `shouldContain` "/tab new shell"
           -- (c) /tabs for dashboard
           T.unpack body `shouldContain` "/tabs"
+          -- (d) tmux packing note is mentioned so users know /N does
+          -- NOT auto-spawn any more.
+          T.unpack body `shouldContain` "tmux"
         other -> expectationFailure $
           "expected exactly one emitted message, got " <> show (length other)
 

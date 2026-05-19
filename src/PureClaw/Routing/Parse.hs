@@ -362,19 +362,20 @@ parseTabAction rest = case T.words rest of
     "rename" -> parseTabRename args rest
     _        -> Nothing
 
--- | @\/tab new \<N\> [\<kind\> [\<arg-text\>]]@.
+-- | @\/tab new [\<kind\> [\<arg-text\>]]@.
+--
+-- The grammar deliberately omits a user-specified index: new tabs are
+-- always allocated at the lowest free slot by the handler (tmux-style
+-- packing). @\/tab new@ with no kind force-prompts the user; with a
+-- kind it spawns directly.
 parseTabNew :: [Text] -> Maybe Slash.SlashCommand
-parseTabNew []     = Nothing
-parseTabNew (n:ks) = do
-  idx <- parseDecimalIndex n
-  case ks of
-    []         -> Just (Slash.CmdTab (Slash.TabNewCmd idx Nothing Nothing))
-    (k:argTs)  -> do
-      kind <- parseTabKindArg k
-      let argText = if null argTs
-                      then Nothing
-                      else Just (T.unwords argTs)
-      Just (Slash.CmdTab (Slash.TabNewCmd idx (Just kind) argText))
+parseTabNew []        = Just (Slash.CmdTab (Slash.TabNewCmd Nothing Nothing))
+parseTabNew (k:argTs) = do
+  kind <- parseTabKindArg k
+  let argText = if null argTs
+                  then Nothing
+                  else Just (T.unwords argTs)
+  Just (Slash.CmdTab (Slash.TabNewCmd (Just kind) argText))
 
 -- | @\/tab close \<N\> [--force]@.
 parseTabClose :: [Text] -> Maybe Slash.SlashCommand

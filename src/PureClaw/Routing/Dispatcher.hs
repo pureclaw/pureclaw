@@ -506,14 +506,9 @@ doDispatchOne env ds uid raw = do
       emitDispatcherBanner env "input not recognized"
 
     Right (Switch idx) -> do
-      -- A1 \/ A3 \/ A4 \/ A5 \/ A6: route through the AutoSpawn handler
-      -- so the auto-spawn truth table (present-tab focus, missing-tab
-      -- auto-spawn, missing-tab prompt) is owned by ONE module.
+      -- tmux packing model: a missing /N is user error (no auto-spawn).
       AutoSpawn.handleSwitch env
-        (_ds_promptRenderer ds)
-        (ratelimitedSpawn env ds uid)
         (emitDispatcherBanner env)
-        (_ds_spawnArgs ds)
         idx
       -- WU10 — X1 expectation capture: if the focused tab is now
       -- Crashed, record the spawn args under the user's pending-retry
@@ -854,16 +849,22 @@ handleResolved env ds uid sessionsDir realSid = do
 
 -- | Dispatch a @\/tab*@ command to the AutoSpawn handlers. Each branch
 -- maps a 'TabSlashCommand' constructor to the appropriate handler.
+--
+-- The @\/tab close N@ branch supplies AutoSpawn with a renumber
+-- callback that shifts the dispatcher's side maps ('_ds_pendingRetry'
+-- in particular) to match the registry's tmux-style packing.
+-- '_ds_spawnArgs' is shifted by AutoSpawn itself since it is passed
+-- in directly.
 dispatchTab
   :: AgentEnv -> DispatcherState -> UserId -> TabSlashCommand -> IO ()
 dispatchTab env ds uid tcmd = case tcmd of
-  TabNewCmd rawIdx mKind mArgs ->
+  TabNewCmd mKind mArgs ->
     AutoSpawn.handleNew env
       (_ds_promptRenderer ds)
       (ratelimitedSpawn env ds uid)
       (emitDispatcherBanner env)
       (_ds_spawnArgs ds)
-      rawIdx mKind mArgs
+      mKind mArgs
 
   TabListCmd ->
     AutoSpawn.handleListTabs env (emitDispatcherBanner env)
@@ -872,15 +873,13 @@ dispatchTab env ds uid tcmd = case tcmd of
     AutoSpawn.handleClose env
       (emitDispatcherBanner env)
       (_ds_spawnArgs ds)
+      (renumberPendingRetry ds)
       rawIdx
       (force == ForceYes)
 
   TabFocusCmd rawIdx ->
     AutoSpawn.handleFocus env
-      (_ds_promptRenderer ds)
-      (ratelimitedSpawn env ds uid)
       (emitDispatcherBanner env)
-      (_ds_spawnArgs ds)
       rawIdx
 
   TabResumeCmd sid ->
@@ -891,6 +890,28 @@ dispatchTab env ds uid tcmd = case tcmd of
       (emitDispatcherBanner env)
       Parse.sanitizeTabName
       rawIdx newName
+
+-- | Shift the keys of the per-user pending-retry map so that any
+-- pending @(TabIndex, SpawnArgs)@ payload whose tab index was just
+-- renumbered down by one stays pointed at the same tab.
+--
+-- Entries whose @TabIndex@ equals the closed slot are dropped (the
+-- referenced tab no longer exists); entries whose index is greater
+-- have the index decremented; entries with smaller indices stay put.
+renumberPendingRetry :: DispatcherState -> Int -> IO ()
+renumberPendingRetry ds closedN =
+  atomicModifyIORef' (_ds_pendingRetry ds) $ \m ->
+    (Map.mapMaybe (shiftEntry closedN) m, ())
+  where
+    shiftEntry k (idx, sa) =
+      let i = unTabIndex idx
+      in if i == k
+           then Nothing
+           else if i > k
+                  then case Tab.mkTabIndex (i - 1) of
+                         Just newIdx -> Just (newIdx, sa)
+                         Nothing     -> Nothing  -- unreachable: i > k >= 0
+                  else Just (idx, sa)
 
 
 -- | Enqueue text on a specific tab's input queue. Looks up the tab in

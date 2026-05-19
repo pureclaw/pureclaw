@@ -281,8 +281,11 @@ spec = do
       bs `shouldSatisfy` any ("/9" `T.isInfixOf`)
       bs `shouldSatisfy` any ("not found" `T.isInfixOf`)
 
-    it ("L6 (WU9): /tab close of focused tab — new focus is the "
-        <> "highest-indexed remaining tab, or Nothing if empty") $ do
+    it ("L6 (tmux packing): /tab close of focused tab — focus clears "
+        <> "to Nothing (tmux semantics: closing the focused window in "
+        <> "renumber-windows mode leaves no focus until the user picks "
+        <> "one); a non-focused close does not touch focus other than "
+        <> "shifting indices to track the renumber") $ do
       env <- mkAiTestEnv Nothing
       h0 <- spawnAiTab env 0 "ai-0"
       h1 <- spawnAiTab env 1 "ai-1"
@@ -290,12 +293,12 @@ spec = do
       _  <- insertTabAt env (ti 1) h1
       writeIORef (_env_focus env) (Just (ti 1))
       ds <- mkAiDispatcherState env
-      -- /tab close 1 — focused tab closes → focus moves to the
-      -- highest-indexed remaining (which is 0).
+      -- /tab close 1 — focused tab closes → focus clears (NOT moved to
+      -- the next highest tab); user has to type /N or /tab focus N.
       dispatchOneAi env ds "/tab close 1"
       f0 <- readIORef (_env_focus env)
-      f0 `shouldBe` Just (ti 0)
-      -- /tab close 0 — last tab closes → focus becomes Nothing.
+      f0 `shouldBe` Nothing
+      -- /tab close 0 — last remaining tab also closes; focus stays Nothing.
       dispatchOneAi env ds "/tab close 0"
       f1 <- readIORef (_env_focus env)
       f1 `shouldBe` Nothing

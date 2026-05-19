@@ -8,12 +8,13 @@
 --   * @\/start@ handler ('handleStart') — Telegram's onboarding
 --     convention. Emits a single-message orientation that names the
 --     three principal slash-prefix surfaces users need to know about:
---     @\/0@ (auto-spawn AI), @\/tab new 0 shell@ (auto-spawn shell),
---     and @\/tabs@ (dashboard). The message is sent via 'ChannelHandle'
---     @_ch_send@ which works on every channel implementation (CLI,
---     Signal, Telegram). Non-Telegram channels degrade gracefully —
---     they receive the same orientation text even though they have no
---     BotFather autocomplete behind the @\/start@ keyword (O1).
+--     @\/0@ (the first tab once spawned), @\/tab new shell@ (allocate
+--     a shell tab at the next free slot), and @\/tabs@ (dashboard).
+--     The message is sent via 'ChannelHandle' @_ch_send@ which works
+--     on every channel implementation (CLI, Signal, Telegram).
+--     Non-Telegram channels degrade gracefully — they receive the same
+--     orientation text even though they have no BotFather autocomplete
+--     behind the @\/start@ keyword (O1).
 --
 --   * @\/help@ \"Tab commands\" subsection ('helpTabSection') — pure
 --     text appended by @executeSlashCommand env CmdHelp@ in
@@ -75,8 +76,8 @@ import PureClaw.Handles.Channel (ChannelHandle (..), OutgoingMessage (..))
 -- O1 requires the response to include:
 --
 --   * a one-line value prop,
---   * @\/0@ (the AI auto-spawn shortcut),
---   * @\/tab new 0 shell@ (the shell auto-spawn invocation),
+--   * @\/0@ (the first tab once spawned),
+--   * @\/tab new shell@ (the shell-tab allocation form),
 --   * @\/tabs@ (the dashboard alias).
 --
 -- All four are baked into 'onboardingMessage' so the @\/start@ output
@@ -100,8 +101,13 @@ handleStart env =
 -- Authored as a single 'Text' so the O1 test can assert against
 -- specific substrings without re-deriving them from a builder.
 -- Mentions all three slash-prefix surfaces explicitly (value prop,
--- @\/0@, @\/tab new 0 shell@, @\/tabs@). The @\/N@ shortcut accepts
+-- @\/0@, @\/tab new shell@, @\/tabs@). The @\/N@ shortcut accepts
 -- any single digit @0-9@ or lowercase letter @a-z@ (36 tabs total).
+--
+-- Tabs follow a tmux-style packing model: they always occupy the
+-- lowest slots, so the first tab is always at @\/0@ and closing tab N
+-- renumbers the rest. The orientation copy mentions this so users
+-- don't expect to pick a slot themselves.
 onboardingMessage :: Text
 onboardingMessage = T.intercalate "\n"
   [ "Welcome to PureClaw."
@@ -109,12 +115,17 @@ onboardingMessage = T.intercalate "\n"
   , "Tabbed Chat lets you drive multiple agents from one chat thread."
   , ""
   , "Quick start:"
-  , "  /0                 \x2014 talk to an AI agent (auto-spawned)"
-  , "  /tab new 0 shell   \x2014 open a shell tab at index 0"
+  , "  hello there        \x2014 just type to talk (an AI tab is auto-spawned)"
+  , "  /tab new shell     \x2014 open a shell tab at the next free slot"
+  , "  /0                 \x2014 switch focus to tab 0 (must already exist)"
   , "  /tabs              \x2014 list your tabs"
   , ""
+  , "Tabs are always packed in the lowest slots; closing tab N"
+  , "renumbers the rest (tmux-style)."
+  , ""
   , "Tab shortcut /N accepts any digit 0-9 or lowercase letter a-z"
-  , "(36 tabs total)."
+  , "(36 tabs total). /N only works for tabs that already exist \x2014"
+  , "use /tab new to create one."
   , ""
   , "See /help for the full command reference."
   ]
@@ -143,11 +154,13 @@ helpTabSection :: Text
 helpTabSection = T.intercalate "\n"
   [ ""
   , "  Tab commands (N is one char: digit 0-9 or letter a-z; 36 tabs max):"
-  , "    /N                          Switch focus to tab N (auto-spawn if missing)"
+  , "  Tabs are tmux-style packed: they always occupy the lowest slots;"
+  , "  closing tab N renumbers the rest down by one."
+  , "    /N                          Switch focus to tab N (error if missing)"
   , "    /N <payload>                Direct-inject payload to tab N (focus unchanged)"
   , "    /tabs                       List all tabs (alias of /tab list)"
-  , "    /tab new <N> [<kind>]       Open a new tab (kinds: ai, harness, shell, ssh, tmux)"
-  , "    /tab close <N> [--force]    Close tab N (--force skips archive on AI tabs)"
+  , "    /tab new [<kind>]           Open a new tab at the next free slot (kinds: ai, harness, shell, ssh, tmux)"
+  , "    /tab close <N> [--force]    Close tab N (--force skips archive on AI tabs); remaining tabs renumber"
   , "    /tab focus <N>              Switch focus to tab N (alias of /N)"
   , "    /tab resume <session-id>    Resume an archived session into a new tab"
   , "    /tab rename <N> <name>      Rename tab N (input is sanitized)"

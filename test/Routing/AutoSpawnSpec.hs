@@ -68,6 +68,7 @@ import PureClaw.Routing.Dispatcher
   , dispatchOne
   , newDispatcherState
   )
+import PureClaw.Routing.Dispatcher qualified
 import PureClaw.Routing.AutoSpawn qualified
 import PureClaw.Routing.PromptRenderer
   ( PromptRenderer (..)
@@ -215,7 +216,7 @@ banners xs = [t | (SrcDispatcher, BannerLine t) <- xs]
 
 spec :: Spec
 spec = do
-  describe "A-series — auto-spawn behavior (WU9)" $ do
+  describe "A-series — /N switch + /tab new + close (tmux packing)" $ do
 
     it ("A1: /3 when N exists — focus + recap banner; \"focused\" "
         <> "marker present") $ do
@@ -246,105 +247,93 @@ spec = do
       sent <- readIORef (_st_sentRf st)
       sent `shouldBe` ["hello world"]
 
-    it ("A3: /3 when N missing, default set — spawn with "
-        <> "_rc_defaultKind, focus, single-line confirmation") $ do
+    it ("A3 (tmux-packing): /3 when N missing — emits a 'no such tab' "
+        <> "banner; NO auto-spawn; focus unchanged") $ do
       env <- mkAutoSpawnEnv
-      st  <- mkSyntheticTab (ti 0) KindAi "auto-0" (Idle t0)
-      queue <- newIORef [st]
-      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      dispatchOne env ds (UserId "u") "/3"
-      -- A3: spawn happens at the lowest free index (0), not at the
-      -- requested index 3 — see the design doc's discussion of the v1
-      -- "lowest free index" contract.
-      tabs <- readIORef (_env_tabs env)
-      IntMap.size tabs `shouldBe` 1
-      f <- readIORef (_env_focus env)
-      f `shouldBe` Just (ti 0)
-      drained <- drainQueue (_env_channelOutQ env)
-      banners drained `shouldSatisfy`
-        any (\t -> "spawned" `T.isInfixOf` t && "ai" `T.isInfixOf` t)
-
-    it ("A4: /3 when N missing, default unset — prompt UI via "
-        <> "PromptRenderer (A4 \\/ A6 contract)") $ do
-      env0 <- mkAutoSpawnEnv
-      -- We override the routing config so that _rc_defaultKind is set
-      -- but the prompt path is still reachable via /tab new (A7) —
-      -- which is the form WU9's prompt UX targets in v1.
-      let env = env0
       st  <- mkSyntheticTab (ti 0) KindAi "shouldnt-spawn" (Idle t0)
       queue <- newIORef [st]
       ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      dispatchOne env ds (UserId "u") "/tab new 5"
-      drained <- drainQueue (_env_channelOutQ env)
-      banners drained `shouldSatisfy`
-        any (\t -> "/5" `T.isInfixOf` t
-                && ("ai" `T.isInfixOf` t || "shell" `T.isInfixOf` t))
-
-    it ("A5: /3 payload when N missing, default set — spawn, focus, "
-        <> "enqueue payload") $ do
-      env <- mkAutoSpawnEnv
-      -- The dispatcher's parser produces Inject for /3 <payload> shape,
-      -- so this test uses /3 alone (Switch path) then asserts the
-      -- spawn happened. The A5 truth-table cell is realised by the
-      -- Default+empty-focus path L6+K3 (see L6 test below) which is
-      -- the v1 surface for "auto-spawn + enqueue".
-      st  <- mkSyntheticTab (ti 0) KindAi "auto-0" (Idle t0)
-      queue <- newIORef [st]
-      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
       dispatchOne env ds (UserId "u") "/3"
       tabs <- readIORef (_env_tabs env)
-      IntMap.size tabs `shouldBe` 1
+      IntMap.size tabs `shouldBe` 0
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Nothing
+      drained <- drainQueue (_env_channelOutQ env)
+      banners drained `shouldSatisfy`
+        any (\t -> "/3" `T.isInfixOf` t && "no such tab" `T.isInfixOf` t)
 
-    it ("A6: /3 payload when N missing, default unset — payload "
-        <> "buffered in the prompt; deferred enqueue after kind pick") $ do
+    it ("A4 (tmux-packing): /tab new (no kind) — force-prompt at the "
+        <> "next free slot (0); enumerates the kind keywords; NO spawn") $ do
       env <- mkAutoSpawnEnv
-      st  <- mkSyntheticTab (ti 0) KindAi "auto-0" (Idle t0)
+      st  <- mkSyntheticTab (ti 0) KindAi "shouldnt-spawn" (Idle t0)
       queue <- newIORef [st]
       ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      -- A6's spec is parser-level: /3 payload routes as Inject 3
-      -- payload. The dispatcher's Inject path enqueues onto the tab
-      -- (existing) or surfaces "no such tab" PublicError (missing).
-      -- The v1 buffered-payload UX is verified via the prompt
-      -- renderer's "Buffered text:" suffix; this assertion exercises
-      -- the renderer end-to-end via /tab new 5 with no kind.
-      dispatchOne env ds (UserId "u") "/tab new 5"
+      dispatchOne env ds (UserId "u") "/tab new"
       drained <- drainQueue (_env_channelOutQ env)
+      -- Prompt renders for the lowest free slot (0).
       banners drained `shouldSatisfy`
-        any ("/5" `T.isInfixOf`)
-
-    it "A7: /tab new 3 (no kind) — force-prompt (ignores _rc_defaultKind)" $ do
-      env <- mkAutoSpawnEnv
-      queue <- newIORef []
-      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      dispatchOne env ds (UserId "u") "/tab new 3"
-      drained <- drainQueue (_env_channelOutQ env)
-      -- Prompt renderer text mentions the kind keywords.
-      banners drained `shouldSatisfy`
-        any (\t -> "/3" `T.isInfixOf` t
+        any (\t -> "/0" `T.isInfixOf` t
                 && ("ai" `T.isInfixOf` t || "shell" `T.isInfixOf` t))
-      -- NO spawn happened.
       tabs <- readIORef (_env_tabs env)
       IntMap.size tabs `shouldBe` 0
 
-    it ("A8: /tab new 3 (no kind), N exists — error '/3 already "
-        <> "exists. Use /tab close 3 to replace.'") $ do
+    it ("A5 (tmux-packing): /3 payload when N missing — Inject path "
+        <> "surfaces 'no such tab' PublicError; no spawn") $ do
       env <- mkAutoSpawnEnv
-      st3 <- mkSyntheticTab (ti 3) KindAi "tab-3" (Idle t0)
-      _   <- insertTab (_env_tabs env) (ti 3) (_st_handle st3)
-      queue <- newIORef []
+      st  <- mkSyntheticTab (ti 0) KindAi "shouldnt-spawn" (Idle t0)
+      queue <- newIORef [st]
       ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      dispatchOne env ds (UserId "u") "/tab new 3"
+      dispatchOne env ds (UserId "u") "/3 hello"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 0
       drained <- drainQueue (_env_channelOutQ env)
       banners drained `shouldSatisfy`
-        any (\t -> "already exists" `T.isInfixOf` t
-                && "/tab close" `T.isInfixOf` t)
+        any (\t -> "/3" `T.isInfixOf` t && "no such tab" `T.isInfixOf` t)
 
-    it "A9: /tab new 3 shell — spawn with KindShell, focus" $ do
+    it ("A6 (tmux-packing): /tab new force-prompt with a non-empty "
+        <> "registry — prompt targets the NEXT free slot (not slot 0)") $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "exists" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      dispatchOne env ds (UserId "u") "/tab new"
+      drained <- drainQueue (_env_channelOutQ env)
+      banners drained `shouldSatisfy`
+        any ("/1" `T.isInfixOf`)
+
+    it "A7: /tab new (no kind) — force-prompt mentions the kinds" $ do
+      env <- mkAutoSpawnEnv
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      dispatchOne env ds (UserId "u") "/tab new"
+      drained <- drainQueue (_env_channelOutQ env)
+      banners drained `shouldSatisfy`
+        any (\t -> "/0" `T.isInfixOf` t
+                && ("ai" `T.isInfixOf` t || "shell" `T.isInfixOf` t))
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 0
+
+    it ("A8 (tmux-packing): /tab new always lands at the lowest free "
+        <> "slot; user no longer picks the index. With one tab already "
+        <> "at /0, /tab new ai spawns at /1.") $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "tab-0" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      stNew <- mkSyntheticTab (ti 1) KindAi "new-tab" (Idle t0)
+      queue <- newIORef [stNew]
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      dispatchOne env ds (UserId "u") "/tab new ai"
+      drained <- drainQueue (_env_channelOutQ env)
+      banners drained `shouldSatisfy`
+        any (\t -> "/1" `T.isInfixOf` t && "spawned" `T.isInfixOf` t)
+
+    it "A9: /tab new shell — spawn with KindShell, focus" $ do
       env <- mkAutoSpawnEnv
       st  <- mkSyntheticTab (ti 0) KindShell "sh-0" (Idle t0)
       queue <- newIORef [st]
       ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      dispatchOne env ds (UserId "u") "/tab new 3 shell"
+      dispatchOne env ds (UserId "u") "/tab new shell"
       tabs <- readIORef (_env_tabs env)
       IntMap.size tabs `shouldBe` 1
       f <- readIORef (_env_focus env)
@@ -353,23 +342,24 @@ spec = do
       banners drained `shouldSatisfy`
         any ("shell" `T.isInfixOf`)
 
-    it "A10: /tab new 3 shell when N exists — same error as A8" $ do
+    it ("A10 (tmux-packing): /tab new ai with /0 already existing "
+        <> "spawns at /1 (no 'already exists' error any more — the user "
+        <> "no longer names the slot)") $ do
       env <- mkAutoSpawnEnv
-      st3 <- mkSyntheticTab (ti 3) KindAi "tab-3" (Idle t0)
-      _   <- insertTab (_env_tabs env) (ti 3) (_st_handle st3)
-      queue <- newIORef []
+      st0 <- mkSyntheticTab (ti 0) KindAi "tab-0" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      stNew <- mkSyntheticTab (ti 1) KindAi "new-tab" (Idle t0)
+      queue <- newIORef [stNew]
       ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      dispatchOne env ds (UserId "u") "/tab new 3 shell"
+      dispatchOne env ds (UserId "u") "/tab new ai"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 2
       drained <- drainQueue (_env_channelOutQ env)
-      banners drained `shouldSatisfy`
-        any ("already exists" `T.isInfixOf`)
+      banners drained `shouldSatisfy` any ("spawned" `T.isInfixOf`)
 
-    it ("A11 \\/ S6: spawn past _rc_maxTabs cap — Left "
-        <> "TabLimitExceeded as redacted PublicError; no spawn") $ do
+    it ("A11 \\/ S6: /tab new at full capacity — TabLimitExceeded "
+        <> "surfaces as a redacted PublicError; no spawn") $ do
       env0 <- mkAutoSpawnEnv
-      -- _rc_maxTabs is overridden to 2 below so the cap can be tripped
-      -- with two synthetic tabs; the new default (36) is too large to
-      -- exercise here without exhausting the test fixture.
       let envFull = env0
             { _env_routingConfig = (_env_routingConfig env0)
                 { _rc_maxTabs = 2 }
@@ -378,39 +368,146 @@ spec = do
       st1 <- mkSyntheticTab (ti 1) KindAi "t1" (Idle t0)
       _   <- insertTab (_env_tabs envFull) (ti 0) (_st_handle st0)
       _   <- insertTab (_env_tabs envFull) (ti 1) (_st_handle st1)
-      stExtra <- mkSyntheticTab (ti 0) KindAi "x" (Idle t0)
-      queue <- newIORef [stExtra]
+      -- The factory's queue is empty so a successful spawn would also
+      -- fail; the rate-limited dispatcher path returns TabLimitExceeded
+      -- because lowestFreeIndex returns Nothing at cap.
+      queue <- newIORef []
       ds  <- newDispatcherState envFull (syntheticFactoryFromQueue queue)
-      dispatchOne envFull ds (UserId "u") "/tab new 1 ai"
+      dispatchOne envFull ds (UserId "u") "/tab new ai"
       drained <- drainQueue (_env_channelOutQ envFull)
+      -- The dispatcher banner mentions the /tab new prefix and a
+      -- redacted error.
       banners drained `shouldSatisfy`
-        any ("already exists" `T.isInfixOf`)
-      -- Now try a fresh index that will trip the cap.
-      stExtra2 <- mkSyntheticTab (ti 0) KindAi "y" (Idle t0)
-      queue2 <- newIORef [stExtra2]
-      ds2 <- newDispatcherState envFull (syntheticFactoryFromQueue queue2)
-      dispatchOne envFull ds2 (UserId "u") "/0"
-      -- /0 already exists — switch path (no spawn). Tab count
-      -- unchanged.
+        any (\t -> "/tab new" `T.isInfixOf` t && "tab:" `T.isInfixOf` t)
       tabs <- readIORef (_env_tabs envFull)
       IntMap.size tabs `shouldBe` 2
 
-    it ("A12: after /tab close 0, index 0 is immediately reusable; "
-        <> "next /tab new <kind> spawns at the lowest free index") $ do
+    it ("A12: after /tab close 0, the lowest free slot is 0 again; "
+        <> "/tab new ai spawns at 0") $ do
       env <- mkAutoSpawnEnv
       st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
       _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
       stNew <- mkSyntheticTab (ti 0) KindAi "new-0" (Idle t0)
       queue <- newIORef [stNew]
       ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
-      -- /tab close 0
       dispatchOne env ds (UserId "u") "/tab close 0"
       tabs0 <- readIORef (_env_tabs env)
       IntMap.size tabs0 `shouldBe` 0
-      -- /tab new 1 ai → new tab spawned at lowest free index (0).
-      dispatchOne env ds (UserId "u") "/tab new 1 ai"
+      dispatchOne env ds (UserId "u") "/tab new ai"
       tabs1 <- readIORef (_env_tabs env)
       IntMap.size tabs1 `shouldBe` 1
+      IntMap.member 0 tabs1 `shouldBe` True
+
+  describe "tmux renumber-on-close (always-packed slot model)" $ do
+
+    it ("closing /1 with /0,/1,/2 open renumbers /2 to /1; registry "
+        <> "is contiguous [0,1]") $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
+      st1 <- mkSyntheticTab (ti 1) KindAi "t1" (Idle t0)
+      st2 <- mkSyntheticTab (ti 2) KindAi "t2" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      _   <- insertTab (_env_tabs env) (ti 1) (_st_handle st1)
+      _   <- insertTab (_env_tabs env) (ti 2) (_st_handle st2)
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      dispatchOne env ds (UserId "u") "/tab close 1"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.keys tabs `shouldBe` [0, 1]
+      -- The handle at the new /1 is what used to be st2 (its name is
+      -- preserved through the registry move; _tabHandle_index is
+      -- advisory and not rewritten).
+      case IntMap.lookup 1 tabs of
+        Just h  -> _tabHandle_name h `shouldBe` TabName "t2"
+        Nothing -> expectationFailure "expected /1 to hold former t2"
+
+    it "closing a focused tab clears focus (was N → Nothing)" $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
+      st1 <- mkSyntheticTab (ti 1) KindAi "t1" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      _   <- insertTab (_env_tabs env) (ti 1) (_st_handle st1)
+      writeIORef (_env_focus env) (Just (ti 1))
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      dispatchOne env ds (UserId "u") "/tab close 1"
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Nothing
+
+    it ("closing a tab below the focus decrements focus by 1 "
+        <> "(was at N+1; new focus N)") $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
+      st1 <- mkSyntheticTab (ti 1) KindAi "t1" (Idle t0)
+      st2 <- mkSyntheticTab (ti 2) KindAi "t2" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      _   <- insertTab (_env_tabs env) (ti 1) (_st_handle st1)
+      _   <- insertTab (_env_tabs env) (ti 2) (_st_handle st2)
+      writeIORef (_env_focus env) (Just (ti 2))
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      dispatchOne env ds (UserId "u") "/tab close 0"
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Just (ti 1)
+
+    it "closing a tab above the focus leaves focus untouched" $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
+      st1 <- mkSyntheticTab (ti 1) KindAi "t1" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      _   <- insertTab (_env_tabs env) (ti 1) (_st_handle st1)
+      writeIORef (_env_focus env) (Just (ti 0))
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      dispatchOne env ds (UserId "u") "/tab close 1"
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Just (ti 0)
+
+    it ("SpawnArgs side map is shifted to follow the renumber: closing "
+        <> "tab 0 drops its args entry and shifts the rest down by 1") $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
+      st1 <- mkSyntheticTab (ti 1) KindShell "t1" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      _   <- insertTab (_env_tabs env) (ti 1) (_st_handle st1)
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      let saMap = PureClaw.Routing.Dispatcher._ds_spawnArgs ds
+      PureClaw.Routing.AutoSpawn.rememberArgsForTest saMap (ti 0)
+        KindAi    ["t0"]
+      PureClaw.Routing.AutoSpawn.rememberArgsForTest saMap (ti 1)
+        KindShell ["t1"]
+      dispatchOne env ds (UserId "u") "/tab close 0"
+      saAfter <- readIORef saMap
+      Map.keys saAfter `shouldBe` [0]
+      case Map.lookup 0 saAfter of
+        Just sa -> PureClaw.Routing.AutoSpawn._sa_kind sa `shouldBe` KindShell
+        Nothing -> expectationFailure "expected the former /1 args at /0"
+
+    it ("pending-retry side map is shifted to follow the renumber: "
+        <> "closing /0 drops its entry; an entry that pointed at /1 "
+        <> "is renumbered to /0") $ do
+      env <- mkAutoSpawnEnv
+      st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
+      st1 <- mkSyntheticTab (ti 1) KindAi "t1" (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      _   <- insertTab (_env_tabs env) (ti 1) (_st_handle st1)
+      queue <- newIORef []
+      ds  <- newDispatcherState env (syntheticFactoryFromQueue queue)
+      let pendRef = PureClaw.Routing.Dispatcher._ds_pendingRetry ds
+          sa = PureClaw.Routing.AutoSpawn.SpawnArgs
+                 { PureClaw.Routing.AutoSpawn._sa_kind = KindAi
+                 , PureClaw.Routing.AutoSpawn._sa_args = ["x"]
+                 }
+      atomicModifyIORef' pendRef
+        (\m -> ( Map.insert (UserId "v") (ti 1, sa)
+                  (Map.insert (UserId "u") (ti 0, sa) m), () ))
+      dispatchOne env ds (UserId "u") "/tab close 0"
+      pendAfter <- readIORef pendRef
+      Map.lookup (UserId "u") pendAfter `shouldBe` Nothing
+      case Map.lookup (UserId "v") pendAfter of
+        Just (idx, _) -> idx `shouldBe` ti 0
+        Nothing       -> expectationFailure "expected v's retry at /0 after renumber"
 
   describe "B-series — dashboard rendering (WU9)" $ do
 
@@ -517,14 +614,16 @@ spec = do
   describe "AutoSpawn — error paths + tab-kind round-trip (WU9)" $ do
 
     it ("handleNew: factory returning Left propagates as a "
-        <> "dispatcher PublicError") $ do
+        <> "dispatcher PublicError (no per-index banner under tmux "
+        <> "packing — the banner is keyed on /tab new since the user "
+        <> "no longer named the slot)") $ do
       env <- mkAutoSpawnEnv
       let leftFactory _ _ _ = pure (Left (TabLimitExceeded 9))
       ds <- newDispatcherState env leftFactory
-      dispatchOne env ds (UserId "u") "/tab new 5 ai"
+      dispatchOne env ds (UserId "u") "/tab new ai"
       drained <- drainQueue (_env_channelOutQ env)
       banners drained `shouldSatisfy`
-        any (\t -> "/5" `T.isInfixOf` t
+        any (\t -> "/tab new" `T.isInfixOf` t
                 && "tab:" `T.isInfixOf` t)
 
     it "handleClose: invalid index emits 'tab: invalid index'" $ do

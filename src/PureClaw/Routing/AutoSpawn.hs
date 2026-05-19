@@ -5,28 +5,38 @@
 --
 -- The user-visible UX surface for tab creation, close, resume, rename,
 -- and crashed-tab handling. The dispatcher (WU5) routes parsed slash
--- commands here; this module owns the auto-spawn truth table
--- (A-series), the close lifecycle on top of the per-kind factory
--- '_tabHandle_close' (L-series), the crashed-tab retry prompt
--- (X-series), and the rename handler (S10).
+-- commands here; this module owns the @\/N@ switch UX (A-series), the
+-- close lifecycle on top of the per-kind factory '_tabHandle_close'
+-- (L-series), the crashed-tab retry prompt (X-series), and the rename
+-- handler (S10).
 --
--- == Auto-spawn truth table (A-series)
+-- == @\/N@ switch UX (A-series, tmux-style packing model)
 --
--- 'handleSwitch' implements the A1\/A3\/A4 axis:
+-- 'handleSwitch' implements the simple truth table:
 --
---   * tab present → focus + recap.
---   * tab missing AND '_rc_defaultKind' set → silent spawn at the
---     requested index via the kind-specific factory, then focus.
---   * tab missing AND '_rc_defaultKind' unset → emit a kind-prompt
---     banner via 'PromptRenderer' (A4 \/ A6).
+--   * tab present → focus + recap (and Crashed observation, X1).
+--   * tab missing → emit an error banner; do NOT auto-spawn.
 --
--- == Force-prompt (A7)
+-- The previous "auto-spawn on missing /N" behaviour was retired in
+-- favour of the tmux packing model: tabs always occupy the lowest
+-- slots @\/0..K-1@, so @\/N@ with @N >= K@ is always user error.
 --
--- The @\/tab new N@ no-kind path ALWAYS prompts regardless of
--- '_rc_defaultKind' — the user explicitly asked for the prompt UX by
--- typing @\/tab new N@ with no kind argument.
+-- == 'handleDefault' first-run UX (K3)
 --
--- == Max-tab cap (A11 \/ S6)
+-- The first-run case (no tab focused, registry empty) still
+-- implicit-spawns '_rc_defaultKind' at index 0 and forwards the typed
+-- text. This is what makes a brand-new user with no tabs able to just
+-- type a message and start talking — the K3 first-run path is the only
+-- surviving implicit-spawn surface after the tmux packing refactor.
+--
+-- == @\/tab new@ — always-lowest allocation
+--
+-- @\/tab new@ no longer accepts a user-supplied index: spawns always
+-- land at the lowest free slot via 'Registry.lowestFreeIndex'. The
+-- no-kind variant force-prompts the user; the with-kind variant spawns
+-- directly.
+--
+-- == Max-tab cap (S6)
 --
 -- Every spawn path consults '_rc_maxTabs' BEFORE calling the factory;
 -- exceeding the cap surfaces 'TabLimitExceeded' as a dispatcher
@@ -50,6 +60,7 @@ module PureClaw.Routing.AutoSpawn
     -- * Banner-emit + spawn-IO injection types
   , BannerEmit
   , SpawnIO
+  , RenumberCallback
     -- * Entry points (called by Dispatcher)
   , handleSwitch
   , handleDefault
@@ -65,17 +76,18 @@ module PureClaw.Routing.AutoSpawn
   , splitArgs
   , recapText
   , rememberArgsForTest
+  , missingTabBanner
+  , shiftMapKeysAfter
   ) where
 
 import Control.Exception (SomeException, try)
-import Data.Foldable (for_)
 import Data.IORef
   ( IORef
+  , atomicModifyIORef'
   , modifyIORef'
   , readIORef
   , writeIORef
   )
-import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -138,75 +150,40 @@ type BannerEmit = Text -> IO ()
 
 
 -- ---------------------------------------------------------------------------
--- handleSwitch — /N (A1\/A3\/A4)
+-- handleSwitch — /N (tmux packing model)
 -- ---------------------------------------------------------------------------
 
--- | Handle @\/N@ (Switch). Truth table:
+-- | Handle @\/N@ (Switch). Truth table (tmux packing model):
 --
 -- * tab present → focus, emit recap, observe Crashed status (X1).
--- * tab missing AND '_rc_defaultKind' set → silent auto-spawn at the
---   requested index, then focus + confirmation banner.
--- * tab missing AND '_rc_defaultKind' unset → kind-prompt via the
---   supplied 'PromptRenderer'.
+-- * tab missing → emit an error banner ('missingTabBanner'); no
+--   auto-spawn.
 --
--- The 'SpawnIO' caller is responsible for honouring '_rc_maxTabs' (S6
--- \/ A11) and the spawn-rate limit (S7); AutoSpawn does not duplicate
--- those checks.
+-- The previous "auto-spawn on missing /N" behaviour was retired with
+-- the tmux packing refactor: because tabs are always packed in the
+-- lowest slots, @\/N@ for any @N@ outside the open range is always
+-- user error. The K3 first-run UX (no focus, registry empty, plain
+-- text) still implicit-spawns via 'handleDefault'.
 handleSwitch
   :: AgentEnv
-  -> PromptRenderer
-  -> SpawnIO
   -> BannerEmit
-  -> IORef (Map Int SpawnArgs)
   -> TabIndex
   -> IO ()
-handleSwitch env renderer spawnIO emit argsRef idx = do
+handleSwitch env emit idx = do
   mTab <- Registry.lookupTab (_env_tabs env) idx
   case mTab of
     Just h  -> focusExisting env emit idx h
-    Nothing -> handleMissingSwitch env renderer spawnIO emit argsRef idx Nothing
+    Nothing -> emit (missingTabBanner idx)
 
--- | Common path for @\/N@ where tab N is absent. The optional
--- @mPayload@ argument is the buffered text from an @\/N \<payload\>@
--- input shape (A6) — when set, it is enqueued on the newly-spawned
--- tab after the spawn succeeds.
-handleMissingSwitch
-  :: AgentEnv
-  -> PromptRenderer
-  -> SpawnIO
-  -> BannerEmit
-  -> IORef (Map Int SpawnArgs)
-  -> TabIndex
-  -> Maybe Text
-  -> IO ()
-handleMissingSwitch env renderer spawnIO emit argsRef idx mPayload = do
-  let rc = _env_routingConfig env
-  case kindFromDefault rc of
-    Nothing ->
-      -- A4 \/ A6: no default kind — prompt the user.
-      emit (_pr_renderSpawnPrompt renderer idx mPayload)
-    Just kind -> do
-      -- A3 \/ A5: silent spawn with the default kind.
-      r <- spawnIO kind []
-      case r of
-        Left  e ->
-          emit ("/" <> tShowIdx idx <> ": "
-                <> unPublicTabError (toPublicTabError e))
-        Right newIdx -> do
-          rememberArgs argsRef newIdx kind []
-          writeIORef (_env_focus env) (Just newIdx)
-          for_ mPayload (enqueuePayloadOn env emit newIdx)
-          emit ("/" <> tShowIdx newIdx <> ": spawned ("
-                <> kindKeyword kind <> ")")
-
--- | Project '_rc_defaultKind' onto 'Maybe TabKind'. The field is
--- non-optional 'TabKind' (default 'KindAi') by design. WU9 v1 always
--- returns 'Just'; the @\/tab new N@ no-kind path is what reaches the
--- prompt UX (via 'handleNew'), not the bare @\/N@ form. We keep the
--- 'Maybe' shape so a future config switch can opt into the prompt UX
--- as the default for @\/N@ as well.
-kindFromDefault :: RoutingConfig -> Maybe TabKind
-kindFromDefault = Just . _rc_defaultKind
+-- | Banner emitted when @\/N@ references a tab that does not exist.
+--
+-- Phrased to nudge the user toward the (always-allocating) @\/tab new@
+-- command rather than the old "auto-spawn at the requested index"
+-- behaviour, which no longer exists.
+missingTabBanner :: TabIndex -> Text
+missingTabBanner idx =
+  "/" <> tShowIdx idx
+    <> ": no such tab — use /tab new to create one"
 
 
 -- ---------------------------------------------------------------------------
@@ -243,77 +220,111 @@ handleDefault env spawnIO emit argsRef text = do
 
 
 -- ---------------------------------------------------------------------------
--- handleNew — /tab new ...
+-- handleNew — /tab new [<kind> [<args>]]
 -- ---------------------------------------------------------------------------
 
--- | Handle @\/tab new N [\<kind\> [\<arg-text\>]]@.
+-- | Handle @\/tab new [\<kind\> [\<arg-text\>]]@ (tmux packing model).
 --
--- Truth table (mirrors A7 \/ A8 \/ A9 \/ A10 \/ A11):
+-- Truth table:
 --
--- * @\/tab new N@ (no kind), N missing  → force-prompt (A7).
--- * @\/tab new N@ (no kind), N exists   → error (A8).
--- * @\/tab new N kind \[args\]@, N missing → spawn (A9).
--- * @\/tab new N kind \[args\]@, N exists  → error (A10).
--- * Cap exceeded → redacted 'TabLimitExceeded' (A11 \/ S6).
+-- * @\/tab new@ (no kind)            → force-prompt at the next free
+--   slot.
+-- * @\/tab new \<kind\> [\<args\>]@  → spawn at the lowest free slot
+--   via 'SpawnIO' (the dispatcher's rate-limited factory), focus it,
+--   and emit a confirmation banner.
+-- * Spawn failure (rate-limit, cap, factory failure, etc.) → redacted
+--   'PublicError' banner.
+--
+-- The previous "user picks the slot" behaviour is gone: new tabs are
+-- always allocated at the lowest free index (matches tmux
+-- @renumber-windows on@ semantics). The slot for the force-prompt
+-- banner is determined by 'Registry.lowestFreeIndex' so the prompt
+-- text shows the user where the spawn would land.
 handleNew
   :: AgentEnv
   -> PromptRenderer
   -> SpawnIO
   -> BannerEmit
   -> IORef (Map Int SpawnArgs)
-  -> Int               -- ^ requested index
   -> Maybe TabKindArg  -- ^ kind keyword, if supplied
   -> Maybe Text        -- ^ arg text, if supplied
   -> IO ()
-handleNew env renderer spawnIO emit argsRef rawIdx mKind mArgs =
-  case mkTabIndex rawIdx of
-    Nothing  ->
-      emit ("/" <> T.pack (show rawIdx) <> ": tab: invalid index")
-    Just idx -> do
-      mTab <- Registry.lookupTab (_env_tabs env) idx
-      case (mTab, mKind) of
-        (Just _, _) ->
-          -- A8 \/ A10: tab already exists.
-          emit ("/" <> tShowIdx idx
-                <> " already exists. Use /tab close "
-                <> tShowIdx idx <> " to replace.")
-        (Nothing, Nothing) ->
-          -- A7: force-prompt (ignores '_rc_defaultKind').
+handleNew env renderer spawnIO emit argsRef mKind mArgs = do
+  let rc = _env_routingConfig env
+  case mKind of
+    Nothing -> do
+      -- Force-prompt: surface the index where the spawn would land so
+      -- the prompt UX has a target to render. If the cap is full, we
+      -- emit a redacted PublicError instead of a prompt for a slot
+      -- that doesn't exist.
+      mFree <- Registry.lowestFreeIndex (_env_tabs env) (_rc_maxTabs rc)
+      case mFree of
+        Nothing ->
+          emit ("/tab new: "
+                <> unPublicTabError
+                     (toPublicTabError (TabLimitExceeded (_rc_maxTabs rc))))
+        Just idx ->
           emit (_pr_renderSpawnPrompt renderer idx Nothing)
-        (Nothing, Just kindArg) -> do
-          let kind = tabKindArgToKind kindArg
-              args = splitArgs mArgs
-          r <- spawnIO kind args
-          case r of
-            Left e ->
-              emit ("/" <> tShowIdx idx <> ": "
-                    <> unPublicTabError (toPublicTabError e))
-            Right newIdx -> do
-              rememberArgs argsRef newIdx kind args
-              writeIORef (_env_focus env) (Just newIdx)
-              emit ("/" <> tShowIdx newIdx <> ": spawned ("
-                    <> kindKeyword kind <> ")")
+    Just kindArg -> do
+      let kind = tabKindArgToKind kindArg
+          args = splitArgs mArgs
+      r <- spawnIO kind args
+      case r of
+        Left e ->
+          -- We don't have a known target index at this point — the
+          -- spawn never assigned one. Emit a generic /tab new banner.
+          emit ("/tab new: "
+                <> unPublicTabError (toPublicTabError e))
+        Right newIdx -> do
+          rememberArgs argsRef newIdx kind args
+          writeIORef (_env_focus env) (Just newIdx)
+          emit ("/" <> tShowIdx newIdx <> ": spawned ("
+                <> kindKeyword kind <> ")")
 
 
 -- ---------------------------------------------------------------------------
--- handleClose — /tab close N [--force]
+-- handleClose — /tab close N [--force] (tmux-style renumber)
 -- ---------------------------------------------------------------------------
 
--- | Handle @\/tab close N [--force]@. Truth table:
+-- | The post-close renumber callback. The dispatcher passes in a
+-- closure that shifts its side-maps (spawn-args, pending-retry, etc.)
+-- down by one starting at @closedIdx + 1@. AutoSpawn calls this AFTER
+-- it has driven the registry-side renumber so the side maps stay in
+-- sync with the registry's view of slot ownership.
+type RenumberCallback = Int -> IO ()
+
+-- | Handle @\/tab close N [--force]@ with tmux-style packing.
+--
+-- Truth table:
 --
 -- * N missing  → 'TabNotFound' (L5).
--- * N present  → '_tabHandle_close' (graceful or force, L2 \/ L3 \/ L4);
---   remove the registry entry; if the closed tab was focused, update
---   '_env_focus' per L6 (next focus is the highest-indexed remaining
---   tab, or 'Nothing' if empty); drop the SpawnArgs entry.
+-- * N present  → '_tabHandle_close' (graceful or force);
+--   remove the registry entry; shift every remaining tab at index
+--   @\> N@ down by one (tmux @renumber-windows on@ model); drop the
+--   SpawnArgs entry for @N@ then shift remaining SpawnArgs keys;
+--   reconcile '_env_focus' (was N → cleared; was \> N → decremented).
+--
+-- The renumber pass is done under a single 'atomicModifyIORef'' for
+-- '_env_tabs' and '_env_runners' so a concurrent reader (the
+-- dispatcher is the only writer per E3) always observes a consistent
+-- contiguous slot layout. The 'RenumberCallback' lets the caller
+-- (Dispatcher) apply the same shift to side maps that AutoSpawn does
+-- not own.
+--
+-- The 'TabHandle._tabHandle_index' field of any remaining handle is
+-- /not/ rewritten — it reflects the creation index and is treated as
+-- advisory after a renumber. The authoritative current slot is the
+-- registry key.
 handleClose
   :: AgentEnv
   -> BannerEmit
   -> IORef (Map Int SpawnArgs)
-  -> Int     -- ^ requested index
-  -> Bool    -- ^ True = --force
+  -> RenumberCallback  -- ^ side-map shift (dispatcher passes the
+                       --   callback that shifts pendingRetry etc.)
+  -> Int               -- ^ requested index
+  -> Bool              -- ^ True = --force
   -> IO ()
-handleClose env emit argsRef rawIdx force =
+handleClose env emit argsRef renumber rawIdx force =
   case mkTabIndex rawIdx of
     Nothing  ->
       emit ("/" <> T.pack (show rawIdx) <> ": tab: invalid index")
@@ -325,30 +336,58 @@ handleClose env emit argsRef rawIdx force =
                                (toPublicTabError (TabNotFound rawIdx)))
         Just h  -> do
           safeIgnore (_tabHandle_close h closeMode)
-          -- L6: update focus.
+          -- tmux packing: shift every remaining tab > closedIdx down
+          -- by one so the registry stays contiguous starting at 0.
+          let closedN = unTabIndex idx
+          atomicModifyIORef' (_env_tabs env) $ \m ->
+            (Registry.packAfterRemove closedN m, ())
+          atomicModifyIORef' (_env_runners env) $ \m ->
+            (Registry.packAfterRemove closedN m, ())
+          -- Side-map shifts: drop the spawn-args for the closed slot,
+          -- then shift remaining keys down. The dispatcher's
+          -- 'RenumberCallback' handles its own pending-retry map and
+          -- any other dispatcher-owned side state.
+          atomicModifyIORef' argsRef $ \m ->
+            ( shiftMapKeysAfter closedN (Map.delete closedN m), () )
+          renumber closedN
+          -- Reconcile focus: closed tab → Nothing; tabs above → -1.
           updateFocusOnClose env idx
-          -- Drop the X2\/X3 retry args.
-          forgetArgs argsRef idx
           emit ("/" <> tShowIdx idx <> ": closed")
   where
     closeMode = if force then CloseForce else CloseGraceful
 
--- | After a close, recompute '_env_focus'. Per L6 the new focus is
--- @Just highestRemaining@ if a non-empty registry remains, or
--- @Nothing@ if empty.
+-- | After a close (with tmux-style renumber), reconcile '_env_focus':
+--
+--   * focused tab was the closed one → clear focus (the dispatcher's
+--     K3 implicit-spawn path will pick up the next 'Default' input);
+--   * focused tab was strictly greater than the closed one →
+--     decrement the focus index by one (it just got renumbered);
+--   * focused tab was strictly less than the closed one → unchanged.
 updateFocusOnClose :: AgentEnv -> TabIndex -> IO ()
 updateFocusOnClose env closedIdx = do
   mFocus <- readIORef (_env_focus env)
   case mFocus of
-    Just f | f == closedIdx -> do
-      tabs <- readIORef (_env_tabs env)
-      let newFocus = highestKey tabs
-      writeIORef (_env_focus env) newFocus
-    _ -> pure ()
-  where
-    highestKey m
-      | IntMap.null m = Nothing
-      | otherwise     = mkTabIndex (fst (IntMap.findMax m))
+    Nothing -> pure ()
+    Just f
+      | f == closedIdx ->
+          writeIORef (_env_focus env) Nothing
+      | unTabIndex f > unTabIndex closedIdx ->
+          -- The focused tab was renumbered down by one.
+          writeIORef (_env_focus env) (mkTabIndex (unTabIndex f - 1))
+      | otherwise -> pure ()
+
+-- | Shift the keys of a 'Data.Map.Strict.Map' (Int-keyed) down by one
+-- for every key strictly greater than @k@. Mirrors
+-- 'Registry.packAfterRemove' for 'IntMap' but works on the generic
+-- 'Map' that the dispatcher uses for spawn-args and pending-retry side
+-- state.
+shiftMapKeysAfter :: Int -> Map Int v -> Map Int v
+shiftMapKeysAfter k = Map.foldlWithKey'
+  (\acc i v ->
+     if i > k
+       then Map.insert (i - 1) v acc
+       else Map.insert i v acc)
+  Map.empty
 
 
 -- ---------------------------------------------------------------------------
@@ -359,18 +398,15 @@ updateFocusOnClose env closedIdx = do
 -- 'handleSwitch'.
 handleFocus
   :: AgentEnv
-  -> PromptRenderer
-  -> SpawnIO
   -> BannerEmit
-  -> IORef (Map Int SpawnArgs)
   -> Int     -- ^ requested index
   -> IO ()
-handleFocus env renderer spawnIO emit argsRef rawIdx =
+handleFocus env emit rawIdx =
   case mkTabIndex rawIdx of
     Nothing  ->
       emit ("/" <> T.pack (show rawIdx) <> ": tab: invalid index")
     Just idx ->
-      handleSwitch env renderer spawnIO emit argsRef idx
+      handleSwitch env emit idx
 
 
 -- ---------------------------------------------------------------------------
@@ -580,12 +616,7 @@ rememberArgs ref idx kind args =
 -- | Public alias of 'rememberArgs' exposed for tests that want to seed
 -- a spawn-args map without going through the full dispatchOne path.
 -- Production code should never call this directly; the public
--- 'handleNew' \/ 'handleSwitch' \/ 'handleDefault' paths invoke
--- 'rememberArgs' internally on every successful spawn.
+-- 'handleNew' \/ 'handleDefault' paths invoke 'rememberArgs' internally
+-- on every successful spawn.
 rememberArgsForTest :: IORef (Map Int SpawnArgs) -> TabIndex -> TabKind -> [Text] -> IO ()
 rememberArgsForTest = rememberArgs
-
--- | Drop the retained spawn args for a tab (on close).
-forgetArgs :: IORef (Map Int SpawnArgs) -> TabIndex -> IO ()
-forgetArgs ref idx =
-  modifyIORef' ref (Map.delete (unTabIndex idx))

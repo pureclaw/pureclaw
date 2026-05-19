@@ -20,6 +20,8 @@ module PureClaw.Routing.Registry
   , insertTab
   , removeTab
   , lowestFreeIndex
+    -- * tmux-style packing helper
+  , packAfterRemove
   ) where
 
 import Data.IORef (IORef, atomicModifyIORef', readIORef)
@@ -75,3 +77,23 @@ lowestFreeIndex ref maxN
       | n >= limit         = Nothing
       | IntMap.member n m  = firstFree m (n + 1) limit
       | otherwise          = mkTabIndex n
+
+-- | Pure variant of the tmux-style \"renumber-windows\" pass: given a
+-- map whose entry at index @k@ has already been removed, shift every
+-- entry strictly greater than @k@ down by one key. Keys @\< k@ are
+-- left untouched.
+--
+-- This is a no-op when no key exceeds @k@. The pass is value-preserving
+-- (only keys are remapped); duplicates cannot arise because the
+-- pre-shift map has unique keys and the shift is monotone.
+packAfterRemove :: Int -> IntMap a -> IntMap a
+packAfterRemove k =
+  -- Walk in ascending order so the destination key for an entry is
+  -- always free by the time we write it (the previous entry at that
+  -- key was either removed or also shifted down).
+  IntMap.foldlWithKey'
+    (\acc i v ->
+       if i > k
+         then IntMap.insert (i - 1) v acc
+         else IntMap.insert i v acc)
+    IntMap.empty

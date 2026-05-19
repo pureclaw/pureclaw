@@ -565,7 +565,7 @@ spec = do
       length bodies `shouldBe` 1
       let body = T.concat bodies
       T.unpack body `shouldContain` "/0"
-      T.unpack body `shouldContain` "/tab new 0 shell"
+      T.unpack body `shouldContain` "/tab new shell"
       T.unpack body `shouldContain` "/tabs"
 
 
@@ -928,24 +928,24 @@ spec = do
       let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
       banners `shouldSatisfy` not . any ("crashed" `T.isInfixOf`)
 
-    it ("Switch on a missing tab routes through AutoSpawn.handleSwitch "
-        <> "— A3 behavior: silently spawns the default kind at the "
-        <> "lowest free index and focuses it") $ do
+    it ("Switch on a missing tab — tmux-packing model: emits a "
+        <> "'no such tab' banner; does NOT auto-spawn. Focus unchanged.") $ do
       fch <- newFakeChannel
       env <- mkDispatcherEnv (fakeChannelHandle fch)
       st  <- mkSyntheticTab (ti 0) KindAi (Idle t0)
       ds  <- newDispatcherState env (syntheticFactory st)
-      -- /7 — tab 7 is not in the registry. With WU9 wiring, the
-      -- dispatcher routes through AutoSpawn.handleSwitch which spawns
-      -- _rc_defaultKind at the lowest free index (0 here) and focuses
-      -- the freshly-spawned tab — NOT at the literal requested index 7
-      -- (that's a v1.5+ refinement; the v1 behavior matches the WU5
-      -- factory's "lowest free index" contract).
+      -- /7 — tab 7 is not in the registry. Under the tmux-packing
+      -- model the dispatcher emits an error banner and does NOT
+      -- auto-spawn. The user has to run /tab new to create a tab.
       dispatchOne env ds (UserId "u") "/7"
       f <- readIORef (_env_focus env)
-      f `shouldBe` Just (ti 0)
+      f `shouldBe` Nothing
       tabs <- readIORef (_env_tabs env)
-      IntMap.size tabs `shouldBe` 1
+      IntMap.size tabs `shouldBe` 0
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy` any
+        (\t -> "/7" `T.isInfixOf` t && "no such tab" `T.isInfixOf` t)
 
     it "runDispatcher calls runDispatcherWith with defaultTabFactory" $ do
       fch <- newFakeChannel

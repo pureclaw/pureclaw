@@ -237,15 +237,23 @@ data ForceMode
 --
 -- @TabResumeCmd@ carries the validated 'SessionId' produced by
 -- @mkSessionId@ (WU2 smart constructor).
+--
+-- /tmux-style packing update:/ @TabNewCmd@ no longer carries an
+-- explicit target index — new tabs are always allocated at the lowest
+-- free slot. The constructor's payload is therefore just the optional
+-- kind keyword and the optional argument-text remainder.
 data TabSlashCommand
-  = TabNewCmd !Int !(Maybe TabKindArg) !(Maybe Text)
-    -- ^ @\/tab new \<N\> [\<kind\> [\<arg-text\>]]@. The third field
-    --   is the remainder of the line after the kind, captured as a
-    --   single 'Text' for the handler to split further.
+  = TabNewCmd !(Maybe TabKindArg) !(Maybe Text)
+    -- ^ @\/tab new [\<kind\> [\<arg-text\>]]@. Index is allocated at
+    --   the lowest free slot by the handler (tmux-style packing). The
+    --   second field is the remainder of the line after the kind,
+    --   captured as a single 'Text' for the handler to split further.
   | TabListCmd
     -- ^ @\/tab list@ (and the @\/tabs@ alias).
   | TabCloseCmd !Int !ForceMode
-    -- ^ @\/tab close \<N\> [--force]@.
+    -- ^ @\/tab close \<N\> [--force]@. Remaining tabs are renumbered
+    --   down by one starting at @N+1@ so the registry is always packed
+    --   in the lowest slots (tmux @renumber-windows on@ model).
   | TabFocusCmd !Int
     -- ^ @\/tab focus \<N\>@ (functional alias of @\/N@).
   | TabResumeCmd !SessionId
