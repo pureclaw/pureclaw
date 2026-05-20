@@ -3,7 +3,7 @@
 -- Description : Channel-aware spawn-prompt UX (Tabbed Chat WU9, A4 \/ A6).
 --
 -- When the dispatcher needs to ask the user which 'TabKind' to spawn
--- (because '/N' or '/tab new N' was issued without a kind argument and
+-- (because '/tab new' was issued without a kind argument and
 -- '_rc_defaultKind' is unset), it emits a short prompt via the channel.
 -- Different channels render this differently:
 --
@@ -33,7 +33,7 @@
 -- channel to round-trip the index AND the payload back to the
 -- dispatcher in the subsequent user reply — for v1 we surface the
 -- index \/ payload in the prompt text so the user can re-issue
--- '/tab new N <kind> <payload>' verbatim. A v1.5+ refinement may add a
+-- '/tab new <kind> <payload>' verbatim. A v1.5+ refinement may add a
 -- proper callback-data layer; the renderer interface admits it without
 -- a breaking change.
 --
@@ -102,9 +102,13 @@ mkDefaultPromptRenderer ch
 -- The wording is:
 --
 -- @
--- Spawn /N as which kind? Reply with: /tab new N \<kind\> [\<args\>]
+-- Spawn /N as which kind? Reply with: /tab new \<kind\> [\<args\>]
 -- where \<kind\> is one of: ai, harness, shell, ssh, tmux
 -- @
+--
+-- @\/N@ in the first half is informational — it shows the user the
+-- slot the spawn will land at. The user does NOT type the index when
+-- replying (tmux packing model — see @docs\/tabbed-chat.md@).
 --
 -- When a buffered payload is present (A6), the prompt appends a
 -- secondary line so the user can re-issue the full command verbatim.
@@ -116,8 +120,8 @@ renderTextPrompt idx mPayload =
   let nTxt = tShowIdx idx
       header =
         "Spawn /" <> nTxt
-          <> " as which kind? Reply with: /tab new "
-          <> nTxt <> " <kind> [<args>] where <kind> is one of: "
+          <> " as which kind? Reply with: /tab new <kind> [<args>]"
+          <> " where <kind> is one of: "
           <> renderKindsAsText
       payloadLine = case mPayload of
         Nothing -> ""
@@ -140,7 +144,7 @@ renderInlineKeyboardPrompt idx mPayload =
       header =
         "Choose a kind for /" <> nTxt
           <> ": [ai] [harness] [shell] [ssh] [tmux] — "
-          <> "reply /tab new " <> nTxt <> " <kind>"
+          <> "reply /tab new <kind>"
       payloadLine = case mPayload of
         Nothing -> ""
         Just p  -> "\nBuffered text: " <> p

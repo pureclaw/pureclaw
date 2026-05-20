@@ -10,8 +10,13 @@
 -- * Empty registry (B1) — emits a single helper line:
 --
 --   @
---   No tabs open. Use \/N or \/tab new N \<kind\> to create one.
+--   No tabs open. Use \/tab new \<kind\> to create one.
 --   @
+--
+--   Under the tmux packing model, the user does not pick a slot — the
+--   factory allocates at the next free index. @\/N@ on a missing tab
+--   errors (no auto-spawn), so it is intentionally not advertised
+--   here as a way to create tabs.
 --
 -- * 1 ≤ N \< 8 tabs (B2) — one line per tab, each carrying
 --   @index, kind, redacted name, status, asterisk if focused@. The
@@ -67,7 +72,7 @@ bulletThreshold = 8
 -- tests so the exact wording can be pinned without re-deriving it.
 emptyDashboardText :: Text
 emptyDashboardText =
-  "No tabs open. Use /N or /tab new N <kind> to create one."
+  "No tabs open. Use /tab new <kind> to create one."
 
 
 -- | Render the tab dashboard.

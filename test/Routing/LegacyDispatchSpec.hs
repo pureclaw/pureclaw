@@ -159,6 +159,21 @@ spec = do
       ok <- sentMessageContains fch "No tabs open"
       ok `shouldBe` True
 
+    -- The empty-dashboard banner must NOT mention the obsolete
+    -- "/tab new N <kind>" syntax (tmux model — user doesn't pick a
+    -- slot) and must NOT advertise "/N" as a way to create tabs (/N
+    -- on missing tab errors; it's not a spawn shortcut).
+    it "empty-dashboard banner uses the tmux-model /tab new <kind> syntax" $ do
+      fch <- newFakeChannel
+      env <- mkTestEnvWithChannel fch
+      dispatchLegacyTabCmd env TabListCmd
+      msgs <- drainSentText fch
+      let joined = T.unwords msgs
+      -- Positive: mention the correct syntax
+      ("/tab new <kind>" `T.isInfixOf` joined) `shouldBe` True
+      -- Negative: must NOT contain stale "/tab new N" guidance
+      ("/tab new N" `T.isInfixOf` joined) `shouldBe` False
+
     it "TabListCmd with one tab lists it" $ do
       fch <- newFakeChannel
       env <- mkTestEnvWithChannel fch

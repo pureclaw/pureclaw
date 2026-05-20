@@ -756,7 +756,7 @@ enqueueOnFocused env idx cmd = do
 -- the slash command can land somewhere.
 noFocusBanner :: SlashCommand -> Text
 noFocusBanner _ =
-  "no focused tab — focus one with /N or spawn one with /tab new N"
+  "no focused tab — focus one with /N or spawn one with /tab new <kind>"
 
 -- | Wrap '_tabHandle_enqueueSlash' so any synchronous exception
 -- becomes a redacted 'TabConcurrencyLimit' rather than a dispatcher
