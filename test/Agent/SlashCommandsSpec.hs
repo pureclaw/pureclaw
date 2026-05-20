@@ -232,6 +232,48 @@ spec = do
       parseSlashCommand "/msg claude-code-0 hello world"
         `shouldBe` Just (CmdMsg "claude-code-0" "hello world")
 
+    -- ---------------------------------------------------------------
+    -- /tab* family — must be recognized by the legacy parser used by
+    -- Agent.Loop.runAgentLoop so users running the single-tab CLI see
+    -- a real handler rather than "Unrecognized slash command".
+    --
+    -- The canonical /tab* surface lives in Routing.Parse + Dispatcher,
+    -- but the legacy executor needs the parser to at least RECOGNIZE
+    -- these commands so they reach executeSlashCommand's CmdTab arm
+    -- (which is then expected to dispatch into Routing.AutoSpawn or
+    -- emit a sensible error — separate concern from parser support).
+    -- ---------------------------------------------------------------
+
+    it "parses /tabs as the list-tabs shortcut" $ do
+      parseSlashCommand "/tabs" `shouldBe` Just (CmdTab TabListCmd)
+
+    it "parses /tab list" $ do
+      parseSlashCommand "/tab list" `shouldBe` Just (CmdTab TabListCmd)
+
+    it "parses bare /tab new (force-prompt form)" $ do
+      parseSlashCommand "/tab new"
+        `shouldBe` Just (CmdTab (TabNewCmd Nothing Nothing))
+
+    it "parses /tab new shell" $ do
+      parseSlashCommand "/tab new shell"
+        `shouldBe` Just (CmdTab (TabNewCmd (Just TkaShell) Nothing))
+
+    it "parses /tab new ai" $ do
+      parseSlashCommand "/tab new ai"
+        `shouldBe` Just (CmdTab (TabNewCmd (Just TkaAi) Nothing))
+
+    it "parses /tab close 0" $ do
+      parseSlashCommand "/tab close 0"
+        `shouldBe` Just (CmdTab (TabCloseCmd 0 ForceNo))
+
+    it "parses /tab close 1 --force" $ do
+      parseSlashCommand "/tab close 1 --force"
+        `shouldBe` Just (CmdTab (TabCloseCmd 1 ForceYes))
+
+    it "parses /tab focus 2" $ do
+      parseSlashCommand "/tab focus 2"
+        `shouldBe` Just (CmdTab (TabFocusCmd 2))
+
     it "parses /msg case-insensitively for command" $ do
       parseSlashCommand "/MSG cc-1 test message"
         `shouldBe` Just (CmdMsg "cc-1" "test message")
