@@ -1651,8 +1651,13 @@ spec = do
       case sent of
         Nothing -> expectationFailure "Expected /help output"
         Just t  -> do
-          -- Every spec syntax should appear in the /help output
-          mapM_ (\s -> T.unpack t `shouldContain` T.unpack (_cs_syntax s)) allCommandSpecs
+          -- Every non-Tab spec syntax should appear in the /help
+          -- output via the auto-render. Tab specs are deliberately
+          -- excluded from the auto-render block — the hand-authored
+          -- Onboarding.helpTabSection covers them with richer context
+          -- (see CmdHelp in executeSlashCommand for why).
+          let nonTab = filter ((/= GroupTab) . _cs_group) allCommandSpecs
+          mapM_ (\s -> T.unpack t `shouldContain` T.unpack (_cs_syntax s)) nonTab
 
     it "/help output contains group headings" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)

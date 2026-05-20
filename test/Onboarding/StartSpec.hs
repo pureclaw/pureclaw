@@ -153,6 +153,32 @@ spec = describe "O-series \x2014 onboarding (WU11 wires)" $ do
         other -> expectationFailure $
           "expected exactly one /help message, got " <> show (length other)
 
+    -- The legacy parser's GroupTab specs auto-render as a "Tab:" group
+    -- via renderHelpText, BUT Onboarding.helpTabSection is a richer
+    -- hand-authored block covering the same vocabulary (plus /N grammar
+    -- and tmux-style note). /help must not display BOTH — the
+    -- auto-render block is suppressed so the hand-authored one is the
+    -- single source.
+    it "/help renders the Tab section exactly once (no duplication \
+       \between auto-render and helpTabSection)" $ do
+      sentRef <- newIORef ([] :: [Text])
+      env <- mkOnboardingEnv (recordingChannel sentRef)
+      let ctx = emptyContext Nothing
+      _ <- executeSlashCommand env CmdHelp ctx
+      sent <- readIORef sentRef
+      case sent of
+        [body] -> do
+          -- The auto-render group heading "  Tab:" must not appear —
+          -- we suppress it because helpTabSection covers the same
+          -- vocabulary with more context.
+          T.unpack body `shouldNotContain` "  Tab:\n"
+          -- The hand-authored heading "Tab commands" must appear
+          -- exactly once.
+          let occurrences = T.count "Tab commands" body
+          occurrences `shouldBe` 1
+        other -> expectationFailure $
+          "expected exactly one /help message, got " <> show (length other)
+
     it "the rendered 'Tab commands' subsection enumerates the Tabbed \
        \Chat verbs: /N, /N <payload>, /tabs, /tab new, /tab close, \
        \/tab focus, /tab resume, /tab rename" $ do

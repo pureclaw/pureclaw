@@ -935,12 +935,17 @@ harnessUnknownFallback t =
 executeSlashCommand :: AgentEnv -> SlashCommand -> Context -> IO Context
 
 executeSlashCommand env CmdHelp ctx = do
-  -- Render the full slash-command reference, then append the Tabbed
-  -- Chat \"Tab commands\" subsection from 'Onboarding.helpTabSection'
-  -- (O2). The subsection is appended (not interleaved) so the existing
-  -- group-by-group rendering remains untouched and the Tab vocabulary
-  -- appears as a discrete final block.
-  let body = renderHelpText allCommandSpecs <> "\n" <> Onboarding.helpTabSection
+  -- Render the full slash-command reference EXCEPT the Tab group, then
+  -- append the Tabbed Chat \"Tab commands\" subsection from
+  -- 'Onboarding.helpTabSection' (O2). The hand-authored helpTabSection
+  -- covers the same vocabulary as 'tabFamilyCommandSpecs' plus the @\/N@
+  -- routing grammar and the tmux-packing note — so it is the single
+  -- source of truth for Tab help. Filtering 'GroupTab' from the
+  -- auto-render keeps 'tabFamilyCommandSpecs' as the parser source of
+  -- truth (it must stay in 'allCommandSpecs' so the parser recognises
+  -- the family) without producing a duplicate help block.
+  let nonTabSpecs = filter ((/= GroupTab) . _cs_group) allCommandSpecs
+      body = renderHelpText nonTabSpecs <> "\n" <> Onboarding.helpTabSection
   _ch_send (_env_channel env) (OutgoingMessage body)
   pure ctx
 
