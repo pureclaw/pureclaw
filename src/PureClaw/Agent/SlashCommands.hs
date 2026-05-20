@@ -36,6 +36,7 @@ module PureClaw.Agent.SlashCommands
 import Control.Applicative ((<|>))
 import Control.Exception
 import Control.Monad
+import Data.Char qualified as Char
 import Data.Foldable (asum)
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -99,6 +100,7 @@ data CommandGroup
   | GroupHarness    -- ^ Harness management (tmux-based AI CLI tools)
   | GroupAgent      -- ^ Agent management (bootstrap file collections)
   | GroupMcp        -- ^ MCP server management
+  | GroupTab        -- ^ Tabbed Chat (/tab*, /tabs)
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 -- | Human-readable section heading for '/help' output.
@@ -111,6 +113,7 @@ groupHeading GroupTranscript = "Transcript"
 groupHeading GroupHarness    = "Harness"
 groupHeading GroupAgent      = "Agent"
 groupHeading GroupMcp        = "MCP"
+groupHeading GroupTab        = "Tab"
 
 -- | Specification for a single slash command.
 -- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
@@ -302,7 +305,32 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ mcpCommandSpecs ++ msgCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ mcpCommandSpecs ++ msgCommandSpecs ++ tabFamilyCommandSpecs
+
+-- | The @\/tab@ command family + @\/tabs@ alias (Tabbed Chat #51).
+--
+-- These specs let the LEGACY parser ('parseSlashCommand') recognise
+-- the tab vocabulary so that a user running
+-- 'PureClaw.Agent.Loop.runAgentLoop' (the single-tab CLI loop) sees
+-- a real handler rather than \"Unrecognized slash command\". The
+-- handlers themselves live in 'PureClaw.Routing.AutoSpawn'; the
+-- 'CmdTab' arm of 'executeSlashCommand' dispatches to them.
+--
+-- The canonical parser used by 'PureClaw.Routing.Dispatcher' is
+-- 'PureClaw.Routing.Parse.parseInput'; this list parallels that
+-- parser's @\/tab*@ shapes but is intentionally separate so
+-- @Agent.SlashCommands@ doesn't depend on @Routing.Parse@ (import
+-- cycle).
+tabFamilyCommandSpecs :: [CommandSpec]
+tabFamilyCommandSpecs =
+  [ CommandSpec "/tabs"                              "List all tabs (alias of /tab list)"          GroupTab (exactP "/tabs" (CmdTab TabListCmd))
+  , CommandSpec "/tab list"                          "List all tabs"                               GroupTab (exactP "/tab list" (CmdTab TabListCmd))
+  , CommandSpec "/tab new [<kind>]"                  "Open a new tab at the next free slot"        GroupTab tabNewP
+  , CommandSpec "/tab close <N> [--force]"           "Close tab N (--force skips archive on AI)"    GroupTab tabCloseP
+  , CommandSpec "/tab focus <N>"                     "Switch focus to tab N (alias of /N)"          GroupTab tabFocusP
+  , CommandSpec "/tab resume <id>"                   "Resume a session into a new tab"             GroupTab tabResumeP
+  , CommandSpec "/tab rename <N> <name>"             "Rename tab N (subject to sanitization)"      GroupTab tabRenameP
+  ]
 
 sessionCommandSpecs :: [CommandSpec]
 sessionCommandSpecs =
@@ -574,6 +602,139 @@ parseSlashCommand input =
 -- | Exact case-insensitive match.
 exactP :: Text -> SlashCommand -> Text -> Maybe SlashCommand
 exactP keyword cmd t = if T.toLower t == keyword then Just cmd else Nothing
+
+-- ---------------------------------------------------------------------------
+-- /tab* parser helpers (Tabbed Chat #51)
+-- ---------------------------------------------------------------------------
+
+-- | Parse @\/tab new [<kind> [<arg-text>]]@.
+--
+-- Grammar:
+--   /tab new                         -> TabNewCmd Nothing Nothing
+--   /tab new <kind>                  -> TabNewCmd (Just k) Nothing
+--   /tab new <kind> <rest>           -> TabNewCmd (Just k) (Just rest)
+--
+-- Kind keywords: ai, harness, shell, ssh, tmux (case-insensitive).
+-- An unknown kind word is malformed (returns Nothing); a missing kind
+-- is the force-prompt form (Right (Nothing, Nothing)).
+tabNewP :: Text -> Maybe SlashCommand
+tabNewP t =
+  let pfx   = "/tab new"
+      lower = T.toLower t
+  in if lower == pfx
+     then Just (CmdTab (TabNewCmd Nothing Nothing))
+     else if (pfx <> " ") `T.isPrefixOf` lower
+          then case T.words (T.strip (T.drop (T.length pfx) t)) of
+                 []      -> Just (CmdTab (TabNewCmd Nothing Nothing))
+                 (k:ws)  -> case parseTabKindArg k of
+                   Nothing -> Nothing  -- unknown kind keyword
+                   Just kind ->
+                     let argText = case ws of
+                           [] -> Nothing
+                           _  -> Just (T.unwords ws)
+                     in Just (CmdTab (TabNewCmd (Just kind) argText))
+          else Nothing
+
+-- | Parse @\/tab close <N> [--force]@. @N@ is a non-negative decimal.
+tabCloseP :: Text -> Maybe SlashCommand
+tabCloseP t =
+  let pfx   = "/tab close"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then case T.words (T.strip (T.drop (T.length pfx) t)) of
+            [nTxt]              -> mkClose nTxt ForceNo
+            [nTxt, flagTxt]
+              | T.toLower flagTxt == "--force"
+                -> mkClose nTxt ForceYes
+            _                   -> Nothing
+     else Nothing
+  where
+    mkClose nTxt force = do
+      n <- parseDecimalNonNegative nTxt
+      pure (CmdTab (TabCloseCmd n force))
+
+-- | Parse @\/tab focus <N>@.
+tabFocusP :: Text -> Maybe SlashCommand
+tabFocusP t =
+  let pfx   = "/tab focus"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then case T.words (T.strip (T.drop (T.length pfx) t)) of
+            [nTxt] -> do
+              n <- parseDecimalNonNegative nTxt
+              pure (CmdTab (TabFocusCmd n))
+            _      -> Nothing
+     else Nothing
+
+-- | Parse @\/tab resume <id>@. Mirrors the S3 invariants in
+-- 'PureClaw.Routing.Parse.mkSessionId' (rejects @\/@, @\\@, @..@, NUL,
+-- and any character outside @[a-zA-Z0-9_-]@). Inlined here rather than
+-- imported to avoid a cycle with @Routing.Parse@; the handler
+-- revalidates before use.
+tabResumeP :: Text -> Maybe SlashCommand
+tabResumeP t =
+  let pfx   = "/tab resume"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then case T.words (T.strip (T.drop (T.length pfx) t)) of
+            [sid] | isValidSessionId sid
+              -> Just (CmdTab (TabResumeCmd (SessionId sid)))
+            _ -> Nothing
+     else Nothing
+
+-- | True iff @t@ satisfies the S3 / P15a session-id invariants:
+-- non-empty, no path-traversal markers, all characters in
+-- @[a-zA-Z0-9_-]@.
+isValidSessionId :: Text -> Bool
+isValidSessionId t =
+  not (T.null t)
+    && not ("." `T.isPrefixOf` t)
+    && not (".." `T.isInfixOf` t)
+    && T.all isSessionIdChar t
+  where
+    isSessionIdChar c =
+      Char.isAsciiLower c
+        || Char.isAsciiUpper c
+        || Char.isDigit c
+        || c == '_'
+        || c == '-'
+
+-- | Parse @\/tab rename <N> <name>@. The name captures the remainder
+-- verbatim; 'PureClaw.Routing.Parse.sanitizeTabName' runs at handler
+-- time per S10.
+tabRenameP :: Text -> Maybe SlashCommand
+tabRenameP t =
+  let pfx   = "/tab rename"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then case T.words (T.strip (T.drop (T.length pfx) t)) of
+            (nTxt:nameWords) | not (null nameWords) -> do
+              n <- parseDecimalNonNegative nTxt
+              pure (CmdTab (TabRenameCmd n (T.unwords nameWords)))
+            _ -> Nothing
+     else Nothing
+
+-- | Map a kind keyword to its 'TabKindArg' enum value.
+parseTabKindArg :: Text -> Maybe TabKindArg
+parseTabKindArg w = case T.toLower w of
+  "ai"      -> Just TkaAi
+  "harness" -> Just TkaHarness
+  "shell"   -> Just TkaShell
+  "ssh"     -> Just TkaSsh
+  "tmux"    -> Just TkaTmux
+  _         -> Nothing
+
+-- | Parse a decimal non-negative 'Int'. Rejects empty input, leading
+-- whitespace (caller pre-strips), signs, and any non-digit characters.
+parseDecimalNonNegative :: Text -> Maybe Int
+parseDecimalNonNegative t
+  | T.null t                     = Nothing
+  | T.any (not . Char.isDigit) t = Nothing
+  | otherwise                    = case T.foldl' step 0 t of
+      n | n >= 0 -> Just n
+      _          -> Nothing
+  where
+    step acc c = acc * 10 + (fromEnum c - fromEnum '0')
 
 -- | Case-insensitive match for "/vault <sub>" with no argument.
 vaultExactP :: Text -> VaultSubCommand -> Text -> Maybe SlashCommand
