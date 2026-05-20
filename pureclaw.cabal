@@ -71,6 +71,7 @@ library
     PureClaw.Routing.Config
     PureClaw.Routing.ChannelOut
     PureClaw.Routing.Dispatcher
+    PureClaw.Routing.LegacyDispatch
     PureClaw.Routing.AutoSpawn
     PureClaw.Routing.Dashboard
     PureClaw.Routing.PromptRenderer
@@ -328,6 +329,7 @@ test-suite pureclaw-test
     Routing.DispatcherSpec
     Routing.ChannelOutSpec
     Routing.AutoSpawnSpec
+    Routing.LegacyDispatchSpec
     Tab.AiSpec
     Tab.HarnessSpec
     Tab.BackendSpec

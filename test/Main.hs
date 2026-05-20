@@ -101,6 +101,7 @@ import qualified Routing.ConfigSpec
 import qualified Routing.DispatcherSpec
 import qualified Routing.ChannelOutSpec
 import qualified Routing.AutoSpawnSpec
+import qualified Routing.LegacyDispatchSpec
 import qualified Tab.AiSpec
 import qualified Tab.HarnessSpec
 import qualified Tab.BackendSpec
@@ -208,6 +209,7 @@ main = hspec $ do
   describe "Routing.Dispatcher"   Routing.DispatcherSpec.spec
   describe "Routing.ChannelOut"   Routing.ChannelOutSpec.spec
   describe "Routing.AutoSpawn"    Routing.AutoSpawnSpec.spec
+  describe "Routing.LegacyDispatch" Routing.LegacyDispatchSpec.spec
   describe "Tab.Ai"               Tab.AiSpec.spec
   describe "Tab.Harness"          Tab.HarnessSpec.spec
   describe "Tab.Backend"          Tab.BackendSpec.spec

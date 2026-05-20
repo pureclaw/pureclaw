@@ -27,6 +27,7 @@ import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.MCP (mcpRegistry)
 import PureClaw.Providers.Class
+import PureClaw.Routing.LegacyDispatch (dispatchLegacyTabCmd)
 import PureClaw.Tools.Registry
 import PureClaw.Transcript.Provider
 
@@ -100,6 +101,16 @@ runAgentLoopWith env initialMessages = do
           -- error response rather than silently routing to the LLM.
           | "/" `T.isPrefixOf` stripped ->
               case parseSlashCommand stripped of
+                Just (CmdTab tabCmd) -> do
+                  -- Tab commands need callbacks (SpawnIO, PromptRenderer,
+                  -- BannerEmit, etc.) that 'executeSlashCommand' can't wire
+                  -- without a dependency cycle. Dispatch via the legacy
+                  -- bridge instead. The bridge invokes the canonical
+                  -- 'Routing.AutoSpawn' handlers so /tab* commands behave
+                  -- the same way they would under the new dispatcher.
+                  _lh_logInfo logger $ "Slash command (tab): " <> stripped
+                  dispatchLegacyTabCmd env tabCmd
+                  go ctx
                 Just cmd -> do
                   _lh_logInfo logger $ "Slash command: " <> stripped
                   ctx' <- executeSlashCommand env cmd ctx
