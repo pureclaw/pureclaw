@@ -104,13 +104,13 @@ function SessionRow({
     <div className={rowClasses} onClick={onSelect}>
       <div className="flex items-center gap-2">
         <span
-          className="text-sm truncate"
+          className="text-sm truncate mr-auto"
           style={{ color: 'var(--text-muted)', letterSpacing: 'var(--tracking-tight)' }}
         >
           {displayName}
         </span>
-        <span className="pill token-count ml-auto">{age}</span>
         <ArchiveButton onArchive={() => onArchive(session.id)} />
+        <span className="pill token-count">{age}</span>
       </div>
       {session.model && (
         <div

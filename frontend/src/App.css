@@ -304,7 +304,9 @@ body {
 /* ── Sidebar session archive button ───────────────────────────────────── */
 
 .session-archive {
-  display: inline-flex;
+  /* Hidden by default so the pill stays flush right. Switched to
+   * inline-flex on row hover / button focus. */
+  display: none;
   align-items: center;
   justify-content: center;
   width: 18px;
@@ -315,15 +317,15 @@ body {
   border: none;
   color: var(--text-faint);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--duration-fast) ease,
-              background var(--duration-fast) ease,
+  transition: background var(--duration-fast) ease,
               color var(--duration-fast) ease;
   flex-shrink: 0;
 }
-.session-row:hover .session-archive { opacity: 1; }
+.session-row:hover .session-archive,
 .session-archive:focus-visible {
-  opacity: 1;
+  display: inline-flex;
+}
+.session-archive:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 4px rgba(124, 108, 246, 0.4);
 }
