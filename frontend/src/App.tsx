@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt } from './hooks/useApi'
+import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt, setSessionArchived } from './hooks/useApi'
 import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -319,11 +319,38 @@ function modelContextWindow(model: string | null): number {
 
 export default function App() {
   const { harnesses } = useHarnesses()
-  const { sessions } = useRecentSessions()
+  const { sessions: rawSessions } = useRecentSessions()
   const { agents } = useAgents()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const [customPromptFile, setCustomPromptFile] = useState<{ name: string; content: string } | null>(null)
+
+  // Optimistic strip — when the user archives a session, hide it from the
+  // sidebar immediately rather than waiting for the next 3s poll. Server-side
+  // filtering will catch up; the set just accumulates a few session ids in
+  // the meantime, which is fine.
+  const [archivedOptimistically, setArchivedOptimistically] = useState<Set<string>>(() => new Set())
+  const sessions = useMemo(
+    () => rawSessions.filter((s) => !archivedOptimistically.has(s.id)),
+    [rawSessions, archivedOptimistically],
+  )
+
+  const handleArchiveSession = useCallback(async (id: string) => {
+    setArchivedOptimistically((s) => {
+      const next = new Set(s)
+      next.add(id)
+      return next
+    })
+    const ok = await setSessionArchived(id, true)
+    if (!ok) {
+      // Backend rejected — restore the row so the user can see and retry.
+      setArchivedOptimistically((s) => {
+        const next = new Set(s)
+        next.delete(id)
+        return next
+      })
+    }
+  }, [])
 
   // Initialize selectedAgent from default agent once agents load
   useEffect(() => {
@@ -427,6 +454,7 @@ export default function App() {
           sessions={sessions}
           selectedId={selectedId}
           onSelect={handleSelect}
+          onArchiveSession={handleArchiveSession}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}

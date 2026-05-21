@@ -124,6 +124,7 @@ spec = do
           , _sm_createdAt         = t0
           , _sm_lastActive        = t1
           , _sm_bootstrapConsumed = False
+          , _sm_archived          = False
           }
 
     it "round-trips a fully-populated SessionMeta" $

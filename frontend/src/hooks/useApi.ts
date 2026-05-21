@@ -117,6 +117,20 @@ export function useSendMessage(sessionId: string | null, onComplete: () => void)
   return { send, sending }
 }
 
+/** Set the archive flag on a session. Pure UI hint — the session
+ *  directory and transcript stay on disk. */
+export async function setSessionArchived(sessionId: string, archived: boolean): Promise<boolean> {
+  try {
+    const path = archived ? 'archive' : 'unarchive'
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${path}`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 export async function setSessionPrompt(sessionId: string, prompt: string, name?: string): Promise<boolean> {
   try {
     const body: Record<string, string> = { prompt }

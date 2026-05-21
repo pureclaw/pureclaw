@@ -393,6 +393,7 @@ spec = do
               , _sm_createdAt         = t0
               , _sm_lastActive        = t0
               , _sm_bootstrapConsumed = False
+              , _sm_archived          = False
               }
             mkTxEntry eid dir payload = TranscriptEntry
               { _te_id            = eid
@@ -452,6 +453,7 @@ spec = do
               , _sm_createdAt         = t0
               , _sm_lastActive        = t0
               , _sm_bootstrapConsumed = False
+              , _sm_archived          = False
               }
         createDirectoryIfMissing True sessionsDir
         sh <- mkSessionHandle mkNoOpLogHandle sessionsDir meta

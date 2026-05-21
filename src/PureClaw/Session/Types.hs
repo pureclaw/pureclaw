@@ -16,7 +16,7 @@ module PureClaw.Session.Types
   , SessionMeta (..)
   ) where
 
-import Data.Aeson ((.=), (.:), (.:?))
+import Data.Aeson ((.=), (.:), (.:?), (.!=))
 import Data.Aeson qualified as Aeson
 import Data.Char qualified as Char
 import Data.Text (Text)
@@ -139,6 +139,11 @@ data SessionMeta = SessionMeta
   , _sm_createdAt         :: UTCTime
   , _sm_lastActive        :: UTCTime
   , _sm_bootstrapConsumed :: Bool
+  , _sm_archived          :: Bool
+    -- ^ User-controllable flag that suppresses this session from
+    -- prominent UI surfaces (e.g. the "Recent Sessions" sidebar).
+    -- Pure display state — archiving NEVER removes the session
+    -- directory or transcript from disk. Defaults to 'False'.
   } deriving stock (Show, Eq, Generic)
 
 -- Hand-written JSON so we don't depend on a 'ToJSON' instance for
@@ -155,6 +160,7 @@ instance Aeson.ToJSON SessionMeta where
     , "created_at"         .= _sm_createdAt s
     , "last_active"        .= _sm_lastActive s
     , "bootstrap_consumed" .= _sm_bootstrapConsumed s
+    , "archived"           .= _sm_archived s
     ] <> case _sm_agent s of
       Just n  -> ["agent" .= unAgentName n]
       Nothing -> []
@@ -169,3 +175,6 @@ instance Aeson.FromJSON SessionMeta where
     <*> o .:  "created_at"
     <*> o .:  "last_active"
     <*> o .:  "bootstrap_consumed"
+    -- archived: backward-compat default for session.json files
+    -- written before this field existed.
+    <*> o .:? "archived" .!= False

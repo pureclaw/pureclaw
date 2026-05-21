@@ -60,17 +60,40 @@ function HarnessRow({
   )
 }
 
+function ArchiveButton({ onArchive }: { onArchive: () => void }) {
+  return (
+    <button
+      className="session-archive"
+      title="Archive (hide from Recent Sessions; transcript stays on disk)"
+      aria-label="Archive session"
+      onClick={(e) => { e.stopPropagation(); onArchive() }}
+    >
+      <svg
+        width="11" height="11" viewBox="0 0 16 16" fill="none"
+        stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="2" y="3" width="12" height="3" rx="0.5" />
+        <path d="M3 6 v6 a1 1 0 0 0 1 1 h8 a1 1 0 0 0 1 -1 v-6" />
+        <path d="M6.5 9 h3" />
+      </svg>
+    </button>
+  )
+}
+
 function SessionRow({
   session,
   selected,
   onSelect,
+  onArchive,
 }: {
   session: SessionInfo
   selected: boolean
   onSelect: () => void
+  onArchive: (id: string) => void
 }) {
   const rowClasses = [
-    'agent-row px-3 py-2',
+    'agent-row session-row px-3 py-2',
     selected ? 'selected' : '',
   ].filter(Boolean).join(' ')
 
@@ -81,12 +104,13 @@ function SessionRow({
     <div className={rowClasses} onClick={onSelect}>
       <div className="flex items-center gap-2">
         <span
-          className="text-sm"
+          className="text-sm truncate"
           style={{ color: 'var(--text-muted)', letterSpacing: 'var(--tracking-tight)' }}
         >
           {displayName}
         </span>
         <span className="pill token-count ml-auto">{age}</span>
+        <ArchiveButton onArchive={() => onArchive(session.id)} />
       </div>
       {session.model && (
         <div
@@ -122,11 +146,13 @@ export function Sidebar({
   sessions,
   selectedId,
   onSelect,
+  onArchiveSession,
 }: {
   harnesses: HarnessInfo[]
   sessions: SessionInfo[]
   selectedId: string | null
   onSelect: (type: 'harness' | 'session', id: string) => void
+  onArchiveSession: (id: string) => void
 }) {
   return (
     <div
@@ -156,6 +182,7 @@ export function Sidebar({
                 session={s}
                 selected={selectedId === `session:${s.id}`}
                 onSelect={() => onSelect('session', s.id)}
+                onArchive={onArchiveSession}
               />
             ))}
           </>

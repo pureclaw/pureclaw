@@ -2283,6 +2283,7 @@ executeSessionCommand env sub ctx = do
                 , SessionTypes._sm_createdAt         = now
                 , SessionTypes._sm_lastActive        = now
                 , SessionTypes._sm_bootstrapConsumed = False
+                , SessionTypes._sm_archived          = False
                 }
           newHandle <- Session.mkSessionHandle (_env_logger envS) sessionsDir meta
           writeIORef (_env_session envS) newHandle

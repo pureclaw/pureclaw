@@ -16,6 +16,7 @@ import Data.Time
   )
 import System.Directory
   ( createDirectoryIfMissing
+  , doesDirectoryExist
   , doesFileExist
   )
 import System.FilePath ((</>))
@@ -40,6 +41,7 @@ import PureClaw.Session.Handle
   , ResolvedRuntime (..)
   , ResumeError (..)
   , SessionHandle (..)
+  , SetArchivedError (..)
   , listSessions
   , loadRecentMessages
   , markBootstrapConsumed
@@ -48,6 +50,7 @@ import PureClaw.Session.Handle
   , resolveResumedTarget
   , resolveSessionRef
   , resumeSession
+  , setArchived
   , validateRuntime
   )
 import PureClaw.Providers.Class
@@ -83,6 +86,7 @@ mkMeta sid t = SessionMeta
   , _sm_createdAt         = t
   , _sm_lastActive        = t
   , _sm_bootstrapConsumed = False
+  , _sm_archived          = False
   }
 
 -- Convenience: get the low 9 perm bits of a path.
@@ -320,6 +324,42 @@ spec = do
       loaded <- readIORef (_sh_meta sh')
       _sm_bootstrapConsumed loaded `shouldBe` True
       _th_close (_sh_transcript sh')
+
+  describe "setArchived" $ do
+    it "writes the archive flag back to session.json without touching anything else" $ withTmp $ \base -> do
+      let meta = mkMeta "arch-1" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      result <- setArchived base (parseSessionId "arch-1") True
+      result `shouldBe` Right ()
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "arch-1" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_archived onDisk `shouldBe` True
+      -- Bootstrap state and other fields must be untouched.
+      _sm_bootstrapConsumed onDisk `shouldBe` _sm_bootstrapConsumed meta
+      _sm_id onDisk `shouldBe` _sm_id meta
+
+    it "is reversible — archive then unarchive restores the flag" $ withTmp $ \base -> do
+      let meta = mkMeta "arch-2" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setArchived base (parseSessionId "arch-2") True
+      _ <- setArchived base (parseSessionId "arch-2") False
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "arch-2" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_archived onDisk `shouldBe` False
+
+    it "leaves the transcript and session directory in place after archive" $ withTmp $ \base -> do
+      let meta = mkMeta "arch-3" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setArchived base (parseSessionId "arch-3") True
+      doesDirectoryExist (base </> "arch-3") `shouldReturn` True
+      doesFileExist (base </> "arch-3" </> "session.json") `shouldReturn` True
+
+    it "returns SetArchivedSessionMissing for an unknown session" $ withTmp $ \base -> do
+      result <- setArchived base (parseSessionId "nope-1") True
+      result `shouldBe` Left SetArchivedSessionMissing
 
   describe "loadRecentMessages" $ do
     it "returns all messages when fewer than maxCount exist" $ withTmp $ \base -> do

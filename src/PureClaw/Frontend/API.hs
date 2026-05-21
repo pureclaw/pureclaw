@@ -31,13 +31,20 @@ import System.FilePath ((</>), takeDirectory)
 
 import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
 import PureClaw.Agent.Context
-import PureClaw.Core.Types (ModelId (..), unModelId, unSessionId)
+import PureClaw.Core.Types (ModelId (..), SessionId (..), unModelId, unSessionId)
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
-import PureClaw.Session.Handle (SessionHandle (..), listSessions, loadRecentMessages, mkSessionHandle)
+import PureClaw.Session.Handle
+  ( SessionHandle (..)
+  , SetArchivedError (..)
+  , listSessions
+  , loadRecentMessages
+  , mkSessionHandle
+  , setArchived
+  )
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
 import PureClaw.Transcript.Provider
@@ -140,6 +147,10 @@ apiApp env req respond = do
       handleSend env sid req respond
     ("PUT", ["api", "sessions", sid, "prompt"]) ->
       handleSetPrompt env sid req respond
+    ("POST", ["api", "sessions", sid, "archive"]) ->
+      handleSetArchived env sid True respond
+    ("POST", ["api", "sessions", sid, "unarchive"]) ->
+      handleSetArchived env sid False respond
     ("GET", ["api", "agents"])               -> handleAgents env respond
     _                                        -> respondNotFound respond
 
@@ -183,10 +194,39 @@ extractWindowIdx name =
 
 handleRecentSessions :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleRecentSessions env respond = do
-  metas <- listSessions (_fe_sessionsDir env) Nothing (_fe_recentLimit env)
-  nonEmpty <- filterM (hasTranscriptEntries (_fe_sessionsDir env)) metas
-  let infos = map toSessionInfo nonEmpty
+  let limit = _fe_recentLimit env
+  -- Over-fetch so the empty-transcript filter below can't shrink the
+  -- visible count: listSessions already does a full directory scan and
+  -- sorts the whole metadata set, so a generous bound is essentially
+  -- free. Empty / archived sessions are dropped here, not erased on
+  -- disk — archiving is purely a UI hint controlled by the user.
+  metas    <- listSessions (_fe_sessionsDir env) Nothing (limit * 3)
+  let visible = filter (not . _sm_archived) metas
+  nonEmpty <- filterM (hasTranscriptEntries (_fe_sessionsDir env)) visible
+  let infos = map toSessionInfo (take limit nonEmpty)
   respond $ jsonResponse status200 infos
+
+-- | Toggle the archive flag on a session. The 'archived' argument is
+-- the **target** value (True for /archive, False for /unarchive), so
+-- the routes are idempotent: archiving an already-archived session is
+-- a no-op success. The session directory and transcript are never
+-- removed — see Session.Handle.setArchived for the disk-side contract.
+handleSetArchived
+  :: FrontendEnv
+  -> Text
+  -> Bool
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+handleSetArchived env sidText archived respond = do
+  let sid = SessionId sidText
+  result <- setArchived (_fe_sessionsDir env) sid archived
+  case result of
+    Right () ->
+      respond $ jsonResponse status200 (object ["archived" .= archived])
+    Left SetArchivedSessionMissing ->
+      respondNotFound respond
+    Left (SetArchivedParseFailed msg) ->
+      respond $ jsonResponse status500 (object ["error" .= msg])
 
 -- | Check whether a session has at least one transcript entry.
 hasTranscriptEntries :: FilePath -> SessionMeta -> IO Bool
@@ -319,6 +359,7 @@ handleNewSession env req respond = do
         , _sm_createdAt         = now
         , _sm_lastActive        = now
         , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
         }
   sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
   -- Write custom prompt file if provided

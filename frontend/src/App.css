@@ -270,3 +270,35 @@ body {
 }
 
 .anchor-handle svg { display: block; }
+
+/* ── Sidebar session archive button ───────────────────────────────────── */
+
+.session-archive {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast) ease,
+              background var(--duration-fast) ease,
+              color var(--duration-fast) ease;
+  flex-shrink: 0;
+}
+.session-row:hover .session-archive { opacity: 1; }
+.session-archive:focus-visible {
+  opacity: 1;
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 4px rgba(124, 108, 246, 0.4);
+}
+.session-archive:hover {
+  background: var(--bg-elevated);
+  color: var(--accent-primary);
+}
+.session-archive svg { display: block; }

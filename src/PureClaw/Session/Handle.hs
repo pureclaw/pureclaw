@@ -18,6 +18,9 @@ module PureClaw.Session.Handle
   , resolveResumedTarget
     -- * Bootstrap consumption
   , markBootstrapConsumed
+    -- * Archive flag (disk-only)
+  , setArchived
+  , SetArchivedError (..)
     -- * Resume context reload
   , loadRecentMessages
   ) where
@@ -216,6 +219,7 @@ noOpMeta = SessionMeta
   , _sm_createdAt         = epoch
   , _sm_lastActive        = epoch
   , _sm_bootstrapConsumed = False
+  , _sm_archived          = False
   }
   where
     epoch = UTCTime (fromGregorian 1970 1 1) (secondsToDiffTime 0)
@@ -395,6 +399,48 @@ markBootstrapConsumed sh = do
   atomicModifyIORef' (_sh_meta sh) $ \m ->
     (m { _sm_bootstrapConsumed = True }, ())
   _sh_save sh
+
+-- ----------------------------------------------------------------------------
+-- Archive flag
+-- ----------------------------------------------------------------------------
+
+-- | Reasons 'setArchived' may fail. The session directory and transcript
+-- are never touched, so failure leaves on-disk state unchanged.
+data SetArchivedError
+  = SetArchivedSessionMissing
+    -- ^ @\<baseDir\>/\<sid\>/session.json@ does not exist.
+  | SetArchivedParseFailed Text
+    -- ^ session.json was unreadable or did not decode as 'SessionMeta'.
+  deriving stock (Show, Eq)
+
+-- | Toggle 'SessionMeta._sm_archived' for a session that may or may not
+-- have a live 'SessionHandle'. Operates directly on the on-disk
+-- @session.json@: reads, updates the archive flag, writes back via the
+-- usual tmp-file + rename atomicity pattern.
+--
+-- Crucially, this is **display state only** — neither the session
+-- directory nor the transcript is removed. Unarchiving restores the
+-- session to "Recent Sessions" with all history intact.
+setArchived :: FilePath -> SessionId -> Bool -> IO (Either SetArchivedError ())
+setArchived baseDir sid archived = do
+  let dir    = baseDir </> T.unpack (unSessionId sid)
+      finalP = dir </> "session.json"
+      tmpP   = finalP <> ".tmp"
+  exists <- doesFileExist finalP
+  if not exists
+    then pure (Left SetArchivedSessionMissing)
+    else do
+      eBytes <- try (LBS.readFile finalP) :: IO (Either IOException LBS.ByteString)
+      case eBytes of
+        Left e  -> pure (Left (SetArchivedParseFailed (T.pack (show e))))
+        Right raw -> case Aeson.eitherDecode' raw of
+          Left  err  -> pure (Left (SetArchivedParseFailed (T.pack err)))
+          Right meta -> do
+            let updated = meta { _sm_archived = archived }
+            LBS.writeFile tmpP (Aeson.encode updated)
+            setFileMode tmpP 0o600
+            renameFile tmpP finalP
+            pure (Right ())
 
 -- ----------------------------------------------------------------------------
 -- Resume context reload

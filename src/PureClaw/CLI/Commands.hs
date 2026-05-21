@@ -565,6 +565,7 @@ runChat opts = do
                   , SessionTypes._sm_createdAt         = now
                   , SessionTypes._sm_lastActive        = now
                   , SessionTypes._sm_bootstrapConsumed = False
+                  , SessionTypes._sm_archived          = False
                   }
             mkSessionHandle logger sessionsDir initialMeta
         -- Log the active session ID so tests and humans can find it.
@@ -653,7 +654,7 @@ runChat opts = do
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_sessionsDir  = sessionsDir
-              , _fe_recentLimit  = 20
+              , _fe_recentLimit  = 50
               , _fe_provider     = providerRef
               , _fe_model        = modelRef
               , _fe_systemPrompt = sysPrompt
