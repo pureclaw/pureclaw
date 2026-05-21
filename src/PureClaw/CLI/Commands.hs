@@ -753,6 +753,7 @@ buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle ->
 buildRegistry policy sh workspace fh mh nh ch =
   let reg = uncurry registerTool
   in reg (shellTool policy sh)
+   $ reg (execTool policy sh)
    $ reg (fileReadTool workspace fh)
    $ reg (fileWriteTool workspace fh)
    $ reg (editTool workspace fh)
