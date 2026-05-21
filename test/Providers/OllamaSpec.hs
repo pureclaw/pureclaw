@@ -4,6 +4,7 @@ import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Data.Either (isLeft)
+import Data.IORef
 import Test.Hspec
 
 import PureClaw.Core.Types
@@ -79,6 +80,52 @@ spec = do
 
     it "returns error on invalid JSON" $ do
       decodeResponse "not json" `shouldSatisfy` isLeft
+
+  describe "freshenToolUseIds" $ do
+    it "assigns a unique id to every ToolUseBlock, even within one response" $ do
+      counter <- newIORef 0
+      let resp = CompletionResponse
+            { _crsp_content =
+                [ TextBlock "ok"
+                , ToolUseBlock (ToolCallId "ollama-shell") "shell" (object ["command" .= ("ls" :: String)])
+                , ToolUseBlock (ToolCallId "ollama-shell") "shell" (object ["command" .= ("pwd" :: String)])
+                ]
+            , _crsp_model   = ModelId "gemma4:26b"
+            , _crsp_usage   = Nothing
+            }
+      out <- freshenToolUseIds counter resp
+      let ids = [unToolCallId i | ToolUseBlock i _ _ <- _crsp_content out]
+      case ids of
+        [a, b] -> a `shouldNotBe` b
+        _      -> expectationFailure ("expected exactly two ids, got " ++ show ids)
+
+    it "keeps non-tool-use blocks unchanged" $ do
+      counter <- newIORef 0
+      let resp = CompletionResponse
+            { _crsp_content = [TextBlock "hello"]
+            , _crsp_model   = ModelId "gemma4:26b"
+            , _crsp_usage   = Nothing
+            }
+      out <- freshenToolUseIds counter resp
+      _crsp_content out `shouldBe` [TextBlock "hello"]
+
+    it "draws ids monotonically across successive responses (no cross-call collision)" $ do
+      counter <- newIORef 0
+      let oneCall = CompletionResponse
+            { _crsp_content =
+                [ ToolUseBlock (ToolCallId "ollama-shell") "shell" Null
+                ]
+            , _crsp_model   = ModelId "gemma4:26b"
+            , _crsp_usage   = Nothing
+            }
+      r1 <- freshenToolUseIds counter oneCall
+      r2 <- freshenToolUseIds counter oneCall
+      let idOf r = case [unToolCallId i | ToolUseBlock i _ _ <- _crsp_content r] of
+            (x:_) -> Just x
+            []    -> Nothing
+      case (idOf r1, idOf r2) of
+        (Just a, Just b) -> a `shouldNotBe` b
+        _                -> expectationFailure "expected one tool-use block per response"
 
   describe "parseModelNames" $ do
     it "parses models from Ollama /api/tags response" $ do

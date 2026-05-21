@@ -833,8 +833,9 @@ resolveProvider OpenAI keyOpt vaultOpt manager = do
 resolveProvider OpenRouter keyOpt vaultOpt manager = do
   mApiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
   pure (fmap (MkProvider . mkOpenRouterProvider manager) mApiKey)
-resolveProvider Ollama _ _ manager =
-  pure (Just (MkProvider (mkOllamaProvider manager)))
+resolveProvider Ollama _ _ manager = do
+  provider <- mkOllamaProvider manager
+  pure (Just (MkProvider provider))
 
 -- | Vault key used to cache OAuth tokens between sessions.
 oauthVaultKey :: T.Text

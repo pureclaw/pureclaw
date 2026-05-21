@@ -1436,9 +1436,9 @@ handleOllamaConfigure env _vault ctx = do
       writeFileConfig configPath updated
       -- Hot-swap provider and model in the running session
       manager <- HTTP.newTlsManager
-      let ollamaProvider = if baseUrl == "http://localhost:11434"
-            then mkOllamaProvider manager
-            else mkOllamaProviderWithUrl manager (T.unpack baseUrl)
+      ollamaProvider <- if baseUrl == "http://localhost:11434"
+        then mkOllamaProvider manager
+        else mkOllamaProviderWithUrl manager (T.unpack baseUrl)
       writeIORef (_env_provider env) (Just (MkProvider ollamaProvider))
       writeIORef (_env_model env) (Just (ModelId model))
       send $ "Ollama configured successfully. Model: " <> model <> ", URL: " <> baseUrl
