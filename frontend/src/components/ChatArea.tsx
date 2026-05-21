@@ -163,6 +163,44 @@ function toolCallSummary(input: unknown): string {
   return JSON.stringify(obj)
 }
 
+const RESULT_PREVIEW_LINES = 4
+
+/** Renders a tool-call result. Short results (≤ RESULT_PREVIEW_LINES) inline.
+ *  Long results show the first few lines with a "Show all N lines" toggle so
+ *  giant directory listings or stdout dumps don't dominate the transcript. */
+function ResultPreview({ text, isError }: { text: string; isError?: boolean }) {
+  const [expanded, setExpanded] = useState(false)
+  const lines = text.split('\n')
+  const isLong = lines.length > RESULT_PREVIEW_LINES
+  const visible = !isLong || expanded
+    ? text
+    : lines.slice(0, RESULT_PREVIEW_LINES).join('\n')
+
+  return (
+    <div>
+      <div className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>
+        Result{isError ? ' (error)' : ''}
+      </div>
+      <pre
+        className="code-block"
+        style={{ maxHeight: expanded ? 280 : undefined, overflow: 'auto', margin: 0 }}
+      >
+        {visible}
+      </pre>
+      {isLong && (
+        <button
+          className="anchor-handle mt-1"
+          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded) }}
+        >
+          {expanded
+            ? `Hide ${lines.length - RESULT_PREVIEW_LINES} lines`
+            : `Show all ${lines.length} lines`}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
@@ -225,14 +263,7 @@ function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string })
             </pre>
           </div>
           {tc.result !== undefined && (
-            <div>
-              <div className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>
-                Result{tc.resultIsError ? ' (error)' : ''}
-              </div>
-              <pre className="code-block" style={{ maxHeight: 320, overflow: 'auto', margin: 0 }}>
-                {tc.result}
-              </pre>
-            </div>
+            <ResultPreview text={tc.result} isError={tc.resultIsError} />
           )}
           {tc.result === undefined && (
             <div className="text-xs" style={{ color: 'var(--text-faint)', fontStyle: 'italic' }}>
