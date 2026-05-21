@@ -91,7 +91,7 @@ function SessionRow({
       {session.model && (
         <div
           className="text-xs ml-0 mt-0.5"
-          style={{ color: 'var(--text-muted)', opacity: 0.6, lineHeight: 'var(--leading-tight)' }}
+          style={{ color: 'var(--text-faint)', lineHeight: 'var(--leading-tight)' }}
         >
           {shortenModel(session.model)}
         </div>

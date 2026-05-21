@@ -3,7 +3,7 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt } from './hooks/useApi'
-import type { Message, TranscriptEntry } from './types'
+import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
 function selectedIdFromPath(): string | null {
@@ -28,10 +28,57 @@ function sessionIdFromSelection(selectedId: string | null): string | null {
   return null
 }
 
+interface ToolResultRecord {
+  content: string
+  isError?: boolean
+}
+
+/** Index every tool_use_id we have a tool_result for, scanning the full transcript. */
+function buildToolResultIndex(entries: TranscriptEntry[]): Map<string, ToolResultRecord> {
+  const map = new Map<string, ToolResultRecord>()
+  for (const e of entries) {
+    if (e.direction !== 'request') continue
+    const parsed = tryParseJson(e.payload)
+    if (!parsed) continue
+    const msgs = parsed.messages as Array<{ role: string; content: unknown }> | undefined
+    if (!msgs) continue
+    for (const m of msgs) {
+      if (m.role !== 'user' || !Array.isArray(m.content)) continue
+      for (const b of m.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+        if (b.type === 'tool_result' && b.tool_use_id) {
+          map.set(b.tool_use_id, {
+            content: formatToolResultContent(b.content),
+            isError: b.is_error,
+          })
+        }
+      }
+    }
+  }
+  return map
+}
+
+function formatToolResultContent(content: unknown): string {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => {
+        if (b && typeof b === 'object') {
+          const o = b as { type?: string; text?: string }
+          if (o.type === 'text' && typeof o.text === 'string') return o.text
+        }
+        return JSON.stringify(b)
+      })
+      .join('\n')
+  }
+  return JSON.stringify(content, null, 2)
+}
+
 /** Convert transcript entries to the Message format ChatArea expects. */
 function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
   const messages: Message[] = []
   const seenSystemPrompts = new Set<string>()
+  const toolResults = buildToolResultIndex(entries)
 
   for (const e of entries) {
     const ts = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -48,17 +95,17 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
             agentName: 'System',
             agentStatus: 'idle',
             timestamp: ts,
-            blocks: [{ collapsedText: sysPrompt }],
+            blocks: [{ id: 'sys-' + e.id, collapsedText: sysPrompt }],
           })
         }
         // Extract only the LAST message from the request — it's the new
         // one being sent. Earlier messages in the array are conversation
         // history already represented by previous transcript entries.
-        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; input?: unknown }> }> | undefined
+        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> }> | undefined
         if (msgs && msgs.length > 0) {
           const msg = msgs[msgs.length - 1]!
           const textParts = extractTextFromContent(msg.content)
-          const toolCalls = extractToolCalls(msg.content)
+          const toolCalls = extractToolCalls(msg.content, toolResults)
           if (msg.role === 'user') {
             if (textParts) {
               messages.push({
@@ -66,14 +113,14 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
                 agentName: 'You',
                 agentStatus: 'completed',
                 timestamp: ts,
-                blocks: [{ text: textParts }],
+                blocks: [{ id: 'u-' + e.id, text: textParts }],
                 meta: parsed.model as string | undefined,
               })
             }
           } else if (msg.role === 'assistant') {
-            const blocks: import('./types').MessageContent[] = []
-            if (textParts) blocks.push({ text: textParts })
-            for (const tc of toolCalls) blocks.push({ text: tc })
+            const blocks: MessageContent[] = []
+            if (textParts) blocks.push({ id: 'a-' + e.id + '-text', text: textParts })
+            for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
             if (blocks.length > 0) {
               messages.push({
                 id: e.id + '-asst',
@@ -92,7 +139,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           agentName: 'You',
           agentStatus: 'completed',
           timestamp: ts,
-          blocks: [{ text: e.payload }],
+          blocks: [{ id: 'raw-' + e.id, text: e.payload }],
         })
       }
     } else {
@@ -101,16 +148,16 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
       if (parsed) {
         const content = parsed.content as Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> | undefined
         const textParts = extractTextFromContent(content)
-        const toolCalls = extractToolCalls(content)
+        const toolCalls = extractToolCalls(content, toolResults)
         const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
         const usageMeta = usage
           ? `${usage.input_tokens ?? 0} in / ${usage.output_tokens ?? 0} out tokens`
           : undefined
 
-        const blocks: import('./types').MessageContent[] = []
-        if (textParts) blocks.push({ text: textParts })
-        for (const tc of toolCalls) blocks.push({ text: tc })
-        if (blocks.length === 0) blocks.push({ text: '(empty response)' })
+        const blocks: MessageContent[] = []
+        if (textParts) blocks.push({ id: 'r-' + e.id + '-text', text: textParts })
+        for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
+        if (blocks.length === 0) blocks.push({ id: 'r-' + e.id + '-empty', text: '(empty response)' })
 
         messages.push({
           id: e.id,
@@ -127,7 +174,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           agentName: e.harness ?? e.model ?? 'Assistant',
           agentStatus: 'completed',
           timestamp: ts,
-          blocks: [{ text: e.payload }],
+          blocks: [{ id: 'raw-' + e.id, text: e.payload }],
         })
       }
     }
@@ -153,11 +200,24 @@ function extractTextFromContent(content: Array<{ type: string; text?: string }> 
   return texts.length > 0 ? texts.join('\n') : null
 }
 
-function extractToolCalls(content: Array<{ type: string; name?: string; id?: string; input?: unknown }> | undefined): string[] {
+function extractToolCalls(
+  content: Array<{ type: string; name?: string; id?: string; input?: unknown }> | undefined,
+  results: Map<string, ToolResultRecord>,
+): ToolCallInfo[] {
   if (!content) return []
   return content
     .filter((b) => b.type === 'tool_use' && b.name)
-    .map((b) => `Tool call: ${b.name}`)
+    .map((b, i) => {
+      const id = b.id ?? `unknown-${i}`
+      const r = results.get(id)
+      return {
+        id,
+        name: b.name!,
+        input: b.input,
+        result: r?.content,
+        resultIsError: r?.isError,
+      }
+    })
 }
 
 function computeSessionStats(entries: TranscriptEntry[]): { tokensUsed: number; contextWindow: number } {

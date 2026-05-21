@@ -35,13 +35,36 @@ Each layer differs by ~4-8% lightness. Depth comes from background tints and sub
 
 ### Color: Text
 
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--text-primary` | `#E8E9F0` | Headings, body text |
-| `--text-muted` | `#6B7094` | Secondary text, labels |
-| `--text-faint` | `rgba(107,112,148,0.5)` | Timestamps, tertiary info |
+| Token | Value | Usage | Contrast on `--bg-base` |
+|-------|-------|-------|-------------------------|
+| `--text-primary` | `#E8E9F0` | Headings, body text | ≈14.8:1 (AAA) |
+| `--text-muted` | `#9598B8` | Secondary text, labels | ≈6.5:1 (AA) |
+| `--text-faint` | `#8A8FAD` | Timestamps, tertiary info | ≈5.7:1 (AA) |
 
-Text hierarchy is through opacity/lightness, not hue variation. The muted color has a blue-purple tint matching the accent palette.
+Text hierarchy comes from weight, size, and position — **not** from dimming luminance below the contrast floor. See "Minimum Contrast" below.
+
+## Minimum Contrast (WCAG AA)
+
+**Every text color, on every background it actually renders against, must reach at least 4.5:1 contrast** (3:1 for large text — ≥18pt regular or ≥14pt bold). This is non-negotiable; it's a UI bug, not a stylistic preference.
+
+### What "every background" means
+A text token may render on more than one surface: `--text-muted` appears on `--bg-base`, `--bg-surface`, `--bg-elevated`, and inside `.code-block` (which uses `--bg-sunken`). The contrast floor applies on the **brightest** surface the token can land on, because that's where the ratio is worst.
+
+### Why no opacity-dimmed text
+Stacking `opacity: 0.5` on top of an already-muted token doubles the dim and almost always drops below 3:1. Use a different solid token, not opacity, when you want a quieter shade. Reserve `opacity` for whole controls that genuinely need to fade (disabled state, hover-reveal transitions).
+
+### Hierarchy without dimming
+When you'd reach for "make it dimmer," instead try:
+- Smaller size (`--text-xs` vs `--text-sm`)
+- Lighter weight (`--font-regular` vs `--font-medium`)
+- Spatial demotion (further from the focal point, smaller column)
+- Color shift to a still-AA-compliant token (`--text-faint` is 5.7:1 — quieter than `--text-muted` but still readable)
+
+### How to verify a new color
+Compute the WCAG ratio against every surface it'll render on. A quick check is `contrastratio.com` or any browser devtools color picker. **Reject any token that doesn't clear 4.5:1.** No "the accent looks better at #aaa" exceptions — pick a different hue if needed.
+
+### Exception: decoration-only color
+Borders, dots, gradients, and glow effects don't carry text, so they're not bound by the floor. They still need to be visible enough to do their job, but no specific ratio is required.
 
 ## UI Layout
 
@@ -129,6 +152,22 @@ Every data point appears in exactly one location. If you're about to show the sa
 
 ### Earned screen space
 Every persistent UI element must justify its pixel cost. If it duplicates information visible elsewhere, remove it.
+
+## Context Reachability
+
+**Every part of context must be reachable.** Anything the agent or runtime has access to — tool-call arguments, tool results, system prompts, raw API payloads, model metadata — must be navigable from the UI. Nothing the system "knows" may be permanently hidden from the user.
+
+This requirement has two parts.
+
+### 1. Useful summary always visible; full detail one interaction away
+
+When space is constrained, show the most useful summary inline. For a `shell` tool call, that means the command line itself (truncated to fit), a status glyph, and the exit code when done — not just the tool name. Hidden detail (full arguments, stdout, stderr, raw JSON, system prompt) must be revealable in a single click or keystroke. No context may be buried beyond reach.
+
+### 2. Every addressable block has a direct URL
+
+Every block of context — tool call, system-prompt collapse, message, raw-JSON block — carries a stable id and is reachable via URL fragment (e.g. `#tc-toolu_01abc...`, `#msg-...`). Loading the page with that fragment scrolls the block into view and auto-expands it. This makes any part of the conversation linkable for bug reports, code review, or pointing a teammate at a specific event.
+
+A "copy link" affordance appears on hover for each addressable block.
 
 ## Animation Reference
 
