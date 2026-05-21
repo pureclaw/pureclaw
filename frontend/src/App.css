@@ -271,6 +271,36 @@ body {
 
 .anchor-handle svg { display: block; }
 
+/* ── Chat-header scroll buttons (top / bottom) ────────────────────────── */
+
+.header-scroll-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease,
+              color var(--duration-fast) ease,
+              border-color var(--duration-fast) ease;
+  flex-shrink: 0;
+}
+.header-scroll-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--accent-primary);
+  border-color: var(--border);
+}
+.header-scroll-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 4px rgba(124, 108, 246, 0.4);
+}
+.header-scroll-btn svg { display: block; }
+
 /* ── Sidebar session archive button ───────────────────────────────────── */
 
 .session-archive {

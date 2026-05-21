@@ -593,6 +593,37 @@ export function ChatArea({
             </span>
           </>
         )}
+        {messages.length > 0 && (
+          <div className="ml-auto flex items-center gap-1 shrink-0">
+            <button
+              className="header-scroll-btn"
+              title="Scroll to top of transcript"
+              aria-label="Scroll to top"
+              onClick={() => scrollerRef.current?.scrollTo({ top: 0 })}
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+                aria-hidden="true">
+                <path d="M3 10 L8 5 L13 10" />
+              </svg>
+            </button>
+            <button
+              className="header-scroll-btn"
+              title="Scroll to bottom of transcript"
+              aria-label="Scroll to bottom"
+              onClick={() => {
+                const el = scrollerRef.current
+                if (el) el.scrollTo({ top: el.scrollHeight })
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+                aria-hidden="true">
+                <path d="M3 6 L8 11 L13 6" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Messages */}
