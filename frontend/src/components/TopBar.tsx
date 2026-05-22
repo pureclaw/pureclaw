@@ -37,7 +37,7 @@ export function TopBar({ taskTitle, onNewSession }: { taskTitle: string; onNewSe
           New Session
         </button>
         <div
-          className="text-xs px-2 py-1 rounded-md"
+          className="text-xs px-2.5 py-1.5 rounded-md flex items-center"
           style={{ background: 'var(--bg-elevated)', color: 'var(--text-faint)', border: '1px solid var(--border)' }}
         >
           v0.1.0
