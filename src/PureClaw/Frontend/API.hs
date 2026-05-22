@@ -11,12 +11,16 @@ module PureClaw.Frontend.API
   , AgentInfo (..)
   ) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (IOException, SomeException, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.Vector qualified as V
+import System.IO (IOMode (..), withFile)
+import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -40,10 +44,12 @@ import PureClaw.Providers.Class
 import PureClaw.Session.Handle
   ( SessionHandle (..)
   , SetArchivedError (..)
+  , SetDescriptionError (..)
   , listSessions
   , loadRecentMessages
   , mkSessionHandle
   , setArchived
+  , setDescription
   )
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
@@ -112,23 +118,33 @@ instance ToJSON AgentInfo where
 
 -- | JSON-serializable session info for the frontend.
 data SessionInfo = SessionInfo
-  { _si_id         :: Text
-  , _si_agent      :: Maybe Text
-  , _si_runtime    :: Text
-  , _si_model      :: Text
-  , _si_lastActive :: UTCTime
-  , _si_createdAt  :: UTCTime
+  { _si_id                   :: Text
+  , _si_agent                :: Maybe Text
+  , _si_runtime              :: Text
+  , _si_model                :: Text
+  , _si_lastActive           :: UTCTime
+  , _si_createdAt            :: UTCTime
+  , _si_description          :: Maybe Text
+    -- ^ User-set session description (preferred display title).
+  , _si_autoSummary          :: Maybe Text
+    -- ^ Model-generated short summary; cached in session.json.
+  , _si_firstMessageSnippet  :: Maybe Text
+    -- ^ Cheap fallback: a trimmed prefix of the first user message
+    -- in the transcript. Computed on demand in 'handleRecentSessions'.
   }
   deriving stock (Show, Eq)
 
 instance ToJSON SessionInfo where
   toJSON si = object
-    [ "id"         .= _si_id si
-    , "agent"      .= _si_agent si
-    , "runtime"    .= _si_runtime si
-    , "model"      .= _si_model si
-    , "lastActive" .= _si_lastActive si
-    , "createdAt"  .= _si_createdAt si
+    [ "id"                  .= _si_id si
+    , "agent"               .= _si_agent si
+    , "runtime"             .= _si_runtime si
+    , "model"               .= _si_model si
+    , "lastActive"          .= _si_lastActive si
+    , "createdAt"           .= _si_createdAt si
+    , "description"         .= _si_description si
+    , "autoSummary"         .= _si_autoSummary si
+    , "firstMessageSnippet" .= _si_firstMessageSnippet si
     ]
 
 -- | WAI application handling @\/api\/*@ routes.
@@ -151,6 +167,8 @@ apiApp env req respond = do
       handleSetArchived env sid True respond
     ("POST", ["api", "sessions", sid, "unarchive"]) ->
       handleSetArchived env sid False respond
+    ("PUT", ["api", "sessions", sid, "description"]) ->
+      handleSetDescription env sid req respond
     ("GET", ["api", "agents"])               -> handleAgents env respond
     _                                        -> respondNotFound respond
 
@@ -194,16 +212,22 @@ extractWindowIdx name =
 
 handleRecentSessions :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleRecentSessions env respond = do
-  let limit = _fe_recentLimit env
+  let limit   = _fe_recentLimit env
+      baseDir = _fe_sessionsDir env
   -- Over-fetch so the empty-transcript filter below can't shrink the
   -- visible count: listSessions already does a full directory scan and
   -- sorts the whole metadata set, so a generous bound is essentially
   -- free. Empty / archived sessions are dropped here, not erased on
   -- disk — archiving is purely a UI hint controlled by the user.
-  metas    <- listSessions (_fe_sessionsDir env) Nothing (limit * 3)
+  metas    <- listSessions baseDir Nothing (limit * 3)
   let visible = filter (not . _sm_archived) metas
-  nonEmpty <- filterM (hasTranscriptEntries (_fe_sessionsDir env)) visible
-  let infos = map toSessionInfo (take limit nonEmpty)
+  nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
+  let chosen = take limit nonEmpty
+  -- Read a first-message snippet per session (bounded read per file).
+  -- This is the cheap display fallback when no user description and no
+  -- model-generated summary exist yet.
+  snippets <- traverse (firstMessageSnippet baseDir) chosen
+  let infos = zipWith toSessionInfo chosen snippets
   respond $ jsonResponse status200 infos
 
 -- | Toggle the archive flag on a session. The 'archived' argument is
@@ -228,6 +252,35 @@ handleSetArchived env sidText archived respond = do
     Left (SetArchivedParseFailed msg) ->
       respond $ jsonResponse status500 (object ["error" .= msg])
 
+-- | Update the user-provided description on a session.
+-- Body shape: @{"description": "..."}@ or @{"description": null}@ (clears).
+-- Trims whitespace; an all-whitespace string clears the field.
+handleSetDescription
+  :: FrontendEnv
+  -> Text
+  -> Request
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+handleSetDescription env sidText req respond = do
+  body <- strictRequestBody req
+  case Aeson.eitherDecode' body of
+    Left err -> respond $ jsonResponse status400 (object ["error" .= T.pack err])
+    Right (DescBody mDesc) -> do
+      result <- setDescription (_fe_sessionsDir env) (SessionId sidText) mDesc
+      case result of
+        Right () ->
+          respond $ jsonResponse status200 (object ["description" .= mDesc])
+        Left SetDescriptionSessionMissing ->
+          respondNotFound respond
+        Left (SetDescriptionParseFailed msg) ->
+          respond $ jsonResponse status500 (object ["error" .= msg])
+
+-- | Body parser that accepts @{"description": <string|null>}@; absent
+-- or non-string values normalise to 'Nothing' (which clears the field).
+newtype DescBody = DescBody (Maybe Text)
+instance FromJSON DescBody where
+  parseJSON = Aeson.withObject "DescBody" $ \o -> DescBody <$> o .:? "description"
+
 -- | Check whether a session has at least one transcript entry.
 hasTranscriptEntries :: FilePath -> SessionMeta -> IO Bool
 hasTranscriptEntries baseDir meta = do
@@ -239,15 +292,73 @@ hasTranscriptEntries baseDir meta = do
       size <- getFileSize path
       pure (size > 0)
 
-toSessionInfo :: SessionMeta -> SessionInfo
-toSessionInfo m = SessionInfo
-  { _si_id         = unSessionId (_sm_id m)
-  , _si_agent      = fmap unAgentName (_sm_agent m)
-  , _si_runtime    = runtimeToText (_sm_runtime m)
-  , _si_model      = _sm_model m
-  , _si_lastActive = _sm_lastActive m
-  , _si_createdAt  = _sm_createdAt m
+toSessionInfo :: SessionMeta -> Maybe Text -> SessionInfo
+toSessionInfo m snippet = SessionInfo
+  { _si_id                  = unSessionId (_sm_id m)
+  , _si_agent               = fmap unAgentName (_sm_agent m)
+  , _si_runtime             = runtimeToText (_sm_runtime m)
+  , _si_model               = _sm_model m
+  , _si_lastActive          = _sm_lastActive m
+  , _si_createdAt           = _sm_createdAt m
+  , _si_description         = _sm_description m
+  , _si_autoSummary         = _sm_autoSummary m
+  , _si_firstMessageSnippet = snippet
   }
+
+-- | Cheap fallback for display: read just the first line of the
+-- session's @transcript.jsonl@, decode it as a 'TranscriptEntry', and
+-- extract a short snippet of the first user message. Returns 'Nothing'
+-- when there's no transcript, the first entry isn't a request, or any
+-- decoding step fails. The returned string is at most
+-- 'snippetCharBudget' chars with newlines normalised to spaces.
+--
+-- Cost is one bounded read per call (we don't load the whole transcript).
+firstMessageSnippet :: FilePath -> SessionMeta -> IO (Maybe Text)
+firstMessageSnippet baseDir meta = do
+  let path = baseDir </> T.unpack (unSessionId (_sm_id meta)) </> "transcript.jsonl"
+  result <- try @IOException $ withFile path ReadMode BSC.hGetLine
+  case result of
+    Left _    -> pure Nothing
+    Right line -> case Aeson.eitherDecodeStrict' line :: Either String TranscriptEntry of
+      Left _ -> pure Nothing
+      Right entry
+        | _te_direction entry /= Request -> pure Nothing
+        | otherwise -> pure (snippetFromPayload (_te_payload entry))
+
+snippetCharBudget :: Int
+snippetCharBudget = 120
+
+-- | Extract a display snippet from a request payload. Two shapes:
+-- (1) JSON object with a "messages" array (provider request) — pull
+--     text out of the first message; (2) plain text (harness send) —
+--     use the payload directly. Trimmed, newline-normalised, and
+--     truncated to 'snippetCharBudget' characters.
+snippetFromPayload :: Text -> Maybe Text
+snippetFromPayload raw = trimAndTruncate <$>
+  case Aeson.decodeStrict (TE.encodeUtf8 raw) of
+    Just (Aeson.Object o)
+      | Just (Aeson.Array msgs) <- KM.lookup "messages" o
+      , not (V.null msgs)
+      -> messageText (V.unsafeHead msgs)
+    _ -> Just raw
+  where
+    -- Anthropic-style message content: either a plain string or an
+    -- array of {type:"text", text:"..."} blocks. We just want a
+    -- human-readable lead.
+    messageText :: Aeson.Value -> Maybe Text
+    messageText (Aeson.Object m) = case KM.lookup "content" m of
+      Just (Aeson.String s) -> Just s
+      Just (Aeson.Array bs) -> Just (T.intercalate " " [t | Aeson.Object b <- V.toList bs
+                                                          , Just (Aeson.String t) <- [KM.lookup "text" b]])
+      _                     -> Nothing
+    messageText _ = Nothing
+
+    trimAndTruncate :: Text -> Text
+    trimAndTruncate t =
+      let normalized = T.unwords (T.words t)  -- collapse whitespace incl. newlines
+      in  if T.length normalized > snippetCharBudget
+            then T.take (snippetCharBudget - 1) normalized <> "\x2026"
+            else normalized
 
 runtimeToText :: RuntimeType -> Text
 runtimeToText RTProvider      = "provider"
@@ -360,6 +471,8 @@ handleNewSession env req respond = do
         , _sm_lastActive        = now
         , _sm_bootstrapConsumed = True
         , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
         }
   sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
   -- Write custom prompt file if provided
@@ -368,7 +481,9 @@ handleNewSession env req respond = do
       TIO.writeFile (_sh_dir sh </> "custom-prompt.md") prompt
     _ -> pure ()
   _sh_save sh
-  respond $ jsonResponse status200 (toSessionInfo meta)
+  -- New sessions have no transcript yet, so the first-message snippet
+  -- starts as Nothing.
+  respond $ jsonResponse status200 (toSessionInfo meta Nothing)
 
 -- | Set or replace the custom prompt for a session, optionally updating
 -- the agent name in @session.json@.

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt, setSessionArchived } from './hooks/useApi'
+import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt, setSessionArchived, setSessionDescription } from './hooks/useApi'
 import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -352,6 +352,28 @@ export default function App() {
     }
   }, [])
 
+  // Optimistic overlay for description edits — we apply the user's text
+  // immediately so the chat header doesn't flicker back to the fallback
+  // while the next poll arrives. Cleared per-id when the polled value
+  // catches up. Stores empty string to mean "cleared".
+  const [descriptionOverrides, setDescriptionOverrides] = useState<Map<string, string>>(() => new Map())
+  const handleSetDescription = useCallback(async (id: string, description: string) => {
+    const trimmed = description.trim()
+    setDescriptionOverrides((m) => {
+      const next = new Map(m)
+      next.set(id, trimmed)
+      return next
+    })
+    const ok = await setSessionDescription(id, trimmed.length > 0 ? trimmed : null)
+    if (!ok) {
+      setDescriptionOverrides((m) => {
+        const next = new Map(m)
+        next.delete(id)
+        return next
+      })
+    }
+  }, [])
+
   // Initialize selectedAgent from default agent once agents load
   useEffect(() => {
     if (selectedAgent === null && agents.length > 0) {
@@ -443,7 +465,14 @@ export default function App() {
 
   // Compute session stats from transcript entries
   const sessionStats = useMemo(() => computeSessionStats(entries), [entries])
-  const selectedSession = sessions.find((s) => s.id === currentSessionId)
+  const selectedSession = useMemo(() => {
+    const base = sessions.find((s) => s.id === currentSessionId) ?? null
+    if (!base) return null
+    const override = descriptionOverrides.get(base.id)
+    return override === undefined
+      ? base
+      : { ...base, description: override.length > 0 ? override : null }
+  }, [sessions, currentSessionId, descriptionOverrides])
 
   return (
     <>
@@ -458,6 +487,8 @@ export default function App() {
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
+          selectedSession={selectedSession}
+          onSetDescription={handleSetDescription}
           messages={messages}
           loading={loading}
           onSend={currentSessionId ? handleSend : undefined}

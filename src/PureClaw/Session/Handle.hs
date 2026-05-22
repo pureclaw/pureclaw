@@ -21,6 +21,9 @@ module PureClaw.Session.Handle
     -- * Archive flag (disk-only)
   , setArchived
   , SetArchivedError (..)
+    -- * Description (disk-only)
+  , setDescription
+  , SetDescriptionError (..)
     -- * Resume context reload
   , loadRecentMessages
   ) where
@@ -220,6 +223,8 @@ noOpMeta = SessionMeta
   , _sm_lastActive        = epoch
   , _sm_bootstrapConsumed = False
   , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
   }
   where
     epoch = UTCTime (fromGregorian 1970 1 1) (secondsToDiffTime 0)
@@ -422,22 +427,54 @@ data SetArchivedError
 -- directory nor the transcript is removed. Unarchiving restores the
 -- session to "Recent Sessions" with all history intact.
 setArchived :: FilePath -> SessionId -> Bool -> IO (Either SetArchivedError ())
-setArchived baseDir sid archived = do
+setArchived baseDir sid archived =
+  updateSessionMeta baseDir sid (\m -> m { _sm_archived = archived })
+    SetArchivedSessionMissing SetArchivedParseFailed
+
+-- | Reasons 'setDescription' may fail. Same shape as 'SetArchivedError'.
+data SetDescriptionError
+  = SetDescriptionSessionMissing
+  | SetDescriptionParseFailed Text
+  deriving stock (Show, Eq)
+
+-- | Set or clear the user-provided session description. Passing 'Just t'
+-- stores the description (trimmed of surrounding whitespace; an empty
+-- result is treated as 'Nothing' so callers can pass through what the
+-- user typed without preprocessing). Passing 'Nothing' clears it,
+-- letting display surfaces fall back to '_sm_autoSummary' or a
+-- transcript-derived snippet.
+setDescription :: FilePath -> SessionId -> Maybe Text -> IO (Either SetDescriptionError ())
+setDescription baseDir sid mDesc =
+  let normalized = mDesc >>= \t -> let s = T.strip t in if T.null s then Nothing else Just s
+  in  updateSessionMeta baseDir sid (\m -> m { _sm_description = normalized })
+        SetDescriptionSessionMissing SetDescriptionParseFailed
+
+-- | Shared read-modify-write helper for the disk-only meta mutators.
+-- Reads @session.json@, applies @f@, and writes back via tmp-file +
+-- rename. @missing@ and @parseFail@ are the caller's error
+-- constructors so each public mutator returns its own error type.
+updateSessionMeta
+  :: FilePath
+  -> SessionId
+  -> (SessionMeta -> SessionMeta)
+  -> e
+  -> (Text -> e)
+  -> IO (Either e ())
+updateSessionMeta baseDir sid f missing parseFail = do
   let dir    = baseDir </> T.unpack (unSessionId sid)
       finalP = dir </> "session.json"
       tmpP   = finalP <> ".tmp"
   exists <- doesFileExist finalP
   if not exists
-    then pure (Left SetArchivedSessionMissing)
+    then pure (Left missing)
     else do
       eBytes <- try (LBS.readFile finalP) :: IO (Either IOException LBS.ByteString)
       case eBytes of
-        Left e  -> pure (Left (SetArchivedParseFailed (T.pack (show e))))
+        Left e -> pure (Left (parseFail (T.pack (show e))))
         Right raw -> case Aeson.eitherDecode' raw of
-          Left  err  -> pure (Left (SetArchivedParseFailed (T.pack err)))
+          Left  err  -> pure (Left (parseFail (T.pack err)))
           Right meta -> do
-            let updated = meta { _sm_archived = archived }
-            LBS.writeFile tmpP (Aeson.encode updated)
+            LBS.writeFile tmpP (Aeson.encode (f meta))
             setFileMode tmpP 0o600
             renameFile tmpP finalP
             pure (Right ())

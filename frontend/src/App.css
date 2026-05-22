@@ -271,6 +271,67 @@ body {
 
 .anchor-handle svg { display: block; }
 
+/* ── Chat-header editable title ───────────────────────────────────────── */
+
+.editable-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 360px;
+  padding: 2px 6px;
+  margin: -2px -6px;          /* keep visual bounds identical to the static span it replaces */
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-primary);
+  cursor: text;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.editable-title:hover { background: var(--bg-elevated); }
+.editable-title:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 4px rgba(124, 108, 246, 0.4);
+}
+.editable-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.editable-title-pencil {
+  flex-shrink: 0;
+  opacity: 0;
+  color: var(--text-faint);
+  transition: opacity var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.editable-title:hover .editable-title-pencil,
+.editable-title:focus-visible .editable-title-pencil { opacity: 1; }
+.editable-title:hover .editable-title-pencil { color: var(--accent-primary); }
+
+.editable-title-input {
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-primary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  margin: -2px -6px;
+  outline: none;
+  min-width: 200px;
+  max-width: 360px;
+}
+.editable-title-input::placeholder {
+  color: var(--text-faint);
+  font-weight: var(--font-regular);
+}
+
 /* ── Chat-header scroll buttons (top / bottom) ────────────────────────── */
 
 .header-scroll-btn {

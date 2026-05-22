@@ -24,6 +24,38 @@ export interface SessionInfo {
   model: string
   lastActive: string
   createdAt: string
+  description: string | null
+  autoSummary: string | null
+  firstMessageSnippet: string | null
+}
+
+/** Cascade used to pick the display title for a session.
+ *  Order: user-set description → model-generated summary → snippet of
+ *  the first user message → agent name → short id prefix. */
+export function sessionDisplayTitle(s: SessionInfo): string {
+  if (s.description)         return s.description
+  if (s.autoSummary)         return s.autoSummary
+  if (s.firstMessageSnippet) return s.firstMessageSnippet
+  if (s.agent)               return s.agent
+  return s.id.slice(0, 12) || 'New session'
+}
+
+/** Strip the Anthropic date suffix and verbose family prefix from a
+ *  model id so we can fit it in tight UI surfaces. Examples:
+ *    claude-sonnet-4-20250514 → sonnet-4
+ *    other ids pass through unchanged. */
+export function shortenModel(model: string): string {
+  const m = model.match(/claude-(\w+-\d+)/)
+  return m ? m[1]! : model
+}
+
+/** Agent + short model formatted as "agent · sonnet-4" (with the
+ *  middle dot). Skips either piece if it's missing. */
+export function sessionSubtitle(s: { agent?: string | null; model?: string | null }): string {
+  const parts: string[] = []
+  if (s.agent) parts.push(s.agent)
+  if (s.model) parts.push(shortenModel(s.model))
+  return parts.join(' · ')
 }
 
 export interface AgentInfo {

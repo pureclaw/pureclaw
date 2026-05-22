@@ -1,4 +1,5 @@
 import type { HarnessInfo, SessionInfo } from '../types'
+import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import { ActivityDot } from './StatusDot'
 
 function SectionHeader({ label }: { label: string }) {
@@ -97,7 +98,7 @@ function SessionRow({
     selected ? 'selected' : '',
   ].filter(Boolean).join(' ')
 
-  const displayName = session.agent ?? session.id
+  const displayName = sessionDisplayTitle(session)
   const age = formatAge(session.lastActive)
 
   return (
@@ -112,12 +113,12 @@ function SessionRow({
         <ArchiveButton onArchive={() => onArchive(session.id)} />
         <span className="pill token-count">{age}</span>
       </div>
-      {session.model && (
+      {(session.agent || session.model) && (
         <div
           className="text-xs ml-0 mt-0.5"
           style={{ color: 'var(--text-faint)', lineHeight: 'var(--leading-tight)' }}
         >
-          {shortenModel(session.model)}
+          {sessionSubtitle(session)}
         </div>
       )}
     </div>
@@ -133,12 +134,6 @@ function formatAge(isoDate: string): string {
   if (hours < 24) return `${hours}h`
   const days = Math.floor(hours / 24)
   return `${days}d`
-}
-
-function shortenModel(model: string): string {
-  // "claude-sonnet-4-20250514" → "sonnet-4"
-  const m = model.match(/claude-(\w+-\d+)/)
-  return m ? m[1]! : model
 }
 
 export function Sidebar({

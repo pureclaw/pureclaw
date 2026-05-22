@@ -1,7 +1,85 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
-import type { Agent, AgentInfo, Message, MessageContent, CodeSpan, ToolCallInfo } from '../types'
+import type { Agent, AgentInfo, Message, MessageContent, CodeSpan, ToolCallInfo, SessionInfo } from '../types'
+import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import { StatusDot } from './StatusDot'
 import { BottomBar } from './BottomBar'
+
+/** Click-to-edit chat-header title. Displays the cascade
+ *  (description → autoSummary → snippet → agent name → id prefix);
+ *  clicking enters edit mode with the description prefilled.
+ *  Enter / blur saves, Escape cancels. Empty input clears the
+ *  description, restoring the fallback chain. */
+function EditableSessionTitle({
+  session,
+  onSetDescription,
+}: {
+  session: SessionInfo
+  onSetDescription: (id: string, description: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const startEditing = () => {
+    setDraft(session.description ?? '')
+    setEditing(true)
+  }
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    }
+  }, [editing])
+
+  const commit = () => {
+    if (!editing) return
+    setEditing(false)
+    // Only fire the API call when the value actually changed; otherwise
+    // a blur with no edit is a silent no-op.
+    if (draft.trim() !== (session.description ?? '').trim()) {
+      onSetDescription(session.id, draft)
+    }
+  }
+  const cancel = () => setEditing(false)
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter')       { e.preventDefault(); commit() }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel() }
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="editable-title-input"
+        value={draft}
+        placeholder={sessionDisplayTitle(session)}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={onKeyDown}
+        aria-label="Session title"
+      />
+    )
+  }
+
+  return (
+    <button
+      className="editable-title"
+      title="Click to set a session title"
+      onClick={startEditing}
+    >
+      <span className="editable-title-text">{sessionDisplayTitle(session)}</span>
+      <svg
+        className="editable-title-pencil"
+        width="11" height="11" viewBox="0 0 16 16" fill="none"
+        stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M11 2 L14 5 L5 14 L2 14 L2 11 Z" />
+      </svg>
+    </button>
+  )
+}
 
 /** Per the "Context Reachability" rule in DESIGN.md: every addressable block
  *  reacts to the URL fragment so any tool call, system prompt, or message can
@@ -494,6 +572,8 @@ function SessionSetup({
 
 export function ChatArea({
   selectedAgent,
+  selectedSession,
+  onSetDescription,
   messages,
   loading,
   onSend,
@@ -508,6 +588,8 @@ export function ChatArea({
   onCustomPromptFile,
 }: {
   selectedAgent: Agent
+  selectedSession?: SessionInfo | null
+  onSetDescription?: (id: string, description: string) => void
   messages: Message[]
   loading?: boolean
   onSend?: (message: string) => void
@@ -582,17 +664,30 @@ export function ChatArea({
         style={{ borderBottom: '1px solid var(--border)' }}
       >
         <StatusDot status={selectedAgent.status} />
-        <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)' }}>
-          {selectedAgent.name}
-        </span>
-        {selectedAgent.description && (
-          <>
-            <span style={{ color: 'var(--border)' }}>&middot;</span>
-            <span className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
-              {selectedAgent.description}
-            </span>
-          </>
+        {selectedSession && onSetDescription ? (
+          <EditableSessionTitle session={selectedSession} onSetDescription={onSetDescription} />
+        ) : (
+          <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)' }}>
+            {selectedAgent.name}
+          </span>
         )}
+        {(() => {
+          // Prefer the live session's agent + model when viewing a session;
+          // for harness selections fall back to whatever selectedAgent
+          // exposes as a description (currently the harness's own metadata).
+          const subtitle = selectedSession
+            ? sessionSubtitle(selectedSession)
+            : selectedAgent.description ?? ''
+          if (!subtitle) return null
+          return (
+            <>
+              <span style={{ color: 'var(--border)' }}>&middot;</span>
+              <span className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
+                {subtitle}
+              </span>
+            </>
+          )
+        })()}
         {messages.length > 0 && (
           <div className="ml-auto flex items-center gap-1 shrink-0">
             <button

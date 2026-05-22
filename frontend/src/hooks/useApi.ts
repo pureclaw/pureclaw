@@ -117,6 +117,22 @@ export function useSendMessage(sessionId: string | null, onComplete: () => void)
   return { send, sending }
 }
 
+/** Set or clear the user-provided session description. Passing null
+ *  (or an all-whitespace string, which the backend normalises) clears
+ *  the field, restoring the auto-summary / snippet / agent fallback. */
+export async function setSessionDescription(sessionId: string, description: string | null): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/description`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 /** Set the archive flag on a session. Pure UI hint — the session
  *  directory and transcript stay on disk. */
 export async function setSessionArchived(sessionId: string, archived: boolean): Promise<boolean> {

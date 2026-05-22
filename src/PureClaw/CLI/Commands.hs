@@ -566,6 +566,8 @@ runChat opts = do
                   , SessionTypes._sm_lastActive        = now
                   , SessionTypes._sm_bootstrapConsumed = False
                   , SessionTypes._sm_archived          = False
+                  , SessionTypes._sm_description       = Nothing
+                  , SessionTypes._sm_autoSummary       = Nothing
                   }
             mkSessionHandle logger sessionsDir initialMeta
         -- Log the active session ID so tests and humans can find it.

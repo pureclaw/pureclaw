@@ -42,6 +42,7 @@ import PureClaw.Session.Handle
   , ResumeError (..)
   , SessionHandle (..)
   , SetArchivedError (..)
+  , SetDescriptionError (..)
   , listSessions
   , loadRecentMessages
   , markBootstrapConsumed
@@ -51,6 +52,7 @@ import PureClaw.Session.Handle
   , resolveSessionRef
   , resumeSession
   , setArchived
+  , setDescription
   , validateRuntime
   )
 import PureClaw.Providers.Class
@@ -87,6 +89,8 @@ mkMeta sid t = SessionMeta
   , _sm_lastActive        = t
   , _sm_bootstrapConsumed = False
   , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
   }
 
 -- Convenience: get the low 9 perm bits of a path.
@@ -360,6 +364,44 @@ spec = do
     it "returns SetArchivedSessionMissing for an unknown session" $ withTmp $ \base -> do
       result <- setArchived base (parseSessionId "nope-1") True
       result `shouldBe` Left SetArchivedSessionMissing
+
+  describe "setDescription" $ do
+    it "writes the description back to session.json" $ withTmp $ \base -> do
+      let meta = mkMeta "desc-1" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      result <- setDescription base (parseSessionId "desc-1") (Just "kernel build pipeline")
+      result `shouldBe` Right ()
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "desc-1" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description onDisk `shouldBe` Just "kernel build pipeline"
+
+    it "trims surrounding whitespace and treats all-whitespace as a clear" $ withTmp $ \base -> do
+      let meta = mkMeta "desc-2" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setDescription base (parseSessionId "desc-2") (Just "  hello world  ")
+      Right d1 <- Aeson.eitherDecodeFileStrict' (base </> "desc-2" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description d1 `shouldBe` Just "hello world"
+      _ <- setDescription base (parseSessionId "desc-2") (Just "   ")
+      Right d2 <- Aeson.eitherDecodeFileStrict' (base </> "desc-2" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description d2 `shouldBe` Nothing
+
+    it "Nothing clears a previously-set description" $ withTmp $ \base -> do
+      let meta = mkMeta "desc-3" t0
+      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setDescription base (parseSessionId "desc-3") (Just "first attempt")
+      _ <- setDescription base (parseSessionId "desc-3") Nothing
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "desc-3" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description onDisk `shouldBe` Nothing
+
+    it "returns SetDescriptionSessionMissing for an unknown session" $ withTmp $ \base -> do
+      result <- setDescription base (parseSessionId "nope-2") (Just "x")
+      result `shouldBe` Left SetDescriptionSessionMissing
 
   describe "loadRecentMessages" $ do
     it "returns all messages when fewer than maxCount exist" $ withTmp $ \base -> do

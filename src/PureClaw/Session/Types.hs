@@ -144,6 +144,19 @@ data SessionMeta = SessionMeta
     -- prominent UI surfaces (e.g. the "Recent Sessions" sidebar).
     -- Pure display state — archiving NEVER removes the session
     -- directory or transcript from disk. Defaults to 'False'.
+  , _sm_description       :: Maybe Text
+    -- ^ Optional user-provided description / title for this session.
+    -- Display surfaces prefer this when set; otherwise they fall back
+    -- through '_sm_autoSummary', a transcript-derived snippet, the
+    -- agent name, and finally the session id. 'Nothing' means "no
+    -- user choice — use a fallback."
+  , _sm_autoSummary       :: Maybe Text
+    -- ^ Optional model-generated short summary of the session,
+    -- cached here so it doesn't have to be recomputed on every
+    -- recent-sessions poll. Populated lazily by a separate
+    -- summarization path (not yet wired up). Defaults to 'Nothing'
+    -- on new sessions and after disk loads of older session.json
+    -- files.
   } deriving stock (Show, Eq, Generic)
 
 -- Hand-written JSON so we don't depend on a 'ToJSON' instance for
@@ -161,6 +174,8 @@ instance Aeson.ToJSON SessionMeta where
     , "last_active"        .= _sm_lastActive s
     , "bootstrap_consumed" .= _sm_bootstrapConsumed s
     , "archived"           .= _sm_archived s
+    , "description"        .= _sm_description s
+    , "auto_summary"       .= _sm_autoSummary s
     ] <> case _sm_agent s of
       Just n  -> ["agent" .= unAgentName n]
       Nothing -> []
@@ -175,6 +190,8 @@ instance Aeson.FromJSON SessionMeta where
     <*> o .:  "created_at"
     <*> o .:  "last_active"
     <*> o .:  "bootstrap_consumed"
-    -- archived: backward-compat default for session.json files
-    -- written before this field existed.
-    <*> o .:? "archived" .!= False
+    -- Backward-compat defaults for session.json files written
+    -- before these fields existed.
+    <*> o .:? "archived"     .!= False
+    <*> o .:? "description"
+    <*> o .:? "auto_summary"
