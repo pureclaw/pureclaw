@@ -9,15 +9,25 @@ module PureClaw.Session.Types
   , SessionPrefixError (..)
     -- * Session ID generation
   , newSessionId
-    -- * Runtime type
-  , RuntimeType (..)
+    -- * Session kind (re-exported from Kind)
+  , SessionKind (..)
+  , ProviderSpec (..)
+  , HarnessSpec (..)
+  , HarnessFlavour (..)
+  , TerminalBackend (..)
+  , TmuxConfig (..)
+  , inferProviderId
+  , fixedFlavourLookup
   , defaultTarget
     -- * Session metadata
   , SessionMeta (..)
+    -- * Conversion helpers
+  , sessionKindToText
   ) where
 
 import Data.Aeson ((.=), (.:), (.:?), (.!=))
 import Data.Aeson qualified as Aeson
+import Data.Aeson.Types (Parser)
 import Data.Char qualified as Char
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -26,7 +36,8 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import GHC.Generics (Generic)
 
 import PureClaw.Agent.AgentDef (AgentName, unAgentName)
-import PureClaw.Core.Types (MessageTarget (..), SessionId (..))
+import PureClaw.Core.Types (MessageTarget (..), ModelId (..), SessionId (..))
+import PureClaw.Session.Kind
 
 -- | Validated session prefix. Used as the human-readable leading segment
 -- of a 'PureClaw.Core.Types.SessionId'. Same character rules as
@@ -100,40 +111,35 @@ newSessionId mPrefix time =
         Just p  -> unSessionPrefix p <> "-" <> timeStr
   in SessionId full
 
--- | Whether a session targets the LLM provider directly or a named harness
--- (e.g. an interactive @claude-code@ tmux session).
-data RuntimeType
-  = RTProvider
-  | RTHarness Text
-  deriving stock (Show, Eq)
-
--- | JSON encoding: @"provider"@ or @"harness:<name>"@. Custom rather than
--- generic so on-disk @session.json@ files stay human-readable and so we
--- don't tie ourselves to aeson's tagged-sum format.
-instance Aeson.ToJSON RuntimeType where
-  toJSON RTProvider       = Aeson.String "provider"
-  toJSON (RTHarness name) = Aeson.String ("harness:" <> name)
-
-instance Aeson.FromJSON RuntimeType where
-  parseJSON = Aeson.withText "RuntimeType" $ \t ->
-    case t of
-      "provider" -> pure RTProvider
-      _ | Just name <- T.stripPrefix "harness:" t -> pure (RTHarness name)
-        | otherwise -> fail ("Unknown RuntimeType: " <> T.unpack t)
-
--- | Map a 'RuntimeType' to its corresponding 'MessageTarget'. Pure helper
+-- | Map a 'SessionKind' to its corresponding 'MessageTarget'. Pure helper
 -- so the session loader and CLI can share the same default-routing logic
 -- without duplicating the case match.
-defaultTarget :: RuntimeType -> MessageTarget
-defaultTarget RTProvider       = TargetProvider
-defaultTarget (RTHarness name) = TargetHarness name
+defaultTarget :: SessionKind -> MessageTarget
+defaultTarget (SkProvider _)    = TargetProvider
+defaultTarget (SkHarness spec)  = TargetHarness (flavourToText (_h_flavour spec))
+
+-- | Render a 'HarnessFlavour' to its canonical text name (matching the
+-- harness key used in the harness map).
+flavourToText :: HarnessFlavour -> Text
+flavourToText HClaudeCode = "claude-code"
+flavourToText HCodex      = "codex"
+flavourToText HOpenCode   = "opencode"
+flavourToText HHermes     = "hermes"
+flavourToText HPureClaw   = "pureclaw"
+flavourToText (HCustom n) = n
+
+-- | Render a 'SessionKind' to a human-readable text label.
+-- Used by the frontend API and session info display.
+sessionKindToText :: SessionKind -> Text
+sessionKindToText (SkProvider _)   = "provider"
+sessionKindToText (SkHarness spec) = "harness:" <> flavourToText (_h_flavour spec)
 
 -- | Persistent metadata for a single session. Stored as @session.json@
 -- inside the session's on-disk directory.
 data SessionMeta = SessionMeta
   { _sm_id                :: SessionId
   , _sm_agent             :: Maybe AgentName
-  , _sm_runtime           :: RuntimeType
+  , _sm_kind              :: SessionKind
   , _sm_model             :: Text
   , _sm_channel           :: Text
   , _sm_createdAt         :: UTCTime
@@ -167,7 +173,7 @@ data SessionMeta = SessionMeta
 instance Aeson.ToJSON SessionMeta where
   toJSON s = Aeson.object $
     [ "id"                 .= _sm_id s
-    , "runtime"            .= _sm_runtime s
+    , "kind"               .= _sm_kind s
     , "model"              .= _sm_model s
     , "channel"            .= _sm_channel s
     , "created_at"         .= _sm_createdAt s
@@ -181,17 +187,62 @@ instance Aeson.ToJSON SessionMeta where
       Nothing -> []
 
 instance Aeson.FromJSON SessionMeta where
-  parseJSON = Aeson.withObject "SessionMeta" $ \o -> SessionMeta
-    <$> o .:  "id"
-    <*> o .:? "agent"
-    <*> o .:  "runtime"
-    <*> o .:  "model"
-    <*> o .:  "channel"
-    <*> o .:  "created_at"
-    <*> o .:  "last_active"
-    <*> o .:  "bootstrap_consumed"
-    -- Backward-compat defaults for session.json files written
-    -- before these fields existed.
-    <*> o .:? "archived"     .!= False
-    <*> o .:? "description"
-    <*> o .:? "auto_summary"
+  parseJSON = Aeson.withObject "SessionMeta" $ \o -> do
+    sid     <- o .:  "id"
+    agent   <- o .:? "agent"
+    model   <- o .:  "model"
+    channel <- o .:  "channel"
+    created <- o .:  "created_at"
+    active  <- o .:  "last_active"
+    boot    <- o .:  "bootstrap_consumed"
+    arch    <- o .:? "archived"     .!= False
+    desc    <- o .:? "description"
+    summ    <- o .:? "auto_summary"
+    -- Parse session kind: accept both new and legacy format.
+    kind    <- parseSessionKind o model agent
+    pure SessionMeta
+      { _sm_id                = sid
+      , _sm_agent             = agent
+      , _sm_kind              = kind
+      , _sm_model             = model
+      , _sm_channel           = channel
+      , _sm_createdAt         = created
+      , _sm_lastActive        = active
+      , _sm_bootstrapConsumed = boot
+      , _sm_archived          = arch
+      , _sm_description       = desc
+      , _sm_autoSummary       = summ
+      }
+
+-- | Parse the session kind from the JSON object. Accepts three formats:
+--
+--   1. New format: @"kind"@ key present -> parse as 'SessionKind' directly.
+--   2. Legacy format: @"runtime"@ key present ->
+--      * @"provider"@ -> 'SkProvider' with inferred provider from model.
+--      * @"harness:\<name\>"@ -> 'SkHarness' with 'fixedFlavourLookup'.
+--   3. Neither present -> default to 'SkProvider' with inferred provider.
+parseSessionKind
+  :: Aeson.Object
+  -> Text              -- ^ model text (for inferring provider)
+  -> Maybe AgentName   -- ^ agent (for ProviderSpec)
+  -> Parser SessionKind
+parseSessionKind o model agent = do
+  mKind    <- o .:? "kind"    :: Parser (Maybe Aeson.Value)
+  mRuntime <- o .:? "runtime" :: Parser (Maybe Text)
+  case mKind of
+    Just kindVal -> Aeson.parseJSON kindVal
+    Nothing -> case mRuntime of
+      Just "provider" ->
+        pure (SkProvider (ProviderSpec (inferProviderId model) (ModelId model) agent))
+      Just rt | Just name <- T.stripPrefix "harness:" rt ->
+        pure (SkHarness (HarnessSpec
+          (fixedFlavourLookup name)
+          (TbTmux (TmuxConfig name name Nothing))
+          Nothing
+          []))
+      Just _ ->
+        -- Unknown runtime text: default to provider
+        pure (SkProvider (ProviderSpec (inferProviderId model) (ModelId model) agent))
+      Nothing ->
+        -- No "kind" and no "runtime": default to provider
+        pure (SkProvider (ProviderSpec (inferProviderId model) (ModelId model) agent))

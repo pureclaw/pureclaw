@@ -60,6 +60,14 @@ import PureClaw.Handles.Tab
   , unTabName
   , unPublicTabError
   )
+import PureClaw.Session.Kind
+  ( HarnessFlavour (..)
+  , HarnessSpec (..)
+  , ProviderSpec (..)
+  , SessionKind (..)
+  , TerminalBackend (..)
+  )
+import PureClaw.Core.Types (unProviderId)
 
 
 -- | Tab count at or above which the renderer switches from one-line-
@@ -117,16 +125,28 @@ renderEntry mFocus useBullets (key, h) = do
                 <> " " <> statusTxt
                 <> focusMark)
 
--- | Render a 'TabKind' as its short keyword. Mirrors
--- 'PureClaw.Routing.Config.tabKindCodec' so the dashboard and the
--- config file use the same vocabulary.
+-- | Render a 'TabKind' as @\<group\>:\<detail\>@ (WU-11 C5).
+--
+-- Examples: @provider:anthropic@, @harness:claude-code@, @shell:local@,
+-- @shell:ssh@, @shell:tmux@, @shell:container@.
 renderKind :: TabKind -> Text
 renderKind k = case k of
-  KindAi      -> "ai"
-  KindHarness -> "harness"
-  KindShell   -> "shell"
-  KindSsh     -> "ssh"
-  KindTmux    -> "tmux"
+  TkSession (SkProvider ps)  -> "provider:" <> unProviderId (_ps_provider ps)
+  TkSession (SkHarness hs)   -> "harness:"  <> renderFlavour (_h_flavour hs)
+  TkRawShell TbLocal         -> "shell:local"
+  TkRawShell (TbSsh _)       -> "shell:ssh"
+  TkRawShell (TbTmux _)      -> "shell:tmux"
+  TkRawShell (TbContainer _) -> "shell:container"
+
+-- | Render a 'HarnessFlavour' as its user-facing label.
+renderFlavour :: HarnessFlavour -> Text
+renderFlavour f = case f of
+  HClaudeCode -> "claude-code"
+  HCodex      -> "codex"
+  HOpenCode   -> "opencode"
+  HHermes     -> "hermes"
+  HPureClaw   -> "pureclaw"
+  HCustom n   -> n
 
 -- | Project a 'TabName' to its render-safe text. The 'TabName' newtype
 -- guarantees H11 (sanitised), so this is just the unwrap.

@@ -9,12 +9,17 @@ module PureClaw.Frontend.API
   , SessionInfo (..)
   , TranscriptEntryInfo (..)
   , AgentInfo (..)
+  , TabSnapshot (..)
+    -- * New tab request/response (exported for testing)
+  , NewTabRequest (..)
+  , NewTabResponse (..)
   ) where
 
 import Control.Exception (IOException, SomeException, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
+import Data.Aeson.Types qualified as AesonTypes
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
@@ -38,6 +43,7 @@ import PureClaw.Agent.Context
 import PureClaw.Core.Types (ModelId (..), SessionId (..), unModelId, unSessionId)
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
+import PureClaw.Handles.Tab (TabKind (..))
 import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
@@ -76,6 +82,19 @@ data FrontendEnv = FrontendEnv
     -- ^ On-disk agents directory (e.g. @~\/.pureclaw\/agents@).
   , _fe_defaultAgent :: Maybe Text
     -- ^ Default agent name from config.
+  , _fe_maxTabs      :: Int
+    -- ^ Maximum number of tabs allowed (A8 enforcement).
+  , _fe_tabCount     :: IORef Int
+    -- ^ Current number of open tabs.
+  , _fe_listTabs     :: IO [TabSnapshot]
+    -- ^ Callback returning a point-in-time snapshot of all open tabs.
+    -- Wired by the dispatcher; returns @[]@ when no tab registry exists.
+  , _fe_closeTab     :: Int -> IO (Either Text ())
+    -- ^ Callback to close a tab by index. The dispatcher provides the
+    -- real implementation; the default stub returns @Left \"not wired\"@.
+    -- On success, the tab is removed from the registry and its resources
+    -- are cleaned up (session saved for session-backed tabs, process
+    -- killed for raw shells).
   }
 
 -- | Activity state of a harness, derived from tmux screen capture.
@@ -116,6 +135,31 @@ instance ToJSON AgentInfo where
     , "isDefault" .= _ai_isDefault ai
     ]
 
+-- | A point-in-time snapshot of a single tab, pre-resolved to
+-- JSON-friendly text values. The snapshot callback in 'FrontendEnv'
+-- produces these; the API layer simply serializes them.
+data TabSnapshot = TabSnapshot
+  { _ts_index     :: !Int
+  , _ts_kind      :: !Text
+    -- ^ @\"provider\"@, @\"harness\"@, or @\"raw_shell\"@.
+  , _ts_name      :: !Text
+    -- ^ Human-readable tab name.
+  , _ts_status    :: !Text
+    -- ^ @\"running\"@, @\"idle\"@, or @\"crashed\"@.
+  , _ts_sessionId :: !(Maybe Text)
+    -- ^ Session ID for session-backed tabs; 'Nothing' for raw shells.
+  }
+  deriving stock (Show, Eq)
+
+instance ToJSON TabSnapshot where
+  toJSON ts = object
+    [ "index"      .= _ts_index ts
+    , "kind"       .= _ts_kind ts
+    , "name"       .= _ts_name ts
+    , "status"     .= _ts_status ts
+    , "session_id" .= _ts_sessionId ts
+    ]
+
 -- | JSON-serializable session info for the frontend.
 data SessionInfo = SessionInfo
   { _si_id                   :: Text
@@ -154,11 +198,17 @@ apiApp env req respond = do
       path   = pathInfo req
   case (method, path) of
     ("GET", ["api", "harnesses"])            -> handleHarnesses env respond
+    ("GET", ["api", "tabs"])                 -> handleListTabs env respond
     ("GET", ["api", "sessions", "recent"])   -> handleRecentSessions env respond
+    ("GET", ["api", "sessions", "archived"]) -> handleArchivedSessions env respond
     ("GET", ["api", "sessions", sid, "transcript"]) ->
       handleTranscript env sid respond
+    ("POST", ["api", "tabs", tidx, "close"]) ->
+      handleCloseTab env tidx respond
+    ("POST", ["api", "tabs", "new"]) ->
+      handleNewTab env req respond
     ("POST", ["api", "sessions", "new"]) ->
-      handleNewSession env req respond
+      handleNewSessionGone respond
     ("POST", ["api", "sessions", sid, "send"]) ->
       handleSend env sid req respond
     ("PUT", ["api", "sessions", sid, "prompt"]) ->
@@ -210,6 +260,26 @@ extractWindowIdx name =
     parts | length parts >= 2 -> last parts
     _                         -> "0"
 
+-- | Return all currently open tabs as a JSON array.
+handleListTabs :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleListTabs env respond = do
+  tabs <- _fe_listTabs env
+  respond $ jsonResponse status200 tabs
+
+-- | Close a tab by index via the '_fe_closeTab' callback.
+handleCloseTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleCloseTab env tidxText respond =
+  case reads (T.unpack tidxText) :: [(Int, String)] of
+    [(idx, "")] -> do
+      result <- _fe_closeTab env idx
+      case result of
+        Right () ->
+          respond $ jsonResponse status200 (object ["closed" .= True])
+        Left errMsg ->
+          respond $ jsonResponse status404 (object ["error" .= errMsg])
+    _ ->
+      respond $ jsonResponse status400 (object ["error" .= ("Invalid tab index" :: Text)])
+
 handleRecentSessions :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleRecentSessions env respond = do
   let limit   = _fe_recentLimit env
@@ -220,7 +290,13 @@ handleRecentSessions env respond = do
   -- free. Empty / archived sessions are dropped here, not erased on
   -- disk — archiving is purely a UI hint controlled by the user.
   metas    <- listSessions baseDir Nothing (limit * 3)
-  let visible = filter (not . _sm_archived) metas
+  -- Collect session IDs that are currently shown in an active tab so
+  -- the same session does not appear in both "Active Tabs" and
+  -- "Recent Sessions" simultaneously.
+  tabs <- _fe_listTabs env
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } <- tabs]
+      notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
+      visible       = filter (\m -> not (_sm_archived m) && notInTab m) metas
   nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
   let chosen = take limit nonEmpty
   -- Read a first-message snippet per session (bounded read per file).
@@ -228,6 +304,16 @@ handleRecentSessions env respond = do
   -- model-generated summary exist yet.
   snippets <- traverse (firstMessageSnippet baseDir) chosen
   let infos = zipWith toSessionInfo chosen snippets
+  respond $ jsonResponse status200 infos
+
+-- | Return all archived sessions, sorted by last-active descending.
+handleArchivedSessions :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleArchivedSessions env respond = do
+  let baseDir = _fe_sessionsDir env
+  -- Load all sessions with a generous limit; filter to archived-only.
+  metas <- listSessions baseDir Nothing 1000
+  let archived = filter _sm_archived metas
+      infos = map (\m -> toSessionInfo m Nothing) archived
   respond $ jsonResponse status200 infos
 
 -- | Toggle the archive flag on a session. The 'archived' argument is
@@ -296,7 +382,7 @@ toSessionInfo :: SessionMeta -> Maybe Text -> SessionInfo
 toSessionInfo m snippet = SessionInfo
   { _si_id                  = unSessionId (_sm_id m)
   , _si_agent               = fmap unAgentName (_sm_agent m)
-  , _si_runtime             = runtimeToText (_sm_runtime m)
+  , _si_runtime             = sessionKindToText (_sm_kind m)
   , _si_model               = _sm_model m
   , _si_lastActive          = _sm_lastActive m
   , _si_createdAt           = _sm_createdAt m
@@ -359,10 +445,6 @@ snippetFromPayload raw = trimAndTruncate <$>
       in  if T.length normalized > snippetCharBudget
             then T.take (snippetCharBudget - 1) normalized <> "\x2026"
             else normalized
-
-runtimeToText :: RuntimeType -> Text
-runtimeToText RTProvider      = "provider"
-runtimeToText (RTHarness name) = "harness:" <> name
 
 -- | JSON-serializable transcript entry for the frontend.
 data TranscriptEntryInfo = TranscriptEntryInfo
@@ -437,53 +519,153 @@ handleAgents env respond = do
         , _ai_isDefault = _fe_defaultAgent env == Just name
         }
 
--- | Request body for creating a new session.
-data NewSessionRequest = NewSessionRequest
-  { _nsr_agent        :: Maybe Text
-  , _nsr_customPrompt :: Maybe Text
+-- ---------------------------------------------------------------------------
+-- POST /api/tabs/new — unified tab creation endpoint
+-- ---------------------------------------------------------------------------
+
+-- | Request body for creating a new tab.
+--
+-- @
+-- { "kind": { "tag": "session",
+--             "session_kind": { "tag": "provider",
+--                               "provider": "anthropic",
+--                               "model": "..." } } }
+-- @
+--
+-- OR:
+--
+-- @
+-- { "kind": { "tag": "raw_shell",
+--             "backend": { "tag": "local" } } }
+-- @
+newtype NewTabRequest = NewTabRequest
+  { _ntr_kind :: TabKind
   }
 
-instance FromJSON NewSessionRequest where
-  parseJSON = Aeson.withObject "NewSessionRequest" $ \o ->
-    NewSessionRequest <$> o .:? "agent" <*> o .:? "customPrompt"
+instance FromJSON NewTabRequest where
+  parseJSON = Aeson.withObject "NewTabRequest" $ \o -> do
+    kindObj <- o .: "kind"
+    tabKind <- parseTabKind kindObj
+    pure (NewTabRequest tabKind)
 
--- | Create a new empty session.
-handleNewSession :: FrontendEnv -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-handleNewSession env req respond = do
+-- | Parse a 'TabKind' from the JSON envelope used by POST /api/tabs/new.
+--
+-- Two top-level tags:
+--
+--   * @\"session\"@ → expects a @\"session_kind\"@ sub-object whose
+--     shape is the existing 'SessionKind' JSON (tag-discriminated:
+--     @\"provider\"@ or @\"harness\"@).
+--   * @\"raw_shell\"@ → expects a @\"backend\"@ sub-object whose shape
+--     is the existing 'TerminalBackend' JSON (tag-discriminated).
+parseTabKind :: Aeson.Value -> AesonTypes.Parser TabKind
+parseTabKind = Aeson.withObject "TabKind" $ \o -> do
+  tag <- o .: "tag" :: AesonTypes.Parser Text
+  case tag of
+    "session" -> do
+      sk <- o .: "session_kind"
+      TkSession <$> Aeson.parseJSON sk
+    "raw_shell" -> do
+      be <- o .: "backend"
+      TkRawShell <$> Aeson.parseJSON be
+    other -> fail ("unknown TabKind tag: " ++ T.unpack other)
+
+-- | Response body for a successful tab creation.
+data NewTabResponse = NewTabResponse
+  { _ntresp_tabIndex  :: Int
+  , _ntresp_sessionId :: Maybe Text
+  , _ntresp_kind      :: Text
+  }
+
+instance ToJSON NewTabResponse where
+  toJSON r = object
+    [ "tab_index"  .= _ntresp_tabIndex r
+    , "session_id" .= _ntresp_sessionId r
+    , "kind"       .= _ntresp_kind r
+    ]
+
+-- | Handle POST /api/tabs/new.
+--
+-- Creates a new tab (session-backed or raw shell), enforces the maxTabs
+-- limit (A8), and returns a JSON response with the tab index, session
+-- ID (if any), and kind description.
+handleNewTab :: FrontendEnv -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleNewTab env req respond = do
   body <- consumeBody req
-  let parsed = case Aeson.eitherDecode body of
-        Right r -> r
-        Left _  -> NewSessionRequest Nothing Nothing
-      mAgentText = _nsr_agent parsed
-      mAgentName = mAgentText >>= either (const Nothing) Just . mkAgentName
-      mPrefix = mAgentText >>= either (const Nothing) Just . mkSessionPrefix
-  now <- getCurrentTime
-  mModel <- readIORef (_fe_model env)
-  let modelText = maybe "" unModelId mModel
-      sid = newSessionId mPrefix now
-      meta = SessionMeta
-        { _sm_id                = sid
-        , _sm_agent             = mAgentName
-        , _sm_runtime           = RTProvider
-        , _sm_model             = modelText
-        , _sm_channel           = "web"
-        , _sm_createdAt         = now
-        , _sm_lastActive        = now
-        , _sm_bootstrapConsumed = True
-        , _sm_archived          = False
-        , _sm_description       = Nothing
-        , _sm_autoSummary       = Nothing
+  case Aeson.eitherDecode body of
+    Left err ->
+      respond $ jsonResponse status400
+        (object ["error" .= ("Invalid JSON: " <> T.pack err)])
+    Right (NewTabRequest tabKind) -> do
+      -- A8: enforce maxTabs limit
+      curCount <- readIORef (_fe_tabCount env)
+      if curCount >= _fe_maxTabs env
+        then respond $ jsonResponse status409
+               (object ["error" .= ("maximum tab count reached" :: Text)])
+        else createTab env tabKind respond
+
+-- | Actually create the tab and return a response.
+createTab :: FrontendEnv -> TabKind -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+createTab env tabKind respond = do
+  curCount <- readIORef (_fe_tabCount env)
+  -- Bump tab count
+  writeIORef (_fe_tabCount env) (curCount + 1)
+  case tabKind of
+    TkSession sk -> do
+      -- Create a session for session-backed tabs
+      now <- getCurrentTime
+      mModel <- readIORef (_fe_model env)
+      let modelText = maybe "" unModelId mModel
+          sid = newSessionId Nothing now
+          meta = SessionMeta
+            { _sm_id                = sid
+            , _sm_agent             = Nothing
+            , _sm_kind              = sk
+            , _sm_model             = modelText
+            , _sm_channel           = "web"
+            , _sm_createdAt         = now
+            , _sm_lastActive        = now
+            , _sm_bootstrapConsumed = True
+            , _sm_archived          = False
+            , _sm_description       = Nothing
+            , _sm_autoSummary       = Nothing
+            }
+      sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
+      _sh_save sh
+      respond $ jsonResponse status200 NewTabResponse
+        { _ntresp_tabIndex  = curCount
+        , _ntresp_sessionId = Just (unSessionId sid)
+        , _ntresp_kind      = tabKindLabel tabKind
         }
-  sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
-  -- Write custom prompt file if provided
-  case _nsr_customPrompt parsed of
-    Just prompt | not (T.null (T.strip prompt)) ->
-      TIO.writeFile (_sh_dir sh </> "custom-prompt.md") prompt
-    _ -> pure ()
-  _sh_save sh
-  -- New sessions have no transcript yet, so the first-message snippet
-  -- starts as Nothing.
-  respond $ jsonResponse status200 (toSessionInfo meta Nothing)
+    TkRawShell _backend -> do
+      respond $ jsonResponse status200 NewTabResponse
+        { _ntresp_tabIndex  = curCount
+        , _ntresp_sessionId = Nothing
+        , _ntresp_kind      = tabKindLabel tabKind
+        }
+
+-- | User-facing kind label for the response JSON.
+tabKindLabel :: TabKind -> Text
+tabKindLabel (TkSession (SkProvider _)) = "provider"
+tabKindLabel (TkSession (SkHarness _))  = "harness"
+tabKindLabel (TkRawShell _)             = "raw_shell"
+
+-- ---------------------------------------------------------------------------
+-- POST /api/sessions/new — 410 Gone stub (A7)
+-- ---------------------------------------------------------------------------
+
+-- | The legacy session-creation endpoint returns 410 Gone with a
+-- @Location@ header pointing to the new unified endpoint.
+handleNewSessionGone :: (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleNewSessionGone respond =
+  respond $ responseLBS status410
+    [ (hContentType, "application/json")
+    , ("Access-Control-Allow-Origin", "*")
+    , ("Location", "/api/tabs/new")
+    ]
+    (Aeson.encode (object
+      [ "error" .= ("deprecated" :: Text)
+      , "use"   .= ("/api/tabs/new" :: Text)
+      ]))
 
 -- | Set or replace the custom prompt for a session, optionally updating
 -- the agent name in @session.json@.

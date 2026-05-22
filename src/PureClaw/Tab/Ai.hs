@@ -104,6 +104,7 @@ import PureClaw.Handles.Tab
   , TabStatus (..)
   , unTabIndex
   )
+import PureClaw.Session.Kind (ProviderSpec (..), SessionKind (..))
 import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
@@ -120,7 +121,8 @@ import PureClaw.Providers.Class
 import PureClaw.Routing.ChannelOut (shouldEmit)
 import PureClaw.Routing.Parse qualified as Parse
 import PureClaw.Routing.Types
-  ( ChannelEvent (..)
+  ( AiDefaults (..)
+  , ChannelEvent (..)
   , InputEvent (..)
   , OutputSource (..)
   , RoutingConfig (..)
@@ -244,10 +246,17 @@ allocState env rc = do
 
 -- | Build the public 'TabHandle' record from the per-tab state.
 mkHandle :: AgentEnv -> TabIndex -> TabName -> AiTabState -> TabHandle
-mkHandle env idx name state = TabHandle
+mkHandle env idx name state =
+  let rc = _env_routingConfig env
+      provSpec = ProviderSpec
+        { _ps_provider = _aid_providerId (_rc_defaultAi rc)
+        , _ps_model    = _aid_modelId    (_rc_defaultAi rc)
+        , _ps_agent    = Nothing
+        }
+  in TabHandle
   { _tabHandle_index        = idx
   , _tabHandle_name         = name
-  , _tabHandle_kind         = KindAi
+  , _tabHandle_kind         = TkSession (SkProvider provSpec)
   , _tabHandle_status       = readIORef (_ats_statusRef state)
   , _tabHandle_send         = sendUserText state
   , _tabHandle_enqueueSlash = enqueueSlashAi state

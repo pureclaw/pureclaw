@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { AgentInfo, HarnessInfo, SessionInfo, TranscriptEntry } from '../types'
+import type { AgentInfo, HarnessInfo, SessionInfo, TabInfo, TranscriptEntry } from '../types'
 
 const POLL_INTERVAL = 3000
 
@@ -42,6 +42,52 @@ export function useRecentSessions() {
 
   const poll = useCallback(async () => {
     const data = await fetchJson<SessionInfo[]>('/api/sessions/recent')
+    if (data) {
+      setSessions(data)
+      setError(false)
+    } else {
+      setError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    poll()
+    const id = setInterval(poll, POLL_INTERVAL)
+    return () => clearInterval(id)
+  }, [poll])
+
+  return { sessions, error }
+}
+
+export function useTabs() {
+  const [tabs, setTabs] = useState<TabInfo[]>([])
+  const [error, setError] = useState(false)
+
+  const poll = useCallback(async () => {
+    const data = await fetchJson<TabInfo[]>('/api/tabs')
+    if (data) {
+      setTabs(data)
+      setError(false)
+    } else {
+      setError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    poll()
+    const id = setInterval(poll, POLL_INTERVAL)
+    return () => clearInterval(id)
+  }, [poll])
+
+  return { tabs, error }
+}
+
+export function useArchivedSessions() {
+  const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [error, setError] = useState(false)
+
+  const poll = useCallback(async () => {
+    const data = await fetchJson<SessionInfo[]>('/api/sessions/archived')
     if (data) {
       setSessions(data)
       setError(false)
@@ -174,19 +220,88 @@ export function useAgents() {
   return { agents }
 }
 
-export async function createSession(agent?: string, customPrompt?: string): Promise<import('../types').SessionInfo | null> {
+/** Response from POST /api/tabs/new */
+export interface NewTabResponse {
+  tab_index: number
+  session_id: string | null
+  kind: string
+}
+
+/** Create a new tab via the unified POST /api/tabs/new endpoint.
+ *  For provider-backed sessions, the response includes a session_id
+ *  that can be used to load the transcript. For raw shell tabs the
+ *  session_id is null. */
+export async function createTab(agent?: string, _customPrompt?: string): Promise<NewTabResponse | null> {
   try {
-    const body: Record<string, string> = {}
-    if (agent) body.agent = agent
-    if (customPrompt) body.customPrompt = customPrompt
-    const res = await fetch('/api/sessions/new', {
+    // Build the TabKind payload. For now the frontend only creates
+    // provider-backed session tabs (the "New Session" button path).
+    const sessionKind: Record<string, unknown> = {
+      tag: 'provider',
+      provider: 'anthropic',
+      model: 'placeholder',
+    }
+    if (agent) {
+      sessionKind.agent = agent
+    }
+    const body = {
+      kind: {
+        tag: 'session',
+        session_kind: sessionKind,
+      },
+    }
+    const res = await fetch('/api/tabs/new', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
     if (!res.ok) return null
-    return await res.json() as import('../types').SessionInfo
+    return await res.json() as NewTabResponse
   } catch {
     return null
+  }
+}
+
+/** Close a tab by index. Returns true if the backend accepted the close. */
+export async function closeTab(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/close`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Resume an archived session: unarchive it, then create a new tab for it.
+ *  Returns the new tab response on success, or null on failure. */
+export async function resumeArchivedSession(sessionId: string): Promise<NewTabResponse | null> {
+  // Step 1: Unarchive the session
+  const unarchived = await setSessionArchived(sessionId, false)
+  if (!unarchived) return null
+
+  // Step 2: Create a new tab for the session
+  const tab = await createTab()
+  return tab
+}
+
+/** @deprecated Use createTab instead. This function is kept for
+ *  backward compatibility but now calls the new /api/tabs/new endpoint
+ *  and wraps the response to match the old SessionInfo shape. */
+export async function createSession(agent?: string, customPrompt?: string): Promise<import('../types').SessionInfo | null> {
+  const tab = await createTab(agent, customPrompt)
+  if (!tab || !tab.session_id) return null
+  // Synthesise a minimal SessionInfo from the tab response so existing
+  // call sites continue to work until they migrate to createTab.
+  return {
+    id: tab.session_id,
+    agent: agent ?? null,
+    runtime: tab.kind,
+    model: '',
+    lastActive: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    description: null,
+    autoSummary: null,
+    firstMessageSnippet: null,
   }
 }

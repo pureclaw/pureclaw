@@ -130,6 +130,12 @@ import PureClaw.Handles.Tab
   , TabStatus (..)
   , unTabIndex
   )
+import PureClaw.Session.Kind
+  ( HarnessFlavour (..)
+  , HarnessSpec (..)
+  , SessionKind (..)
+  , TerminalBackend (..)
+  )
 import PureClaw.Routing.ChannelOut (shouldEmit)
 import PureClaw.Routing.Parse qualified as Parse
 import PureClaw.Routing.Types
@@ -269,10 +275,17 @@ allocState env hh = do
 
 -- | Build the public 'TabHandle' record from the per-tab state.
 mkHandle :: AgentEnv -> TabIndex -> TabName -> HarnessTabState -> TabHandle
-mkHandle env idx name state = TabHandle
+mkHandle env idx name state =
+  let harnSpec = HarnessSpec
+        { _h_flavour = HClaudeCode
+        , _h_backend = TbLocal
+        , _h_cwd     = Nothing
+        , _h_args    = []
+        }
+  in TabHandle
   { _tabHandle_index        = idx
   , _tabHandle_name         = name
-  , _tabHandle_kind         = KindHarness
+  , _tabHandle_kind         = TkSession (SkHarness harnSpec)
   , _tabHandle_status       = readIORef (_hts_statusRef state)
   , _tabHandle_send         = sendBytes state
   , _tabHandle_enqueueSlash = enqueueSlashUnsupported

@@ -109,7 +109,7 @@ import PureClaw.Agent.SlashCommands
   , TabSlashCommand (..)
   , getSessionsDir
   )
-import PureClaw.Core.Types (SessionId (..), UserId, unSessionId)
+import PureClaw.Core.Types (ModelId (..), ProviderId (..), SessionId (..), UserId, unSessionId)
 import PureClaw.Session.Handle qualified as Session
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
@@ -129,6 +129,11 @@ import PureClaw.Handles.Tab
   , unTabIndex
   )
 import PureClaw.Handles.Tab qualified as Tab
+import PureClaw.Session.Kind
+  ( ProviderSpec (..)
+  , SessionKind (..)
+  , TerminalBackend (..)
+  )
 import PureClaw.Routing.AutoSpawn qualified as AutoSpawn
 import PureClaw.Routing.ChannelOut qualified as ChannelOut
 import PureClaw.Routing.Onboarding qualified as Onboarding
@@ -174,7 +179,9 @@ defaultTabFactory env kind idx args =
   case parseArgsForKind kind args of
     Left ai             -> TabAi.mkTabAi env idx ai
     Right (Left harn)   -> TabHarness.mkTabHarness env idx harn
-    Right (Right back)  -> TabBackend.mkTabBackend env idx kind (_backend_args back)
+    Right (Right back)  -> case kind of
+      TkRawShell tb -> TabBackend.mkRawShellTab env idx tb (_backend_args back)
+      _             -> TabBackend.mkRawShellTab env idx TbLocal (_backend_args back)
 
 -- | Pure helper that surfaces how 'defaultTabFactory' projects its
 -- @[Text]@ arg list onto each per-kind spawn-args record. Exposed for
@@ -183,12 +190,12 @@ defaultTabFactory env kind idx args =
 -- (WU1-stubbed) factory bottoms.
 parseArgsForKind :: TabKind -> [Text] -> Either AiSpawnArgs (Either HarnessSpawnArgs BackendSpawnArgs)
 parseArgsForKind kind xs = case kind of
-  KindAi      -> Left  AiSpawnArgs      { _ai_requestedName      = T.unwords xs }
-  KindHarness -> Right (Left HarnessSpawnArgs { _harness_requestedName = T.unwords xs })
-  _           -> Right (Right BackendSpawnArgs
-                          { _backend_requestedName = T.unwords xs
-                          , _backend_args          = xs
-                          })
+  TkSession (SkProvider _) -> Left  AiSpawnArgs      { _ai_requestedName      = T.unwords xs }
+  TkSession (SkHarness _)  -> Right (Left HarnessSpawnArgs { _harness_requestedName = T.unwords xs })
+  TkRawShell _             -> Right (Right BackendSpawnArgs
+                                { _backend_requestedName = T.unwords xs
+                                , _backend_args          = xs
+                                })
 
 
 -- ---------------------------------------------------------------------------
@@ -736,7 +743,7 @@ enqueueOnFocused env idx cmd = do
     Nothing -> emitDispatcherBanner env
                  ("/" <> tShowIdx idx <> ": no such tab")
     Just th -> case _tabHandle_kind th of
-      KindAi -> do
+      TkSession (SkProvider _) -> do
         r <- safeEnqueueSlash th cmd
         case r of
           Right () -> pure ()
@@ -833,7 +840,12 @@ handleResolved env ds uid sessionsDir realSid = do
       -- noted in design's K7 §). The new tab will own the resumed
       -- session.
       writeIORef (_env_session env) newSession
-      spawnResult <- ratelimitedSpawn env ds uid KindAi []
+      let resumeKind = TkSession (SkProvider ProviderSpec
+                        { _ps_provider = ProviderId "anthropic"
+                        , _ps_model    = ModelId "placeholder"
+                        , _ps_agent    = Nothing
+                        })
+      spawnResult <- ratelimitedSpawn env ds uid resumeKind []
       case spawnResult of
         Left tabErr ->
           emitDispatcherBanner env

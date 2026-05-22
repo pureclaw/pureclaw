@@ -22,7 +22,7 @@ import PureClaw.Agent.SlashCommands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Session.Handle (SessionHandle (..), mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
-import PureClaw.Session.Types (SessionMeta (..), RuntimeType (..))
+import PureClaw.Session.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
@@ -261,6 +261,15 @@ spec = do
     it "parses /tab new ai" $ do
       parseSlashCommand "/tab new ai"
         `shouldBe` Just (CmdTab (TabNewCmd (Just TkaAi) Nothing))
+
+    -- WU-11: /tab new provider
+    it "parses /tab new provider (bare)" $ do
+      parseSlashCommand "/tab new provider"
+        `shouldBe` Just (CmdTab (TabNewCmd (Just TkaProvider) Nothing))
+
+    it "parses /tab new provider with args" $ do
+      parseSlashCommand "/tab new provider anthropic claude-opus-4-7"
+        `shouldBe` Just (CmdTab (TabNewCmd (Just TkaProvider) (Just "anthropic claude-opus-4-7")))
 
     it "parses /tab close 0" $ do
       parseSlashCommand "/tab close 0"
@@ -2608,7 +2617,7 @@ spec = do
       -- Context should be unchanged (no clear)
       contextMessages ctx' `shouldBe` contextMessages ctx
 
-    it "/session new --target creates session with RTHarness when harness exists" $ withTempHome $ do
+    it "/session new --target creates session with SkHarness when harness exists" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       env <- mkSessionEnv sentRef
       let harnessName = "claude-code-0"
@@ -2623,7 +2632,7 @@ spec = do
         Nothing -> expectationFailure "Expected session creation confirmation"
       activeHandle <- readIORef (_env_session env)
       meta <- readIORef (_sh_meta activeHandle)
-      _sm_runtime meta `shouldBe` RTHarness harnessName
+      sessionKindToText (_sm_kind meta) `shouldBe` ("harness:" <> harnessName)
 
     it "/session new --target sets target to TargetHarness" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
@@ -2642,6 +2651,19 @@ spec = do
       _ <- executeSlashCommand env (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
       target <- readIORef (_env_target env)
       target `shouldBe` TargetProvider
+
+    -- WU-11 C4: /session new deprecation notice
+    it "/session new emits deprecation notice before creating session" $ withTempHome $ do
+      allSentRef <- newIORef ([] :: [Text])
+      env <- mkSessionEnv (error "WU-11: unused sentRef")
+      let ch = mkNoOpChannelHandle
+                 { _ch_send = \msg -> modifyIORef allSentRef (_om_content msg :) }
+      let envWithAllSent = env { _env_channel = ch }
+      _ <- executeSlashCommand envWithAllSent (CmdSession (SessionNew Nothing Nothing)) (emptyContext Nothing)
+      allSent <- readIORef allSentRef
+      -- The deprecation notice should be among the sent messages
+      allSent `shouldSatisfy` any (\t -> "deprecated" `T.isInfixOf` T.toLower t)
+      allSent `shouldSatisfy` any (\t -> "/tab new provider" `T.isInfixOf` t)
 
     it "/session list with empty dir shows 'No sessions found.'" $ withTempHome $ do
       sentRef <- newIORef (Nothing :: Maybe Text)

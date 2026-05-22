@@ -58,6 +58,16 @@ export function sessionSubtitle(s: { agent?: string | null; model?: string | nul
   return parts.join(' · ')
 }
 
+export type TabStatus = 'running' | 'idle' | 'crashed'
+
+export interface TabInfo {
+  index: number
+  kind: string
+  name: string
+  status: TabStatus
+  session_id: string | null
+}
+
 export interface AgentInfo {
   name: string
   isDefault: boolean

@@ -2,13 +2,14 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt, setSessionArchived, setSessionDescription } from './hooks/useApi'
+import { KindPickerModal } from './components/KindPickerModal'
+import { useTabs, useRecentSessions, useArchivedSessions, useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, resumeArchivedSession } from './hooks/useApi'
 import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
 function selectedIdFromPath(): string | null {
   const path = window.location.pathname
-  const m = path.match(/^\/(harness|session)\/(.+)$/)
+  const m = path.match(/^\/(harness|session|tab)\/(.+)$/)
   if (m) return `${m[1]}:${m[2]}`
   return null
 }
@@ -20,11 +21,20 @@ function pathFromSelectedId(selectedId: string | null): string {
   return `/${type}/${rest.join(':')}`
 }
 
-/** Extract session ID from selectedId, or null if not a session selection. */
-function sessionIdFromSelection(selectedId: string | null): string | null {
+/** Extract session ID from selectedId, or null if not a session selection.
+ *  For tab selections, looks up the tab's session_id from the tabs array. */
+function sessionIdFromSelection(
+  selectedId: string | null,
+  tabs: import('./types').TabInfo[],
+): string | null {
   if (!selectedId) return null
   const [type, ...rest] = selectedId.split(':')
   if (type === 'session') return rest.join(':')
+  if (type === 'tab') {
+    const tabIndex = parseInt(rest.join(':'), 10)
+    const tab = tabs.find((t) => t.index === tabIndex)
+    return tab?.session_id ?? null
+  }
   return null
 }
 
@@ -318,8 +328,9 @@ function modelContextWindow(model: string | null): number {
 }
 
 export default function App() {
-  const { harnesses } = useHarnesses()
+  const { tabs } = useTabs()
   const { sessions: rawSessions } = useRecentSessions()
+  const { sessions: archivedSessions } = useArchivedSessions()
   const { agents } = useAgents()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
@@ -352,6 +363,10 @@ export default function App() {
     }
   }, [])
 
+  const handleUnarchiveSession = useCallback(async (id: string) => {
+    await setSessionArchived(id, false)
+  }, [])
+
   // Optimistic overlay for description edits — we apply the user's text
   // immediately so the chat header doesn't flicker back to the fallback
   // while the next poll arrives. Cleared per-id when the polled value
@@ -382,7 +397,7 @@ export default function App() {
     }
   }, [agents, selectedAgent])
 
-  const currentSessionId = sessionIdFromSelection(selectedId)
+  const currentSessionId = sessionIdFromSelection(selectedId, tabs)
   const { entries, loading, refresh } = useTranscript(currentSessionId)
   const { send, sending } = useSendMessage(currentSessionId, refresh)
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
@@ -433,15 +448,18 @@ export default function App() {
     send(message)
   }, [send, entries.length, customPromptFile, currentSessionId])
 
-  const handleNewSession = useCallback(async () => {
-    const session = await createSession(selectedAgent || undefined, customPromptFile?.content)
-    if (session) {
-      const newId = `session:${session.id}`
-      setSelectedId(newId)
-      window.history.pushState(null, '', pathFromSelectedId(newId))
-      setCustomPromptFile(null)
-    }
-  }, [selectedAgent, customPromptFile])
+  const [showKindPicker, setShowKindPicker] = useState(false)
+
+  const handleNewTab = useCallback(() => {
+    setShowKindPicker(true)
+  }, [])
+
+  const handleTabCreated = useCallback((tab: import('./hooks/useApi').NewTabResponse) => {
+    const newId = `tab:${tab.tab_index}`
+    setSelectedId(newId)
+    window.history.pushState(null, '', pathFromSelectedId(newId))
+    setCustomPromptFile(null)
+  }, [])
 
   // Sync state from browser back/forward navigation
   useEffect(() => {
@@ -450,15 +468,59 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  const handleSelect = useCallback((type: 'harness' | 'session', id: string) => {
-    const newId = `${type}:${id}`
+  const handleSelectTab = useCallback((index: number) => {
+    const newId = `tab:${index}`
     setSelectedId(newId)
     window.history.pushState(null, '', pathFromSelectedId(newId))
   }, [])
 
+  const handleSelectSession = useCallback((id: string) => {
+    const newId = `session:${id}`
+    setSelectedId(newId)
+    window.history.pushState(null, '', pathFromSelectedId(newId))
+  }, [])
+
+  // L1/L2: Close a tab (session-backed or raw shell).
+  // The backend handles save + cleanup; the frontend just deselects if needed.
+  const handleCloseTab = useCallback(async (index: number) => {
+    await closeTab(index)
+    // If the closed tab was selected, clear the selection
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
+  // L4: Archive a running session — close tab first, then archive.
+  const handleArchiveTab = useCallback(async (index: number) => {
+    const tab = tabs.find((t) => t.index === index)
+    if (!tab) return
+    // Close the tab first (backend saves session state)
+    await closeTab(index)
+    // If session-backed, archive the session so it moves to Archived
+    if (tab.session_id) {
+      await setSessionArchived(tab.session_id, true)
+    }
+    // If the archived tab was selected, clear the selection
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [tabs, selectedId])
+
+  // L3: Resume archived session — unarchive then create a new tab.
+  const handleResumeArchivedSession = useCallback(async (id: string) => {
+    const tab = await resumeArchivedSession(id)
+    if (tab) {
+      const newId = `tab:${tab.tab_index}`
+      setSelectedId(newId)
+      window.history.pushState(null, '', pathFromSelectedId(newId))
+    }
+  }, [])
+
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
-    ? deriveAgent(selectedId, harnesses, sessions)
+    ? deriveAgent(selectedId, tabs, sessions)
     : null
 
   const taskTitle = displayAgent?.name ?? 'PureClaw'
@@ -466,24 +528,33 @@ export default function App() {
   // Compute session stats from transcript entries
   const sessionStats = useMemo(() => computeSessionStats(entries), [entries])
   const selectedSession = useMemo(() => {
-    const base = sessions.find((s) => s.id === currentSessionId) ?? null
+    const base = sessions.find((s) => s.id === currentSessionId)
+      ?? archivedSessions.find((s) => s.id === currentSessionId)
+      ?? null
     if (!base) return null
     const override = descriptionOverrides.get(base.id)
     return override === undefined
       ? base
       : { ...base, description: override.length > 0 ? override : null }
-  }, [sessions, currentSessionId, descriptionOverrides])
+  }, [sessions, archivedSessions, currentSessionId, descriptionOverrides])
 
   return (
     <>
-      <TopBar taskTitle={taskTitle} onNewSession={handleNewSession} />
+      <TopBar taskTitle={taskTitle} />
       <div className="flex flex-1 min-h-0">
         <Sidebar
-          harnesses={harnesses}
+          tabs={tabs}
           sessions={sessions}
+          archivedSessions={archivedSessions}
           selectedId={selectedId}
-          onSelect={handleSelect}
+          onSelectTab={handleSelectTab}
+          onSelectSession={handleSelectSession}
+          onNewTab={handleNewTab}
           onArchiveSession={handleArchiveSession}
+          onUnarchiveSession={handleUnarchiveSession}
+          onCloseTab={handleCloseTab}
+          onArchiveTab={handleArchiveTab}
+          onResumeArchivedSession={handleResumeArchivedSession}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
@@ -503,26 +574,32 @@ export default function App() {
           onCustomPromptFile={setCustomPromptFile}
         />
       </div>
+      <KindPickerModal
+        open={showKindPicker}
+        onClose={() => setShowKindPicker(false)}
+        onCreated={handleTabCreated}
+      />
     </>
   )
 }
 
 function deriveAgent(
   selectedId: string,
-  harnesses: import('./types').HarnessInfo[],
+  tabs: import('./types').TabInfo[],
   sessions: import('./types').SessionInfo[],
 ) {
   const [type, ...rest] = selectedId.split(':')
   const id = rest.join(':')
 
-  if (type === 'harness') {
-    const h = harnesses.find((h) => h.name === id)
-    if (!h) return null
+  if (type === 'tab') {
+    const tabIndex = parseInt(id, 10)
+    const tab = tabs.find((t) => t.index === tabIndex)
+    if (!tab) return null
     return {
-      id: `harness:${h.name}`,
-      name: h.name,
-      status: h.activity === 'thinking' ? 'thinking' as const
-        : h.activity === 'idle' ? 'idle' as const
+      id: `tab:${tab.index}`,
+      name: tab.name,
+      status: tab.status === 'running' ? 'thinking' as const
+        : tab.status === 'idle' ? 'idle' as const
         : 'completed' as const,
       tokenCount: '',
     }

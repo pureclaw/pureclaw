@@ -210,6 +210,7 @@ data McpSubCommand
 -- conversion at the handler layer (WU9).
 data TabKindArg
   = TkaAi
+  | TkaProvider
   | TkaHarness
   | TkaShell
   | TkaSsh
@@ -325,7 +326,7 @@ tabFamilyCommandSpecs :: [CommandSpec]
 tabFamilyCommandSpecs =
   [ CommandSpec "/tabs"                              "List all tabs (alias of /tab list)"          GroupTab (exactP "/tabs" (CmdTab TabListCmd))
   , CommandSpec "/tab list"                          "List all tabs"                               GroupTab (exactP "/tab list" (CmdTab TabListCmd))
-  , CommandSpec "/tab new [<kind>]"                  "Open a new tab at the next free slot"        GroupTab tabNewP
+  , CommandSpec "/tab new [<kind>]"                  "Open a new tab (kind: provider, harness, shell, ssh, tmux)" GroupTab tabNewP
   , CommandSpec "/tab close <N> [--force]"           "Close tab N (--force skips archive on AI)"    GroupTab tabCloseP
   , CommandSpec "/tab focus <N>"                     "Switch focus to tab N (alias of /N)"          GroupTab tabFocusP
   , CommandSpec "/tab resume <id>"                   "Resume a session into a new tab"             GroupTab tabResumeP
@@ -717,12 +718,13 @@ tabRenameP t =
 -- | Map a kind keyword to its 'TabKindArg' enum value.
 parseTabKindArg :: Text -> Maybe TabKindArg
 parseTabKindArg w = case T.toLower w of
-  "ai"      -> Just TkaAi
-  "harness" -> Just TkaHarness
-  "shell"   -> Just TkaShell
-  "ssh"     -> Just TkaSsh
-  "tmux"    -> Just TkaTmux
-  _         -> Nothing
+  "ai"       -> Just TkaAi
+  "provider" -> Just TkaProvider
+  "harness"  -> Just TkaHarness
+  "shell"    -> Just TkaShell
+  "ssh"      -> Just TkaSsh
+  "tmux"     -> Just TkaTmux
+  _          -> Nothing
 
 -- | Parse a decimal non-negative 'Int'. Rejects empty input, leading
 -- whitespace (caller pre-strips), signs, and any non-digit characters.
@@ -2108,6 +2110,10 @@ executeSessionCommand env sub ctx = do
   let send = _ch_send (_env_channel env) . OutgoingMessage
   case sub of
     SessionNew mAgent mTargetName -> do
+      -- WU-11 C4: emit deprecation notice
+      _ch_send (_env_channel env)
+        (OutgoingMessage
+           "\x26a0 /session new is deprecated. Use /tab new provider instead.")
       -- Resolve agent: explicit arg > config default > None
       fileCfg <- loadConfig
       let agentName = mAgent <|> _fc_defaultAgent fileCfg
@@ -2124,8 +2130,14 @@ executeSessionCommand env sub ctx = do
               send ("Target \"" <> name <> "\" is not running. "
                     <> "Start it first with /harness start " <> name)
               pure ctx
-            Just _ -> createSession env ctx agentName (SessionTypes.RTHarness name)
-        _ -> createSession env ctx agentName SessionTypes.RTProvider
+            Just _ -> createSession env ctx agentName
+                        (SessionTypes.SkHarness (SessionTypes.HarnessSpec
+                          (SessionTypes.fixedFlavourLookup name)
+                          (SessionTypes.TbTmux (SessionTypes.TmuxConfig name name Nothing))
+                          Nothing []))
+        _ -> createSession env ctx agentName
+               (SessionTypes.SkProvider (SessionTypes.ProviderSpec
+                 (SessionTypes.inferProviderId "") (ModelId "") Nothing))
 
     SessionList mAgentFilter -> do
       sessionsDir <- getSessionsDir
@@ -2196,9 +2208,7 @@ executeSessionCommand env sub ctx = do
           agentLine  = case _sm_agent meta of
             Nothing -> "  Agent:   (no agent)"
             Just a  -> "  Agent:   " <> AgentDef.unAgentName a
-          runtimeLine = "  Runtime: " <> case _sm_runtime meta of
-            SessionTypes.RTProvider   -> "provider"
-            SessionTypes.RTHarness n  -> "harness:" <> n
+          runtimeLine = "  Runtime: " <> SessionTypes.sessionKindToText (_sm_kind meta)
           targetLine = case target of
             TargetProvider     -> "  Target:  model: " <> maybe "(not set)" unModelId mModel
             TargetHarness name -> "  Target:  harness: " <> name
@@ -2237,13 +2247,13 @@ executeSessionCommand env sub ctx = do
     _sh_meta = Session._sh_meta
     _sm_id = SessionTypes._sm_id
     _sm_agent = SessionTypes._sm_agent
-    _sm_runtime = SessionTypes._sm_runtime
+    _sm_kind = SessionTypes._sm_kind
 
-    -- | Shared helper: create a new on-disk session with the given runtime,
+    -- | Shared helper: create a new on-disk session with the given kind,
     -- swap it into '_env_session', set '_env_target' to match, and return a
     -- fresh context. When an agent name is given, validates it, records it
     -- in session metadata, and loads its system prompt into the new context.
-    createSession envS ctxS mAgentText runtime = do
+    createSession envS ctxS mAgentText kind = do
       let sendS = _ch_send (_env_channel envS) . OutgoingMessage
       -- Resolve the agent name, if given.
       mValidAgent <- case mAgentText of
@@ -2277,7 +2287,7 @@ executeSessionCommand env sub ctx = do
               meta = SessionTypes.SessionMeta
                 { SessionTypes._sm_id                = sid
                 , SessionTypes._sm_agent             = mAgent
-                , SessionTypes._sm_runtime           = runtime
+                , SessionTypes._sm_kind              = kind
                 , SessionTypes._sm_model             = ""
                 , SessionTypes._sm_channel           = ""
                 , SessionTypes._sm_createdAt         = now
@@ -2289,13 +2299,13 @@ executeSessionCommand env sub ctx = do
                 }
           newHandle <- Session.mkSessionHandle (_env_logger envS) sessionsDir meta
           writeIORef (_env_session envS) newHandle
-          writeIORef (_env_target envS) (SessionTypes.defaultTarget runtime)
+          writeIORef (_env_target envS) (SessionTypes.defaultTarget kind)
           let agentMsg = case mAgent of
                 Nothing -> ""
                 Just a  -> "\nAgent: " <> AgentDef.unAgentName a
-              runtimeMsg = case runtime of
-                SessionTypes.RTProvider   -> ""
-                SessionTypes.RTHarness n  -> "\nTarget: harness:" <> n
+              runtimeMsg = case kind of
+                SessionTypes.SkProvider _  -> ""
+                SessionTypes.SkHarness _   -> "\nTarget: harness:" <> SessionTypes.sessionKindToText kind
               -- Use the agent's system prompt if available, otherwise
               -- carry forward the existing context's system prompt.
               newSysPrompt = mSysPrompt <|> contextSystemPrompt ctxS

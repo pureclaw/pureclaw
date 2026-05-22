@@ -1,6 +1,7 @@
-import type { HarnessInfo, SessionInfo } from '../types'
+import type { SessionInfo, TabInfo } from '../types'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
-import { ActivityDot } from './StatusDot'
+import { ActiveTabs } from './ActiveTabs'
+import { ArchivedSessions } from './ArchivedSessions'
 
 function SectionHeader({ label }: { label: string }) {
   return (
@@ -9,54 +10,6 @@ function SectionHeader({ label }: { label: string }) {
       style={{ color: 'var(--text-muted)', letterSpacing: '0.08em' }}
     >
       {label}
-    </div>
-  )
-}
-
-function HarnessRow({
-  harness,
-  selected,
-  onSelect,
-}: {
-  harness: HarnessInfo
-  selected: boolean
-  onSelect: () => void
-}) {
-  const isThinking = harness.activity === 'thinking'
-
-  const rowClasses = [
-    'agent-row px-3 py-2',
-    selected ? 'selected' : '',
-    isThinking ? 'shimmer' : '',
-  ].filter(Boolean).join(' ')
-
-  const nameColor = harness.activity === 'stopped'
-    ? 'var(--text-muted)'
-    : 'var(--text-primary)'
-
-  const activityLabel = harness.activity === 'thinking'
-    ? 'Thinking\u2026'
-    : harness.activity === 'idle'
-      ? 'Idle'
-      : 'Stopped'
-
-  return (
-    <div className={rowClasses} onClick={onSelect}>
-      <div className="flex items-center gap-2">
-        <ActivityDot activity={harness.activity} />
-        <span
-          className="text-sm font-medium"
-          style={{ color: nameColor, letterSpacing: 'var(--tracking-tight)' }}
-        >
-          {harness.name}
-        </span>
-      </div>
-      <div
-        className="text-xs ml-4 mt-0.5"
-        style={{ color: 'var(--text-muted)', lineHeight: 'var(--leading-tight)' }}
-      >
-        {activityLabel}
-      </div>
     </div>
   )
 }
@@ -137,17 +90,31 @@ function formatAge(isoDate: string): string {
 }
 
 export function Sidebar({
-  harnesses,
+  tabs,
   sessions,
+  archivedSessions,
   selectedId,
-  onSelect,
+  onSelectTab,
+  onSelectSession,
+  onNewTab,
   onArchiveSession,
+  onUnarchiveSession,
+  onCloseTab,
+  onArchiveTab,
+  onResumeArchivedSession,
 }: {
-  harnesses: HarnessInfo[]
+  tabs: TabInfo[]
   sessions: SessionInfo[]
+  archivedSessions: SessionInfo[]
   selectedId: string | null
-  onSelect: (type: 'harness' | 'session', id: string) => void
+  onSelectTab: (index: number) => void
+  onSelectSession: (id: string) => void
+  onNewTab: () => void
   onArchiveSession: (id: string) => void
+  onUnarchiveSession: (id: string) => void
+  onCloseTab: (index: number) => void
+  onArchiveTab: (index: number) => void
+  onResumeArchivedSession: (id: string) => void
 }) {
   return (
     <div
@@ -155,19 +122,15 @@ export function Sidebar({
       style={{ width: 'var(--sidebar-width)', background: 'var(--bg-surface)', borderRight: '1px solid var(--border)' }}
     >
       <div className="flex-1 overflow-y-auto sidebar-scroll py-1">
-        {harnesses.length > 0 && (
-          <>
-            <SectionHeader label="Harnesses" />
-            {harnesses.map((h) => (
-              <HarnessRow
-                key={h.name}
-                harness={h}
-                selected={selectedId === `harness:${h.name}`}
-                onSelect={() => onSelect('harness', h.name)}
-              />
-            ))}
-          </>
-        )}
+        <ActiveTabs
+          tabs={tabs}
+          selectedId={selectedId}
+          onSelectTab={onSelectTab}
+          onNewTab={onNewTab}
+          onCloseTab={onCloseTab}
+          onArchiveTab={onArchiveTab}
+        />
+
         {sessions.length > 0 && (
           <>
             <SectionHeader label="Recent Sessions" />
@@ -176,15 +139,23 @@ export function Sidebar({
                 key={s.id}
                 session={s}
                 selected={selectedId === `session:${s.id}`}
-                onSelect={() => onSelect('session', s.id)}
+                onSelect={() => onSelectSession(s.id)}
                 onArchive={onArchiveSession}
               />
             ))}
           </>
         )}
-        {harnesses.length === 0 && sessions.length === 0 && (
+
+        <ArchivedSessions
+          sessions={archivedSessions}
+          selectedId={selectedId}
+          onSelectSession={onResumeArchivedSession}
+          onUnarchive={onUnarchiveSession}
+        />
+
+        {tabs.length === 0 && sessions.length === 0 && archivedSessions.length === 0 && (
           <div className="px-3 py-4 text-xs" style={{ color: 'var(--text-muted)' }}>
-            No harnesses or sessions yet.
+            No tabs or sessions yet.
           </div>
         )}
       </div>

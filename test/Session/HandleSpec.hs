@@ -28,6 +28,7 @@ import PureClaw.Agent.AgentDef (mkAgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
+  , ModelId (..)
   , SessionId (..)
   , parseSessionId
   )
@@ -61,9 +62,6 @@ import PureClaw.Providers.Class
   , Role (..)
   )
 import PureClaw.Session.Types
-  ( RuntimeType (..)
-  , SessionMeta (..)
-  )
 import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)
@@ -82,7 +80,7 @@ mkMeta :: Text -> UTCTime -> SessionMeta
 mkMeta sid t = SessionMeta
   { _sm_id                = parseSessionId sid
   , _sm_agent             = Nothing
-  , _sm_runtime           = RTProvider
+  , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "test-model") (ModelId "test-model") Nothing)
   , _sm_model             = "test-model"
   , _sm_channel           = "cli"
   , _sm_createdAt         = t
@@ -221,18 +219,20 @@ spec = do
       _sh_dir sh `shouldBe` ""
 
   describe "validateRuntime" $ do
-    it "RTProvider always returns RuntimeOk TargetProvider" $
-      validateRuntime Map.empty RTProvider `shouldBe` RuntimeOk TargetProvider
+    it "SkProvider always returns RuntimeOk TargetProvider" $
+      validateRuntime Map.empty (SkProvider (ProviderSpec (inferProviderId "") (ModelId "") Nothing)) `shouldBe` RuntimeOk TargetProvider
 
-    it "RTHarness present in map returns RuntimeOk (TargetHarness name)" $ do
+    it "SkHarness present in map returns RuntimeOk (TargetHarness name)" $ do
       let h = noOpHarness
           m = Map.singleton "cc" h
-      case validateRuntime m (RTHarness "cc") of
+          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+      case validateRuntime m (SkHarness hSpec) of
         RuntimeOk (TargetHarness n) -> n `shouldBe` "cc"
         other -> expectationFailure ("expected RuntimeOk TargetHarness, got: " <> show other)
 
-    it "RTHarness absent returns RuntimeFallback TargetProvider with warning" $
-      case validateRuntime Map.empty (RTHarness "dead") of
+    it "SkHarness absent returns RuntimeFallback TargetProvider with warning" $
+      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing []
+      in case validateRuntime Map.empty (SkHarness hSpec) of
         RuntimeFallback TargetProvider msg ->
           ("dead" `T.isInfixOf` msg && "falling back" `T.isInfixOf` msg)
             `shouldBe` True
@@ -504,22 +504,24 @@ spec = do
       _th_close th
 
   describe "resolveResumedTarget" $ do
-    it "RTProvider resolves to TargetProvider without logging a warning" $ do
+    it "SkProvider resolves to TargetProvider without logging a warning" $ do
       (logger, warnRef) <- mkCaptureLogger
-      tgt <- resolveResumedTarget logger Map.empty RTProvider
+      tgt <- resolveResumedTarget logger Map.empty (SkProvider (ProviderSpec (inferProviderId "") (ModelId "") Nothing))
       tgt `shouldBe` TargetProvider
       readIORef warnRef `shouldReturn` []
 
-    it "RTHarness present resolves to TargetHarness without a warning" $ do
+    it "SkHarness present resolves to TargetHarness without a warning" $ do
       (logger, warnRef) <- mkCaptureLogger
       let harnesses = Map.singleton "cc" noOpHarness
-      tgt <- resolveResumedTarget logger harnesses (RTHarness "cc")
+          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+      tgt <- resolveResumedTarget logger harnesses (SkHarness hSpec)
       tgt `shouldBe` TargetHarness "cc"
       readIORef warnRef `shouldReturn` []
 
-    it "RTHarness missing logs a warning and falls back to TargetProvider" $ do
+    it "SkHarness missing logs a warning and falls back to TargetProvider" $ do
       (logger, warnRef) <- mkCaptureLogger
-      tgt <- resolveResumedTarget logger Map.empty (RTHarness "dead")
+      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing []
+      tgt <- resolveResumedTarget logger Map.empty (SkHarness hSpec)
       tgt `shouldBe` TargetProvider
       warnings <- readIORef warnRef
       case warnings of

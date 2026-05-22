@@ -80,9 +80,14 @@ import PureClaw.Transcript.Types
   , TranscriptFilter (..)
   )
 import PureClaw.Session.Types
-  ( RuntimeType (..)
+  ( SessionKind (..)
   , SessionMeta (..)
+  , ProviderSpec (..)
+  , HarnessSpec (..)
+  , HarnessFlavour (..)
+  , inferProviderId
   )
+import PureClaw.Core.Types (ModelId (..))
 
 -- ----------------------------------------------------------------------------
 -- Types
@@ -216,7 +221,7 @@ noOpMeta :: SessionMeta
 noOpMeta = SessionMeta
   { _sm_id                = parseSessionId "noop"
   , _sm_agent             = Nothing
-  , _sm_runtime           = RTProvider
+  , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "") (ModelId "") Nothing)
   , _sm_model             = ""
   , _sm_channel           = ""
   , _sm_createdAt         = epoch
@@ -353,23 +358,35 @@ resolveSessionRef baseDir ref = do
 -- Runtime validation
 -- ----------------------------------------------------------------------------
 
--- | Validate a 'RuntimeType' against the currently-running harnesses.
+-- | Validate a 'SessionKind' against the currently-running harnesses.
 --
--- * 'RTProvider' always resolves to @RuntimeOk TargetProvider@.
--- * @'RTHarness' name@ resolves to @RuntimeOk (TargetHarness name)@ if
---   a harness with that name is present in the map.
--- * @'RTHarness' name@ resolves to @RuntimeFallback TargetProvider msg@
+-- * 'SkProvider' always resolves to @RuntimeOk TargetProvider@.
+-- * @'SkHarness' spec@ resolves to @RuntimeOk (TargetHarness name)@ if
+--   a harness with that name is present in the map (name derived from
+--   the harness flavour).
+-- * @'SkHarness' spec@ resolves to @RuntimeFallback TargetProvider msg@
 --   if the harness is absent, where @msg@ explains the fallback for
 --   logging at warn level.
-validateRuntime :: Map Text HarnessHandle -> RuntimeType -> ResolvedRuntime
-validateRuntime _ RTProvider = RuntimeOk TargetProvider
-validateRuntime harnesses (RTHarness name)
-  | Map.member name harnesses = RuntimeOk (TargetHarness name)
-  | otherwise =
-      let msg = "harness '" <> name <> "' is not running, falling back to provider"
-       in RuntimeFallback TargetProvider msg
+validateRuntime :: Map Text HarnessHandle -> SessionKind -> ResolvedRuntime
+validateRuntime _ (SkProvider _) = RuntimeOk TargetProvider
+validateRuntime harnesses (SkHarness spec) =
+  let name = sessionKindHarnessName spec
+  in if Map.member name harnesses
+       then RuntimeOk (TargetHarness name)
+       else let msg = "harness '" <> name <> "' is not running, falling back to provider"
+            in RuntimeFallback TargetProvider msg
 
--- | Resolve a resumed session's 'RuntimeType' to a concrete
+-- | Extract the harness name from a 'HarnessSpec' by rendering its flavour.
+sessionKindHarnessName :: HarnessSpec -> Text
+sessionKindHarnessName spec = case _h_flavour spec of
+  HClaudeCode -> "claude-code"
+  HCodex      -> "codex"
+  HOpenCode   -> "opencode"
+  HHermes     -> "hermes"
+  HPureClaw   -> "pureclaw"
+  HCustom n   -> n
+
+-- | Resolve a resumed session's 'SessionKind' to a concrete
 -- 'MessageTarget' given the currently-running harness map, logging a
 -- warning if the recorded runtime is no longer available.
 --
@@ -380,9 +397,9 @@ validateRuntime harnesses (RTHarness name)
 resolveResumedTarget
   :: LogHandle
   -> Map Text HarnessHandle
-  -> RuntimeType
+  -> SessionKind
   -> IO MessageTarget
-resolveResumedTarget logger harnesses rt = case validateRuntime harnesses rt of
+resolveResumedTarget logger harnesses sk = case validateRuntime harnesses sk of
   RuntimeOk tgt -> pure tgt
   RuntimeFallback tgt warning -> do
     _lh_logWarn logger warning

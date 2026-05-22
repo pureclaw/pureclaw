@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Tab.HarnessSpec
 -- Description : Harness-tab DoDs (L\/I subsets) — WU7 flips I4 + L2 green.
@@ -59,10 +60,10 @@ import PureClaw.Handles.Tab
   , TabError (..)
   , TabHandle (..)
   , TabIndex
-  , TabKind (..)
   , TabName (..)
   , TabStatus (..)
   , mkTabIndex
+  , pattern KindHarness
   )
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)

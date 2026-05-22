@@ -457,12 +457,13 @@ parseDecimalIndex t
 -- | Recognise the short tab-kind keywords (case-insensitive).
 parseTabKindArg :: Text -> Maybe Slash.TabKindArg
 parseTabKindArg t = case T.toLower t of
-  "ai"      -> Just Slash.TkaAi
-  "harness" -> Just Slash.TkaHarness
-  "shell"   -> Just Slash.TkaShell
-  "ssh"     -> Just Slash.TkaSsh
-  "tmux"    -> Just Slash.TkaTmux
-  _         -> Nothing
+  "ai"       -> Just Slash.TkaAi
+  "provider" -> Just Slash.TkaProvider
+  "harness"  -> Just Slash.TkaHarness
+  "shell"    -> Just Slash.TkaShell
+  "ssh"      -> Just Slash.TkaSsh
+  "tmux"     -> Just Slash.TkaTmux
+  _          -> Nothing
 
 
 -- ---------------------------------------------------------------------------

@@ -137,6 +137,9 @@ data ChatOptions = ChatOptions
   , _co_agent         :: Maybe String
   , _co_session       :: Maybe String
   , _co_prefix        :: Maybe String
+  , _co_depth         :: Int
+    -- ^ Current HPureClaw recursion depth. Internal — set by the parent
+    -- process when spawning a child via @--depth N@. Not user-facing.
   }
   deriving stock (Show, Eq)
 
@@ -208,6 +211,12 @@ chatOptionsParser = ChatOptions
       ( long "prefix"
      <> help "Prefix for the new session ID (mutually exclusive with --session)"
       ))
+  <*> option auto
+      ( long "depth"
+     <> value 0
+     <> internal
+     <> help "HPureClaw recursion depth (internal, set by parent process)"
+      )
 
 -- | Parse a provider type from a CLI string.
 parseProviderType :: ReadM ProviderType
@@ -555,11 +564,15 @@ runChat opts = do
                 exitFailure
           Nothing -> do
             let sid = SessionTypes.newSessionId mPrefix now
+                mAgent = fmap AgentDef._ad_name mAgentDef
                 initialMeta = SessionTypes.SessionMeta
                   { SessionTypes._sm_id                = sid
-                  , SessionTypes._sm_agent             =
-                      fmap AgentDef._ad_name mAgentDef
-                  , SessionTypes._sm_runtime           = SessionTypes.RTProvider
+                  , SessionTypes._sm_agent             = mAgent
+                  , SessionTypes._sm_kind              = SessionTypes.SkProvider
+                      (SessionTypes.ProviderSpec
+                        (SessionTypes.inferProviderId (T.pack effectiveModel))
+                        (ModelId (T.pack effectiveModel))
+                        mAgent)
                   , SessionTypes._sm_model             = T.pack effectiveModel
                   , SessionTypes._sm_channel           = T.pack effectiveChannel
                   , SessionTypes._sm_createdAt         = now
@@ -592,7 +605,7 @@ runChat opts = do
         providerRef <- newIORef mProvider
         modelRef    <- newIORef (Just model)
         -- Runtime validation on resume: if the session's recorded
-        -- runtime was an RTHarness, validate that the harness is still
+        -- kind was an SkHarness, validate that the harness is still
         -- running (it may have been discovered by 'discoverHarnesses'
         -- above). Missing harness falls back to TargetProvider with a
         -- warning; fresh sessions simply start at TargetProvider.
@@ -600,7 +613,7 @@ runChat opts = do
           Just _  -> do
             resumedMeta <- readIORef (_sh_meta sessionHandle)
             resolveResumedTarget logger discoveredHarnesses
-              (SessionTypes._sm_runtime resumedMeta)
+              (SessionTypes._sm_kind resumedMeta)
           Nothing -> pure TargetProvider
         targetRef   <- newIORef initialTarget
         windowIdxRef <- newIORef nextWindowIdx
@@ -615,7 +628,9 @@ runChat opts = do
         -- pre-allocate the tab registry, focus pointer, active-count
         -- TVar, runner placeholder map, and bounded channel-out queue.
         -- All start empty / Nothing / 0; live tabs land in WU5+.
-        routingCfg     <- Routing.loadRoutingConfig pureclawDir
+        routingCfg0    <- Routing.loadRoutingConfig pureclawDir
+        let routingCfg = routingCfg0
+              { Routing._rc_pureClawDepth = _co_depth opts }
         tabsRef        <- newIORef IntMap.empty
         focusRef       <- newIORef Nothing
         activeCountTv  <- newTVarIO 0
@@ -653,6 +668,7 @@ runChat opts = do
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
         -- Start the frontend server on a background thread
+        feTabCountRef <- newIORef 0
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_sessionsDir  = sessionsDir
@@ -663,6 +679,10 @@ runChat opts = do
               , _fe_logger       = logger
               , _fe_agentsDir    = agentsDir
               , _fe_defaultAgent = _fc_defaultAgent fileCfg
+              , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
+              , _fe_tabCount     = feTabCountRef
+              , _fe_listTabs     = pure []
+              , _fe_closeTab     = \_ -> pure (Left "not wired")
               }
         void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv) logger
         runAgentLoopWith env reloadedMessages

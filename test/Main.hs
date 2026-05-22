@@ -93,6 +93,15 @@ import qualified Transcript.ProviderSpec
 import qualified Session.TypesSpec
 import qualified Session.HandleSpec
 
+-- WU2 (Session.Kind leaf module)
+import qualified Session.KindSpec
+
+-- WU1 (frontend server settings + CORS)
+import qualified Frontend.ServerSpec
+
+-- WU-7 (POST /api/tabs/new unified endpoint)
+import qualified Frontend.APISpec
+
 -- WU0 (tabbed-chat) red-phase scaffold specs
 import qualified Routing.ParseSpec
 import qualified Handles.TabSpec
@@ -108,6 +117,12 @@ import qualified Tab.BackendSpec
 import qualified Coexistence.SlashCmdSpec
 import qualified Security.TabSpec
 import qualified Onboarding.StartSpec
+
+-- WU-10 (Container + Local harness factory arms)
+import qualified Tab.ContainerSpec
+
+-- WU9 (HPureClaw depth limit)
+import qualified Routing.DepthLimitSpec
 
 main :: IO ()
 main = hspec $ do
@@ -201,6 +216,12 @@ main = hspec $ do
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
   describe "Session.Types" Session.TypesSpec.spec
   describe "Session.Handle" Session.HandleSpec.spec
+  -- WU2 (Session.Kind leaf module)
+  describe "Session.Kind"         Session.KindSpec.spec
+  -- WU1 (frontend server settings + CORS)
+  describe "Frontend.Server"      Frontend.ServerSpec.spec
+  -- WU-7 (POST /api/tabs/new unified endpoint)
+  describe "Frontend.API"          Frontend.APISpec.spec
   -- WU0 (tabbed-chat) red-phase scaffold specs
   describe "Routing.Parse"        Routing.ParseSpec.spec
   describe "Handles.Tab"          Handles.TabSpec.spec
@@ -216,3 +237,7 @@ main = hspec $ do
   describe "Coexistence.SlashCmd" Coexistence.SlashCmdSpec.spec
   describe "Security.Tab"         Security.TabSpec.spec
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
+  -- WU9 (HPureClaw depth limit)
+  describe "Routing.DepthLimit"  Routing.DepthLimitSpec.spec
+  -- WU-10 (Container + Local harness factory arms)
+  describe "Tab.Container"      Tab.ContainerSpec.spec

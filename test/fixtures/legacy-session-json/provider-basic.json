@@ -1,0 +1,9 @@
+{
+  "id": "test-20240101-120000-000",
+  "runtime": "provider",
+  "model": "claude-opus-4-7",
+  "channel": "console",
+  "created_at": "2024-01-01T12:00:00Z",
+  "last_active": "2024-01-01T12:00:00Z",
+  "bootstrap_consumed": false
+}
