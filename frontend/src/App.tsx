@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { KindPickerModal } from './components/KindPickerModal'
+import { NewTabComposer } from './components/NewTabComposer'
 import { useTabs, useRecentSessions, useArchivedSessions, useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, resumeArchivedSession } from './hooks/useApi'
+import { useNewTabSpec } from './hooks/useNewTabSpec'
 import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -448,18 +449,79 @@ export default function App() {
     send(message)
   }, [send, entries.length, customPromptFile, currentSessionId])
 
-  const [showKindPicker, setShowKindPicker] = useState(false)
-
+  // Compose mode is implicit: selectedId === null means "no tab focused,
+  // show the inline new-tab composer in the ChatArea". Clicking the "New
+  // tab" button just clears the selection — there's no separate modal
+  // or composing flag.
   const handleNewTab = useCallback(() => {
-    setShowKindPicker(true)
-  }, [])
-
-  const handleTabCreated = useCallback((tab: import('./hooks/useApi').NewTabResponse) => {
-    const newId = `tab:${tab.tab_index}`
-    setSelectedId(newId)
-    window.history.pushState(null, '', pathFromSelectedId(newId))
+    setSelectedId(null)
+    window.history.pushState(null, '', '/')
     setCustomPromptFile(null)
   }, [])
+
+  // Shared composer state. Lives in App so that both the inline panel
+  // (in ChatArea's messages region) and the existing bottom chat input
+  // can read from a single source of truth — the panel renders config
+  // fields, the bottom input drives the create-and-send flow on submit.
+  const composerSpec = useNewTabSpec()
+  const composing = selectedId === null
+
+  // The transcript refresh callback is bound to whichever session is
+  // currently focused. We keep the latest one in a ref so that the
+  // compose-send flow — which switches the focus mid-flight — can call
+  // the *new* session's refresh once the first-message LLM call returns.
+  const refreshRef = useRef<() => void>(() => {})
+  useEffect(() => { refreshRef.current = refresh }, [refresh])
+
+  const handleComposerSend = useCallback(
+    async (message: string) => {
+      const body = composerSpec.buildBody()
+      const res = await fetch('/api/tabs/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) return
+      const tab = await res.json() as import('./hooks/useApi').NewTabResponse
+
+      // Switch the active tab *immediately* after creation so the
+      // composer disappears and the main window begins tracking the
+      // new session. The first-message send below blocks on the LLM
+      // response — doing it before the focus switch would leave the
+      // composer visible for the entire LLM completion.
+      const newId = `tab:${tab.tab_index}`
+      const trimmed = message.trim()
+      const sendFirst = trimmed.length > 0
+      if (sendFirst) {
+        // Mirror the first message locally so the new tab's transcript
+        // shows it immediately (instead of a blank screen until the
+        // send completes and the next transcript refresh lands).
+        entryCountAtSend.current = 0
+        setPendingMessage(trimmed)
+      }
+      setSelectedId(newId)
+      window.history.pushState(null, '', pathFromSelectedId(newId))
+      setCustomPromptFile(null)
+
+      if (sendFirst && tab.session_id) {
+        try {
+          await fetch(`/api/sessions/${encodeURIComponent(tab.session_id)}/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: trimmed }),
+          })
+        } catch {
+          // Tab created; the message failed. The user can retry from
+          // the new tab's transcript view.
+        }
+        // After the LLM call returns, refresh the now-focused
+        // transcript so the user message + assistant reply land in
+        // place of the optimistic pending pair.
+        refreshRef.current()
+      }
+    },
+    [composerSpec],
+  )
 
   // Sync state from browser back/forward navigation
   useEffect(() => {
@@ -572,13 +634,14 @@ export default function App() {
           onAgentChange={setSelectedAgent}
           customPromptFile={customPromptFile}
           onCustomPromptFile={setCustomPromptFile}
+          composerControls={composing ? {
+            panel: <NewTabComposer spec={composerSpec} />,
+            kind: composerSpec.kind,
+            valid: composerSpec.validationError === null,
+            onSubmit: handleComposerSend,
+          } : null}
         />
       </div>
-      <KindPickerModal
-        open={showKindPicker}
-        onClose={() => setShowKindPicker(false)}
-        onCreated={handleTabCreated}
-      />
     </>
   )
 }
@@ -608,9 +671,14 @@ function deriveAgent(
   if (type === 'session') {
     const s = sessions.find((s) => s.id === id)
     if (!s) return null
+    // Display name preference: agent name → model id → (last resort)
+    // session id. The session id is a timestamp-like string like
+    // "20260522-..." — useless to surface in a chat input placeholder,
+    // so we only fall back to it when both agent and model are missing.
+    const displayName = s.agent ?? (s.model && s.model.length > 0 ? s.model : s.id)
     return {
       id: `session:${s.id}`,
-      name: s.agent ?? s.id,
+      name: displayName,
       status: 'completed' as const,
       tokenCount: '',
       description: s.model,

@@ -7,6 +7,9 @@ module PureClaw.Providers.OpenAI
     -- * Request/response encoding (exported for testing)
   , encodeRequest
   , decodeResponse
+    -- * Model listing (exported for testing)
+  , isChatEligibleOpenAIModel
+  , parseOpenAIModelIds
   ) where
 
 import Control.Exception
@@ -39,6 +42,7 @@ mkOpenAIProvider mgr key = OpenAIProvider mgr key "https://api.openai.com/v1/cha
 
 instance Provider OpenAIProvider where
   complete = openAIComplete
+  listModels = openAIListModels
 
 -- | Errors from the OpenAI API.
 data OpenAIError
@@ -179,3 +183,67 @@ decodeResponse bs = eitherDecode bs >>= parseEither parseResp
       argsStr <- fn .: "arguments"
       let input = fromMaybe (object []) (decode (BL.fromStrict (TE.encodeUtf8 argsStr)))
       pure (ToolUseBlock (ToolCallId callId) name input)
+
+-- | OpenAI Models listing endpoint.
+openAIModelsUrl :: String
+openAIModelsUrl = "https://api.openai.com/v1/models"
+
+-- | List available models for the authenticated OpenAI account, filtered
+-- to chat-completion-eligible IDs. Returns an empty list on any error.
+openAIListModels :: OpenAIProvider -> IO [ModelId]
+openAIListModels provider = do
+  result <- try @SomeException $ do
+    initReq <- HTTP.parseRequest openAIModelsUrl
+    let httpReq = initReq
+          { HTTP.method = "GET"
+          , HTTP.requestHeaders =
+              [ ("Authorization", "Bearer " <> withApiKey (_oai_apiKey provider) id)
+              , ("content-type", "application/json")
+              ]
+          , HTTP.responseTimeout = HTTP.responseTimeoutMicro (30 * 1000000)
+          }
+    resp <- HTTP.httpLbs httpReq (_oai_manager provider)
+    let status = Status.statusCode (HTTP.responseStatus resp)
+    if status /= 200
+      then pure []
+      else case eitherDecode (HTTP.responseBody resp) of
+        Left  _   -> pure []
+        Right val -> pure (filter (isChatEligibleOpenAIModel . unModelId) (parseOpenAIModelIds val))
+  case result of
+    Left  _   -> pure []
+    Right ids -> pure ids
+
+-- | Extract model IDs from an OpenAI /v1/models response body.
+-- Expected shape: @{"object":"list","data":[{"id":"gpt-4o","object":"model",...},...]}@
+parseOpenAIModelIds :: Value -> [ModelId]
+parseOpenAIModelIds = fromMaybe [] . parseMaybe parseList
+  where
+    parseList :: Value -> Parser [ModelId]
+    parseList = withObject "OpenAIModelsResponse" $ \o -> do
+      arr <- o .: "data"
+      mapM (withObject "Model" (\m -> ModelId <$> m .: "id")) arr
+
+-- | Filter to chat-completion-eligible OpenAI model IDs.
+-- The /v1/models endpoint returns hundreds of entries spanning embeddings,
+-- audio, image, moderation, and fine-tuning models — most of which can't
+-- be used with /chat/completions. We keep IDs that start with a known
+-- chat-family prefix and don't contain a known non-chat substring.
+isChatEligibleOpenAIModel :: Text -> Bool
+isChatEligibleOpenAIModel mid =
+  any (`T.isPrefixOf` mid) chatPrefixes
+    && not (any (`T.isInfixOf` mid) nonChatSubstrings)
+  where
+    chatPrefixes = ["gpt-", "o1", "o3", "o4", "chatgpt-"]
+    nonChatSubstrings =
+      [ "-instruct"
+      , "audio"
+      , "realtime"
+      , "tts"
+      , "whisper"
+      , "dall-e"
+      , "embedding"
+      , "moderation"
+      , "search-preview"
+      , "transcribe"
+      , "image"
+      ]

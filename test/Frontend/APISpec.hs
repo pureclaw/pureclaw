@@ -415,6 +415,8 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_tabCount     = tabCountRef
     , _fe_listTabs     = pure []
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
+    , _fe_listModels   = \_ -> pure []
+    , _fe_listProviders = pure ([] :: [ProviderInfo])
     }
 
 -- | Build a FrontendEnv with a pre-set tab listing.

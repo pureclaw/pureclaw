@@ -14,9 +14,10 @@ module PureClaw.CLI.Commands
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
-import Control.Exception (IOException, bracket_, try)
-import Control.Monad (unless, void, when)
+import Control.Exception (IOException, SomeException, bracket_, try)
+import Control.Monad (filterM, unless, void, when)
 import Data.ByteString (ByteString)
+import Data.Either (fromRight)
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -669,6 +670,29 @@ runChat opts = do
         writeIORef envRef (Just env)
         -- Start the frontend server on a background thread
         feTabCountRef <- newIORef 0
+        let listModelsForProvider providerName =
+              case parseProviderMaybe (Just providerName) of
+                Nothing -> pure []
+                Just ptype -> do
+                  mProv <- resolveProvider ptype effectiveApiKey vaultOpt manager
+                  case mProv of
+                    Nothing -> pure []
+                    Just sp -> do
+                      result <- try @SomeException (listModels sp)
+                      case result of
+                        Left  _   -> pure []
+                        Right ids -> pure (map unModelId ids)
+            listConfiguredProviders = do
+              let all_ = [minBound .. maxBound] :: [ProviderType]
+              keepers <- filterM
+                (\p -> hasProviderCredentials manager p effectiveApiKey vaultOpt)
+                all_
+              pure $ map
+                (\p -> ProviderInfo
+                  { _pi_name      = T.pack (providerToText p)
+                  , _pi_isDefault = p == effectiveProvider
+                  })
+                keepers
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_sessionsDir  = sessionsDir
@@ -683,6 +707,8 @@ runChat opts = do
               , _fe_tabCount     = feTabCountRef
               , _fe_listTabs     = pure []
               , _fe_closeTab     = \_ -> pure (Left "not wired")
+              , _fe_listModels   = listModelsForProvider
+              , _fe_listProviders = listConfiguredProviders
               }
         void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv) logger
         runAgentLoopWith env reloadedMessages
@@ -859,6 +885,43 @@ resolveProvider OpenRouter keyOpt vaultOpt manager = do
 resolveProvider Ollama _ _ manager = do
   provider <- mkOllamaProvider manager
   pure (Just (MkProvider provider))
+
+-- | Cheap check for whether a provider is "configured" — i.e., the
+-- frontend should offer it in the provider dropdown.
+--
+--   * @Anthropic@: API key in flag/env/vault, or cached OAuth tokens in
+--     the vault. Does not refresh expired tokens.
+--   * @OpenAI@ \/ @OpenRouter@: API key in flag/env/vault.
+--   * @Ollama@: a sub-second HTTP probe of @\/api\/tags@ on @localhost:11434@.
+--
+-- Never throws. Intended to be safe to call on every modal open.
+hasProviderCredentials
+  :: HTTP.Manager
+  -> ProviderType
+  -> Maybe String
+  -> Maybe VaultHandle
+  -> IO Bool
+hasProviderCredentials _ Anthropic keyOpt vaultOpt = do
+  mApiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
+  case mApiKey of
+    Just _  -> pure True
+    Nothing -> do
+      cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
+      pure (isJust (cachedBs >>= eitherToMaybe . deserializeTokens))
+hasProviderCredentials _ OpenAI keyOpt vaultOpt =
+  isJust <$> resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
+hasProviderCredentials _ OpenRouter keyOpt vaultOpt =
+  isJust <$> resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
+hasProviderCredentials manager Ollama _ _ = do
+  result <- try @SomeException $ do
+    initReq <- HTTP.parseRequest "http://localhost:11434/api/tags"
+    let req = initReq
+          { HTTP.method          = "GET"
+          , HTTP.responseTimeout = HTTP.responseTimeoutMicro 1000000  -- 1s
+          }
+    _ <- HTTP.httpLbs req manager
+    pure True
+  pure (fromRight False result)
 
 -- | Vault key used to cache OAuth tokens between sessions.
 oauthVaultKey :: T.Text

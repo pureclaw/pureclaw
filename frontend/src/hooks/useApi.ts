@@ -213,11 +213,45 @@ export function useAgents() {
 
   useEffect(() => {
     fetchJson<AgentInfo[]>('/api/agents').then((data) => {
-      if (data) setAgents(data)
+      if (Array.isArray(data)) setAgents(data)
     })
   }, [])
 
   return { agents }
+}
+
+/** Live fetch of available model IDs for a provider. The backend proxies
+ *  the call to the provider's `/v1/models` endpoint using the credentials
+ *  configured in the vault. Returns an empty list when the provider is
+ *  unknown, has no credentials, or the upstream call fails. Never throws. */
+export async function fetchProviderModels(provider: string): Promise<string[]> {
+  const data = await fetchJson<string[]>(`/api/providers/${encodeURIComponent(provider)}/models`)
+  return Array.isArray(data) ? data : []
+}
+
+/** A provider the user has configured. `isDefault` marks the one the
+ *  running PureClaw instance is configured to use (from CLI flag or
+ *  config file). At most one entry has it set to true. */
+export interface ProviderInfo {
+  name: string
+  isDefault: boolean
+}
+
+/** Providers the user has actually configured (API key present, or
+ *  Ollama reachable). Used to filter the New Tab provider dropdown.
+ *  Returns an empty list if the call fails. */
+export function useConfiguredProviders() {
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    fetchJson<ProviderInfo[]>('/api/providers').then((data) => {
+      if (Array.isArray(data)) setProviders(data)
+      setLoaded(true)
+    })
+  }, [])
+
+  return { providers, loaded }
 }
 
 /** Response from POST /api/tabs/new */

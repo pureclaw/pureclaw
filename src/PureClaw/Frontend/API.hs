@@ -9,6 +9,7 @@ module PureClaw.Frontend.API
   , SessionInfo (..)
   , TranscriptEntryInfo (..)
   , AgentInfo (..)
+  , ProviderInfo (..)
   , TabSnapshot (..)
     -- * New tab request/response (exported for testing)
   , NewTabRequest (..)
@@ -95,6 +96,18 @@ data FrontendEnv = FrontendEnv
     -- On success, the tab is removed from the registry and its resources
     -- are cleaned up (session saved for session-backed tabs, process
     -- killed for raw shells).
+  , _fe_listModels   :: Text -> IO [Text]
+    -- ^ List model IDs for the named provider. Runs the live
+    -- @\/v1\/models@ call on the provider using the currently
+    -- configured credentials. Returns @[]@ if the provider is
+    -- unknown, no credentials are configured, or the call fails.
+    -- Never throws.
+  , _fe_listProviders :: IO [ProviderInfo]
+    -- ^ List the providers the user has actually configured
+    -- (API key present in flag\/env\/vault, or Ollama reachable).
+    -- Each entry carries @isDefault@: true for the one provider the
+    -- running PureClaw instance is configured to use (from CLI flag or
+    -- config file). Never throws.
   }
 
 -- | Activity state of a harness, derived from tmux screen capture.
@@ -133,6 +146,22 @@ instance ToJSON AgentInfo where
   toJSON ai = object
     [ "name"      .= _ai_name ai
     , "isDefault" .= _ai_isDefault ai
+    ]
+
+-- | JSON-serializable provider info for the frontend. @isDefault@ marks
+-- the provider that the running PureClaw instance is configured to use
+-- (from the CLI @--provider@ flag or the config file @provider@ field),
+-- and is true for at most one entry.
+data ProviderInfo = ProviderInfo
+  { _pi_name      :: Text
+  , _pi_isDefault :: Bool
+  }
+  deriving stock (Show, Eq)
+
+instance ToJSON ProviderInfo where
+  toJSON pi_ = object
+    [ "name"      .= _pi_name pi_
+    , "isDefault" .= _pi_isDefault pi_
     ]
 
 -- | A point-in-time snapshot of a single tab, pre-resolved to
@@ -220,6 +249,9 @@ apiApp env req respond = do
     ("PUT", ["api", "sessions", sid, "description"]) ->
       handleSetDescription env sid req respond
     ("GET", ["api", "agents"])               -> handleAgents env respond
+    ("GET", ["api", "providers"])            -> handleListProviders env respond
+    ("GET", ["api", "providers", name, "models"]) ->
+      handleListProviderModels env name respond
     _                                        -> respondNotFound respond
 
 handleHarnesses :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -519,6 +551,32 @@ handleAgents env respond = do
         , _ai_isDefault = _fe_defaultAgent env == Just name
         }
 
+-- | List available models for a given provider name. Delegates to the
+-- @_fe_listModels@ callback, which makes a live HTTP call to the
+-- provider's @\/v1\/models@ endpoint with the configured credentials.
+-- Returns @[]@ when the provider is unknown, the call fails, or no
+-- credentials are configured — the frontend then offers only the
+-- "Custom…" free-text affordance.
+handleListProviderModels
+  :: FrontendEnv
+  -> Text
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+handleListProviderModels env name respond = do
+  ids <- _fe_listModels env name
+  respond $ jsonResponse status200 ids
+
+-- | List the providers the user has actually configured. Used by the
+-- New Tab dialog to filter its provider dropdown so only usable
+-- providers appear. See '_fe_listProviders' for what "configured" means.
+handleListProviders
+  :: FrontendEnv
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+handleListProviders env respond = do
+  names <- _fe_listProviders env
+  respond $ jsonResponse status200 names
+
 -- ---------------------------------------------------------------------------
 -- POST /api/tabs/new — unified tab creation endpoint
 -- ---------------------------------------------------------------------------
@@ -616,9 +674,18 @@ createTab env tabKind respond = do
       mModel <- readIORef (_fe_model env)
       let modelText = maybe "" unModelId mModel
           sid = newSessionId Nothing now
+          -- Carry the agent name through from the request: the
+          -- frontend uses it as the display name for the session
+          -- (e.g. the chat input placeholder), and the agent's
+          -- definition was already used to build the system prompt.
+          -- Without this, the metadata loses the association and
+          -- recent-sessions UI falls back to the session id.
+          agentName = case sk of
+            SkProvider ps -> _ps_agent ps
+            SkHarness  _  -> Nothing
           meta = SessionMeta
             { _sm_id                = sid
-            , _sm_agent             = Nothing
+            , _sm_agent             = agentName
             , _sm_kind              = sk
             , _sm_model             = modelText
             , _sm_channel           = "web"

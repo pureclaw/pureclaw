@@ -10,6 +10,7 @@ module PureClaw.Frontend.Server
   , corsMiddleware
     -- * Re-export environment
   , FrontendEnv (..)
+  , ProviderInfo (..)
   ) where
 
 import Data.ByteString qualified as BS

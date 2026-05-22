@@ -586,6 +586,7 @@ export function ChatArea({
   onAgentChange,
   customPromptFile,
   onCustomPromptFile,
+  composerControls,
 }: {
   selectedAgent: Agent
   selectedSession?: SessionInfo | null
@@ -602,6 +603,18 @@ export function ChatArea({
   onAgentChange?: (agent: string) => void
   customPromptFile?: { name: string; content: string } | null
   onCustomPromptFile?: (file: { name: string; content: string } | null) => void
+  /** When set, ChatArea is in "new tab compose" mode. The messages region
+   *  renders `panel` instead of the transcript, and the bottom input
+   *  drives the new-tab create-and-send flow via `onSubmit`. The input
+   *  stays in its normal position. */
+  composerControls?: {
+    panel: React.ReactNode
+    kind: 'provider' | 'harness'
+    /** False when the spec has a known-invalid field; the send button
+     *  is disabled in that case. */
+    valid: boolean
+    onSubmit: (message: string) => void | Promise<void>
+  } | null
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -721,10 +734,12 @@ export function ChatArea({
         )}
       </div>
 
-      {/* Messages */}
+      {/* Messages or composer panel */}
       <div ref={scrollerRef} className="flex-1 overflow-y-auto chat-scroll px-5 py-6">
         <div className="flex flex-col gap-5">
-          {loading ? (
+          {composerControls ? (
+            composerControls.panel
+          ) : loading ? (
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>Loading transcript...</div>
           ) : messages.length === 0 && onSend && agents && agents.length > 0 && onAgentChange && onCustomPromptFile ? (
             <SessionSetup
@@ -745,37 +760,70 @@ export function ChatArea({
         </div>
       </div>
 
-      {/* Input area */}
-      <div className="shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
-        <div className="px-4 py-3 flex items-end gap-3">
-          <textarea
-            ref={textareaRef}
-            className="flex-1 rounded-lg px-4 py-3 text-sm resize-none"
-            style={{
-              background: 'var(--bg-sunken)',
-              border: '1px solid var(--accent-primary)',
-              boxShadow: '0 0 0 2px rgba(124,108,246,0.12)',
-              color: 'var(--text-primary)',
-              outline: 'none',
-              minHeight: '44px',
-              maxHeight: '200px',
-            }}
-            placeholder={`Message ${selectedAgent.name}\u2026`}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={1}
-          />
-          <button
-            className="btn btn-primary px-4 py-3 rounded-lg text-sm font-medium flex items-center gap-2"
-            onClick={handleSend}
-            disabled={!input.trim() || !onSend}
-            style={{ opacity: (!input.trim() || !onSend) ? 0.5 : 1 }}
-          >
-            Send <span className="kbd">{'\u2318\u21B5'}</span>
-          </button>
-        </div>
-      </div>
+      {/* Input area. In compose mode we keep the textarea right where it
+          always lives, just rewire its submit path. For raw_shell the
+          textarea disables (no message to send) and the button starts the
+          shell. */}
+      {(() => {
+        const isCompose = !!composerControls
+        const placeholder = isCompose
+          ? 'Type your first message\u2026'
+          : `Message ${selectedAgent.name}\u2026`
+        const submitDisabled = isCompose
+          ? !composerControls!.valid || !input.trim()
+          : (!input.trim() || !onSend)
+        const onSubmit = () => {
+          if (isCompose) {
+            if (submitDisabled) return
+            void composerControls!.onSubmit(input.trim())
+            setInput('')
+          } else {
+            handleSend()
+          }
+        }
+        const onKeyDownLocal = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+          if (isCompose) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              onSubmit()
+            }
+          } else {
+            handleKeyDown(e)
+          }
+        }
+        return (
+          <div className="shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
+            <div className="px-4 py-3 flex items-end gap-3">
+              <textarea
+                ref={textareaRef}
+                className="flex-1 rounded-lg px-4 py-3 text-sm resize-none"
+                style={{
+                  background: 'var(--bg-sunken)',
+                  border: '1px solid var(--accent-primary)',
+                  boxShadow: '0 0 0 2px rgba(124,108,246,0.12)',
+                  color: 'var(--text-primary)',
+                  outline: 'none',
+                  minHeight: '44px',
+                  maxHeight: '200px',
+                }}
+                placeholder={placeholder}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={onKeyDownLocal}
+                rows={1}
+              />
+              <button
+                className="btn btn-primary px-4 py-3 rounded-lg text-sm font-medium flex items-center gap-2"
+                onClick={onSubmit}
+                disabled={submitDisabled}
+                style={{ opacity: submitDisabled ? 0.5 : 1 }}
+              >
+                Send <span className="kbd">{'\u2318\u21B5'}</span>
+              </button>
+            </div>
+          </div>
+        )
+      })()}
 
       <BottomBar
         tokensUsed={tokensUsed ?? 0}
