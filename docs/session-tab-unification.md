@@ -1,7 +1,7 @@
 # Session / Tab Unification
 
 **Issue:** _(to be assigned)_
-**Status:** design — draft (pre-review)
+**Status:** design — revision 2 (addressing review gate round 1)
 **Branch:** `fill-out-frontend`
 **Authors:** Doug Beardsley, Claude
 **Builds on:** [Tabbed Chat](tabbed-chat.md) (#51), [Terminal / Backend Abstractions](terminal-backend-abstractions.md) (#49).
@@ -92,7 +92,11 @@ Stateless tabs (`TkRawShell`) participate in Running but never enter Recent or A
 
 ## SessionKind ADT
 
+All session-kind types live in a new leaf module `PureClaw.Session.Kind`. This module imports only `Core.Types` and `Agent.AgentDef` — it does NOT import `Backend.*`, `Security.*`, or `Handles.*`. Both `Session.Types` (for `SessionMeta._sm_kind`) and `Handles.Tab` (for `TabKind`) import this leaf module.
+
 ```haskell
+-- module PureClaw.Session.Kind
+
 -- | What kind of AI execution this session represents.
 -- Persisted as the `_sm_kind` field on SessionMeta.
 --
@@ -105,16 +109,16 @@ data SessionKind
   deriving stock (Show, Eq)
 
 data ProviderSpec = ProviderSpec
-  { _ps_provider :: !ProviderName     -- e.g. "anthropic", "openai", "ollama", "openrouter"
-  , _ps_model    :: !Text             -- e.g. "claude-opus-4-7"
+  { _ps_provider :: !ProviderId        -- existing Core.Types.ProviderId
+  , _ps_model    :: !Text              -- e.g. "claude-opus-4-7"
   , _ps_agent    :: !(Maybe AgentName)
   } deriving stock (Show, Eq)
 
 data HarnessSpec = HarnessSpec
   { _h_flavour :: !HarnessFlavour
   , _h_backend :: !TerminalBackend
-  , _h_cwd     :: !(Maybe FilePath)
-  , _h_args    :: ![Text]
+  , _h_cwd     :: !(Maybe Text)        -- plain Text for serialization; validated via mkSafePath at spawn time
+  , _h_args    :: ![Text]              -- validated at spawn: no engine-level flags (see Security)
   } deriving stock (Show, Eq)
 
 -- | Well-known harness flavours plus a custom escape hatch.
@@ -127,42 +131,116 @@ data HarnessFlavour
   | HCodex         -- OpenAI's Codex CLI
   | HOpenCode      -- OpenCode
   | HHermes        -- Hermes Agent
-  | HPureClaw      -- recursive: a PureClaw session driving another PureClaw
-  | HCustom !Text  -- user-provided executable name; validated via `authorize`
+  | HPureClaw      -- recursive: PureClaw driving another PureClaw (see Security: depth limit)
+  | HCustom !Text  -- bare command name (no path separators); validated via `authorize`
   deriving stock (Show, Eq)
 ```
 
+**`HCustom` validation (Security-B5):** The `HCustom` smart constructor rejects any `Text` containing `/` or `\` (path separators). The value must be a bare command name resolved by the OS via PATH lookup. This closes the `authorize`/`takeFileName` gap: `authorize` extracts `takeFileName` from the command, so without this check, a user could supply `/tmp/evil/claude` and pass the basename check for `"claude"`.
+
+**`_h_cwd` validation (Security):** Stored as plain `Text` in the serializable spec (to keep `Session.Kind` free of `Security.*` imports). At spawn time, the factory validates the path via `mkSafePath` — if validation fails, tab creation returns `Left CwdValidationFailed`. `Nothing` means "use the PureClaw working directory".
+
+**`_h_args` validation (Security-B3):** The factory layer validates `_h_args` before subprocess construction. For `TbContainer`, args must not contain engine-level flags (`--privileged`, `--cap-add`, `--network`, `--volume`, `-v`). These are blocked by a denylist in the container factory arm. For all backends, the args list is passed as an explicit argv (never shell-interpolated).
+
 ### TerminalBackend
 
+**Critical design note (Arch-B3):** These types are *serializable descriptions*, not runtime-validated handles. The existing codebase has `TmuxTarget` (in `Backend.Tmux`) and `SshTarget` (in `Backend.SSH`) with runtime-only fields like `SafeKeyPath` (filesystem-validated, mode-0400 checked) and `SshHost` (smart-constructor validated). Those types cannot round-trip through JSON — a `SafeKeyPath` deserialized from disk may point at a deleted file or one with changed permissions.
+
+Instead, `TerminalBackend` uses lightweight *config records* with plain `Text` fields. The factory layer (`mkHarnessTab`) resolves these specs into the real runtime types (`TmuxTarget`, `SshTarget` with `SafeKeyPath`) at construction time, performing validation then.
+
 ```haskell
+-- module PureClaw.Session.Kind (continued)
+
 -- | Where a subprocess physically runs.
 --
 -- Vocabulary aligned with Hermes' "terminal backends" (gap-analysis-hermes-agent.md:59).
 -- This is the higher layer above #49's `BackendHandle`: a TerminalBackend is a
 -- description; a factory constructs it into a BackendHandle.
+--
+-- IMPORTANT: These are serializable specs, not runtime handles. The factory
+-- layer (mkHarnessTab) resolves them into BackendHandle at construction time.
 data TerminalBackend
   = TbLocal                              -- direct PTY subprocess on this host
-  | TbTmux      !TmuxHarnessConfig       -- in a tmux pane (persistence + external attach)
-  | TbSsh       !SshTarget               -- on a remote host via ssh
+  | TbTmux      !TmuxConfig             -- serializable tmux config (→ TmuxTarget at spawn)
+  | TbSsh       !SshConfig              -- serializable SSH config (→ SshTarget at spawn)
   | TbContainer !ContainerSpec           -- inside docker / podman / kubectl exec
   deriving stock (Show, Eq)
+
+-- | Serializable tmux session config. Corresponds to the runtime
+-- `Backend.Tmux.TmuxTarget` (session/window/pane triple), but uses
+-- plain Text fields for JSON round-tripping.
+data TmuxConfig = TmuxConfig
+  { _tc_session :: !Text                 -- tmux session name
+  , _tc_window  :: !Text                 -- tmux window (e.g. "@42")
+  , _tc_pane    :: !(Maybe Text)         -- tmux pane (Nothing = default pane)
+  } deriving stock (Show, Eq)
+
+-- | Serializable SSH connection config. Corresponds to the runtime
+-- `Backend.SSH.SshTarget` but WITHOUT SafeKeyPath or SshHost smart-constructor
+-- types — those are constructed at spawn time.
+data SshConfig = SshConfig
+  { _sc_user    :: !Text                 -- SSH username
+  , _sc_host    :: !Text                 -- hostname (validated at spawn via mkSshHost)
+  , _sc_port    :: !(Maybe Int)          -- SSH port (Nothing = 22)
+  } deriving stock (Show, Eq)
 
 data ContainerSpec = ContainerSpec
   { _cs_engine :: !ContainerEngine       -- Docker | Podman | Kubectl
   , _cs_target :: !ContainerTarget       -- validated container ID/name or pod selector
   } deriving stock (Show, Eq)
 
+-- | Smart-constructor newtype. Admits only [a-zA-Z0-9_-]+ for Docker/Podman,
+-- and pod/name:container shapes for Kubectl. Rejects shell metacharacters.
+newtype ContainerTarget = ContainerTarget { unContainerTarget :: Text }
+  deriving stock (Show, Eq)
+
 data ContainerEngine = Docker | Podman | Kubectl
   deriving stock (Show, Eq, Bounded, Enum)
 ```
 
-`TmuxHarnessConfig` and `SshTarget` already exist in #49 / #51; this work reuses them. `ContainerSpec` and `ContainerEngine` are new.
+**Mapping from spec to runtime types (factory layer):**
+
+| Spec type (serializable, in `Session.Kind`) | Runtime type (validated, in `Backend.*`) | Resolved at |
+|---|---|---|
+| `TmuxConfig` | `Backend.Tmux.TmuxTarget` | `mkHarnessTab` TbTmux arm |
+| `SshConfig` | `Backend.SSH.SshTarget` (with `SafeKeyPath` from Vault, `SshHost` from `mkSshHost`) | `mkHarnessTab` TbSsh arm |
+| `ContainerSpec` | `BackendHandle` (via local PTY running `<engine> exec`) | `mkHarnessTab` TbContainer arm |
+| `TbLocal` | `BackendHandle` (via `Backend.Local` PTY) | `mkHarnessTab` TbLocal arm |
+
+SSH identity key: at spawn time, the factory reads the Vault slot named `_rc_sshIdentityKey` from `RoutingConfig`, calls `mkSafeKeyPath` to validate the resolved path, and constructs the full `SshTarget`. The serialized `SshConfig` does NOT store the key path — it's always sourced from Vault at spawn time.
 
 ### The two orthogonal axes, realised at the type level
 
 The earlier conversation framed sessions as having two orthogonal axes: *which harness* × *where it runs*. That framing is now realised directly in the type structure: `HarnessSpec._h_flavour :: HarnessFlavour` and `HarnessSpec._h_backend :: TerminalBackend`. There's no flat product enum; the axes are composable.
 
 `SkProvider` has no `TerminalBackend` because there's no subprocess — PureClaw makes an HTTPS request and that's it.
+
+## Module Placement and Import Graph
+
+**New module: `PureClaw.Session.Kind`** — leaf module containing `SessionKind`, `ProviderSpec`, `HarnessSpec`, `HarnessFlavour`, `TerminalBackend`, `TmuxConfig`, `SshConfig`, `ContainerSpec`, `ContainerEngine`, `ContainerTarget`, and their JSON instances. All types use plain serializable fields (`Text`, `Maybe Int`, etc.) — NO imports from `Backend.*`, `Security.*`, or `Handles.*`.
+
+```
+Session.Kind   (NEW leaf — imports only Core.Types, Agent.AgentDef)
+  ↑              ↑
+  |              |
+Session.Types   Handles.Tab    (both import Session.Kind)
+  ↑              ↑
+  |              |
+  ... (existing dependency graph unchanged) ...
+```
+
+**Import edges added by this work:**
+
+| Consumer | New import | Reason |
+|---|---|---|
+| `Session.Types` | `Session.Kind` | `SessionMeta._sm_kind :: SessionKind` |
+| `Handles.Tab` | `Session.Kind` | `TabKind = TkSession SessionKind \| TkRawShell TerminalBackend` |
+| `Frontend.API` | `Session.Kind` | Request/response encoding for `POST /api/tabs/new` |
+| `Routing.Dispatcher` | `Session.Kind` | Factory dispatch on `SessionKind` |
+
+**No import edges from `Session.Kind` to any module in the cycle zone** (`Agent.Env`, `Handles.Tab`, `Routing.Types`, `Agent.SlashCommands`). The existing `.hs-boot` files (`Handles/Tab.hs-boot`, `Routing/Types.hs-boot`) are unaffected — they don't export `TabKind` and don't need to. The cycle break is preserved.
+
+**Handles.Tab → Session.Kind** is a new edge but safe: `Session.Kind` is a leaf. `Handles.Tab` already imports `Core.Types` (a leaf), so this is the same pattern.
 
 ## SessionMeta Changes
 
@@ -184,10 +262,12 @@ data SessionMeta = SessionMeta
 
 `_sm_runtime :: RuntimeType` is *removed*. Its information is folded into `_sm_kind`:
 
-- `RTProvider` → `SkProvider {_ps_provider, _ps_model, _ps_agent}` (provider derived from model name; agent from `_sm_agent`).
-- `RTHarness name` → `SkHarness {_h_flavour = lookupFlavour name, _h_backend = TbTmux (lookupTmuxConfig name), _h_cwd = Nothing, _h_args = []}`.
+- `RTProvider` → `SkProvider {_ps_provider = inferProviderId _sm_model, _ps_model = _sm_model, _ps_agent = _sm_agent}` where `inferProviderId` is a pure function using a fixed mapping (model prefix → provider ID; e.g., `"claude-"` → `"anthropic"`, `"gpt-"` → `"openai"`; fallback → `"anthropic"`).
+- `RTHarness name` → `SkHarness {_h_flavour = fixedFlavourLookup name, _h_backend = TbTmux (TmuxConfig { _tc_session = name, _tc_window = "0", _tc_pane = Nothing }), _h_cwd = Nothing, _h_args = []}` where `fixedFlavourLookup` is pure: `"claude-code"` → `HClaudeCode`, `"codex"` → `HCodex`, etc.; unknown → `HCustom name`.
 
-`_sm_agent` and `_sm_model` are kept for backward compatibility with the existing display fallback chain (`description` → `autoSummary` → snippet → `agent` → `id`). For `SkProvider` they duplicate `ProviderSpec`; for `SkHarness` they're informational.
+**No runtime registry in the decoder (Arch-S4):** The `FromJSON SessionMeta` instance is pure. It does NOT call `discoverHarnesses` or any IO action. Legacy harness names are mapped to flavours via a fixed table. The tmux session name defaults to the harness name (which was the convention in #51).
+
+`_sm_agent` and `_sm_model` are kept for backward compatibility with the existing display fallback chain (`description` → `autoSummary` → snippet → `agent` → `id`). For `SkProvider` they duplicate `ProviderSpec` (source of truth for new code is `_sm_kind`; `_sm_agent`/`_sm_model` are write-only — populated at creation for old-client compat). For `SkHarness` sessions, `_sm_agent` is `Nothing` and `_sm_model` is the flavour display name (e.g., `"claude-code"`).
 
 ## TabKind (in-memory only; not persisted)
 
@@ -265,11 +345,13 @@ For harness sessions:
 }
 ```
 
-The `FromJSON SessionMeta` decoder:
+The `FromJSON SessionMeta` decoder (pure — no IO):
 
 1. If `kind` field present: parse via `FromJSON SessionKind`.
-2. Else if legacy `runtime` field present: map `"provider"` → `SkProvider` (provider inferred from model name; default `"anthropic"`), `"harness:<name>"` → `SkHarness` (flavour from name via registry; backend = `TbTmux` via discoverHarnesses lookup; cwd/args empty).
-3. Default missing both → `SkProvider` with model from `_sm_model` (final fallback).
+2. Else if legacy `runtime` field present: map `"provider"` → `SkProvider` (provider inferred from model name via fixed `inferProviderId`; default `"anthropic"`), `"harness:<name>"` → `SkHarness` (flavour from name via fixed `fixedFlavourLookup`; backend = `TbTmux (TmuxConfig name "0" Nothing)`; cwd/args empty).
+3. Default missing both → `SkProvider` with model from `_sm_model` (final fallback). Note: this default is security-relevant — it determines which API key is used.
+
+Both `inferProviderId` and `fixedFlavourLookup` are pure functions with hard-coded tables. The decoder never calls `discoverHarnesses` or any IO action.
 
 Tests assert: every legacy `session.json` fixture parses to a non-bottom `SessionMeta` with sensible `_sm_kind`.
 
@@ -296,7 +378,15 @@ Tests assert: every legacy `session.json` fixture parses to a non-bottom `Sessio
 - Header: `"Active Tabs"` label + `[+]` button. Tooltip on hover: `"New tab"`. Aria-label: `"New tab"`.
 - Each row: tab slot index, status indicator (icon — never the literal word "Active"), session/tab display name, optional context hint.
 - Status indicator visual vocabulary: `●` (filled, coloured) for live activity; `○` (outline) for idle; `◐` (half) for "working"/streaming; `✕` (red) for crashed.
-- User-facing status words (in tooltips / status bar): `Running`, `Working`, `Thinking`, `Idle`, `Crashed`. (Internal `Active`/`Idle`/`Crashed` enum is mapped to these.)
+- User-facing status words (in tooltips / status bar): `Running`, `Idle`, `Crashed`. The internal `TabStatus` ADT maps directly:
+
+  | Internal `TabStatus` | User-facing word | Icon |
+  |---|---|---|
+  | `Active` | `Running` | `●` (green) |
+  | `Idle _` | `Idle` | `○` (grey) |
+  | `Crashed _` | `Crashed` | `✕` (red) |
+
+  **OQ-Status-detail resolved:** For v1, `Working` and `Thinking` are collapsed into `Running`. Distinguishing "model is generating" from "tool call executing" requires sub-status state not present in the current `TabStatus` ADT. Adding sub-statuses (`ActiveStreaming`, `ActiveToolCall`, `ActiveWaiting`) is deferred to v1.5 — the three-state mapping is sufficient and avoids ADT churn in the first push.
 - `TkRawShell` rows show a `[raw]` badge indicating they will not persist on close.
 
 ### Recent Sessions section
@@ -339,7 +429,7 @@ Triggered by `[+]`. Two-step flow.
 - Backend radio group (Local / Tmux / SSH / Container) with kind-specific sub-fields:
   - **Local**: optional cwd, additional args.
   - **Tmux**: tmux config — either pick a registered harness (from `discoverHarnesses`) or specify session/window manually.
-  - **SSH**: `user@host`, identity key picker (from Vault), optional remote cwd.
+  - **SSH**: `user@host`, optional port, optional remote cwd. Identity key is sourced from Vault slot `_rc_sshIdentityKey` (configured in `RoutingConfig`); not user-selectable in the picker (Vault is write-only from UI — no list capability). Per-target key selection is deferred to v1.5.
   - **Container**: engine dropdown (Docker / Podman / Kubectl), container target text field (engine-specific placeholder), optional inner cwd.
 
 **Raw shell:**
@@ -353,9 +443,23 @@ Triggered by `[+]`. Two-step flow.
 
 ## Backend API
 
+### JSON key convention (Des-B4)
+
+The existing codebase has an inconsistency: on-disk `session.json` uses `snake_case` (`created_at`, `last_active`, `bootstrap_consumed`), but the frontend API responses use `camelCase` in `SessionInfo` (`lastActive`, `createdAt`, `autoSummary`).
+
+**Decision for new API surface:** All new endpoints (`POST /api/tabs/new`, `GET /api/tabs`, `GET /api/sessions/archived`) use **`snake_case`** for JSON keys, matching the on-disk convention. The existing `GET /api/sessions/recent` response retains its current `camelCase` keys for backward compatibility. A future unified migration (out of scope) can harmonize all API responses to one convention.
+
+### API trust boundary (Sec-B4)
+
+The frontend Warp server MUST bind to `127.0.0.1` explicitly (not `0.0.0.0`). `POST /api/tabs/new` can spawn SSH connections, container exec sessions, and custom binaries — exposing it to the network without authentication is a critical vulnerability.
+
+Additionally, CORS headers must restrict the `Origin` to prevent cross-origin requests from malicious web pages that could call `localhost:<port>/api/tabs/new` and spawn sessions.
+
+Pre-flight check **PF-C** (below) verifies this binding before implementation begins.
+
 ### `POST /api/tabs/new` (unified)
 
-One endpoint creates a tab; the server decides whether a session is persisted based on the tab kind.
+One endpoint creates a tab; the server decides whether a session is persisted based on the tab kind. All write endpoints enforce `_rc_maxTabs` and the S7 spawn rate limit.
 
 **Request body:**
 ```json
@@ -416,7 +520,7 @@ The `session_id: Maybe SessionId` field in the response is the single discrimina
 
 ### `GET /api/tabs`
 
-Returns the current state of the in-process tab registry: ordered list of `{ index, kind, name, status, session_id? }`. Polled by the frontend to populate Active Tabs. Status field is the user-facing word (`Running`/`Working`/`Thinking`/`Idle`/`Crashed`).
+Returns the current state of the in-process tab registry: ordered list of `{ index, kind, name, status, session_id? }`. Polled by the frontend to populate Active Tabs. Status field is the user-facing word (`Running`/`Idle`/`Crashed`) — the three-state mapping from `TabStatus` (see sidebar status table above).
 
 ### `GET /api/sessions/recent`
 
@@ -432,7 +536,7 @@ Existing flip-the-flag endpoints; ensure they're idempotent.
 
 ### Removed
 
-- `POST /api/sessions/new` — the per-session endpoint is replaced by the unified `POST /api/tabs/new`. Existing clients calling the old route receive a 410 Gone with a header pointing at the new route for one release.
+- `POST /api/sessions/new` — the per-session endpoint is replaced by the unified `POST /api/tabs/new`. Existing clients calling the old route receive a **410 Gone** with `Location: /api/tabs/new` header and JSON body `{"error": "deprecated", "use": "/api/tabs/new"}`. This deprecation endpoint ships in this work and is removed in the next semver bump.
 
 ## Console Parity
 
@@ -447,12 +551,55 @@ Existing flip-the-flag endpoints; ensure they're idempotent.
 
 ## Security Considerations
 
-The new session kinds expand the attack surface. Smart constructors enforce:
+The new session kinds expand the attack surface significantly. This section addresses each threat vector identified by the security review.
 
-- **HCustom flavour**: the executable name passes through `authorize` (same path as raw shell commands today).
+### S-Sec-1: HCustom path validation (Sec-B5)
+
+`HCustom` accepts a `Text` that is "validated via `authorize`". However, `Security.Command.authorize` calls `takeFileName` on the command — so `/tmp/evil/claude` would pass the basename check if `"claude"` is in the allowed set, but the full attacker-controlled path would be executed.
+
+**Mitigation:** The `HCustom` smart constructor (`mkHCustom :: Text -> Either HCustomError HarnessFlavour`) rejects any `Text` containing `/` or `\` (path separators). The value must be a bare command name, resolved by the OS via PATH lookup. The `authorize` call then validates against `SecurityPolicy`'s allowed-command set.
+
+### S-Sec-2: HPureClaw recursion depth (Sec-B1)
+
+`HPureClaw` spawns a new PureClaw process. Without limits, a user (or a compromised inner PureClaw via prompt injection) can spawn PureClaw → PureClaw → PureClaw ad infinitum — a fork bomb.
+
+**Mitigation:** `RoutingConfig` gains a new field `_rc_maxPureClawDepth :: Int` (default: `2`). At spawn time, the factory passes `--depth <N-1>` to the child PureClaw binary. The child reads this flag and sets its own `_rc_maxPureClawDepth` to that value. When depth reaches 0, `mkHarnessTab` with `HPureClaw` returns `Left MaxPureClawDepthExceeded`. The `_rc_maxTabs` limit is also enforced per-instance but does not prevent cross-instance exhaustion — the depth limit does.
+
+### S-Sec-3: HPureClaw vault propagation (Sec-B2)
+
+`VaultHandle` provides `_vh_get` which reads arbitrary vault secrets by name. If a child PureClaw inherits the parent's `VaultHandle`, the child's agent loop (which accepts user input and is subject to prompt injection) could exfiltrate all secrets.
+
+**Mitigation:** HPureClaw children do NOT receive `VaultHandle`. Period. If the child needs an API key (e.g., for its own `SkProvider` session), the parent injects it as an environment variable at spawn time via the existing `EnvMap` mechanism (which already blocks `forbiddenEnvVars`). The child's `AgentEnv._env_vault` is `Nothing`. Vault access is parent-only.
+
+### S-Sec-4: Container command injection (Sec-B3)
+
+The TbContainer arm runs `<engine> exec -it <target> <flavour-binary> [args…]` via local PTY. Threat vectors:
+
+1. **Target injection**: Addressed by `ContainerTarget` smart constructor (S1 — rejects shell metacharacters).
+2. **Args injection**: `_h_args` could contain engine-level flags like `--privileged`, `--network=host`, or `--cap-add`.
+3. **Shell interpolation**: If the argv is composed as a shell string rather than an explicit argument list.
+
+**Mitigations:**
+- The composed command is passed as an **explicit argv list** (using `System.Process.proc`), never shell-interpolated. This is the same discipline as the existing SSH backend (`Backend.SSH` uses `shellQuote` for remote commands).
+- `_h_args` are validated by the container factory arm: a denylist rejects known-dangerous engine flags (`--privileged`, `--cap-add`, `--network`, `--volume`, `-v`, `--device`, `--pid`, `--ipc`, `--uts`). Args are passed strictly after a `--` separator in the argv to prevent interpretation as engine flags.
+- Full argv structure: `[engine, "exec", "-it", target, "--", flavour_binary] ++ h_args`
+
+### S-Sec-5: API authentication / binding (Sec-B4)
+
+The existing frontend Warp server binds to `0.0.0.0` with no auth middleware on `/api/*` routes. `POST /api/tabs/new` can spawn SSH connections, container exec sessions, and custom binaries.
+
+**Mitigations:**
+- Frontend server MUST bind to `127.0.0.1` explicitly (pre-flight check PF-C verifies this).
+- CORS headers restrict `Origin` to prevent cross-origin requests from malicious web pages.
+- All mutating endpoints enforce `_rc_maxTabs` and S7 spawn rate limit.
+
+### S-Sec-6: Existing controls (unchanged)
+
 - **ContainerTarget**: rejects shell metacharacters in container IDs; admits only `[a-zA-Z0-9_\-]+` for `docker`/`podman` and `pod/name:container` shapes for `kubectl`.
-- **Container engine**: fixed allowlist (Docker / Podman / Kubectl); no plugin engines.
-- **SSH identity**: taken from Vault slot `_rc_sshIdentityKey` only; no inline-credential acceptance.
+- **Container engine**: fixed allowlist (Docker / Podman / Kubectl); no plugin engines. Consider a `SecurityPolicy`-level gate allowing admins to disable specific engines.
+- **SSH identity**: taken from Vault slot `_rc_sshIdentityKey` only; no inline-credential acceptance. All SSH sessions share one key; per-target key selection deferred to v1.5.
+- **SSH validation**: `SshConfig._sc_host` is validated at spawn time via `mkSshHost` (existing smart constructor in `Backend.SSH`), which rejects shell metacharacters and leading dashes.
+- **`_h_cwd`**: Validated via `SafePath` (`mkSafePath`) — no directory traversal.
 - **Harness subprocess stdout**: NOT trusted as slash-command input (existing #51 discipline applies — `parseSlashCommand` runs on user input only).
 - **Rate limits**: all new kinds respect `_rc_maxTabs` and the S7 spawn rate limit from #51.
 
@@ -460,21 +607,42 @@ The new session kinds expand the attack surface. Smart constructors enforce:
 
 Series-organised; each DoD is independently verifiable. The plan decomposes these into work units.
 
+### Naming convention (CTO-B8)
+
+All new type constructors use a two-letter prefix indicating their ADT:
+
+| ADT | Constructor prefix | Example |
+|---|---|---|
+| `SessionKind` | `Sk` | `SkProvider`, `SkHarness` |
+| `TabKind` | `Tk` | `TkSession`, `TkRawShell` |
+| `TerminalBackend` | `Tb` | `TbLocal`, `TbTmux`, `TbSsh`, `TbContainer` |
+| `HarnessFlavour` | `H` | `HClaudeCode`, `HCodex`, `HCustom` |
+| `ContainerEngine` | (unabbreviated) | `Docker`, `Podman`, `Kubectl` |
+
+This matches the existing codebase convention (e.g., `RTProvider`, `RTHarness` for `RuntimeType`). Record field prefixes follow the existing `_sm_`, `_h_`, `_ps_`, `_cs_` pattern.
+
+### PF-series — Pre-flight checks (blockers before implementation begins)
+
+- **PF-A**: `nix develop . --command cabal build` succeeds on `fill-out-frontend` HEAD. No open `-Werror` failures.
+- **PF-B**: Frontend dev server starts (`cd frontend && npm run dev`). Verify `package.json` has a test runner (vitest or jest). If missing, add vitest as a pre-flight WU-0.
+- **PF-C**: Verify current Warp server binding. Run `grep -r 'Warp.run\|runSettings\|setHost\|setPort' src/PureClaw/Frontend/`. If binding is `0.0.0.0` or unspecified, fixing it to `127.0.0.1` is the first implementation WU (before any new endpoints land).
+- **PF-D**: Enumerate all `_sm_runtime` and `RTProvider`/`RTHarness` call sites: `grep -rn '_sm_runtime\|RTProvider\|RTHarness' src/`. Record count and list in the plan. This is the blast radius for T3.
+
 ### G-series — Glossary / Documentation
 
-- **G1**: `docs/session-tab-unification.md` (this doc) lands on the branch.
+- **G1**: `docs/session-tab-unification.md` (this doc) lands on the branch, reviewed and approved.
 - **G2**: `docs/tabbed-chat.md` gets a post-merge note pointing at the new SessionKind/TabKind shape.
 - **G3**: `docs/terminal-backend-abstractions.md` gets a note about the higher-layer `TerminalBackend` type that wraps `BackendHandle` factories.
 - **G4**: `CLAUDE.md` "Key Decisions" section references the unified model.
 
 ### T-series — Type layer
 
-- **T1**: `SessionKind` ADT (two-variant) defined in `PureClaw.Session.Types`.
-- **T2**: `ProviderSpec`, `HarnessSpec`, `HarnessFlavour`, `TerminalBackend`, `ContainerSpec`, `ContainerEngine`, `ContainerTarget` defined with smart constructors where appropriate.
-- **T3**: `SessionMeta._sm_kind :: SessionKind` field added; `_sm_runtime` removed.
-- **T4**: `TabKind` refactored to two-level (`TkSession SessionKind | TkRawShell TerminalBackend`).
-- **T5**: All construction sites updated (`-Werror` field-completion rule).
-- **T6**: Module-level haddock on `TerminalBackend` calls out the layering relationship to `BackendHandle`.
+- **T1**: New module `PureClaw.Session.Kind` defined as a leaf module. Contains `SessionKind`, `ProviderSpec`, `HarnessSpec`, `HarnessFlavour`, `TerminalBackend`, `TmuxConfig`, `SshConfig`, `ContainerSpec`, `ContainerEngine`, `ContainerTarget`, `mkContainerTarget`, `mkHCustom`, and all Aeson instances. Imports only `Core.Types` and `Agent.AgentDef`. Does NOT import `Backend.*`, `Security.*`, or `Handles.*`.
+- **T2**: All smart constructors implemented: `mkContainerTarget` (shell-metachar rejection, engine-specific validation), `mkHCustom` (no path separators). Aeson instances are hand-written (matching project pattern — no generic derivation).
+- **T3**: `SessionMeta._sm_kind :: SessionKind` field added; `_sm_runtime :: RuntimeType` removed. All call sites updated (enumerated in PF-D). `-Werror` field-completion enforces no missed sites.
+- **T4**: `TabKind` refactored to two-level (`TkSession SessionKind | TkRawShell TerminalBackend`) in `Handles.Tab`. `Handles.Tab` imports `Session.Kind`.
+- **T5**: All construction sites updated (`-Werror` field-completion rule). Verified: `cabal build` clean.
+- **T6**: Module-level haddock on `Session.Kind` and `TerminalBackend` calls out the layering relationship to `BackendHandle` and the spec-vs-runtime type distinction.
 
 ### P-series — Persistence / Migration
 
@@ -500,7 +668,7 @@ Series-organised; each DoD is independently verifiable. The plan decomposes thes
 - **A4**: `GET /api/sessions/recent` excludes sessions currently in tabs.
 - **A5**: `GET /api/sessions/archived` returns archived sessions.
 - **A6**: `POST /api/sessions/{id}/archive` and `/unarchive` are idempotent.
-- **A7**: `POST /api/sessions/new` (legacy) returns 410 Gone with a `Location` header for one release.
+- **A7**: `POST /api/sessions/new` (legacy) returns 410 Gone with `Location: /api/tabs/new` header AND JSON body `{"error": "deprecated", "use": "/api/tabs/new"}`. "One release" means: removed in the release after the one that introduces `/api/tabs/new` (i.e., the deprecation endpoint ships in this work and is removed in the next semver bump).
 - **A8**: All write endpoints enforce `_rc_maxTabs` and S7 rate limit.
 
 ### U-series — Frontend UI
@@ -535,12 +703,18 @@ Series-organised; each DoD is independently verifiable. The plan decomposes thes
 
 ### S-series — Security
 
-- **S1**: `ContainerTarget` smart constructor rejects shell metacharacters.
-- **S2**: `HCustom` executables pass through `authorize`.
-- **S3**: Container engine is fixed allowlist (Docker/Podman/Kubectl).
+- **S1**: `ContainerTarget` smart constructor rejects shell metacharacters; admits only `[a-zA-Z0-9_-]+` for Docker/Podman and `pod/name:container` shapes for Kubectl.
+- **S2**: `HCustom` smart constructor (`mkHCustom`) rejects path separators (`/`, `\`); value must be a bare command name. Then passes through `authorize` for SecurityPolicy check.
+- **S3**: Container engine is fixed allowlist (Docker/Podman/Kubectl); no plugin engines.
 - **S4**: Harness subprocess stdout is NOT trusted as slash-command input.
 - **S5**: All new kinds respect `_rc_maxTabs` and S7 rate limit.
-- **S6**: SSH identity sourced from Vault only.
+- **S6**: SSH identity sourced from Vault slot `_rc_sshIdentityKey` only; no inline-credential acceptance.
+- **S7**: `_rc_maxPureClawDepth :: Int` (default 2) added to `RoutingConfig`. Factory refuses `HPureClaw` when depth <= 0. Child receives `--depth <N-1>` flag.
+- **S8**: HPureClaw children do NOT receive `VaultHandle`. `AgentEnv._env_vault` is `Nothing` for child instances. API keys injected via `EnvMap` at spawn time.
+- **S9**: Container exec uses explicit argv (`System.Process.proc`), never shell interpolation. `_h_args` validated: denylist rejects engine-level flags. Args placed after `--` in argv.
+- **S10**: `_h_cwd` validated via `mkSafePath` at spawn time — no directory traversal. Stored as plain `Text` in the serializable spec.
+- **S11**: Frontend Warp server binds to `127.0.0.1` explicitly. CORS headers restrict `Origin`.
+- **S12**: `FromJSON HarnessFlavour` validates `HCustom` text at deserialization time (not deferred to spawn), preventing malicious payloads from persisting in `session.json`.
 
 ### M-series — Migration
 
@@ -551,13 +725,52 @@ Series-organised; each DoD is independently verifiable. The plan decomposes thes
 
 ## Open Questions
 
-- **OQ-L1**: Resume-archived flow — resolved: implicit unarchive on resume (L3). If you're resuming it, you want to see it.
-- **OQ-L2**: Archive-while-running — resolved: single click archives and closes (L4).
-- **OQ-API**: Endpoint count — resolved: one unified `POST /api/tabs/new`. `session_id: Maybe SessionId` in response discriminates.
-- **OQ-Picker**: Kind picker layout — resolved: modal with two-step flow.
+### Resolved
+
+- **OQ-L1**: Resume-archived flow — **resolved**: implicit unarchive on resume (L3). If you're resuming it, you want to see it.
+- **OQ-L2**: Archive-while-running — **resolved**: single click archives and closes (L4). Single atomic operation from user perspective (one click, one confirmation dialog).
+- **OQ-API**: Endpoint count — **resolved**: one unified `POST /api/tabs/new`. `session_id: Maybe SessionId` in response discriminates.
+- **OQ-Picker**: Kind picker layout — **resolved**: modal with two-step flow.
+- **OQ-Container-pod**: For Kubectl, support label selectors in v1 or only direct `pod/name:container` strings? **Resolved: direct strings only in v1.**
+- **OQ-Status-detail**: User-facing status word `Working` vs `Thinking` — **resolved: collapse to three states** (Running/Idle/Crashed) for v1. The internal `TabStatus` ADT has only three constructors; distinguishing sub-states requires adding `ActiveStreaming`/`ActiveToolCall`/`ActiveWaiting` constructors, which is deferred to v1.5.
+
+### Still open
+
 - **OQ-CLI-detect**: For `HarnessFlavour`, do we want first-class detection of "is the CLI installed on this machine" with a friendlier error than "subprocess failed to spawn"? *Recommended: yes — `command -v <binary>` check before spawn, surfaced as a setup-help error. Defer to a follow-up if WU scope creeps.*
-- **OQ-Container-pod**: For Kubectl, support label selectors in v1 or only direct `pod/name:container` strings? *Recommended: direct strings only in v1.*
-- **OQ-Status-detail**: User-facing status word `Working` vs `Thinking` — is the distinction worth making, or collapse to `Working`? *Recommended: keep both — `Thinking` for "model is generating, no stream yet"; `Working` for "tool call running."*
+- **OQ-orphan-raw-shell**: When a user closes their browser while a `TkRawShell` tab is open, the process continues on the server but the user can't reconnect (raw shells are not persisted). Do we need a server-side timeout or cleanup mechanism? *Recommended: defer to v1.5 — the existing tab-close-on-disconnect path from #51 handles this.*
+- **OQ-quick-create**: Should there be a fast-path for the 80% case (default Provider session) that skips the two-step modal? E.g., keyboard shortcut, or long-press on `[+]`. *Recommended: defer to v1.5 — the modal is fast enough for v1. Note in the design for follow-up.*
+
+## Scope and Splitting Strategy (CTO-B6)
+
+This design is large. The recommended PR splitting strategy:
+
+**PR 1 — Type layer + Migration** (T-series + P-series + M-series + G-series + S1-S2):
+- New `Session.Kind` module with all types, smart constructors, JSON instances
+- `SessionMeta` changes (`_sm_kind` replaces `_sm_runtime`)
+- Legacy JSON migration + fixtures
+- Security: `mkHCustom`, `mkContainerTarget` smart constructors
+- `TabKind` refactor in `Handles.Tab`
+- All existing tests green, new type-layer tests pass
+
+**PR 2 — Backend API + Security hardening** (A-series + S-series + F-series):
+- `POST /api/tabs/new` unified endpoint
+- `GET /api/tabs` endpoint
+- `GET /api/sessions/archived`
+- Warp binding to 127.0.0.1, CORS
+- Tab factories for new backends (TbLocal, TbContainer)
+- HPureClaw depth limit, vault non-propagation
+
+**PR 3 — Frontend UI** (U-series + C-series + L-series):
+- Sidebar restructure (Active Tabs / Recent Sessions / Archived)
+- Kind picker modal
+- Status indicators
+- Console parity commands
+
+Each PR is independently shippable and testable. PRs 2 and 3 both depend on PR 1 but are independent of each other.
+
+## Aeson Instance Strategy (Arch-S5)
+
+All new JSON instances are **hand-written** (matching the existing project pattern for `SessionMeta`, `RuntimeType`, etc.). No generic derivation via `DeriveGeneric` + `genericToJSON`. This keeps on-disk `session.json` files human-readable and avoids coupling to aeson's tagged-sum format.
 
 ## Out of Scope (v1.5+)
 
@@ -568,6 +781,12 @@ Series-organised; each DoD is independently verifiable. The plan decomposes thes
 - **Hermes-parity terminal backends** — Daytona, Modal, Singularity. Type admits them as additive `TerminalBackend` constructors.
 - **TmuxRpc backend** — non-PTY tmux control (stubbed in `Backend.hs:18`).
 - **Cross-host session migration** — open a Recent session on a different PureClaw instance.
+- **Per-target SSH keys** — different SSH targets using different identity keys. Currently all SSH sessions share `_rc_sshIdentityKey`.
+- **Vault list capability** — frontend key picker for SSH identity. Vault is currently write-only from UI.
+- **Sub-status indicators** — `Working` (tool call) vs `Thinking` (model generating) as distinct from `Running`. Requires extending `TabStatus` ADT.
+- **Unified sidebar endpoint** — single `GET /api/sidebar` replacing separate `/api/tabs` + `/api/sessions/recent` + `/api/sessions/archived` polls. Would halve request count.
+- **Quick-create shortcut** — fast-path for default Provider session bypassing the kind picker modal.
+- **SecurityPolicy per-engine gate** — admin-configurable disable of specific container engines.
 
 ## Decision Log
 
@@ -582,3 +801,8 @@ Series-organised; each DoD is independently verifiable. The plan decomposes thes
 - **Why icons rather than the word "Active" for status?** Collides with the existing `Active` runtime status enum, which is one tier finer than the user-facing status.
 - **Why one unified `POST /api/tabs/new` endpoint instead of two?** The thing being created is always a tab; whether a session is persisted is downstream from the kind. One endpoint, one client code path, response shape discriminates with `session_id: Maybe SessionId`.
 - **Why `HarnessFlavour` as closed enum with `HCustom Text` escape hatch?** Known flavours get ergonomic pattern matching, picker UX gets a named list, type-level defaults are possible (default args, default backend), and `HCustom` covers the long tail. Adding a new well-known harness is a one-line change.
+- **Why serializable spec types (`TmuxConfig`, `SshConfig`) instead of reusing runtime types (`TmuxTarget`, `SshTarget`)?** Runtime types contain `SafeKeyPath` (filesystem-validated) and `SshHost` (smart-constructor validated) that cannot meaningfully round-trip through JSON — a `SafeKeyPath` deserialized from disk may point at a deleted file. The spec/runtime split keeps the persistent layer pure and deferrs validation to factory construction time.
+- **Why a separate `PureClaw.Session.Kind` leaf module?** Placing `TerminalBackend` payloads in `Session.Types` would require importing `Backend.SSH` and `Backend.Tmux` — heavyweight modules with 15+ transitive dependencies. A leaf module keeps the types importable from both `Session.Types` and `Handles.Tab` without pulling in the security/backend dependency cone. Mirrors the existing `Core.Types` leaf-module pattern.
+- **Why hand-written Aeson instances rather than generic?** Project convention: all existing Aeson instances (`SessionMeta`, `RuntimeType`) are hand-written to keep on-disk JSON human-readable and decoupled from aeson's tagged-sum format. New types follow the same pattern.
+- **Why three user-facing statuses (Running/Idle/Crashed) instead of five?** The internal `TabStatus` ADT has three constructors. Distinguishing `Working` from `Thinking` requires sub-status state not yet present. Three states are sufficient for v1; sub-statuses are deferred.
+- **Why `127.0.0.1` binding instead of authentication middleware?** Simplest effective mitigation. The frontend server is a local development tool; network exposure is a bug, not a feature. Authentication middleware is overkill for a single-user local tool.
