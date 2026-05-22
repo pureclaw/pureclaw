@@ -345,7 +345,7 @@ handleArchivedSessions env respond = do
   -- Load all sessions with a generous limit; filter to archived-only.
   metas <- listSessions baseDir Nothing 1000
   let archived = filter _sm_archived metas
-      infos = map (\m -> toSessionInfo m Nothing) archived
+      infos = map (`toSessionInfo` Nothing) archived
   respond $ jsonResponse status200 infos
 
 -- | Toggle the archive flag on a session. The 'archived' argument is

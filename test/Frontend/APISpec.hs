@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wno-x-partial #-}
+{- HLINT ignore "Use head" -}
 module Frontend.APISpec (spec) where
 
 import Data.Aeson qualified as Aeson
@@ -185,7 +187,7 @@ spec = do
           let items = toList' arr
           length items `shouldBe` 3
           -- Check first tab (running)
-          let t0 = items !! 0
+          let t0 = head items
           lookupKey t0 "index"      `shouldBe` Just (Aeson.Number 0)
           lookupKey t0 "kind"       `shouldBe` Just (Aeson.String "provider")
           lookupKey t0 "name"       `shouldBe` Just (Aeson.String "claude-opus")

@@ -59,6 +59,7 @@ import PureClaw.Agent.AgentDef (AgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
+  , ModelId (..)
   , SessionId (..)
   , parseSessionId
   )
@@ -87,7 +88,6 @@ import PureClaw.Session.Types
   , HarnessFlavour (..)
   , inferProviderId
   )
-import PureClaw.Core.Types (ModelId (..))
 
 -- ----------------------------------------------------------------------------
 -- Types

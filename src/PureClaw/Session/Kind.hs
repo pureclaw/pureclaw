@@ -299,21 +299,20 @@ instance Aeson.ToJSON HarnessFlavour where
   toJSON (HCustom n) = Aeson.String ("custom:" <> n)
 
 instance Aeson.FromJSON HarnessFlavour where
-  parseJSON = Aeson.withText "HarnessFlavour" $ \t ->
-    case t of
-      "claude-code" -> pure HClaudeCode
-      "codex"       -> pure HCodex
-      "opencode"    -> pure HOpenCode
-      "hermes"      -> pure HHermes
-      "pureclaw"    -> pure HPureClaw
-      other
-        | Just rest <- T.stripPrefix "custom:" other ->
-            case mkHCustom rest of
-              Right hf -> pure hf
-              Left HCustomEmpty -> fail "HarnessFlavour: custom name is empty"
-              Left (HCustomPathSeparator raw) ->
-                fail ("HarnessFlavour: path separator in custom name: " ++ show raw)
-        | otherwise -> fail ("unknown HarnessFlavour: " ++ show other)
+  parseJSON = Aeson.withText "HarnessFlavour" $ \case
+    "claude-code" -> pure HClaudeCode
+    "codex"       -> pure HCodex
+    "opencode"    -> pure HOpenCode
+    "hermes"      -> pure HHermes
+    "pureclaw"    -> pure HPureClaw
+    other
+      | Just rest <- T.stripPrefix "custom:" other ->
+          case mkHCustom rest of
+            Right hf -> pure hf
+            Left HCustomEmpty -> fail "HarnessFlavour: custom name is empty"
+            Left (HCustomPathSeparator raw) ->
+              fail ("HarnessFlavour: path separator in custom name: " ++ show raw)
+      | otherwise -> fail ("unknown HarnessFlavour: " ++ show other)
 
 -- ProviderSpec — flat object; agent omitted when Nothing
 
@@ -325,8 +324,7 @@ instance Aeson.ToJSON ProviderSpec where
 
 instance Aeson.FromJSON ProviderSpec where
   parseJSON = Aeson.withObject "ProviderSpec" $ \o ->
-    ProviderSpec
-      <$> (ProviderId <$> o .: "provider")
+    ProviderSpec . ProviderId <$> o .: "provider"
       <*> (ModelId <$> o .: "model")
       <*> o .:? "agent"
 
@@ -338,7 +336,7 @@ instance Aeson.ToJSON HarnessSpec where
     [ "flavour" .= _h_flavour hs
     , "backend" .= _h_backend hs
     ] ++ maybe [] (\c -> ["cwd" .= c]) (_h_cwd hs)
-      ++ if null (_h_args hs) then [] else ["args" .= _h_args hs]
+      ++ ["args" .= _h_args hs | not (null (_h_args hs))]
 
 instance Aeson.FromJSON HarnessSpec where
   parseJSON = Aeson.withObject "HarnessSpec" $ \o ->

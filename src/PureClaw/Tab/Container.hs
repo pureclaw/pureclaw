@@ -155,7 +155,7 @@ validateCwd (Just t) =
 hasParentTraversal :: FilePath -> Bool
 hasParentTraversal path =
   let components = splitPath path
-  in any (== "..") components
+  in ".." `elem` components
   where
     -- Simple split on '/' — sufficient for the pure traversal check.
     splitPath :: FilePath -> [String]
