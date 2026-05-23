@@ -333,6 +333,9 @@ test-suite pureclaw-test
     -- Frontend (live transcript streaming — WU3)
     Frontend.StreamHarness
     Frontend.StreamSpec
+    -- Frontend (live transcript streaming — WU3b: integration + goldens)
+    Frontend.StreamGoldensSpec
+    Frontend.StreamIntegrationSpec
     -- Frontend (live transcript streaming — WU4)
     Frontend.ActivityProbeSpec
     Harness.ClaudeCodeSpec

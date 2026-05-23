@@ -1,0 +1,5 @@
+{
+  "type": "replay-end",
+  "sessionId": "session-abc-123",
+  "lastReplayedEntryId": "te-uuid-42"
+}

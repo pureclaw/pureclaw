@@ -6,15 +6,23 @@
 --   * 'openWSClient' — open a WebSocket from a Haskell client with an
 --     optional Origin override.
 --   * Helpers to assemble a minimal 'FrontendEnv' for tests.
+--   * 'readGoldenFixture' — read a JSON fixture from
+--     @test\/Frontend\/fixtures\/stream-events@.
 module Frontend.StreamHarness
   ( -- * Server lifecycle
     withStreamServer
+  , withStreamServerCustom
   , mkTestFrontendEnv
+  , mkTestFrontendEnvWith
   , testAllowedOrigins
     -- * WS client helpers
   , openWSClient
+  , openWSClientNoOrigin
   , defaultOrigin
   , awaitTextMessage
+    -- * Golden fixture helpers
+  , readGoldenFixture
+  , goldenFixturePath
     -- * Re-exports
   , module PureClaw.Frontend.API
   , module PureClaw.Frontend.StreamBroker
@@ -35,6 +43,7 @@ import Network.Wai (Application, responseLBS)
 import Network.Wai.Handler.Warp qualified as Warp
 import Network.Wai.Handler.WebSockets qualified as WaiWS
 import Network.WebSockets qualified as WS
+import System.FilePath ((</>))
 import System.Timeout (timeout)
 
 import PureClaw.Frontend.API
@@ -78,6 +87,22 @@ mkTestFrontendEnv sessionsDir broker guard = do
     , _fe_streamGuard  = Just guard
     }
 
+-- | Variant of 'mkTestFrontendEnv' that lets the caller construct the
+-- broker + guard from explicit caps. Used by integration tests that
+-- need to exercise cap-reached behaviour (D30, D35) without exhausting
+-- the production defaults (32 / 8). Returns the constructed broker and
+-- guard alongside the env so tests can interact with them directly.
+mkTestFrontendEnvWith
+  :: FilePath               -- ^ sessions dir
+  -> BrokerConfig           -- ^ broker config (often a small-cap variant)
+  -> Int                    -- ^ per-origin cap for the StreamGuard
+  -> IO (FrontendEnv, StreamBroker, StreamGuard)
+mkTestFrontendEnvWith sessionsDir bcfg perOriginCap = do
+  broker <- mkInProcessBroker bcfg
+  guard  <- mkStreamGuard perOriginCap
+  env    <- mkTestFrontendEnv sessionsDir broker guard
+  pure (env, broker, guard)
+
 -- | Build the WAI app that routes @\/api\/stream@ WS upgrades to
 -- 'streamApp' with the provided allowlist.
 mkStreamWaiApp :: [Text] -> FrontendEnv -> Application
@@ -101,6 +126,15 @@ withStreamServer
 withStreamServer allowed env =
   Warp.testWithApplication (pure (mkStreamWaiApp allowed env))
 
+-- | Variant of 'withStreamServer' that accepts an explicit WAI
+-- 'Application'. Used by tests that need to verify path-routing
+-- behaviour (e.g. that only @\/api\/stream@ accepts WS upgrades).
+withStreamServerCustom
+  :: Application
+  -> (Int -> IO a)
+  -> IO a
+withStreamServerCustom app = Warp.testWithApplication (pure app)
+
 -- | Open a WS client to @ws://localhost:<port>/api/stream@. The Origin
 -- header defaults to 'defaultOrigin' unless overridden. The connection
 -- closes when @clientApp@ returns.
@@ -121,6 +155,20 @@ openWSClient port mOrigin clientApp = do
     headers
     clientApp
 
+-- | Open a WS client without any Origin header. Used by tests that
+-- exercise the missing-Origin reject path.
+openWSClientNoOrigin
+  :: Int
+  -> WS.ClientApp a
+  -> IO a
+openWSClientNoOrigin port =
+  WS.runClientWith
+    "127.0.0.1"
+    port
+    "/api/stream"
+    WS.defaultConnectionOptions
+    []
+
 -- | Wait up to @us@ microseconds for a text message; return 'Nothing'
 -- on timeout. Useful for D9's 50 ms focus-switch budget.
 awaitTextMessage :: Int -> WS.Connection -> IO (Maybe LBS.ByteString)
@@ -131,3 +179,15 @@ awaitTextMessage us conn =
       Left _    -> pure LBS.empty
       Right bs  -> pure bs
 
+-- | Absolute path of a JSON fixture file by short name (without the
+-- @.json@ suffix).
+goldenFixturePath :: FilePath -> FilePath
+goldenFixturePath name =
+  "test" </> "Frontend" </> "fixtures" </> "stream-events" </> (name <> ".json")
+
+-- | Read a wire-protocol golden fixture file as a lazy 'LBS.ByteString'.
+-- Tests typically decode the result via 'Data.Aeson.eitherDecode' and
+-- compare as 'Data.Aeson.Value' to remain insensitive to key order or
+-- whitespace differences.
+readGoldenFixture :: FilePath -> IO LBS.ByteString
+readGoldenFixture name = LBS.readFile (goldenFixturePath name)
