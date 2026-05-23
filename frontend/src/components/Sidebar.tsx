@@ -1,4 +1,5 @@
 import type { HarnessInfo, SessionInfo } from '../types'
+import type { SessionActivityState } from '../types/stream'
 import { ActivityDot } from './StatusDot'
 
 function SectionHeader({ label }: { label: string }) {
@@ -64,29 +65,53 @@ function SessionRow({
   session,
   selected,
   onSelect,
+  activity,
 }: {
   session: SessionInfo
   selected: boolean
   onSelect: () => void
+  activity?: SessionActivityState
 }) {
+  const isThinking = activity?.harness === 'thinking'
+  const unread = activity?.unread ?? 0
+
   const rowClasses = [
     'agent-row px-3 py-2',
     selected ? 'selected' : '',
+    isThinking ? 'shimmer' : '',
   ].filter(Boolean).join(' ')
 
   const displayName = session.agent ?? session.id
-  const age = formatAge(session.lastActive)
+  // Prefer the live "last entry at" timestamp when available; fall back to
+  // the meta's lastActive otherwise.
+  const ageBasis = activity?.lastEntryAt ?? session.lastActive
+  const age = formatAge(ageBasis)
 
   return (
     <div className={rowClasses} onClick={onSelect}>
       <div className="flex items-center gap-2">
+        {isThinking && <ActivityDot activity="thinking" />}
         <span
           className="text-sm"
           style={{ color: 'var(--text-muted)', letterSpacing: 'var(--tracking-tight)' }}
         >
           {displayName}
         </span>
-        <span className="pill token-count ml-auto">{age}</span>
+        {unread > 0 && (
+          <span
+            className="pill ml-auto"
+            style={{
+              background: 'var(--accent-primary)',
+              color: 'var(--text-primary)',
+              padding: '0 0.4em',
+              fontSize: '0.7em',
+            }}
+            aria-label={`${unread} new entries`}
+          >
+            {unread}
+          </span>
+        )}
+        <span className={`pill token-count${unread > 0 ? '' : ' ml-auto'}`}>{age}</span>
       </div>
       {session.model && (
         <div
@@ -122,11 +147,13 @@ export function Sidebar({
   sessions,
   selectedId,
   onSelect,
+  sessionActivity,
 }: {
   harnesses: HarnessInfo[]
   sessions: SessionInfo[]
   selectedId: string | null
   onSelect: (type: 'harness' | 'session', id: string) => void
+  sessionActivity?: Record<string, SessionActivityState>
 }) {
   return (
     <div
@@ -156,6 +183,7 @@ export function Sidebar({
                 session={s}
                 selected={selectedId === `session:${s.id}`}
                 onSelect={() => onSelect('session', s.id)}
+                activity={sessionActivity?.[s.id]}
               />
             ))}
           </>

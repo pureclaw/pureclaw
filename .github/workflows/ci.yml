@@ -109,6 +109,21 @@ jobs:
       - name: Run tests with coverage
         run: nix develop --command cabal test --enable-coverage
 
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run frontend tests
+        run: |
+          cd frontend
+          npm test
+
+      - name: Build frontend (TypeScript + Vite)
+        run: |
+          cd frontend
+          npm run build
+
       - name: Generate coverage report
         if: always()
         run: |

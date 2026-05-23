@@ -3,6 +3,8 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt } from './hooks/useApi'
+import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
+import { useSessionActivityStream } from './hooks/useSessionActivityStream'
 import type { Message, TranscriptEntry } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -274,7 +276,18 @@ export default function App() {
   }, [agents, selectedAgent])
 
   const currentSessionId = sessionIdFromSelection(selectedId)
-  const { entries, loading, refresh } = useTranscript(currentSessionId)
+  const { entries: httpEntries, loading, refresh } = useTranscript(currentSessionId)
+  // Live WebSocket tail: merges its own HTTP-seed + WS-delivered entries.
+  // We additionally reconcile against the manual-refresh `useTranscript` view
+  // so behavior is unchanged when the WS connection is unavailable.
+  const { entries: streamEntries } = useTranscriptStream(currentSessionId)
+  const { sessions: sessionActivity } = useSessionActivityStream()
+  const entries = useMemo(() => {
+    if (streamEntries.length === 0) return httpEntries
+    let merged: TranscriptEntry[] = httpEntries
+    for (const e of streamEntries) merged = reconcileEntries(merged, e)
+    return merged
+  }, [httpEntries, streamEntries])
   const { send, sending } = useSendMessage(currentSessionId, refresh)
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
   const entryCountAtSend = useRef(0)
@@ -367,6 +380,7 @@ export default function App() {
           sessions={sessions}
           selectedId={selectedId}
           onSelect={handleSelect}
+          sessionActivity={sessionActivity}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
