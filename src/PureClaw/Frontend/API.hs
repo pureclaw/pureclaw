@@ -41,7 +41,11 @@ import PureClaw.Agent.Context
 import PureClaw.Core.Types (ModelId (..), SessionId (..), unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
-import PureClaw.Frontend.StreamBroker (StreamBroker)
+import PureClaw.Frontend.StreamBroker
+  ( BrokerEvent (..)
+  , SessionActivity (..)
+  , StreamBroker (..)
+  )
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Harness.ClaudeCode (isIdle)
@@ -369,6 +373,15 @@ handleNewSession env req respond = do
       TIO.writeFile (_sh_dir sh </> "custom-prompt.md") prompt
     _ -> pure ()
   _sh_save sh
+  -- Publish the new-session signal to the live stream broker (D18). The
+  -- sidebar uses this to render the session row without polling. The
+  -- no-broker path is intentional ('Nothing' preserves the legacy
+  -- behaviour for one-off scripts and tests).
+  case _fe_broker env of
+    Just broker ->
+      _streamBroker_publish broker
+        (ActivityChanged (_sm_id meta) (SaSessionCreated meta))
+    Nothing -> pure ()
   respond $ jsonResponse status200 (toSessionInfo meta)
 
 -- | Set or replace the custom prompt for a session, optionally updating

@@ -114,6 +114,8 @@ import qualified Frontend.StreamBrokerSpec
 import qualified Frontend.BroadcastingTranscriptSpec
 -- WU3 (WS endpoint + wire protocol + Origin/cap enforcement)
 import qualified Frontend.StreamSpec
+-- WU4 (activity probe loop)
+import qualified Frontend.ActivityProbeSpec
 
 main :: IO ()
 main = hspec $ do
@@ -229,3 +231,5 @@ main = hspec $ do
     Frontend.BroadcastingTranscriptSpec.spec
   -- WU3 (WS endpoint + wire protocol)
   describe "Frontend.Stream" Frontend.StreamSpec.spec
+  -- WU4 (activity probe loop)
+  describe "Frontend.ActivityProbe" Frontend.ActivityProbeSpec.spec

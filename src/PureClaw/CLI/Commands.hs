@@ -63,6 +63,7 @@ import PureClaw.Frontend.StreamBroker
   , defaultBrokerConfig
   , mkInProcessBroker
   )
+import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -667,12 +668,14 @@ runChat opts = do
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
-        -- Start the frontend server under a structured Async scope so
-        -- that the server is automatically cancelled when the agent
-        -- loop exits or throws (WU3 lifecycle change).
-        --
-        -- TODO(WU4): nest the activity-probe-loop's @withAsync@ here
-        -- (sibling to the WAI server) before @runAgentLoopWith@.
+        -- Start the frontend server and the activity probe loop under
+        -- structured 'Async.withAsync' scopes so both are automatically
+        -- cancelled when the agent loop exits or throws (WU3 + WU4
+        -- lifecycle changes). The probe loop is a sibling of the WAI
+        -- server inside @runAgentLoopWith@'s scope (D24): both share
+        -- @startWithChannel@ as the common parent, and both are
+        -- guaranteed to be cancelled within 1 s of @runAgentLoopWith@
+        -- returning or throwing.
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_sessionsDir  = sessionsDir
@@ -687,8 +690,10 @@ runChat opts = do
               , _fe_streamGuard  = Just streamGuard
               }
         Async.withAsync
-          (runFrontend defaultFrontendConfig (Just frontendEnv) logger)
-          (\_serverAsync -> runAgentLoopWith env reloadedMessages)
+          (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
+          Async.withAsync
+            (runActivityProbeLoop broker harnessRef logger) $ \_probeAsync ->
+            runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of
     "signal" -> do

@@ -160,6 +160,7 @@ library
     PureClaw.Frontend.BroadcastingTranscript
     PureClaw.Frontend.Stream
     PureClaw.Frontend.StreamBroker
+    PureClaw.Frontend.ActivityProbe
     -- Transcript
     PureClaw.Transcript
     PureClaw.Transcript.Combinator
@@ -332,6 +333,8 @@ test-suite pureclaw-test
     -- Frontend (live transcript streaming — WU3)
     Frontend.StreamHarness
     Frontend.StreamSpec
+    -- Frontend (live transcript streaming — WU4)
+    Frontend.ActivityProbeSpec
     Harness.ClaudeCodeSpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs
