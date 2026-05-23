@@ -191,6 +191,7 @@ library
     mcp-types,
     memory,
     mtl,
+    network,
     optparse-applicative,
     posix-pty,
     process,
@@ -328,6 +329,9 @@ test-suite pureclaw-test
     Frontend.StreamBrokerSpec
     -- Frontend (live transcript streaming — WU2)
     Frontend.BroadcastingTranscriptSpec
+    -- Frontend (live transcript streaming — WU3)
+    Frontend.StreamHarness
+    Frontend.StreamSpec
     Harness.ClaudeCodeSpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs
@@ -366,6 +370,7 @@ test-suite pureclaw-test
     http-client,
     http-client-tls,
     http-types,
+    network,
     optparse-applicative,
     stm,
     temporary,
@@ -373,7 +378,9 @@ test-suite pureclaw-test
     time,
     tomland,
     wai,
+    wai-websockets,
     warp,
+    websockets,
     hspec,
     typed-process,
     unix,

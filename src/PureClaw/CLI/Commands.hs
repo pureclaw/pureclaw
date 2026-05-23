@@ -12,10 +12,10 @@ module PureClaw.CLI.Commands
   , buildPolicy
   ) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (IOException, bracket_, try)
-import Control.Monad (unless, void, when)
+import Control.Monad (unless, when)
 import Data.ByteString (ByteString)
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
@@ -56,7 +56,13 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
+import PureClaw.Frontend.API (mkStreamGuard)
 import PureClaw.Frontend.Server
+import PureClaw.Frontend.StreamBroker
+  ( BrokerConfig (..)
+  , defaultBrokerConfig
+  , mkInProcessBroker
+  )
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -502,6 +508,13 @@ runChat opts = do
 
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
+        -- WU3: construct the in-process broker and the WS per-origin guard
+        -- BEFORE any session-handle/transcript construction so every
+        -- write site (resumeSession, mkSessionHandle, handleSend) can
+        -- thread it down. Exactly one broker per process — see the
+        -- design doc §Lifecycle and Shutdown.
+        broker      <- mkInProcessBroker defaultBrokerConfig
+        streamGuard <- mkStreamGuard (_bc_maxSubsPerOrigin defaultBrokerConfig)
         -- Build registry: pure tools + IO tools (todo needs IORef state)
         (todoDef, todoHandler) <- todoTool
         let sessSearchTool = sessionSearchTool logger (pureclawDir </> "sessions")
@@ -541,9 +554,10 @@ runChat opts = do
         sessionHandle <- case _co_session opts of
           Just sidRaw -> do
             _lh_logInfo logger $ "Resuming session " <> T.pack sidRaw
-            -- WU2 leaves the broker disabled here; WU3 constructs it at
-            -- the top of 'startWithChannel' and threads it down.
-            result <- resumeSession Nothing logger sessionsDir
+            -- WU3: the broker is constructed at the top of
+            -- 'startWithChannel' and threaded through here so the resumed
+            -- session's transcript handle becomes a broadcasting handle.
+            result <- resumeSession (Just broker) logger sessionsDir
                         (parseSessionId (T.pack sidRaw))
             case result of
               Right resumed -> pure resumed
@@ -568,8 +582,8 @@ runChat opts = do
                   , SessionTypes._sm_lastActive        = now
                   , SessionTypes._sm_bootstrapConsumed = False
                   }
-            -- WU2 leaves the broker disabled here; WU3 wires it up.
-            mkSessionHandle Nothing logger sessionsDir initialMeta
+            -- WU3: see broker construction at the top of startWithChannel.
+            mkSessionHandle (Just broker) logger sessionsDir initialMeta
         -- Log the active session ID so tests and humans can find it.
         do
           currentMeta <- readIORef (_sh_meta sessionHandle)
@@ -649,11 +663,16 @@ runChat opts = do
               , _env_channelOutQ      = channelOutQ
               , _env_routingConfig    = routingCfg
               , _env_fork             = defaultEnvFork
-              , _env_broker           = Nothing
+              , _env_broker           = Just broker
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
-        -- Start the frontend server on a background thread
+        -- Start the frontend server under a structured Async scope so
+        -- that the server is automatically cancelled when the agent
+        -- loop exits or throws (WU3 lifecycle change).
+        --
+        -- TODO(WU4): nest the activity-probe-loop's @withAsync@ here
+        -- (sibling to the WAI server) before @runAgentLoopWith@.
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_sessionsDir  = sessionsDir
@@ -664,10 +683,12 @@ runChat opts = do
               , _fe_logger       = logger
               , _fe_agentsDir    = agentsDir
               , _fe_defaultAgent = _fc_defaultAgent fileCfg
-              , _fe_broker       = Nothing
+              , _fe_broker       = Just broker
+              , _fe_streamGuard  = Just streamGuard
               }
-        void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv) logger
-        runAgentLoopWith env reloadedMessages
+        Async.withAsync
+          (runFrontend defaultFrontendConfig (Just frontendEnv) logger)
+          (\_serverAsync -> runAgentLoopWith env reloadedMessages)
 
   case effectiveChannel of
     "signal" -> do

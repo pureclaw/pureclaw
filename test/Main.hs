@@ -112,6 +112,8 @@ import qualified Onboarding.StartSpec
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
 import qualified Frontend.BroadcastingTranscriptSpec
+-- WU3 (WS endpoint + wire protocol + Origin/cap enforcement)
+import qualified Frontend.StreamSpec
 
 main :: IO ()
 main = hspec $ do
@@ -225,3 +227,5 @@ main = hspec $ do
   -- WU2 (broadcasting transcript decorator)
   describe "Frontend.BroadcastingTranscript"
     Frontend.BroadcastingTranscriptSpec.spec
+  -- WU3 (WS endpoint + wire protocol)
+  describe "Frontend.Stream" Frontend.StreamSpec.spec

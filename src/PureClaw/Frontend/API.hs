@@ -3,6 +3,11 @@ module PureClaw.Frontend.API
     apiApp
     -- * Environment
   , FrontendEnv (..)
+    -- * Stream connection guard (per-origin cap)
+  , StreamGuard (..)
+  , mkStreamGuard
+    -- * Shared helpers
+  , isValidSessionId
     -- * Response types (exported for testing)
   , HarnessInfo (..)
   , HarnessActivity (..)
@@ -11,6 +16,7 @@ module PureClaw.Frontend.API
   , AgentInfo (..)
   ) where
 
+import Control.Concurrent.STM (TVar, newTVarIO)
 import Control.Exception (SomeException, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as Aeson
@@ -18,6 +24,7 @@ import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
+import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -72,7 +79,45 @@ data FrontendEnv = FrontendEnv
     -- transcript handle via 'mkBroadcastingFileTranscriptHandle' so that
     -- provider Request\/Response entries reach subscribers in real time
     -- (DoD D25). 'Nothing' preserves the legacy non-broadcasting path.
+  , _fe_streamGuard  :: Maybe StreamGuard
+    -- ^ Optional per-origin WS subscriber counter. The WS endpoint uses
+    -- this to enforce '_bc_maxSubsPerOrigin' (DoD D30). 'Nothing' disables
+    -- the WS endpoint entirely (it returns 503).
   }
+
+-- | Per-origin WS subscriber counter. Lives at the same lifetime as the
+-- broker (constructed once in @startWithChannel@). The WS handler calls
+-- 'tryClaim' on upgrade (rejecting with 503 if the cap is reached) and
+-- 'release' on disconnect. Key is the normalized Origin string (see
+-- 'normalizeOrigin' in "PureClaw.Frontend.Stream").
+data StreamGuard = StreamGuard
+  { _streamGuard_perOrigin    :: !(TVar (Map Text Int))
+    -- ^ Live count per normalized Origin string.
+  , _streamGuard_maxPerOrigin :: !Int
+    -- ^ Maximum simultaneous WS subscriptions per origin.
+  }
+
+-- | Construct a fresh 'StreamGuard' with the given per-origin cap.
+mkStreamGuard :: Int -> IO StreamGuard
+mkStreamGuard maxPer = do
+  ref <- newTVarIO Map.empty
+  pure StreamGuard
+    { _streamGuard_perOrigin    = ref
+    , _streamGuard_maxPerOrigin = maxPer
+    }
+
+-- | Shared session-ID validation used by every endpoint that consumes a
+-- caller-supplied session id (HTTP @\/transcript@, @\/send@, @\/prompt@
+-- and the WS @focus@ op). Rejects @..@ and @\/@ to foreclose path
+-- traversal; rejects the empty string. Behavioural surface is intentionally
+-- the same across the HTTP and WS paths so D26's "shared helper" property
+-- holds: changing the rule here changes it everywhere.
+isValidSessionId :: Text -> Bool
+isValidSessionId sid
+  | T.null sid = False
+  | T.isInfixOf ".." sid = False
+  | T.isInfixOf "/" sid = False
+  | otherwise = True
 
 -- | JSON-serializable harness info for the frontend.
 data HarnessInfo = HarnessInfo
@@ -246,8 +291,8 @@ toTranscriptEntryInfo e = TranscriptEntryInfo
 -- | Read transcript entries from a session's @transcript.jsonl@ file.
 handleTranscript :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleTranscript env sid respond = do
-  -- Reject path traversal
-  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+  -- Reject path traversal (shared helper — D26)
+  if not (isValidSessionId sid)
     then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
     else do
       let path = _fe_sessionsDir env </> T.unpack sid </> "transcript.jsonl"
@@ -330,7 +375,7 @@ handleNewSession env req respond = do
 -- the agent name in @session.json@.
 handleSetPrompt :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleSetPrompt env sid req respond = do
-  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+  if not (isValidSessionId sid)
     then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
     else do
       let sessionDir = _fe_sessionsDir env </> T.unpack sid
@@ -371,8 +416,8 @@ instance FromJSON SendRequest where
 -- | Send a user message to a session and get a completion.
 handleSend :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleSend env sid req respond = do
-  -- Validate session ID
-  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+  -- Validate session ID (shared helper — D26)
+  if not (isValidSessionId sid)
     then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
     else do
       let sessionDir = _fe_sessionsDir env </> T.unpack sid
