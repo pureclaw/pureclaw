@@ -331,7 +331,7 @@ function modelContextWindow(model: string | null): number {
 }
 
 export default function App() {
-  const { tabs } = useTabs()
+  const { tabs, refresh: refreshTabs } = useTabs()
   const { sessions: rawSessions } = useRecentSessions()
   const { sessions: archivedSessions } = useArchivedSessions()
   const { agents } = useAgents()
@@ -496,6 +496,15 @@ export default function App() {
       })
       if (!res.ok) return
       const tab = await res.json() as import('./hooks/useApi').NewTabResponse
+
+      // Force the tabs list to refresh BEFORE we flip selectedId. Without
+      // this, sessionIdFromSelection("tab:N", tabs) returns null until
+      // the next poll (useTabs polls on an interval). Downstream session-
+      // derived state (useTranscript/useSendMessage/useTranscriptStream
+      // focus) would all bind to null, the refreshRef captures the
+      // no-op refresh, and the new tab's first transcript entries
+      // silently fail to render until a manual page reload.
+      await refreshTabs()
 
       // Switch the active tab *immediately* after creation so the
       // composer disappears and the main window begins tracking the

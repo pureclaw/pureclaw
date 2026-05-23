@@ -79,7 +79,15 @@ export function useTabs() {
     return () => clearInterval(id)
   }, [poll])
 
-  return { tabs, error }
+  // `refresh` lets callers force an immediate poll instead of waiting
+  // for the next interval. The new-tab compose-send flow uses this so
+  // that the just-created tab is in the local tabs list BEFORE it sets
+  // selectedId — without this, sessionIdFromSelection can't resolve
+  // "tab:N" until the next interval fires, leaving downstream session-
+  // derived state (useTranscript, useSendMessage, useTranscriptStream
+  // focus) bound to null and silently dropping live transcript updates
+  // for the new tab's first message.
+  return { tabs, error, refresh: poll }
 }
 
 export function useArchivedSessions() {
