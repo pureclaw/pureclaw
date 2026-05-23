@@ -156,6 +156,7 @@ library
     -- Frontend
     PureClaw.Frontend.API
     PureClaw.Frontend.Server
+    PureClaw.Frontend.Stream
     -- Transcript
     PureClaw.Transcript
     PureClaw.Transcript.Combinator
@@ -203,6 +204,7 @@ library
     vector,
     wai,
     wai-extra,
+    wai-websockets,
     warp,
     websockets,
   hs-source-dirs:   src
