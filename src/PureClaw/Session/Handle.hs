@@ -18,6 +18,12 @@ module PureClaw.Session.Handle
   , resolveResumedTarget
     -- * Bootstrap consumption
   , markBootstrapConsumed
+    -- * Archive flag (disk-only)
+  , setArchived
+  , SetArchivedError (..)
+    -- * Description (disk-only)
+  , setDescription
+  , SetDescriptionError (..)
     -- * Resume context reload
   , loadRecentMessages
   ) where
@@ -53,6 +59,7 @@ import PureClaw.Agent.AgentDef (AgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
+  , ModelId (..)
   , SessionId (..)
   , parseSessionId
   )
@@ -74,8 +81,12 @@ import PureClaw.Transcript.Types
   , TranscriptFilter (..)
   )
 import PureClaw.Session.Types
-  ( RuntimeType (..)
+  ( SessionKind (..)
   , SessionMeta (..)
+  , ProviderSpec (..)
+  , HarnessSpec (..)
+  , HarnessFlavour (..)
+  , inferProviderId
   )
 
 -- ----------------------------------------------------------------------------
@@ -210,12 +221,15 @@ noOpMeta :: SessionMeta
 noOpMeta = SessionMeta
   { _sm_id                = parseSessionId "noop"
   , _sm_agent             = Nothing
-  , _sm_runtime           = RTProvider
+  , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "") (ModelId "") Nothing)
   , _sm_model             = ""
   , _sm_channel           = ""
   , _sm_createdAt         = epoch
   , _sm_lastActive        = epoch
   , _sm_bootstrapConsumed = False
+  , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
   }
   where
     epoch = UTCTime (fromGregorian 1970 1 1) (secondsToDiffTime 0)
@@ -344,23 +358,35 @@ resolveSessionRef baseDir ref = do
 -- Runtime validation
 -- ----------------------------------------------------------------------------
 
--- | Validate a 'RuntimeType' against the currently-running harnesses.
+-- | Validate a 'SessionKind' against the currently-running harnesses.
 --
--- * 'RTProvider' always resolves to @RuntimeOk TargetProvider@.
--- * @'RTHarness' name@ resolves to @RuntimeOk (TargetHarness name)@ if
---   a harness with that name is present in the map.
--- * @'RTHarness' name@ resolves to @RuntimeFallback TargetProvider msg@
+-- * 'SkProvider' always resolves to @RuntimeOk TargetProvider@.
+-- * @'SkHarness' spec@ resolves to @RuntimeOk (TargetHarness name)@ if
+--   a harness with that name is present in the map (name derived from
+--   the harness flavour).
+-- * @'SkHarness' spec@ resolves to @RuntimeFallback TargetProvider msg@
 --   if the harness is absent, where @msg@ explains the fallback for
 --   logging at warn level.
-validateRuntime :: Map Text HarnessHandle -> RuntimeType -> ResolvedRuntime
-validateRuntime _ RTProvider = RuntimeOk TargetProvider
-validateRuntime harnesses (RTHarness name)
-  | Map.member name harnesses = RuntimeOk (TargetHarness name)
-  | otherwise =
-      let msg = "harness '" <> name <> "' is not running, falling back to provider"
-       in RuntimeFallback TargetProvider msg
+validateRuntime :: Map Text HarnessHandle -> SessionKind -> ResolvedRuntime
+validateRuntime _ (SkProvider _) = RuntimeOk TargetProvider
+validateRuntime harnesses (SkHarness spec) =
+  let name = sessionKindHarnessName spec
+  in if Map.member name harnesses
+       then RuntimeOk (TargetHarness name)
+       else let msg = "harness '" <> name <> "' is not running, falling back to provider"
+            in RuntimeFallback TargetProvider msg
 
--- | Resolve a resumed session's 'RuntimeType' to a concrete
+-- | Extract the harness name from a 'HarnessSpec' by rendering its flavour.
+sessionKindHarnessName :: HarnessSpec -> Text
+sessionKindHarnessName spec = case _h_flavour spec of
+  HClaudeCode -> "claude-code"
+  HCodex      -> "codex"
+  HOpenCode   -> "opencode"
+  HHermes     -> "hermes"
+  HPureClaw   -> "pureclaw"
+  HCustom n   -> n
+
+-- | Resolve a resumed session's 'SessionKind' to a concrete
 -- 'MessageTarget' given the currently-running harness map, logging a
 -- warning if the recorded runtime is no longer available.
 --
@@ -371,9 +397,9 @@ validateRuntime harnesses (RTHarness name)
 resolveResumedTarget
   :: LogHandle
   -> Map Text HarnessHandle
-  -> RuntimeType
+  -> SessionKind
   -> IO MessageTarget
-resolveResumedTarget logger harnesses rt = case validateRuntime harnesses rt of
+resolveResumedTarget logger harnesses sk = case validateRuntime harnesses sk of
   RuntimeOk tgt -> pure tgt
   RuntimeFallback tgt warning -> do
     _lh_logWarn logger warning
@@ -395,6 +421,80 @@ markBootstrapConsumed sh = do
   atomicModifyIORef' (_sh_meta sh) $ \m ->
     (m { _sm_bootstrapConsumed = True }, ())
   _sh_save sh
+
+-- ----------------------------------------------------------------------------
+-- Archive flag
+-- ----------------------------------------------------------------------------
+
+-- | Reasons 'setArchived' may fail. The session directory and transcript
+-- are never touched, so failure leaves on-disk state unchanged.
+data SetArchivedError
+  = SetArchivedSessionMissing
+    -- ^ @\<baseDir\>/\<sid\>/session.json@ does not exist.
+  | SetArchivedParseFailed Text
+    -- ^ session.json was unreadable or did not decode as 'SessionMeta'.
+  deriving stock (Show, Eq)
+
+-- | Toggle 'SessionMeta._sm_archived' for a session that may or may not
+-- have a live 'SessionHandle'. Operates directly on the on-disk
+-- @session.json@: reads, updates the archive flag, writes back via the
+-- usual tmp-file + rename atomicity pattern.
+--
+-- Crucially, this is **display state only** — neither the session
+-- directory nor the transcript is removed. Unarchiving restores the
+-- session to "Recent Sessions" with all history intact.
+setArchived :: FilePath -> SessionId -> Bool -> IO (Either SetArchivedError ())
+setArchived baseDir sid archived =
+  updateSessionMeta baseDir sid (\m -> m { _sm_archived = archived })
+    SetArchivedSessionMissing SetArchivedParseFailed
+
+-- | Reasons 'setDescription' may fail. Same shape as 'SetArchivedError'.
+data SetDescriptionError
+  = SetDescriptionSessionMissing
+  | SetDescriptionParseFailed Text
+  deriving stock (Show, Eq)
+
+-- | Set or clear the user-provided session description. Passing 'Just t'
+-- stores the description (trimmed of surrounding whitespace; an empty
+-- result is treated as 'Nothing' so callers can pass through what the
+-- user typed without preprocessing). Passing 'Nothing' clears it,
+-- letting display surfaces fall back to '_sm_autoSummary' or a
+-- transcript-derived snippet.
+setDescription :: FilePath -> SessionId -> Maybe Text -> IO (Either SetDescriptionError ())
+setDescription baseDir sid mDesc =
+  let normalized = mDesc >>= \t -> let s = T.strip t in if T.null s then Nothing else Just s
+  in  updateSessionMeta baseDir sid (\m -> m { _sm_description = normalized })
+        SetDescriptionSessionMissing SetDescriptionParseFailed
+
+-- | Shared read-modify-write helper for the disk-only meta mutators.
+-- Reads @session.json@, applies @f@, and writes back via tmp-file +
+-- rename. @missing@ and @parseFail@ are the caller's error
+-- constructors so each public mutator returns its own error type.
+updateSessionMeta
+  :: FilePath
+  -> SessionId
+  -> (SessionMeta -> SessionMeta)
+  -> e
+  -> (Text -> e)
+  -> IO (Either e ())
+updateSessionMeta baseDir sid f missing parseFail = do
+  let dir    = baseDir </> T.unpack (unSessionId sid)
+      finalP = dir </> "session.json"
+      tmpP   = finalP <> ".tmp"
+  exists <- doesFileExist finalP
+  if not exists
+    then pure (Left missing)
+    else do
+      eBytes <- try (LBS.readFile finalP) :: IO (Either IOException LBS.ByteString)
+      case eBytes of
+        Left e -> pure (Left (parseFail (T.pack (show e))))
+        Right raw -> case Aeson.eitherDecode' raw of
+          Left  err  -> pure (Left (parseFail (T.pack err)))
+          Right meta -> do
+            LBS.writeFile tmpP (Aeson.encode (f meta))
+            setFileMode tmpP 0o600
+            renameFile tmpP finalP
+            pure (Right ())
 
 -- ----------------------------------------------------------------------------
 -- Resume context reload

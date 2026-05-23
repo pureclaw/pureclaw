@@ -1,5 +1,12 @@
 # Terminal / Backend Abstractions
 
+> **Post-merge note (Session/Tab Unification):** The `TerminalBackend` ADT
+> (`TbLocal | TbTmux !TmuxConfig | TbSsh !SshConfig | TbContainer !ContainerSpec`)
+> in `PureClaw.Session.Kind` formalizes the backend vocabulary from this
+> design as serializable spec types. Runtime-validated types (`SshTarget`,
+> `TmuxTarget`, etc.) and `BackendHandle` remain in the transport layer.
+> See `docs/session-tab-unification.md`.
+
 > ### ⚠️ Important v1 Operating Mode Note
 >
 > Tmux **Attach mode** (this work) joins the target window as a real tmux

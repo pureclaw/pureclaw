@@ -234,3 +234,164 @@ body {
   color: rgba(255,255,255,0.6);
   font-family: inherit;
 }
+
+/* ── Addressable blocks (Context Reachability) ────────────────────────── */
+
+.anchor-handle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-weight: var(--font-regular);
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease,
+              color var(--duration-fast) ease;
+  flex-shrink: 0;
+}
+
+.anchor-handle:hover {
+  background: var(--surface-hover);
+  color: var(--accent-primary);
+}
+.anchor-handle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 2px var(--accent-primary);
+}
+
+.anchor-handle-copied {
+  color: var(--success);
+}
+
+.anchor-handle svg { display: block; }
+
+/* ── Chat-header editable title ───────────────────────────────────────── */
+
+.editable-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 360px;
+  padding: 2px 6px;
+  margin: -2px -6px;          /* keep visual bounds identical to the static span it replaces */
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-primary);
+  cursor: text;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.editable-title:hover { background: var(--bg-elevated); }
+.editable-title:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 4px rgba(124, 108, 246, 0.4);
+}
+.editable-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.editable-title-pencil {
+  flex-shrink: 0;
+  opacity: 0;
+  color: var(--text-faint);
+  transition: opacity var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.editable-title:hover .editable-title-pencil,
+.editable-title:focus-visible .editable-title-pencil { opacity: 1; }
+.editable-title:hover .editable-title-pencil { color: var(--accent-primary); }
+
+.editable-title-input {
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-primary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  margin: -2px -6px;
+  outline: none;
+  min-width: 200px;
+  max-width: 360px;
+}
+.editable-title-input::placeholder {
+  color: var(--text-faint);
+  font-weight: var(--font-regular);
+}
+
+/* ── Chat-header scroll buttons (top / bottom) ────────────────────────── */
+
+.header-scroll-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease,
+              color var(--duration-fast) ease,
+              border-color var(--duration-fast) ease;
+  flex-shrink: 0;
+}
+.header-scroll-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--accent-primary);
+  border-color: var(--border);
+}
+.header-scroll-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 4px rgba(124, 108, 246, 0.4);
+}
+.header-scroll-btn svg { display: block; }
+
+/* ── Sidebar session archive button ───────────────────────────────────── */
+
+.session-archive {
+  /* Hidden by default so the pill stays flush right. Switched to
+   * inline-flex on row hover / button focus. */
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease,
+              color var(--duration-fast) ease;
+  flex-shrink: 0;
+}
+.session-row:hover .session-archive,
+.session-archive:focus-visible {
+  display: inline-flex;
+}
+.session-archive:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 4px rgba(124, 108, 246, 0.4);
+}
+.session-archive:hover {
+  background: var(--bg-elevated);
+  color: var(--accent-primary);
+}
+.session-archive svg { display: block; }

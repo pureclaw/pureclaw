@@ -1,5 +1,13 @@
 # Tabbed Chat — Mobile-Friendly Multiplexing
 
+> **Post-merge note (Session/Tab Unification):** The flat `TabKind` ADT
+> (`KindAi | KindHarness | KindShell | KindSsh | KindTmux`) introduced by
+> this design has been superseded by a two-level structure:
+> `TabKind = TkSession !SessionKind | TkRawShell !TerminalBackend`.
+> `SessionKind` lives in `PureClaw.Session.Kind`; `TabKind` stays in
+> `PureClaw.Handles.Tab`. Bidirectional pattern synonyms preserve the old
+> constructor names for pattern matching. See `docs/session-tab-unification.md`.
+
 **Issue:** [#51](https://github.com/pureclaw/pureclaw/issues/51)
 **Status:** design — APPROVED by all 5 review-gate agents (PM, Architect, Designer, Security, CTO) over rounds 1–5
 **Branch:** `feat/terminal-backends-design`

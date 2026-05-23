@@ -2,13 +2,15 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { useHarnesses, useRecentSessions, useTranscript, useSendMessage, useAgents, createSession, setSessionPrompt } from './hooks/useApi'
-import type { Message, TranscriptEntry } from './types'
+import { NewTabComposer } from './components/NewTabComposer'
+import { useTabs, useRecentSessions, useArchivedSessions, useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, resumeArchivedSession } from './hooks/useApi'
+import { useNewTabSpec } from './hooks/useNewTabSpec'
+import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
 function selectedIdFromPath(): string | null {
   const path = window.location.pathname
-  const m = path.match(/^\/(harness|session)\/(.+)$/)
+  const m = path.match(/^\/(harness|session|tab)\/(.+)$/)
   if (m) return `${m[1]}:${m[2]}`
   return null
 }
@@ -20,18 +22,74 @@ function pathFromSelectedId(selectedId: string | null): string {
   return `/${type}/${rest.join(':')}`
 }
 
-/** Extract session ID from selectedId, or null if not a session selection. */
-function sessionIdFromSelection(selectedId: string | null): string | null {
+/** Extract session ID from selectedId, or null if not a session selection.
+ *  For tab selections, looks up the tab's session_id from the tabs array. */
+function sessionIdFromSelection(
+  selectedId: string | null,
+  tabs: import('./types').TabInfo[],
+): string | null {
   if (!selectedId) return null
   const [type, ...rest] = selectedId.split(':')
   if (type === 'session') return rest.join(':')
+  if (type === 'tab') {
+    const tabIndex = parseInt(rest.join(':'), 10)
+    const tab = tabs.find((t) => t.index === tabIndex)
+    return tab?.session_id ?? null
+  }
   return null
+}
+
+interface ToolResultRecord {
+  content: string
+  isError?: boolean
+}
+
+/** Index every tool_use_id we have a tool_result for, scanning the full transcript. */
+function buildToolResultIndex(entries: TranscriptEntry[]): Map<string, ToolResultRecord> {
+  const map = new Map<string, ToolResultRecord>()
+  for (const e of entries) {
+    if (e.direction !== 'request') continue
+    const parsed = tryParseJson(e.payload)
+    if (!parsed) continue
+    const msgs = parsed.messages as Array<{ role: string; content: unknown }> | undefined
+    if (!msgs) continue
+    for (const m of msgs) {
+      if (m.role !== 'user' || !Array.isArray(m.content)) continue
+      for (const b of m.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+        if (b.type === 'tool_result' && b.tool_use_id) {
+          map.set(b.tool_use_id, {
+            content: formatToolResultContent(b.content),
+            isError: b.is_error,
+          })
+        }
+      }
+    }
+  }
+  return map
+}
+
+function formatToolResultContent(content: unknown): string {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => {
+        if (b && typeof b === 'object') {
+          const o = b as { type?: string; text?: string }
+          if (o.type === 'text' && typeof o.text === 'string') return o.text
+        }
+        return JSON.stringify(b)
+      })
+      .join('\n')
+  }
+  return JSON.stringify(content, null, 2)
 }
 
 /** Convert transcript entries to the Message format ChatArea expects. */
 function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
   const messages: Message[] = []
   const seenSystemPrompts = new Set<string>()
+  const toolResults = buildToolResultIndex(entries)
 
   for (const e of entries) {
     const ts = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -48,17 +106,17 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
             agentName: 'System',
             agentStatus: 'idle',
             timestamp: ts,
-            blocks: [{ collapsedText: sysPrompt }],
+            blocks: [{ id: 'sys-' + e.id, collapsedText: sysPrompt }],
           })
         }
         // Extract only the LAST message from the request — it's the new
         // one being sent. Earlier messages in the array are conversation
         // history already represented by previous transcript entries.
-        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; input?: unknown }> }> | undefined
+        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> }> | undefined
         if (msgs && msgs.length > 0) {
           const msg = msgs[msgs.length - 1]!
           const textParts = extractTextFromContent(msg.content)
-          const toolCalls = extractToolCalls(msg.content)
+          const toolCalls = extractToolCalls(msg.content, toolResults)
           if (msg.role === 'user') {
             if (textParts) {
               messages.push({
@@ -66,14 +124,14 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
                 agentName: 'You',
                 agentStatus: 'completed',
                 timestamp: ts,
-                blocks: [{ text: textParts }],
+                blocks: [{ id: 'u-' + e.id, text: textParts }],
                 meta: parsed.model as string | undefined,
               })
             }
           } else if (msg.role === 'assistant') {
-            const blocks: import('./types').MessageContent[] = []
-            if (textParts) blocks.push({ text: textParts })
-            for (const tc of toolCalls) blocks.push({ text: tc })
+            const blocks: MessageContent[] = []
+            if (textParts) blocks.push({ id: 'a-' + e.id + '-text', text: textParts })
+            for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
             if (blocks.length > 0) {
               messages.push({
                 id: e.id + '-asst',
@@ -92,7 +150,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           agentName: 'You',
           agentStatus: 'completed',
           timestamp: ts,
-          blocks: [{ text: e.payload }],
+          blocks: [{ id: 'raw-' + e.id, text: e.payload }],
         })
       }
     } else {
@@ -101,16 +159,16 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
       if (parsed) {
         const content = parsed.content as Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> | undefined
         const textParts = extractTextFromContent(content)
-        const toolCalls = extractToolCalls(content)
+        const toolCalls = extractToolCalls(content, toolResults)
         const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
         const usageMeta = usage
           ? `${usage.input_tokens ?? 0} in / ${usage.output_tokens ?? 0} out tokens`
           : undefined
 
-        const blocks: import('./types').MessageContent[] = []
-        if (textParts) blocks.push({ text: textParts })
-        for (const tc of toolCalls) blocks.push({ text: tc })
-        if (blocks.length === 0) blocks.push({ text: '(empty response)' })
+        const blocks: MessageContent[] = []
+        if (textParts) blocks.push({ id: 'r-' + e.id + '-text', text: textParts })
+        for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
+        if (blocks.length === 0) blocks.push({ id: 'r-' + e.id + '-empty', text: '(empty response)' })
 
         messages.push({
           id: e.id,
@@ -127,7 +185,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           agentName: e.harness ?? e.model ?? 'Assistant',
           agentStatus: 'completed',
           timestamp: ts,
-          blocks: [{ text: e.payload }],
+          blocks: [{ id: 'raw-' + e.id, text: e.payload }],
         })
       }
     }
@@ -153,11 +211,24 @@ function extractTextFromContent(content: Array<{ type: string; text?: string }> 
   return texts.length > 0 ? texts.join('\n') : null
 }
 
-function extractToolCalls(content: Array<{ type: string; name?: string; id?: string; input?: unknown }> | undefined): string[] {
+function extractToolCalls(
+  content: Array<{ type: string; name?: string; id?: string; input?: unknown }> | undefined,
+  results: Map<string, ToolResultRecord>,
+): ToolCallInfo[] {
   if (!content) return []
   return content
     .filter((b) => b.type === 'tool_use' && b.name)
-    .map((b) => `Tool call: ${b.name}`)
+    .map((b, i) => {
+      const id = b.id ?? `unknown-${i}`
+      const r = results.get(id)
+      return {
+        id,
+        name: b.name!,
+        input: b.input,
+        result: r?.content,
+        resultIsError: r?.isError,
+      }
+    })
 }
 
 function computeSessionStats(entries: TranscriptEntry[]): { tokensUsed: number; contextWindow: number } {
@@ -258,12 +329,66 @@ function modelContextWindow(model: string | null): number {
 }
 
 export default function App() {
-  const { harnesses } = useHarnesses()
-  const { sessions } = useRecentSessions()
+  const { tabs } = useTabs()
+  const { sessions: rawSessions } = useRecentSessions()
+  const { sessions: archivedSessions } = useArchivedSessions()
   const { agents } = useAgents()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const [customPromptFile, setCustomPromptFile] = useState<{ name: string; content: string } | null>(null)
+
+  // Optimistic strip — when the user archives a session, hide it from the
+  // sidebar immediately rather than waiting for the next 3s poll. Server-side
+  // filtering will catch up; the set just accumulates a few session ids in
+  // the meantime, which is fine.
+  const [archivedOptimistically, setArchivedOptimistically] = useState<Set<string>>(() => new Set())
+  const sessions = useMemo(
+    () => rawSessions.filter((s) => !archivedOptimistically.has(s.id)),
+    [rawSessions, archivedOptimistically],
+  )
+
+  const handleArchiveSession = useCallback(async (id: string) => {
+    setArchivedOptimistically((s) => {
+      const next = new Set(s)
+      next.add(id)
+      return next
+    })
+    const ok = await setSessionArchived(id, true)
+    if (!ok) {
+      // Backend rejected — restore the row so the user can see and retry.
+      setArchivedOptimistically((s) => {
+        const next = new Set(s)
+        next.delete(id)
+        return next
+      })
+    }
+  }, [])
+
+  const handleUnarchiveSession = useCallback(async (id: string) => {
+    await setSessionArchived(id, false)
+  }, [])
+
+  // Optimistic overlay for description edits — we apply the user's text
+  // immediately so the chat header doesn't flicker back to the fallback
+  // while the next poll arrives. Cleared per-id when the polled value
+  // catches up. Stores empty string to mean "cleared".
+  const [descriptionOverrides, setDescriptionOverrides] = useState<Map<string, string>>(() => new Map())
+  const handleSetDescription = useCallback(async (id: string, description: string) => {
+    const trimmed = description.trim()
+    setDescriptionOverrides((m) => {
+      const next = new Map(m)
+      next.set(id, trimmed)
+      return next
+    })
+    const ok = await setSessionDescription(id, trimmed.length > 0 ? trimmed : null)
+    if (!ok) {
+      setDescriptionOverrides((m) => {
+        const next = new Map(m)
+        next.delete(id)
+        return next
+      })
+    }
+  }, [])
 
   // Initialize selectedAgent from default agent once agents load
   useEffect(() => {
@@ -273,7 +398,7 @@ export default function App() {
     }
   }, [agents, selectedAgent])
 
-  const currentSessionId = sessionIdFromSelection(selectedId)
+  const currentSessionId = sessionIdFromSelection(selectedId, tabs)
   const { entries, loading, refresh } = useTranscript(currentSessionId)
   const { send, sending } = useSendMessage(currentSessionId, refresh)
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
@@ -324,15 +449,79 @@ export default function App() {
     send(message)
   }, [send, entries.length, customPromptFile, currentSessionId])
 
-  const handleNewSession = useCallback(async () => {
-    const session = await createSession(selectedAgent || undefined, customPromptFile?.content)
-    if (session) {
-      const newId = `session:${session.id}`
+  // Compose mode is implicit: selectedId === null means "no tab focused,
+  // show the inline new-tab composer in the ChatArea". Clicking the "New
+  // tab" button just clears the selection — there's no separate modal
+  // or composing flag.
+  const handleNewTab = useCallback(() => {
+    setSelectedId(null)
+    window.history.pushState(null, '', '/')
+    setCustomPromptFile(null)
+  }, [])
+
+  // Shared composer state. Lives in App so that both the inline panel
+  // (in ChatArea's messages region) and the existing bottom chat input
+  // can read from a single source of truth — the panel renders config
+  // fields, the bottom input drives the create-and-send flow on submit.
+  const composerSpec = useNewTabSpec()
+  const composing = selectedId === null
+
+  // The transcript refresh callback is bound to whichever session is
+  // currently focused. We keep the latest one in a ref so that the
+  // compose-send flow — which switches the focus mid-flight — can call
+  // the *new* session's refresh once the first-message LLM call returns.
+  const refreshRef = useRef<() => void>(() => {})
+  useEffect(() => { refreshRef.current = refresh }, [refresh])
+
+  const handleComposerSend = useCallback(
+    async (message: string) => {
+      const body = composerSpec.buildBody()
+      const res = await fetch('/api/tabs/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) return
+      const tab = await res.json() as import('./hooks/useApi').NewTabResponse
+
+      // Switch the active tab *immediately* after creation so the
+      // composer disappears and the main window begins tracking the
+      // new session. The first-message send below blocks on the LLM
+      // response — doing it before the focus switch would leave the
+      // composer visible for the entire LLM completion.
+      const newId = `tab:${tab.tab_index}`
+      const trimmed = message.trim()
+      const sendFirst = trimmed.length > 0
+      if (sendFirst) {
+        // Mirror the first message locally so the new tab's transcript
+        // shows it immediately (instead of a blank screen until the
+        // send completes and the next transcript refresh lands).
+        entryCountAtSend.current = 0
+        setPendingMessage(trimmed)
+      }
       setSelectedId(newId)
       window.history.pushState(null, '', pathFromSelectedId(newId))
       setCustomPromptFile(null)
-    }
-  }, [selectedAgent, customPromptFile])
+
+      if (sendFirst && tab.session_id) {
+        try {
+          await fetch(`/api/sessions/${encodeURIComponent(tab.session_id)}/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: trimmed }),
+          })
+        } catch {
+          // Tab created; the message failed. The user can retry from
+          // the new tab's transcript view.
+        }
+        // After the LLM call returns, refresh the now-focused
+        // transcript so the user message + assistant reply land in
+        // place of the optimistic pending pair.
+        refreshRef.current()
+      }
+    },
+    [composerSpec],
+  )
 
   // Sync state from browser back/forward navigation
   useEffect(() => {
@@ -341,35 +530,98 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  const handleSelect = useCallback((type: 'harness' | 'session', id: string) => {
-    const newId = `${type}:${id}`
+  const handleSelectTab = useCallback((index: number) => {
+    const newId = `tab:${index}`
     setSelectedId(newId)
     window.history.pushState(null, '', pathFromSelectedId(newId))
   }, [])
 
+  const handleSelectSession = useCallback((id: string) => {
+    const newId = `session:${id}`
+    setSelectedId(newId)
+    window.history.pushState(null, '', pathFromSelectedId(newId))
+  }, [])
+
+  // L1/L2: Close a tab (session-backed or raw shell).
+  // The backend handles save + cleanup; the frontend just deselects if needed.
+  const handleCloseTab = useCallback(async (index: number) => {
+    await closeTab(index)
+    // If the closed tab was selected, clear the selection
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
+  // L4: Archive a running session — close tab first, then archive.
+  const handleArchiveTab = useCallback(async (index: number) => {
+    const tab = tabs.find((t) => t.index === index)
+    if (!tab) return
+    // Close the tab first (backend saves session state)
+    await closeTab(index)
+    // If session-backed, archive the session so it moves to Archived
+    if (tab.session_id) {
+      await setSessionArchived(tab.session_id, true)
+    }
+    // If the archived tab was selected, clear the selection
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [tabs, selectedId])
+
+  // L3: Resume archived session — unarchive then create a new tab.
+  const handleResumeArchivedSession = useCallback(async (id: string) => {
+    const tab = await resumeArchivedSession(id)
+    if (tab) {
+      const newId = `tab:${tab.tab_index}`
+      setSelectedId(newId)
+      window.history.pushState(null, '', pathFromSelectedId(newId))
+    }
+  }, [])
+
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
-    ? deriveAgent(selectedId, harnesses, sessions)
+    ? deriveAgent(selectedId, tabs, sessions)
     : null
 
   const taskTitle = displayAgent?.name ?? 'PureClaw'
 
   // Compute session stats from transcript entries
   const sessionStats = useMemo(() => computeSessionStats(entries), [entries])
-  const selectedSession = sessions.find((s) => s.id === currentSessionId)
+  const selectedSession = useMemo(() => {
+    const base = sessions.find((s) => s.id === currentSessionId)
+      ?? archivedSessions.find((s) => s.id === currentSessionId)
+      ?? null
+    if (!base) return null
+    const override = descriptionOverrides.get(base.id)
+    return override === undefined
+      ? base
+      : { ...base, description: override.length > 0 ? override : null }
+  }, [sessions, archivedSessions, currentSessionId, descriptionOverrides])
 
   return (
     <>
-      <TopBar taskTitle={taskTitle} onNewSession={handleNewSession} />
+      <TopBar taskTitle={taskTitle} />
       <div className="flex flex-1 min-h-0">
         <Sidebar
-          harnesses={harnesses}
+          tabs={tabs}
           sessions={sessions}
+          archivedSessions={archivedSessions}
           selectedId={selectedId}
-          onSelect={handleSelect}
+          onSelectTab={handleSelectTab}
+          onSelectSession={handleSelectSession}
+          onNewTab={handleNewTab}
+          onArchiveSession={handleArchiveSession}
+          onUnarchiveSession={handleUnarchiveSession}
+          onCloseTab={handleCloseTab}
+          onArchiveTab={handleArchiveTab}
+          onResumeArchivedSession={handleResumeArchivedSession}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
+          selectedSession={selectedSession}
+          onSetDescription={handleSetDescription}
           messages={messages}
           loading={loading}
           onSend={currentSessionId ? handleSend : undefined}
@@ -382,6 +634,12 @@ export default function App() {
           onAgentChange={setSelectedAgent}
           customPromptFile={customPromptFile}
           onCustomPromptFile={setCustomPromptFile}
+          composerControls={composing ? {
+            panel: <NewTabComposer spec={composerSpec} />,
+            kind: composerSpec.kind,
+            valid: composerSpec.validationError === null,
+            onSubmit: handleComposerSend,
+          } : null}
         />
       </div>
     </>
@@ -390,20 +648,21 @@ export default function App() {
 
 function deriveAgent(
   selectedId: string,
-  harnesses: import('./types').HarnessInfo[],
+  tabs: import('./types').TabInfo[],
   sessions: import('./types').SessionInfo[],
 ) {
   const [type, ...rest] = selectedId.split(':')
   const id = rest.join(':')
 
-  if (type === 'harness') {
-    const h = harnesses.find((h) => h.name === id)
-    if (!h) return null
+  if (type === 'tab') {
+    const tabIndex = parseInt(id, 10)
+    const tab = tabs.find((t) => t.index === tabIndex)
+    if (!tab) return null
     return {
-      id: `harness:${h.name}`,
-      name: h.name,
-      status: h.activity === 'thinking' ? 'thinking' as const
-        : h.activity === 'idle' ? 'idle' as const
+      id: `tab:${tab.index}`,
+      name: tab.name,
+      status: tab.status === 'running' ? 'thinking' as const
+        : tab.status === 'idle' ? 'idle' as const
         : 'completed' as const,
       tokenCount: '',
     }
@@ -412,9 +671,14 @@ function deriveAgent(
   if (type === 'session') {
     const s = sessions.find((s) => s.id === id)
     if (!s) return null
+    // Display name preference: agent name → model id → (last resort)
+    // session id. The session id is a timestamp-like string like
+    // "20260522-..." — useless to surface in a chat input placeholder,
+    // so we only fall back to it when both agent and model are missing.
+    const displayName = s.agent ?? (s.model && s.model.length > 0 ? s.model : s.id)
     return {
       id: `session:${s.id}`,
-      name: s.agent ?? s.id,
+      name: displayName,
       status: 'completed' as const,
       tokenCount: '',
       description: s.model,

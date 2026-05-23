@@ -23,6 +23,9 @@ module PureClaw.Routing.Types
     RoutingConfig (..)
   , AiDefaults (..)
   , ShellDefaults (..)
+    -- * Spawn errors (depth limiting)
+  , SpawnError (..)
+  , checkPureClawDepth
     -- * Routing errors
   , RoutingError (..)
   , ParseError (..)
@@ -81,7 +84,7 @@ data ShellDefaults = ShellDefaults
 -- Runtime mutation via @\/config@ is v1.5+.
 data RoutingConfig = RoutingConfig
   { _rc_defaultKind         :: !Tab.TabKind
-    -- ^ Pre-shipped as 'Tab.KindAi'.
+    -- ^ Pre-shipped as @'Tab.TkSession' ('SkProvider' ...)@.
   , _rc_defaultAi           :: !AiDefaults
   , _rc_defaultShell        :: !ShellDefaults
   , _rc_switchRecap         :: !Int
@@ -109,8 +112,37 @@ data RoutingConfig = RoutingConfig
   , _rc_sshIdentityKey      :: !Text
     -- ^ Default @"default-ssh-key"@. Vault slot from which the ssh
     --   identity is loaded (no inline identities permitted per S4).
+  , _rc_maxPureClawDepth   :: !Int
+    -- ^ Maximum recursion depth for HPureClaw harness sessions.
+    --   Default 2. Spawning is refused when
+    --   @'_rc_pureClawDepth' >= '_rc_maxPureClawDepth'@.
+  , _rc_pureClawDepth      :: !Int
+    -- ^ Current recursion depth. 0 at top level. Incremented via
+    --   the @--depth@ CLI flag when PureClaw spawns a child process.
   }
   deriving stock (Eq, Show)
+
+
+-- ---------------------------------------------------------------------------
+-- Spawn errors (depth limiting)
+-- ---------------------------------------------------------------------------
+
+-- | Errors that prevent spawning a new HPureClaw harness session.
+data SpawnError
+  = MaxPureClawDepthExceeded !Int !Int
+    -- ^ @MaxPureClawDepthExceeded current max@ — the current recursion
+    --   depth equals or exceeds the configured maximum.
+  deriving stock (Show, Eq)
+
+-- | Pure guard that checks whether the current recursion depth allows
+-- spawning another HPureClaw session. Returns @'Left'
+-- 'MaxPureClawDepthExceeded'@ when @'_rc_pureClawDepth' >=
+-- '_rc_maxPureClawDepth'@.
+checkPureClawDepth :: RoutingConfig -> Either SpawnError ()
+checkPureClawDepth cfg
+  | _rc_pureClawDepth cfg >= _rc_maxPureClawDepth cfg =
+      Left (MaxPureClawDepthExceeded (_rc_pureClawDepth cfg) (_rc_maxPureClawDepth cfg))
+  | otherwise = Right ()
 
 
 -- ---------------------------------------------------------------------------

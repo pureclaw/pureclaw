@@ -19,16 +19,12 @@ import System.Process.Typed
 import Test.Hspec
 
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
-import PureClaw.Core.Types (parseSessionId)
+import PureClaw.Core.Types (ModelId (..), parseSessionId)
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Session.Handle (SessionHandle (..), mkSessionHandle)
 import PureClaw.Session.Types
-  ( RuntimeType (..)
-  , SessionMeta (..)
-  )
 import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)
@@ -387,12 +383,15 @@ spec = do
             meta = SessionMeta
               { _sm_id                = sid
               , _sm_agent             = Nothing
-              , _sm_runtime           = RTProvider
+              , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "test-model") (ModelId "test-model") Nothing)
               , _sm_model             = "test-model"
               , _sm_channel           = "cli"
               , _sm_createdAt         = t0
               , _sm_lastActive        = t0
               , _sm_bootstrapConsumed = False
+              , _sm_archived          = False
+              , _sm_description       = Nothing
+              , _sm_autoSummary       = Nothing
               }
             mkTxEntry eid dir payload = TranscriptEntry
               { _te_id            = eid
@@ -437,7 +436,7 @@ spec = do
             -- The /status handler prints "  Messages: N" — must be 2.
             outStr `shouldContain` "Messages:            2"
 
-    it "logs a warning and falls back to TargetProvider when resuming an RTHarness session whose harness is not running" $ do
+    it "logs a warning and falls back to TargetProvider when resuming an SkHarness session whose harness is not running" $ do
       bin <- findPureclaw
       withSystemTempDirectory "pureclaw-resume-rth-test" $ \tmpDir -> do
         let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
@@ -446,12 +445,15 @@ spec = do
             meta = SessionMeta
               { _sm_id                = sid
               , _sm_agent             = Nothing
-              , _sm_runtime           = RTHarness ("ghost-harness" :: Text)
+              , _sm_kind              = SkHarness (HarnessSpec (fixedFlavourLookup "ghost-harness") (TbTmux (TmuxConfig "ghost-harness" "ghost-harness" Nothing)) Nothing [])
               , _sm_model             = "test-model"
               , _sm_channel           = "cli"
               , _sm_createdAt         = t0
               , _sm_lastActive        = t0
               , _sm_bootstrapConsumed = False
+              , _sm_archived          = False
+              , _sm_description       = Nothing
+              , _sm_autoSummary       = Nothing
               }
         createDirectoryIfMissing True sessionsDir
         sh <- mkSessionHandle mkNoOpLogHandle sessionsDir meta

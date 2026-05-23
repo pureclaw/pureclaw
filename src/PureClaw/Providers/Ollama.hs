@@ -8,6 +8,7 @@ module PureClaw.Providers.Ollama
     -- * Request/response encoding (exported for testing)
   , encodeRequest
   , decodeResponse
+  , freshenToolUseIds
     -- * Model listing (exported for testing)
   , parseModelNames
   ) where
@@ -17,6 +18,7 @@ import Data.Aeson
 import Data.Aeson.Types
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
+import Data.IORef
 import Data.Maybe qualified
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -31,18 +33,26 @@ import PureClaw.Providers.Class
 data OllamaProvider = OllamaProvider
   { _ol_manager :: HTTP.Manager
   , _ol_baseUrl :: String    -- ^ Base URL without endpoint path (e.g. "http://localhost:11434")
+  , _ol_callCounter :: IORef Int
+    -- ^ Monotonic counter used to mint unique tool_use_ids. Ollama's
+    -- /api/chat response does not include per-call identifiers, so we
+    -- generate them here. Globally unique across the provider's lifetime
+    -- so downstream tool_result pairing can't collide.
   }
 
 -- | Create an Ollama provider. Defaults to localhost:11434.
-mkOllamaProvider :: HTTP.Manager -> OllamaProvider
-mkOllamaProvider mgr = OllamaProvider mgr "http://localhost:11434"
+mkOllamaProvider :: HTTP.Manager -> IO OllamaProvider
+mkOllamaProvider mgr = do
+  counter <- newIORef 0
+  pure (OllamaProvider mgr "http://localhost:11434" counter)
 
 -- | Create an Ollama provider with a custom base URL.
 -- The URL should be the base (e.g. @http://myhost:11434@).
-mkOllamaProviderWithUrl :: HTTP.Manager -> String -> OllamaProvider
-mkOllamaProviderWithUrl mgr url =
+mkOllamaProviderWithUrl :: HTTP.Manager -> String -> IO OllamaProvider
+mkOllamaProviderWithUrl mgr url = do
+  counter <- newIORef 0
   let trimmed = reverse (dropWhile (== '/') (reverse url))
-  in OllamaProvider mgr trimmed
+  pure (OllamaProvider mgr trimmed counter)
 
 instance Provider OllamaProvider where
   complete = ollamaComplete
@@ -74,7 +84,23 @@ ollamaComplete provider req = do
     then throwIO (OllamaAPIError status (BL.toStrict (HTTP.responseBody resp)))
     else case decodeResponse (HTTP.responseBody resp) of
       Left err -> throwIO (OllamaParseError (T.pack err))
-      Right response -> pure response
+      Right response -> freshenToolUseIds (_ol_callCounter provider) response
+
+-- | Replace every 'ToolUseBlock' id in the response with a fresh
+-- @"ollama-call-N"@ identifier drawn from the provider's monotonic
+-- counter. Ollama's API does not return per-call ids, so the parser
+-- emits placeholders that all collide; this rewrite is what makes
+-- tool_use → tool_result pairing actually work downstream.
+freshenToolUseIds :: IORef Int -> CompletionResponse -> IO CompletionResponse
+freshenToolUseIds counter resp = do
+  freshened <- mapM rewrite (_crsp_content resp)
+  pure resp { _crsp_content = freshened }
+  where
+    rewrite :: ContentBlock -> IO ContentBlock
+    rewrite (ToolUseBlock _ name args) = do
+      n <- atomicModifyIORef' counter (\x -> (x + 1, x + 1))
+      pure (ToolUseBlock (ToolCallId ("ollama-call-" <> T.pack (show n))) name args)
+    rewrite other = pure other
 
 -- | Encode a request for the Ollama /api/chat endpoint.
 -- Ollama uses system messages in the messages array and a simpler

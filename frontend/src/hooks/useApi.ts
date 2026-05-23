@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { AgentInfo, HarnessInfo, SessionInfo, TranscriptEntry } from '../types'
+import type { AgentInfo, HarnessInfo, SessionInfo, TabInfo, TranscriptEntry } from '../types'
 
 const POLL_INTERVAL = 3000
 
@@ -42,6 +42,52 @@ export function useRecentSessions() {
 
   const poll = useCallback(async () => {
     const data = await fetchJson<SessionInfo[]>('/api/sessions/recent')
+    if (data) {
+      setSessions(data)
+      setError(false)
+    } else {
+      setError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    poll()
+    const id = setInterval(poll, POLL_INTERVAL)
+    return () => clearInterval(id)
+  }, [poll])
+
+  return { sessions, error }
+}
+
+export function useTabs() {
+  const [tabs, setTabs] = useState<TabInfo[]>([])
+  const [error, setError] = useState(false)
+
+  const poll = useCallback(async () => {
+    const data = await fetchJson<TabInfo[]>('/api/tabs')
+    if (data) {
+      setTabs(data)
+      setError(false)
+    } else {
+      setError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    poll()
+    const id = setInterval(poll, POLL_INTERVAL)
+    return () => clearInterval(id)
+  }, [poll])
+
+  return { tabs, error }
+}
+
+export function useArchivedSessions() {
+  const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [error, setError] = useState(false)
+
+  const poll = useCallback(async () => {
+    const data = await fetchJson<SessionInfo[]>('/api/sessions/archived')
     if (data) {
       setSessions(data)
       setError(false)
@@ -117,6 +163,36 @@ export function useSendMessage(sessionId: string | null, onComplete: () => void)
   return { send, sending }
 }
 
+/** Set or clear the user-provided session description. Passing null
+ *  (or an all-whitespace string, which the backend normalises) clears
+ *  the field, restoring the auto-summary / snippet / agent fallback. */
+export async function setSessionDescription(sessionId: string, description: string | null): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/description`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Set the archive flag on a session. Pure UI hint — the session
+ *  directory and transcript stay on disk. */
+export async function setSessionArchived(sessionId: string, archived: boolean): Promise<boolean> {
+  try {
+    const path = archived ? 'archive' : 'unarchive'
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${path}`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 export async function setSessionPrompt(sessionId: string, prompt: string, name?: string): Promise<boolean> {
   try {
     const body: Record<string, string> = { prompt }
@@ -137,26 +213,129 @@ export function useAgents() {
 
   useEffect(() => {
     fetchJson<AgentInfo[]>('/api/agents').then((data) => {
-      if (data) setAgents(data)
+      if (Array.isArray(data)) setAgents(data)
     })
   }, [])
 
   return { agents }
 }
 
-export async function createSession(agent?: string, customPrompt?: string): Promise<import('../types').SessionInfo | null> {
+/** Live fetch of available model IDs for a provider. The backend proxies
+ *  the call to the provider's `/v1/models` endpoint using the credentials
+ *  configured in the vault. Returns an empty list when the provider is
+ *  unknown, has no credentials, or the upstream call fails. Never throws. */
+export async function fetchProviderModels(provider: string): Promise<string[]> {
+  const data = await fetchJson<string[]>(`/api/providers/${encodeURIComponent(provider)}/models`)
+  return Array.isArray(data) ? data : []
+}
+
+/** A provider the user has configured. `isDefault` marks the one the
+ *  running PureClaw instance is configured to use (from CLI flag or
+ *  config file). At most one entry has it set to true. */
+export interface ProviderInfo {
+  name: string
+  isDefault: boolean
+}
+
+/** Providers the user has actually configured (API key present, or
+ *  Ollama reachable). Used to filter the New Tab provider dropdown.
+ *  Returns an empty list if the call fails. */
+export function useConfiguredProviders() {
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    fetchJson<ProviderInfo[]>('/api/providers').then((data) => {
+      if (Array.isArray(data)) setProviders(data)
+      setLoaded(true)
+    })
+  }, [])
+
+  return { providers, loaded }
+}
+
+/** Response from POST /api/tabs/new */
+export interface NewTabResponse {
+  tab_index: number
+  session_id: string | null
+  kind: string
+}
+
+/** Create a new tab via the unified POST /api/tabs/new endpoint.
+ *  For provider-backed sessions, the response includes a session_id
+ *  that can be used to load the transcript. For raw shell tabs the
+ *  session_id is null. */
+export async function createTab(agent?: string, _customPrompt?: string): Promise<NewTabResponse | null> {
   try {
-    const body: Record<string, string> = {}
-    if (agent) body.agent = agent
-    if (customPrompt) body.customPrompt = customPrompt
-    const res = await fetch('/api/sessions/new', {
+    // Build the TabKind payload. For now the frontend only creates
+    // provider-backed session tabs (the "New Session" button path).
+    const sessionKind: Record<string, unknown> = {
+      tag: 'provider',
+      provider: 'anthropic',
+      model: 'placeholder',
+    }
+    if (agent) {
+      sessionKind.agent = agent
+    }
+    const body = {
+      kind: {
+        tag: 'session',
+        session_kind: sessionKind,
+      },
+    }
+    const res = await fetch('/api/tabs/new', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
     if (!res.ok) return null
-    return await res.json() as import('../types').SessionInfo
+    return await res.json() as NewTabResponse
   } catch {
     return null
+  }
+}
+
+/** Close a tab by index. Returns true if the backend accepted the close. */
+export async function closeTab(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/close`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Resume an archived session: unarchive it, then create a new tab for it.
+ *  Returns the new tab response on success, or null on failure. */
+export async function resumeArchivedSession(sessionId: string): Promise<NewTabResponse | null> {
+  // Step 1: Unarchive the session
+  const unarchived = await setSessionArchived(sessionId, false)
+  if (!unarchived) return null
+
+  // Step 2: Create a new tab for the session
+  const tab = await createTab()
+  return tab
+}
+
+/** @deprecated Use createTab instead. This function is kept for
+ *  backward compatibility but now calls the new /api/tabs/new endpoint
+ *  and wraps the response to match the old SessionInfo shape. */
+export async function createSession(agent?: string, customPrompt?: string): Promise<import('../types').SessionInfo | null> {
+  const tab = await createTab(agent, customPrompt)
+  if (!tab || !tab.session_id) return null
+  // Synthesise a minimal SessionInfo from the tab response so existing
+  // call sites continue to work until they migrate to createTab.
+  return {
+    id: tab.session_id,
+    agent: agent ?? null,
+    runtime: tab.kind,
+    model: '',
+    lastActive: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    description: null,
+    autoSummary: null,
+    firstMessageSnippet: null,
   }
 }

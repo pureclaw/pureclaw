@@ -95,7 +95,7 @@ import Data.Text qualified as T
 
 import PureClaw.Agent.Env (AgentEnv (..))
 import PureClaw.Agent.SlashCommands (TabKindArg (..))
-import PureClaw.Core.Types (SessionId (..))
+import PureClaw.Core.Types (ModelId (..), ProviderId (..), SessionId (..))
 import PureClaw.Handles.Tab
   ( CloseMode (..)
   , NameError (..)
@@ -109,6 +109,15 @@ import PureClaw.Handles.Tab
   , unPublicTabError
   , unTabIndex
   , unTabName
+  )
+import PureClaw.Session.Kind
+  ( HarnessFlavour (..)
+  , HarnessSpec (..)
+  , ProviderSpec (..)
+  , SessionKind (..)
+  , SshConfig (..)
+  , TerminalBackend (..)
+  , TmuxConfig (..)
   )
 import PureClaw.Routing.Dashboard (renderDashboard)
 import PureClaw.Routing.PromptRenderer (PromptRenderer (..))
@@ -579,23 +588,68 @@ safeIgnore m = do
   pure ()
 
 -- | Convert a parser-level 'TabKindArg' to the canonical 'TabKind'.
+--
+-- The payload in the resulting 'TabKind' is a /placeholder/ — the real
+-- configuration (provider, model, harness flavour, SSH host, etc.) is
+-- constructed by the per-kind factory from its spawn-args, not from
+-- the 'TabKind' value. The 'TabKind' here is used only for dispatch.
 tabKindArgToKind :: TabKindArg -> TabKind
 tabKindArgToKind k = case k of
-  TkaAi      -> KindAi
-  TkaHarness -> KindHarness
-  TkaShell   -> KindShell
-  TkaSsh     -> KindSsh
-  TkaTmux    -> KindTmux
+  TkaAi       -> TkSession (SkProvider placeholderProviderSpec)
+  TkaProvider -> TkSession (SkProvider placeholderProviderSpec)
+  TkaHarness  -> TkSession (SkHarness placeholderHarnessSpec)
+  TkaShell    -> TkRawShell TbLocal
+  TkaSsh      -> TkRawShell (TbSsh placeholderSshConfig)
+  TkaTmux     -> TkRawShell (TbTmux placeholderTmuxConfig)
 
 -- | Project a 'TabKind' to its short keyword (mirrors
 -- 'PureClaw.Routing.Config.tabKindCodec').
 kindKeyword :: TabKind -> Text
 kindKeyword k = case k of
-  KindAi      -> "ai"
-  KindHarness -> "harness"
-  KindShell   -> "shell"
-  KindSsh     -> "ssh"
-  KindTmux    -> "tmux"
+  TkSession (SkProvider _)   -> "ai"
+  TkSession (SkHarness _)    -> "harness"
+  TkRawShell TbLocal         -> "shell"
+  TkRawShell (TbSsh _)       -> "ssh"
+  TkRawShell (TbTmux _)      -> "tmux"
+  TkRawShell (TbContainer _) -> "container"
+
+-- | Placeholder 'ProviderSpec' used when 'tabKindArgToKind' produces
+-- a 'TkSession (SkProvider _)'. The factory ignores this payload;
+-- the real provider\/model comes from 'AgentEnv' and spawn-args.
+placeholderProviderSpec :: ProviderSpec
+placeholderProviderSpec = ProviderSpec
+  { _ps_provider = ProviderId "anthropic"
+  , _ps_model    = ModelId "placeholder"
+  , _ps_agent    = Nothing
+  }
+
+-- | Placeholder 'HarnessSpec' used when 'tabKindArgToKind' produces
+-- a 'TkSession (SkHarness _)'. The factory ignores this payload.
+placeholderHarnessSpec :: HarnessSpec
+placeholderHarnessSpec = HarnessSpec
+  { _h_flavour = HClaudeCode
+  , _h_backend = TbLocal
+  , _h_cwd     = Nothing
+  , _h_args    = []
+  }
+
+-- | Placeholder 'SshConfig' used when 'tabKindArgToKind' produces
+-- 'TkRawShell (TbSsh _)'. The factory ignores this payload.
+placeholderSshConfig :: SshConfig
+placeholderSshConfig = SshConfig
+  { _sc_user = "placeholder"
+  , _sc_host = "placeholder"
+  , _sc_port = Nothing
+  }
+
+-- | Placeholder 'TmuxConfig' used when 'tabKindArgToKind' produces
+-- 'TkRawShell (TbTmux _)'. The factory ignores this payload.
+placeholderTmuxConfig :: TmuxConfig
+placeholderTmuxConfig = TmuxConfig
+  { _tc_session = "placeholder"
+  , _tc_window  = "placeholder"
+  , _tc_pane    = Nothing
+  }
 
 -- | Split the @[args-text]@ field (a single 'Text' parsed greedily
 -- after the kind keyword) into a list of arguments by whitespace.
