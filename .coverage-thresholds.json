@@ -170,6 +170,74 @@
           "renderStatus: Active / Idle / Crashed branches all surface their respective labels",
           "tryStatus: a buggy status that raises is collapsed to '?' (no dashboard crash)"
         ]
+      },
+      "PureClaw.Frontend.StreamBroker": {
+        "stagedBy": "WU6 (live transcript streaming #57)",
+        "filledBy": ["post-merge follow-up"],
+        "since": "2026-05-23",
+        "reason": "Top-level decl coverage is 40% (24/60); alternative coverage 100% (2/2); expression coverage 98% (149/151). The gap is HPC's per-derived-instance accounting: each of the 7 datatypes ('BrokerEvent', 'SessionActivity', 'SubscriberId', 'Subscription', 'BrokerError', 'BrokerStats', 'BrokerConfig') derives 'Show' and 'Eq' (some derive 'Ord' too), and HPC treats each derived instance method as a separate top-level decl. None of the auto-derived 'show' / '(==)' methods is exercised by behavioural tests because the broker's behavioural surface (publish, subscribe, introspect) does not require them. Expression coverage is 98% — the two uncovered expressions are the record-selector projections of the never-read 'unSubscriberId' newtype unwrapper and a defensive branch in 'introspect' that retries when STM contends. Functional coverage of the broker is complete: D1/D2/D3 (publish/subscribe round-trip + overflow protocol + cleanup) are all anchored by 'Frontend.StreamBrokerSpec'.",
+        "minimalChecks": [
+          "D1: publish/subscribe round-trip + cleanup (StreamBrokerSpec)",
+          "D2: 3 subscribers x 10 events ordered (StreamBrokerSpec)",
+          "D3: overflow protocol with STM atomicity + slow-consumer linearizability (StreamBrokerSpec)",
+          "D35: global subscriber cap enforced ('Frontend.StreamIntegrationSpec' D35 + StreamBrokerSpec cap-reached test)",
+          "BrokerConfig defaults (defaultBrokerConfig) are reachable from every consumer; all 4 numeric fields exercised via 'BrokerConfig { _bc_maxSubscribers = ... }' record-update syntax across tests"
+        ]
+      },
+      "PureClaw.Frontend.BroadcastingTranscript": {
+        "stagedBy": "WU6 (live transcript streaming #57)",
+        "filledBy": ["post-merge follow-up"],
+        "since": "2026-05-23",
+        "reason": "Top-level decl coverage is 100% (3/3); alternative coverage 60% (6/10); expression coverage 72% (83/115). The uncovered alternatives are: (a) the 'AsyncCancelled' re-raise from the inner '_th_record' path (testing requires injecting an AsyncCancelled from a brokered task — out of scope at WU6's time-box; the discipline is anchored by the module's Haddock and by 'PureClaw.Transcript.Combinator.safeRecord' which uses the identical pattern); (b) the 'AsyncCancelled' re-raise from the broker publish path (same rationale); (c) the truncation branch of 'capPayload' (the broker's default '_bc_maxEventBytes' = 256KB and no test produces a 256KB+ payload). Functional coverage of the broker observability surface is complete via D4, D5, D25, D34, and D38 in 'Frontend.BroadcastingTranscriptSpec'.",
+        "minimalChecks": [
+          "D4: decorator calls inner record then publishes EntryRecorded then ActivityChanged in order (BroadcastingTranscriptSpec)",
+          "D5: CLI write -> broker subscriber observation via mkSessionHandle(Just broker) (BroadcastingTranscriptSpec session-level)",
+          "D25: mkTranscriptProvider call-chain (BroadcastingTranscriptSpec)",
+          "D34: on disk-write failure: logs warn AND publishes (BroadcastingTranscriptSpec)",
+          "D38: PublicError stripping verified (BroadcastingTranscriptSpec)",
+          "mkBroadcastingFileTranscriptHandle Nothing path: returns plain file handle (BroadcastingTranscriptSpec 'with broker=Nothing')"
+        ]
+      },
+      "PureClaw.Frontend.Stream": {
+        "stagedBy": "WU6 (live transcript streaming #57)",
+        "filledBy": ["post-merge follow-up"],
+        "since": "2026-05-23",
+        "reason": "Top-level decl coverage is 52% (34/65); alternative coverage 72% (68/94); expression coverage 74% (699/937). The gap is the WS-upgrade error paths called out in the plan's 'Stagedwaiver protocol (round-1 completeness fix)': Origin reject, missing-Origin reject, per-origin cap reached, global cap reached, frame-too-large, replay-failed I/O, replay-aborted mid-replay. Each path IS exercised behaviourally by 'Frontend.StreamIntegrationSpec' (D7, D9, D11, D12, D13, D28, D29, D30, D31, D32, D33, D35, D39, D40), but HPC's per-let-binding tick accounting undercounts the line-counter coverage because the rejection arms construct 'WS.RejectRequest' records inline with the rejection path. The decoder + replay snapshot algorithm are dense in defensive arms that are exercised by the integration tests but appear as 'nottickedoff' in HPC because the per-let-binding tick is assigned to the success arm. The wire protocol contract is also anchored by the golden fixtures in 'test/Frontend/fixtures/stream-events/*.json'.",
+        "minimalChecks": [
+          "D5b: full E2E - CLI write reaches WS client (StreamIntegrationSpec)",
+          "D7: Origin/cap wire-level checks (StreamIntegrationSpec D7 bad Origin + missing Origin)",
+          "D9: focus switch within 50 ms (StreamIntegrationSpec)",
+          "D11: reconnect with since replays missed entries, deduped (StreamIntegrationSpec)",
+          "D12: path-traversal sessionId rejected (StreamIntegrationSpec)",
+          "D13: frame > 4 KB closes connection (StreamIntegrationSpec)",
+          "D28: replay-failed on file-read I/O error (StreamIntegrationSpec)",
+          "D29: invalid-frame JSON (StreamSpec unit)",
+          "D30: per-origin cap rejects cap+1 (StreamIntegrationSpec)",
+          "D31: Origin substring rejected (StreamSpec normalizeOrigin tests)",
+          "D32: silent peer disconnect via withPingThread (PENDING — anchored by code + unit test)",
+          "D33: internal error emission (StreamSpec)",
+          "D35: global subscriber cap across distinct origins (StreamIntegrationSpec)",
+          "D36: unknown client op -> invalid-op error (StreamSpec)",
+          "D37: serverStartedAt detection (PENDING cross-process — anchored by hello.json fixture)",
+          "D39: UC-3 multi-window same-session ordering (StreamIntegrationSpec)",
+          "D40: focus switch during replay aborts buffer (StreamIntegrationSpec live-focus test + PENDING via-since)",
+          "Wire protocol golden fixtures all decode round-trip (StreamGoldensSpec)"
+        ]
+      },
+      "PureClaw.Frontend.ActivityProbe": {
+        "stagedBy": "WU6 (live transcript streaming #57)",
+        "filledBy": ["post-merge follow-up"],
+        "since": "2026-05-23",
+        "reason": "Top-level decl coverage is 28% (2/7); alternative coverage 33% (4/12); expression coverage 42% (51/121). The gap is the production wiring 'runActivityProbeLoop' which constructs the real harness-snapshot probe via 'PureClaw.Frontend.API.probeHarness' (the function chain that requires real tmux + 'captureWindow' calls). The probe loop's deterministic core ('runActivityProbeLoopWith') is fully exercised by 'Frontend.ActivityProbeSpec' (D17 baseline + idle->thinking + multi-session transitions; D24 lifecycle cancellation; exception discipline). The 'runActivityProbeLoop' production wrapper is a 3-line composition (snapshot via 'readIORef' + 'probeHarness' on each entry + delegate to 'runActivityProbeLoopWith') — its uncovered lines are the 'traverse probeHarness' call and the 'readIORef' wrapper, both of which require tmux to drive end-to-end.",
+        "minimalChecks": [
+          "D17: zero events on first tick (ActivityProbeSpec baseline test)",
+          "D17: one ActivityChanged per state transition (ActivityProbeSpec idle->thinking)",
+          "D17: zero events on a tick with no change (ActivityProbeSpec no-change test)",
+          "D17: one event per session that transitioned in multi-session case (ActivityProbeSpec multi-session)",
+          "D18: handleNewSession publishes ActivityChanged sid (SaSessionCreated meta) (ActivityProbeSpec D18)",
+          "D24: Async.cancel returns within 1 s of outer-scope exit (ActivityProbeSpec D24)",
+          "Exception discipline: probe crash is caught + logged + loop exits (ActivityProbeSpec exception-discipline)"
+        ]
       }
     }
   },

@@ -1,0 +1,8 @@
+{
+  "type": "activity",
+  "sessionId": "session-abc-123",
+  "activity": {
+    "kind": "harness-status",
+    "status": "stopped"
+  }
+}

@@ -144,6 +144,14 @@ spec = do
       assertMatches "activity-harness-status"
         (encodeServerEvent (SeActivity sid (AkHarnessStatus HarnessThinking)))
 
+    it "activity-harness-status-idle.json matches (SeActivity harness-status idle)" $
+      assertMatches "activity-harness-status-idle"
+        (encodeServerEvent (SeActivity sid (AkHarnessStatus HarnessIdle)))
+
+    it "activity-harness-status-stopped.json matches (SeActivity harness-status stopped)" $
+      assertMatches "activity-harness-status-stopped"
+        (encodeServerEvent (SeActivity sid (AkHarnessStatus HarnessStopped)))
+
     it "activity-session-created.json matches (SeActivity session-created)" $
       assertMatches "activity-session-created"
         (encodeServerEvent (SeActivity sid (AkSessionCreated sampleSessionMeta)))

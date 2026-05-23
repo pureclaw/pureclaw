@@ -119,6 +119,8 @@ import qualified Frontend.StreamGoldensSpec
 import qualified Frontend.StreamIntegrationSpec
 -- WU4 (activity probe loop)
 import qualified Frontend.ActivityProbeSpec
+-- WU6 (HTTP-API regression tests for the legacy endpoints)
+import qualified Frontend.APISpec
 
 main :: IO ()
 main = hspec $ do
@@ -239,3 +241,5 @@ main = hspec $ do
   describe "Frontend.StreamIntegration" Frontend.StreamIntegrationSpec.spec
   -- WU4 (activity probe loop)
   describe "Frontend.ActivityProbe" Frontend.ActivityProbeSpec.spec
+  -- WU6 (HTTP-API regression tests for the legacy endpoints)
+  describe "Frontend.API" Frontend.APISpec.spec
