@@ -129,13 +129,13 @@ spec = do
   describe "mkSessionHandle (create path)" $ do
     it "creates the session directory with mode 0o700" $ withTmp $ \base -> do
       let meta = mkMeta "alpha-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       bits <- permBits (_sh_dir sh)
       bits `shouldBe` 0o700
 
     it "writes session.json with mode 0o600" $ withTmp $ \base -> do
       let meta = mkMeta "alpha-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let metaPath = _sh_dir sh </> "session.json"
       doesFileExist metaPath `shouldReturn` True
       bits <- permBits metaPath
@@ -143,7 +143,7 @@ spec = do
 
     it "creates transcript.jsonl with mode 0o600" $ withTmp $ \base -> do
       let meta = mkMeta "alpha-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let txPath = _sh_dir sh </> "transcript.jsonl"
       doesFileExist txPath `shouldReturn` True
       bits <- permBits txPath
@@ -153,7 +153,7 @@ spec = do
   describe "mkSessionHandle (metadata persistence)" $ do
     it "save round-trips SessionMeta to disk" $ withTmp $ \base -> do
       let meta = mkMeta "beta-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _sh_save sh
       bytes <- Aeson.eitherDecodeFileStrict' (_sh_dir sh </> "session.json")
         :: IO (Either String SessionMeta)
@@ -162,7 +162,7 @@ spec = do
 
     it "subsequent saves persist updated last_active" $ withTmp $ \base -> do
       let meta = mkMeta "beta-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let newTime = addUTCTime 60 t0
       modifyIORef' (_sh_meta sh) (\m -> m { _sm_lastActive = newTime })
       _sh_save sh
@@ -174,10 +174,10 @@ spec = do
   describe "resumeSession" $ do
     it "round-trips an existing session and reopens transcript for append" $ withTmp $ \base -> do
       let meta = mkMeta "gamma-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_record (_sh_transcript sh) (mkEntry "e1" t0)
       _th_close (_sh_transcript sh)
-      result <- resumeSession mkNoOpLogHandle base (parseSessionId "gamma-1")
+      result <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "gamma-1")
       case result of
         Left err -> expectationFailure ("expected success, got: " <> show err)
         Right sh' -> do
@@ -189,7 +189,7 @@ spec = do
     it "returns ResumeMissingMetadata when session.json is missing" $ withTmp $ \base -> do
       -- Create the session dir but never write session.json
       createDirectoryIfMissing True (base </> "ghost")
-      result <- resumeSession mkNoOpLogHandle base (parseSessionId "ghost")
+      result <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "ghost")
       case result of
         Left (ResumeMissingMetadata p) -> p `shouldBe` (base </> "ghost" </> "session.json")
         Right _ -> expectationFailure "expected MissingMetadata, got: Right _"
@@ -199,7 +199,7 @@ spec = do
       let dir = base </> "broken"
       createDirectoryIfMissing True dir
       writeFile (dir </> "session.json") "{ this is not valid json"
-      result <- resumeSession mkNoOpLogHandle base (parseSessionId "broken")
+      result <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "broken")
       case result of
         Left (ResumeCorruptedMetadata p _) -> p `shouldBe` (dir </> "session.json")
         Right _ -> expectationFailure "expected CorruptedMetadata, got: Right _"
@@ -289,7 +289,7 @@ spec = do
   describe "markBootstrapConsumed" $ do
     it "flips _sm_bootstrapConsumed to True and persists to session.json" $ withTmp $ \base -> do
       let meta = mkMeta "bc-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _sm_bootstrapConsumed <$> readIORef (_sh_meta sh) `shouldReturn` False
       markBootstrapConsumed sh
       -- IORef reflects the change.
@@ -303,7 +303,7 @@ spec = do
 
     it "is idempotent on repeated invocations" $ withTmp $ \base -> do
       let meta = mkMeta "bc-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       markBootstrapConsumed sh
       markBootstrapConsumed sh
       markBootstrapConsumed sh
@@ -313,10 +313,10 @@ spec = do
 
     it "survives resumeSession (flag preserved on reload)" $ withTmp $ \base -> do
       let meta = mkMeta "bc-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       markBootstrapConsumed sh
       _th_close (_sh_transcript sh)
-      Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "bc-3")
+      Right sh' <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "bc-3")
       loaded <- readIORef (_sh_meta sh')
       _sm_bootstrapConsumed loaded `shouldBe` True
       _th_close (_sh_transcript sh')
@@ -324,7 +324,7 @@ spec = do
   describe "loadRecentMessages" $ do
     it "returns all messages when fewer than maxCount exist" $ withTmp $ \base -> do
       let meta = mkMeta "lr-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       _th_record th (mkTextEntry "e1" t0 Request  "hello")
       _th_record th (mkTextEntry "e2" t0 Response "hi there")
@@ -341,7 +341,7 @@ spec = do
 
     it "caps at maxCount and returns the MOST RECENT window (oldest-first)" $ withTmp $ \base -> do
       let meta = mkMeta "lr-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       mapM_ (\i -> _th_record th
                      (mkTextEntry (T.pack ("e" <> show i)) t0 Request
@@ -361,7 +361,7 @@ spec = do
 
     it "truncates by token budget (chars `div` 4) when budget smaller than count" $ withTmp $ \base -> do
       let meta = mkMeta "lr-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       -- Each payload is 400 chars → ~100 tokens; budget of 250 tokens → 2 messages fit.
       let big = T.replicate 400 "x"
@@ -376,7 +376,7 @@ spec = do
     it "preserves compaction summary across session resume" $ withTmp $ \base -> do
       -- Set up a session with several messages in the transcript
       let meta = mkMeta "compact-resume-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       -- Record 5 request/response pairs — simulating a conversation
       mapM_ (\i -> do
@@ -400,7 +400,7 @@ spec = do
       _th_flush th
       _th_close th
       -- Resume the session and load recent messages
-      Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "compact-resume-1")
+      Right sh' <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "compact-resume-1")
       ms <- loadRecentMessages (_sh_transcript sh') 50 100000
       -- The resumed context should contain the compaction summary
       -- plus only entries AFTER the compaction boundary.
@@ -415,7 +415,7 @@ spec = do
 
     it "returns [] on an empty transcript" $ withTmp $ \base -> do
       let meta = mkMeta "lr-4" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       ms <- loadRecentMessages th 50 100000
       ms `shouldBe` []
@@ -478,7 +478,7 @@ writeMetaWithAgent base sid offsetSecs mAgentText = do
         { _sm_agent      = mAgent
         , _sm_lastActive = lastActive
         }
-  sh <- mkSessionHandle mkNoOpLogHandle base meta
+  sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
   _sh_save sh
   _th_close (_sh_transcript sh)
 

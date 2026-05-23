@@ -110,6 +110,8 @@ import qualified Security.TabSpec
 import qualified Onboarding.StartSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
+-- WU2 (broadcasting transcript decorator)
+import qualified Frontend.BroadcastingTranscriptSpec
 
 main :: IO ()
 main = hspec $ do
@@ -220,3 +222,6 @@ main = hspec $ do
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
+  -- WU2 (broadcasting transcript decorator)
+  describe "Frontend.BroadcastingTranscript"
+    Frontend.BroadcastingTranscriptSpec.spec

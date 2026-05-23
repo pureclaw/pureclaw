@@ -346,5 +346,6 @@ mkOnboardingEnv ch = do
     , _env_channelOutQ       = channelOutQ
     , _env_routingConfig     = defaultRoutingConfig
     , _env_fork              = defaultEnvFork
+    , _env_broker              = Nothing
     }
 

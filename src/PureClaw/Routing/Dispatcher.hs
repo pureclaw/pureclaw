@@ -818,7 +818,8 @@ handleResolved
   -> IO ()
 handleResolved env ds uid sessionsDir realSid = do
   resumed <- try @SomeException
-               (Session.resumeSession (_env_logger env) sessionsDir realSid)
+               (Session.resumeSession
+                  (_env_broker env) (_env_logger env) sessionsDir realSid)
   case resumed of
     Left _e ->
       emitDispatcherBanner env

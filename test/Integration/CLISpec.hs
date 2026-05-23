@@ -406,7 +406,7 @@ spec = do
               , _te_metadata      = Map.empty
               } :: TranscriptEntry
         createDirectoryIfMissing True sessionsDir
-        sh <- mkSessionHandle mkNoOpLogHandle sessionsDir meta
+        sh <- mkSessionHandle Nothing mkNoOpLogHandle sessionsDir meta
         let th = _sh_transcript sh
         _th_record th (mkTxEntry "e1" Request  "prior user message")
         _th_record th (mkTxEntry "e2" Response "prior assistant reply")
@@ -454,7 +454,7 @@ spec = do
               , _sm_bootstrapConsumed = False
               }
         createDirectoryIfMissing True sessionsDir
-        sh <- mkSessionHandle mkNoOpLogHandle sessionsDir meta
+        sh <- mkSessionHandle Nothing mkNoOpLogHandle sessionsDir meta
         _th_close (_sh_transcript sh)
         let args = ["--no-vault", "--session", "dead-harness-fixture-1"]
             pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "")))

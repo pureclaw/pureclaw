@@ -31,13 +31,15 @@ import System.FilePath ((</>), takeDirectory)
 
 import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
 import PureClaw.Agent.Context
-import PureClaw.Core.Types (ModelId (..), unModelId, unSessionId)
+import PureClaw.Core.Types (ModelId (..), SessionId (..), unModelId, unSessionId)
+import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
+import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
+import PureClaw.Frontend.StreamBroker (StreamBroker)
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
-import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Session.Handle (SessionHandle (..), listSessions, loadRecentMessages, mkSessionHandle)
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
@@ -64,6 +66,12 @@ data FrontendEnv = FrontendEnv
     -- ^ On-disk agents directory (e.g. @~\/.pureclaw\/agents@).
   , _fe_defaultAgent :: Maybe Text
     -- ^ Default agent name from config.
+  , _fe_broker       :: Maybe StreamBroker
+    -- ^ Optional in-process broker for live transcript streaming. When
+    -- 'Just', the @POST \/sessions\/\<id\>\/send@ completion path opens its
+    -- transcript handle via 'mkBroadcastingFileTranscriptHandle' so that
+    -- provider Request\/Response entries reach subscribers in real time
+    -- (DoD D25). 'Nothing' preserves the legacy non-broadcasting path.
   }
 
 -- | JSON-serializable harness info for the frontend.
@@ -309,7 +317,7 @@ handleNewSession env req respond = do
         , _sm_lastActive        = now
         , _sm_bootstrapConsumed = True
         }
-  sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
+  sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
   -- Write custom prompt file if provided
   case _nsr_customPrompt parsed of
     Just prompt | not (T.null (T.strip prompt)) ->
@@ -387,7 +395,8 @@ handleSend env sid req respond = do
                 (_, Nothing) ->
                   respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
                 (Just provider, Just model) -> do
-                  result <- try @SomeException $ doCompletion env provider model userText transcriptPath
+                  result <- try @SomeException $
+                    doCompletion env (SessionId sid) provider model userText transcriptPath
                   case result of
                     Left e -> do
                       _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
@@ -396,10 +405,21 @@ handleSend env sid req respond = do
                       respond $ jsonResponse status200 (object ["response" .= respText])
 
 -- | Run a completion: load context, send to provider, record to transcript.
-doCompletion :: FrontendEnv -> SomeProvider -> ModelId -> Text -> FilePath -> IO Text
-doCompletion env provider model userText transcriptPath = do
-  -- Open a transcript handle for recording
-  th <- mkFileTranscriptHandle (_fe_logger env) transcriptPath
+-- The transcript handle is opened via 'mkBroadcastingFileTranscriptHandle'
+-- so the provider-wrapper Request\/Response entries reach the broker (D25)
+-- when one is configured on the 'FrontendEnv'.
+doCompletion
+  :: FrontendEnv
+  -> SessionId
+  -> SomeProvider
+  -> ModelId
+  -> Text
+  -> FilePath
+  -> IO Text
+doCompletion env sid provider model userText transcriptPath = do
+  -- Open a (possibly broadcasting) transcript handle for recording.
+  th <- mkBroadcastingFileTranscriptHandle
+          (_fe_broker env) sid (_fe_logger env) transcriptPath
   -- Load recent messages for context
   history <- loadRecentMessages th 50 100000
   -- Check for per-session custom prompt, falling back to global

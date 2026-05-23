@@ -56,11 +56,14 @@ import PureClaw.Core.Types
   , SessionId (..)
   , parseSessionId
   )
+import PureClaw.Frontend.BroadcastingTranscript
+  ( mkBroadcastingFileTranscriptHandle
+  )
+import PureClaw.Frontend.StreamBroker (StreamBroker)
 import PureClaw.Handles.Harness (HarnessHandle)
 import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
-  , mkFileTranscriptHandle
   , mkNoOpTranscriptHandle
   )
 import PureClaw.Providers.Class
@@ -130,9 +133,18 @@ data ResolvedRuntime
 --
 -- Creates @\<baseDir\>/\<sessionId\>/@ with mode @0o700@, writes the
 -- initial @session.json@ (mode @0o600@) via 'saveMeta', and opens
--- @transcript.jsonl@ (mode @0o600@) through 'mkFileTranscriptHandle'.
-mkSessionHandle :: LogHandle -> FilePath -> SessionMeta -> IO SessionHandle
-mkSessionHandle logger baseDir meta = do
+-- @transcript.jsonl@ (mode @0o600@) through
+-- 'mkBroadcastingFileTranscriptHandle'. When the optional broker is
+-- 'Nothing' the helper falls back to a plain file handle; when 'Just',
+-- transcript writes are broadcast to the supplied 'StreamBroker' in
+-- addition to being persisted.
+mkSessionHandle
+  :: Maybe StreamBroker
+  -> LogHandle
+  -> FilePath
+  -> SessionMeta
+  -> IO SessionHandle
+mkSessionHandle mBroker logger baseDir meta = do
   let sid  = unSessionId (_sm_id meta)
       dir  = baseDir </> T.unpack sid
       txp  = dir </> "transcript.jsonl"
@@ -140,7 +152,7 @@ mkSessionHandle logger baseDir meta = do
   setFileMode dir 0o700
   metaRef <- newIORef meta
   saveMeta dir metaRef
-  tx <- mkFileTranscriptHandle logger txp
+  tx <- mkBroadcastingFileTranscriptHandle mBroker (_sm_id meta) logger txp
   pure SessionHandle
     { _sh_meta       = metaRef
     , _sh_transcript = tx
@@ -225,13 +237,16 @@ noOpMeta = SessionMeta
 -- ----------------------------------------------------------------------------
 
 -- | Reopen an existing session by ID. Reads @session.json@, validates
--- the JSON, and reopens @transcript.jsonl@ for append.
+-- the JSON, and reopens @transcript.jsonl@ for append. When the optional
+-- broker is 'Just', the reopened transcript handle broadcasts records to
+-- it; 'Nothing' yields a plain file handle.
 resumeSession
-  :: LogHandle
+  :: Maybe StreamBroker
+  -> LogHandle
   -> FilePath
   -> SessionId
   -> IO (Either ResumeError SessionHandle)
-resumeSession logger baseDir sid = do
+resumeSession mBroker logger baseDir sid = do
   let dir    = baseDir </> T.unpack (unSessionId sid)
       metaP  = dir </> "session.json"
       txP    = dir </> "transcript.jsonl"
@@ -247,7 +262,7 @@ resumeSession logger baseDir sid = do
               <> " — recovery hint: inspect or remove " <> metaP)))
         Right meta -> do
           metaRef <- newIORef (meta :: SessionMeta)
-          tx <- mkFileTranscriptHandle logger txP
+          tx <- mkBroadcastingFileTranscriptHandle mBroker sid logger txP
           pure (Right SessionHandle
             { _sh_meta       = metaRef
             , _sh_transcript = tx

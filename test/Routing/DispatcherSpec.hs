@@ -166,6 +166,7 @@ mkDispatcherEnv ch = do
     , _env_channelOutQ       = channelOutQ
     , _env_routingConfig     = routing
     , _env_fork              = defaultEnvFork
+    , _env_broker              = Nothing
     }
 
 -- | A synthetic 'TabHandle' whose IO actions all record into a shared

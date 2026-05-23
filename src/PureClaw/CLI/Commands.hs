@@ -541,7 +541,9 @@ runChat opts = do
         sessionHandle <- case _co_session opts of
           Just sidRaw -> do
             _lh_logInfo logger $ "Resuming session " <> T.pack sidRaw
-            result <- resumeSession logger sessionsDir
+            -- WU2 leaves the broker disabled here; WU3 constructs it at
+            -- the top of 'startWithChannel' and threads it down.
+            result <- resumeSession Nothing logger sessionsDir
                         (parseSessionId (T.pack sidRaw))
             case result of
               Right resumed -> pure resumed
@@ -566,7 +568,8 @@ runChat opts = do
                   , SessionTypes._sm_lastActive        = now
                   , SessionTypes._sm_bootstrapConsumed = False
                   }
-            mkSessionHandle logger sessionsDir initialMeta
+            -- WU2 leaves the broker disabled here; WU3 wires it up.
+            mkSessionHandle Nothing logger sessionsDir initialMeta
         -- Log the active session ID so tests and humans can find it.
         do
           currentMeta <- readIORef (_sh_meta sessionHandle)
@@ -646,6 +649,7 @@ runChat opts = do
               , _env_channelOutQ      = channelOutQ
               , _env_routingConfig    = routingCfg
               , _env_fork             = defaultEnvFork
+              , _env_broker           = Nothing
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
@@ -660,6 +664,7 @@ runChat opts = do
               , _fe_logger       = logger
               , _fe_agentsDir    = agentsDir
               , _fe_defaultAgent = _fc_defaultAgent fileCfg
+              , _fe_broker       = Nothing
               }
         void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv) logger
         runAgentLoopWith env reloadedMessages
