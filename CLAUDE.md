@@ -192,6 +192,27 @@ All subagents (coding agents, review agents, background tasks) MUST follow these
 - **NEVER** self-certify — the orchestrator validates independently
 - **STAY** within declared file scope — do not modify files outside your assigned scope
 
+### Resolving Merge Conflicts (MANDATORY 3-way)
+
+When resolving merge conflicts in **any** branch (including `main` ↔ feature, feature ↔ feature, rebase, cherry-pick — anything that produces conflict markers): **use a 3-way diff, never a 2-way diff.**
+
+A 2-way diff (just HEAD vs the other branch) loses the common-ancestor context. You cannot tell whether "your side added X" or "the other side removed X"; whether a refactor renamed something or one side simply touched a different region. 3-way uses the merge base AND both branch tips so each side's intent is preserved.
+
+**Required procedure for every conflict file:**
+
+1. Extract the three stages with `git show`:
+   - `git show :1:<file>` — common ancestor (the merge base)
+   - `git show :2:<file>` — HEAD's version
+   - `git show :3:<file>` — the other branch's version
+2. Run `diff base→HEAD` and `diff base→other` **separately**. Each diff reveals one side's intent against the shared parent. Compose both intents into the merged file.
+3. **If either side refactored**, do not force the other side's edits onto the old shape. Adapt them to the new structure. (Example: if `main` renamed a function or replaced a type, your branch's adjacent edits must be rewritten against the new name/type — 2-way would have silently hidden the rename.)
+4. **For "both added" files (no merge base)**, read both versions in full and decide whether they overlap structurally or merely live in the same path. Don't blindly concatenate or pick one.
+5. After resolving, build + run the full test suite **before staging**. The compiler often surfaces 3-way mistakes the eye misses (e.g., a missing field in a record literal because main added it to a type the conflict didn't touch).
+
+This applies symmetrically to feature branches merging `main` and to long-lived branches accepting feature merges.
+
+See [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md) for the full procedure with worked examples.
+
 ### Pre-PR Knowledge Capture
 
 After all work units pass final review but BEFORE creating the PR, run `/self-reflect` to extract learnings into the knowledge base. Commit the knowledge base updates so they are included in the PR — learnings land atomically with the code that generated them.
