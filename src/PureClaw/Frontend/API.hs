@@ -22,7 +22,7 @@ module PureClaw.Frontend.API
   ) where
 
 import Control.Concurrent.STM (TVar, newTVarIO)
-import Control.Exception (IOException, SomeException, try)
+import Control.Exception (IOException, SomeException, bracket_, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
@@ -908,7 +908,21 @@ doCompletion env sid provider model userText transcriptPath = do
         , _cr_tools        = []
         , _cr_toolChoice   = Nothing
         }
-  resp <- complete provider' req
+  -- Publish session-thinking activity events so the FE sidebar / chat
+  -- area can show a live indicator while the provider call is in flight.
+  -- For harness-backed sessions, the equivalent signal comes from the
+  -- 2s tmux probe loop in 'PureClaw.Frontend.ActivityProbe'; provider
+  -- sessions don't go through the harness map, so the only place we
+  -- can hook this is at the request boundary in 'doCompletion'.
+  -- 'bracket_' guarantees the Idle event fires even if 'complete' throws.
+  let publishStatus s = case _fe_broker env of
+        Just broker -> _streamBroker_publish broker
+          (ActivityChanged sid (SaHarnessStatus s))
+        Nothing -> pure ()
+  resp <- bracket_
+            (publishStatus HarnessThinking)
+            (publishStatus HarnessIdle)
+            (complete provider' req)
   _th_flush th
   _th_close th
   pure (responseText resp)

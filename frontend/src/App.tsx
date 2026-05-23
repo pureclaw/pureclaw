@@ -418,29 +418,63 @@ export default function App() {
   const entryCountAtSend = useRef(0)
   const transcriptMessages = useMemo(() => transcriptToMessages(entries), [entries])
 
-  // Combine transcript messages with optimistic pending message + thinking indicator
+  // Is the currently-focused session processing a request right now?
+  // Sourced from the live activity stream: provider sessions emit this
+  // from doCompletion's bracket; harness sessions emit this from the
+  // 2s probe loop. Drives both the sidebar spinner (already wired in
+  // Sidebar.tsx) and the bottom-of-chat thinking indicator below.
+  const sessionIsThinking = currentSessionId !== null
+    && sessionActivity?.[currentSessionId]?.harness === 'thinking'
+
+  // Combine transcript messages with a thinking indicator at the bottom.
+  // Two cases compose to render the indicator:
+  //   1. Local optimistic: the LOCAL tab just sent a message — show
+  //      `pending-user` + `pending-thinking` immediately so the user
+  //      sees their typed message echoed before the HTTP POST returns.
+  //   2. Remote-driven: some OTHER tab/device sent a message on the
+  //      same session — `pendingMessage` is null but the broker's
+  //      SaHarnessStatus thinking event reached us via WS. Render just
+  //      a `remote-thinking` block so the user can see the session is
+  //      currently busy.
+  // The two are mutually exclusive in the messages array (case 1 takes
+  // precedence) so the indicator never duplicates.
   const messages = useMemo(() => {
-    if (!pendingMessage) return transcriptMessages
     const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    return [
-      ...transcriptMessages,
-      {
-        id: 'pending-user',
-        agentName: 'You',
-        agentStatus: 'completed' as const,
-        timestamp: now,
-        blocks: [{ text: pendingMessage }],
-      },
-      {
-        id: 'pending-thinking',
-        agentName: 'Assistant',
-        agentStatus: 'thinking' as const,
-        timestamp: now,
-        blocks: [],
-        isGenerating: true,
-      },
-    ]
-  }, [transcriptMessages, pendingMessage])
+    if (pendingMessage) {
+      return [
+        ...transcriptMessages,
+        {
+          id: 'pending-user',
+          agentName: 'You',
+          agentStatus: 'completed' as const,
+          timestamp: now,
+          blocks: [{ text: pendingMessage }],
+        },
+        {
+          id: 'pending-thinking',
+          agentName: 'Assistant',
+          agentStatus: 'thinking' as const,
+          timestamp: now,
+          blocks: [],
+          isGenerating: true,
+        },
+      ]
+    }
+    if (sessionIsThinking) {
+      return [
+        ...transcriptMessages,
+        {
+          id: 'remote-thinking',
+          agentName: 'Assistant',
+          agentStatus: 'thinking' as const,
+          timestamp: now,
+          blocks: [],
+          isGenerating: true,
+        },
+      ]
+    }
+    return transcriptMessages
+  }, [transcriptMessages, pendingMessage, sessionIsThinking])
 
   // Clear pending message when transcript gains new entries after the send
   useEffect(() => {
