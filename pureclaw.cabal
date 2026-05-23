@@ -154,9 +154,11 @@ library
     PureClaw.Scheduler.Cron
     PureClaw.Scheduler.Heartbeat
     -- Frontend
+    PureClaw.Frontend.Activity.Types
     PureClaw.Frontend.API
     PureClaw.Frontend.Server
     PureClaw.Frontend.Stream
+    PureClaw.Frontend.StreamBroker
     -- Transcript
     PureClaw.Transcript
     PureClaw.Transcript.Combinator
@@ -321,6 +323,8 @@ test-suite pureclaw-test
     Session.HandleSpec
     Handles.TranscriptSpec
     Handles.HarnessSpec
+    -- Frontend (live transcript streaming — WU1)
+    Frontend.StreamBrokerSpec
     Harness.ClaudeCodeSpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs

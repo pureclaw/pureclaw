@@ -37,6 +37,7 @@ import PureClaw.Handles.Log
 import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
+import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Session.Handle (SessionHandle (..), listSessions, loadRecentMessages, mkSessionHandle)
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
@@ -64,18 +65,6 @@ data FrontendEnv = FrontendEnv
   , _fe_defaultAgent :: Maybe Text
     -- ^ Default agent name from config.
   }
-
--- | Activity state of a harness, derived from tmux screen capture.
-data HarnessActivity
-  = HarnessThinking
-  | HarnessIdle
-  | HarnessStopped
-  deriving stock (Show, Eq)
-
-instance ToJSON HarnessActivity where
-  toJSON HarnessThinking = Aeson.String "thinking"
-  toJSON HarnessIdle     = Aeson.String "idle"
-  toJSON HarnessStopped  = Aeson.String "stopped"
 
 -- | JSON-serializable harness info for the frontend.
 data HarnessInfo = HarnessInfo
