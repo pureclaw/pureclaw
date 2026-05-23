@@ -85,8 +85,8 @@
 -- (FullMsg emission).
 module PureClaw.Tab.Backend
   ( -- * Factory
-    mkTabBackend
-  , mkTabBackendWith
+    mkRawShellTab
+  , mkRawShellTabWith
     -- * Backend I\/O seam
   , BackendIO (..)
   , realBackendIO
@@ -156,6 +156,13 @@ import PureClaw.Handles.Tab
   , TabRunner (..)
   , TabStatus (..)
   )
+import PureClaw.Session.Kind
+  ( ContainerSpec (..)
+  , SshConfig (..)
+  , TerminalBackend (..)
+  , TmuxConfig (..)
+  )
+import PureClaw.Tab.Container qualified as Container
 import PureClaw.Routing.ChannelOut (shouldEmit)
 import PureClaw.Routing.Parse qualified as Parse
 import PureClaw.Routing.Types
@@ -247,6 +254,14 @@ data BackendIO = BackendIO
     -- ^ Spawn a tmux Attach backend. Production: calls
     -- 'PureClaw.Backend.Tmux.mkTmuxBackendHandle' with 'realPtyIO'
     -- and the default 'PureClaw.Backend.Tmux.TmuxOpts'.
+  , _bio_mkContainer
+      :: AuthorizedCommand
+      -> IO (Either BackendError BackendHandle)
+    -- ^ Spawn a container exec backend. Production: thin wrapper
+    -- around 'PureClaw.Backend.Local.mkLocalBackendHandle' with the
+    -- default 'PureClaw.Handles.Backend.PipeOpts'. The 'AuthorizedCommand'
+    -- carries the full container exec argv (@engine exec -it target --
+    -- binary [args]@).
   }
 
 -- | Production 'BackendIO': calls the real backend factories from
@@ -263,6 +278,7 @@ realBackendIO = BackendIO
       SSH.mkSshBackendHandle realPtyIO sshCmd tgt remote SSH.defaultSshOpts
   , _bio_mkTmux = \loc tgt ->
       Tmux.mkTmuxBackendHandle realPtyIO loc tgt Tmux.defaultTmuxOpts
+  , _bio_mkContainer = (`Local.mkLocalBackendHandle` defaultPipeOpts)
   }
 
 
@@ -270,25 +286,27 @@ realBackendIO = BackendIO
 -- mkTabBackend — the backend tab factory
 -- ---------------------------------------------------------------------------
 
--- | Construct a backend tab (KindShell \/ KindSsh \/ KindTmux).
+-- | Construct a raw-shell backend tab (F4: 'TbLocal' \/ 'TbSsh' \/
+-- 'TbTmux').
 --
--- Calls 'mkTabBackendWith' with 'realBackendIO'. The factory itself
+-- Calls 'mkRawShellTabWith' with 'realBackendIO'. The factory itself
 -- never throws: it always returns @'Right' h@ or @'Left' e@. Failures
 -- inside the forked helper threads are caught by their own outer
 -- exception handler and surface as a 'Crashed' status (visible via
 -- '_tabHandle_status').
-mkTabBackend
+mkRawShellTab
   :: AgentEnv
   -> TabIndex
-  -> TabKind
+  -> TerminalBackend
   -> [Text]
   -> IO (Either TabError TabHandle)
-mkTabBackend = mkTabBackendWith realBackendIO
+mkRawShellTab = mkRawShellTabWith realBackendIO
 
--- | Construct a backend tab with a caller-supplied 'BackendIO'. Test
--- seam. See 'mkTabBackend' for the production entry point.
+-- | Construct a raw-shell backend tab with a caller-supplied
+-- 'BackendIO'. Test seam. See 'mkRawShellTab' for the production
+-- entry point.
 --
--- Dispatches on 'TabKind' to one of three sub-factories. Each
+-- Dispatches on 'TerminalBackend' to one of three sub-factories. Each
 -- sub-factory:
 --
 -- 1. Runs the kind-specific smart constructors (per S1\/S2\/S3\/S4) on
@@ -300,25 +318,21 @@ mkTabBackend = mkTabBackendWith realBackendIO
 -- 3. On 'Right' wraps the resulting 'BackendHandle' in per-tab state
 --    and forks the drainer + writer helper threads via '_env_fork'.
 --
--- 'KindAi' and 'KindHarness' are rejected with
--- @'Left' ('TabUnsupportedCommand' ...)@ — those kinds have their own
--- factories ('PureClaw.Tab.Ai.mkTabAi' and
--- 'PureClaw.Tab.Harness.mkTabHarness').
-mkTabBackendWith
+-- Session-backed kinds ('TkSession') have their own factories
+-- ('PureClaw.Tab.Ai.mkTabAi' and 'PureClaw.Tab.Harness.mkTabHarness')
+-- and must not be routed here.
+mkRawShellTabWith
   :: BackendIO
   -> AgentEnv
   -> TabIndex
-  -> TabKind
+  -> TerminalBackend
   -> [Text]
   -> IO (Either TabError TabHandle)
-mkTabBackendWith bio env idx kind args = case kind of
-  KindShell -> mkShellTab bio env idx args
-  KindSsh   -> mkSshTab   bio env idx args
-  KindTmux  -> mkTmuxTab  bio env idx args
-  -- These two kinds are handled by Tab.Ai / Tab.Harness; routing them
-  -- through Tab.Backend is a programmer error in the dispatcher.
-  KindAi -> pure (Left (TabSpawnAuthDenied PublicAuthError))
-  KindHarness -> pure (Left (TabSpawnAuthDenied PublicAuthError))
+mkRawShellTabWith bio env idx tb args = case tb of
+  TbLocal         -> mkShellTab     bio env idx args
+  TbSsh _         -> mkSshTab       bio env idx args
+  TbTmux _        -> mkTmuxTab      bio env idx args
+  TbContainer cs  -> mkContainerTab bio env idx cs args
 
 
 -- ---------------------------------------------------------------------------
@@ -349,7 +363,7 @@ mkShellTab bio env idx args = case args of
         Left nameErr -> pure (Left (TabInvalidName nameErr))
         Right nameTxt -> do
           mkResult <- _bio_mkShell bio authCmd
-          finishSpawn env idx (TabName nameTxt) KindShell mkResult
+          finishSpawn env idx (TabName nameTxt) (TkRawShell TbLocal) mkResult
 
 
 -- ---------------------------------------------------------------------------
@@ -424,7 +438,12 @@ mkSshTab bio env idx args = case args of
                             Left nameErr -> pure (Left (TabInvalidName nameErr))
                             Right nameTxt -> do
                               mkResult <- _bio_mkSsh bio tgt sshCmd remote
-                              finishSpawn env idx (TabName nameTxt) KindSsh mkResult
+                              let sshCfg = SshConfig
+                                    { _sc_user = user
+                                    , _sc_host = hostText
+                                    , _sc_port = Nothing
+                                    }
+                              finishSpawn env idx (TabName nameTxt) (TkRawShell (TbSsh sshCfg)) mkResult
 
 -- | Parse a @user\@host@ string into its components.
 --
@@ -508,7 +527,8 @@ mkTmuxTab bio env idx args = case args of
               Left nameErr -> pure (Left (TabInvalidName nameErr))
               Right nameTxt -> do
                 mkResult <- _bio_mkTmux bio loc tgt
-                finishSpawn env idx (TabName nameTxt) KindTmux mkResult
+                let tmuxCfg = tmuxTargetToConfig tgt
+                finishSpawn env idx (TabName nameTxt) (TkRawShell (TbTmux tmuxCfg)) mkResult
 
 -- | Parse a tmux target spec of the form
 -- @\"session\"@, @\"session:window\"@, or @\"session:window.pane\"@.
@@ -539,6 +559,46 @@ parseTmuxTarget spec = case T.splitOn ":" spec of
           }
       _ -> Left (InvalidOptionDetail "tmux target: malformed window.pane")
   _ -> Left (InvalidOptionDetail "tmux target: expected session:window[.pane]")
+
+
+-- ---------------------------------------------------------------------------
+-- KindContainer sub-factory (S9)
+-- ---------------------------------------------------------------------------
+
+-- | Spawn a container exec backend tab.
+--
+-- Validation pipeline:
+--
+-- 1. The @args@ list is checked against 'Container.containerArgsDenylist'
+--    (S9 — rejects @--privileged@, @--cap-add@, @--volume@, etc.).
+-- 2. The container engine binary name (from 'ContainerSpec._cs_engine')
+--    is authorized via 'authorize' against '_env_policy'.
+-- 3. The full exec argv is constructed via
+--    'Container.buildContainerExecArgv' with a mandatory @--@ separator
+--    between the container target and the harness binary (S9 — prevents
+--    argument injection).
+-- 4. The authorized command is passed to '_bio_mkContainer' (which in
+--    production spawns a local pipe via
+--    'PureClaw.Backend.Local.mkLocalBackendHandle').
+mkContainerTab
+  :: BackendIO -> AgentEnv -> TabIndex -> ContainerSpec -> [Text]
+  -> IO (Either TabError TabHandle)
+mkContainerTab bio env idx cs args = do
+  -- S9: check args against denylist before any subprocess spawn.
+  case Container.checkContainerArgs args of
+    Left _denied -> authDenied
+    Right () ->
+      let engineBin = T.unpack (Container.containerEngineBinary (_cs_engine cs))
+      in case authorize (_env_policy env) engineBin [] of
+           Left _ -> authDenied
+           Right authCmd -> do
+             let nameRaw = "container " <> Container.containerEngineBinary (_cs_engine cs)
+             case Parse.sanitizeTabName nameRaw of
+               Left nameErr -> pure (Left (TabInvalidName nameErr))
+               Right nameTxt -> do
+                 mkResult <- _bio_mkContainer bio authCmd
+                 finishSpawn env idx (TabName nameTxt)
+                   (TkRawShell (TbContainer cs)) mkResult
 
 
 -- ---------------------------------------------------------------------------
@@ -783,3 +843,12 @@ defaultBackendName prefix args = case args of
 -- | Common authorization-denied short-circuit.
 authDenied :: IO (Either TabError TabHandle)
 authDenied = pure (Left (TabSpawnAuthDenied PublicAuthError))
+
+-- | Project a parsed 'Tmux.TmuxTarget' to a serialisation-safe
+-- 'TmuxConfig' for storage in 'TkRawShell'.
+tmuxTargetToConfig :: Tmux.TmuxTarget -> TmuxConfig
+tmuxTargetToConfig tgt = TmuxConfig
+  { _tc_session = Tmux.getTmuxSession (Tmux._tt_session tgt)
+  , _tc_window  = Tmux.getTmuxWindow  (Tmux._tt_window  tgt)
+  , _tc_pane    = Tmux.getTmuxPane <$> Tmux._tt_pane tgt
+  }

@@ -95,6 +95,7 @@ buildAuthHeaders p = case _ap_auth p of
 instance Provider AnthropicProvider where
   complete = anthropicComplete
   completeStream = anthropicCompleteStream
+  listModels = anthropicListModels
 
 -- | Errors from the Anthropic API.
 data AnthropicError
@@ -112,6 +113,43 @@ instance ToPublicError AnthropicError where
 -- | Anthropic Messages API base URL.
 anthropicBaseUrl :: String
 anthropicBaseUrl = "https://api.anthropic.com/v1/messages"
+
+-- | Anthropic Models listing endpoint.
+anthropicModelsUrl :: String
+anthropicModelsUrl = "https://api.anthropic.com/v1/models?limit=1000"
+
+-- | List available models for the authenticated Anthropic account.
+-- Returns an empty list on any error (network, non-200, parse).
+anthropicListModels :: AnthropicProvider -> IO [ModelId]
+anthropicListModels provider = do
+  result <- try @SomeException $ do
+    authHeaders <- buildAuthHeaders provider
+    initReq <- HTTP.parseRequest anthropicModelsUrl
+    let httpReq = initReq
+          { HTTP.method         = "GET"
+          , HTTP.requestHeaders = authHeaders
+          , HTTP.responseTimeout = HTTP.responseTimeoutMicro (30 * 1000000)
+          }
+    resp <- HTTP.httpLbs httpReq (_ap_manager provider)
+    let status = Status.statusCode (HTTP.responseStatus resp)
+    if status /= 200
+      then pure []
+      else case eitherDecode (HTTP.responseBody resp) of
+        Left  _   -> pure []
+        Right val -> pure (parseAnthropicModelIds val)
+  case result of
+    Left  _   -> pure []
+    Right ids -> pure ids
+
+-- | Extract model IDs from an Anthropic /v1/models response body.
+-- Expected shape: @{"data":[{"id":"claude-...","display_name":"...","type":"model","created_at":"..."},...]}@
+parseAnthropicModelIds :: Value -> [ModelId]
+parseAnthropicModelIds = fromMaybe [] . parseMaybe parseList
+  where
+    parseList :: Value -> Parser [ModelId]
+    parseList = withObject "AnthropicModelsResponse" $ \o -> do
+      arr <- o .: "data"
+      mapM (withObject "Model" (\m -> ModelId <$> m .: "id")) arr
 
 -- | Call the Anthropic Messages API.
 anthropicComplete :: AnthropicProvider -> CompletionRequest -> IO CompletionResponse

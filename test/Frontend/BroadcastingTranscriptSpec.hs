@@ -55,9 +55,11 @@ import PureClaw.Providers.Class
   )
 import PureClaw.Session.Handle (SessionHandle (..), mkSessionHandle)
 import PureClaw.Session.Types
-  ( RuntimeType (..)
+  ( SessionKind (..)
+  , ProviderSpec (..)
   , SessionMeta (..)
   )
+import PureClaw.Core.Types (ProviderId (..))
 import PureClaw.Transcript.Provider (mkTranscriptProvider)
 import PureClaw.Transcript.Types
   ( Direction (..)
@@ -92,12 +94,15 @@ mkMeta :: Text -> SessionMeta
 mkMeta sid = SessionMeta
   { _sm_id                = parseSessionId sid
   , _sm_agent             = Nothing
-  , _sm_runtime           = RTProvider
+  , _sm_kind              = SkProvider (ProviderSpec (ProviderId "stub") (ModelId "") Nothing)
   , _sm_model             = ""
   , _sm_channel           = "cli"
   , _sm_createdAt         = sampleTime
   , _sm_lastActive        = sampleTime
   , _sm_bootstrapConsumed = False
+  , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
   }
 
 -- | LogHandle that captures warn messages into an IORef so D34 can assert

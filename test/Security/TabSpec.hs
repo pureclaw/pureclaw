@@ -77,6 +77,7 @@ import PureClaw.Session.Handle
   )
 import PureClaw.Backend.SSH qualified as SSH
 import PureClaw.Backend.Tmux qualified as Tmux
+import PureClaw.Session.Kind qualified as SK
 import PureClaw.Tab.Backend qualified as TabBackend
 import PureClaw.Tools.Registry (emptyRegistry)
 import Test.Fake.ChannelHandle
@@ -105,10 +106,13 @@ spec = do
             , TabBackend._bio_mkTmux  = \_ _ -> do
                 modifyIORefCount seamCalled
                 error "S1: seam must not be invoked"
+            , TabBackend._bio_mkContainer = \_ -> do
+                modifyIORefCount seamCalled
+                error "S1: seam must not be invoked (container)"
             }
           tidx = fromJust (Tab.mkTabIndex 0)
-      r <- TabBackend.mkTabBackendWith recordingBio env tidx
-             Tab.KindShell ["ls", "-la"]
+      r <- TabBackend.mkRawShellTabWith recordingBio env tidx
+             SK.TbLocal ["ls", "-la"]
       case r of
         Left (Tab.TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -133,23 +137,26 @@ spec = do
             , TabBackend._bio_mkTmux  = \_ _ -> do
                 modifyIORefCount seamCalled
                 error "S2: seam must not be invoked"
+            , TabBackend._bio_mkContainer = \_ -> do
+                modifyIORefCount seamCalled
+                error "S2: seam must not be invoked (container)"
             }
           tidx = fromJust (Tab.mkTabIndex 0)
       -- Whitespace.
-      r1 <- TabBackend.mkTabBackendWith recordingBio env tidx
-              Tab.KindSsh ["user@bad host", "bash"]
+      r1 <- TabBackend.mkRawShellTabWith recordingBio env tidx
+              (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@bad host", "bash"]
       shouldBeAuthDenied "S2 whitespace" r1
       -- Leading dash.
-      r2 <- TabBackend.mkTabBackendWith recordingBio env tidx
-              Tab.KindSsh ["user@-evil", "bash"]
+      r2 <- TabBackend.mkRawShellTabWith recordingBio env tidx
+              (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@-evil", "bash"]
       shouldBeAuthDenied "S2 leading-dash" r2
       -- Shell metachar.
-      r3 <- TabBackend.mkTabBackendWith recordingBio env tidx
-              Tab.KindSsh ["user@evil;rm", "bash"]
+      r3 <- TabBackend.mkRawShellTabWith recordingBio env tidx
+              (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@evil;rm", "bash"]
       shouldBeAuthDenied "S2 shell-meta" r3
       -- NUL byte.
-      r4 <- TabBackend.mkTabBackendWith recordingBio env tidx
-              Tab.KindSsh ["user@evil\0name", "bash"]
+      r4 <- TabBackend.mkRawShellTabWith recordingBio env tidx
+              (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@evil\0name", "bash"]
       shouldBeAuthDenied "S2 NUL" r4
       n <- readIORef seamCalled
       n `shouldBe` 0
@@ -268,16 +275,19 @@ spec = do
             , TabBackend._bio_mkTmux  = \_ _ -> do
                 modifyIORefCount seamCalled
                 error "S4: seam must not be invoked"
+            , TabBackend._bio_mkContainer = \_ -> do
+                modifyIORefCount seamCalled
+                error "S4: seam must not be invoked (container)"
             }
           tidx = fromJust (Tab.mkTabIndex 0)
       -- Case 1: no vault configured at all.
-      r1 <- TabBackend.mkTabBackendWith recordingBio env' tidx
-              Tab.KindSsh ["user@host.example.com", "bash"]
+      r1 <- TabBackend.mkRawShellTabWith recordingBio env' tidx
+              (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@host.example.com", "bash"]
       shouldBeAuthDenied "S4 no-vault" r1
       -- Case 2: vault configured but slot missing.
       writeIORef (_env_vault env') (Just s4MissingSlotVault)
-      r2 <- TabBackend.mkTabBackendWith recordingBio env' tidx
-              Tab.KindSsh ["user@host.example.com", "bash"]
+      r2 <- TabBackend.mkRawShellTabWith recordingBio env' tidx
+              (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@host.example.com", "bash"]
       shouldBeAuthDenied "S4 missing-slot" r2
       n <- readIORef seamCalled
       n `shouldBe` 0

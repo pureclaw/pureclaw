@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Routing.LegacyDispatchSpec
 -- Description : Tests for the legacy-CLI bridge that dispatches CmdTab into Routing.AutoSpawn.
@@ -37,10 +38,10 @@ import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Tab
   ( TabHandle (..)
   , TabIndex
-  , TabKind (..)
   , TabName (..)
   , TabStatus (..)
   , mkTabIndex
+  , pattern KindAi
   )
 import PureClaw.MCP (McpServer)
 import PureClaw.Security.Policy (defaultPolicy)

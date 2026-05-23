@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Tab.BackendSpec
 -- Description : Backend-tab DoDs (L\/I subsets) — WU8 flips these green.
@@ -55,10 +56,10 @@ import PureClaw.Handles.Tab
   , TabError (..)
   , TabHandle (..)
   , TabIndex
-  , TabKind (..)
   , TabName (..)
   , TabStatus (..)
   , mkTabIndex
+  , pattern KindShell
   )
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)
@@ -77,10 +78,11 @@ import PureClaw.Session.Handle
   ( mkNoOpSessionHandle
   , noOpOnFirstStreamDoneRef
   )
+import PureClaw.Session.Kind qualified as SK
 import PureClaw.Tab.Backend
   ( BackendIO (..)
-  , mkTabBackend
-  , mkTabBackendWith
+  , mkRawShellTab
+  , mkRawShellTabWith
   , parseTmuxTarget
   , parseUserAtHost
   , realBackendIO
@@ -159,6 +161,10 @@ fakeBackendIO cap = BackendIO
       atomicModifyIORef' (_bc_tmuxTargets cap) $ \xs ->
         (projectTmuxTarget tgt : xs, ())
       pure (Right (mkFakeBackend cap))
+  , _bio_mkContainer = \authCmd -> do
+      atomicModifyIORef' (_bc_shellArgs cap) $ \xs ->
+        (projectAuthCmd authCmd : xs, ())
+      pure (Right (mkFakeBackend cap))
   }
   where
     -- AuthorizedCommand's constructor is non-exported; use the public
@@ -177,9 +183,10 @@ fakeBackendIO cap = BackendIO
 -- the 'TabBackendConstructFailed' path through 'finishSpawn'.
 failingBackendIO :: Backend.BackendError -> BackendIO
 failingBackendIO err = BackendIO
-  { _bio_mkShell = \_ -> pure (Left err)
-  , _bio_mkSsh   = \_ _ _ -> pure (Left err)
-  , _bio_mkTmux  = \_ _   -> pure (Left err)
+  { _bio_mkShell     = \_ -> pure (Left err)
+  , _bio_mkSsh       = \_ _ _ -> pure (Left err)
+  , _bio_mkTmux      = \_ _   -> pure (Left err)
+  , _bio_mkContainer = \_ -> pure (Left err)
   }
 
 -- | A test 'AgentEnv' with a policy that allows specific commands.
@@ -260,7 +267,7 @@ describeResult (Right h) = "Right (TabHandle kind=" <> show (_tabHandle_kind h) 
 spawnShellTab
   :: BackendIO -> AgentEnv -> Int -> [Text] -> IO TabHandle
 spawnShellTab bio env n args = do
-  r <- mkTabBackendWith bio env (ti n) KindShell args
+  r <- mkRawShellTabWith bio env (ti n) SK.TbLocal args
   case r of
     Right h -> pure h
     Left e  -> do
@@ -424,29 +431,15 @@ spec = do
       _tabHandle_close h CloseGraceful
 
   describe "Sub-factory dispatch (WU8)" $ do
-    it ("mkTabBackend with KindAi returns Left TabSpawnAuthDenied —"
-        <> " AI tabs go through Tab.Ai, not Tab.Backend") $ do
-      env <- mkBackendTestEnv [] []
-      r <- mkTabBackend env (ti 0) KindAi []
-      case r of
-        Left (TabSpawnAuthDenied _) -> pure ()
-        other -> expectationFailure
-                   ("expected Left TabSpawnAuthDenied; got " <> describeResult other)
-
-    it ("mkTabBackend with KindHarness returns Left TabSpawnAuthDenied"
-        <> " — harness tabs go through Tab.Harness, not Tab.Backend") $ do
-      env <- mkBackendTestEnv [] []
-      r <- mkTabBackend env (ti 0) KindHarness []
-      case r of
-        Left (TabSpawnAuthDenied _) -> pure ()
-        other -> expectationFailure
-                   ("expected Left TabSpawnAuthDenied; got " <> describeResult other)
+    -- Note: KindAi/KindHarness rejection tests removed — mkRawShellTab now
+    -- takes TerminalBackend, making it a type error to pass session-backed
+    -- kinds. The dispatcher routes those through Tab.Ai/Tab.Harness instead.
 
     it ("KindShell with empty args returns Left TabSpawnAuthDenied —"
         <> " no command supplied") $ do
       env <- mkBackendTestEnv [] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0) KindShell []
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0) SK.TbLocal []
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -456,7 +449,7 @@ spec = do
         <> " no target supplied") $ do
       env <- mkBackendTestEnv [] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0) KindTmux []
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0) (SK.TbTmux (SK.TmuxConfig "" "" Nothing)) []
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -469,8 +462,8 @@ spec = do
       -- Empty allowlist — "ls" is not authorized.
       env <- mkBackendTestEnv [] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindShell ["ls"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             SK.TbLocal ["ls"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -485,8 +478,8 @@ spec = do
       -- Force the policy to autonomy=Deny.
       let env = env0 { _env_policy = withAutonomy Deny (_env_policy env0) }
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindShell ["ls"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             SK.TbLocal ["ls"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -509,8 +502,8 @@ spec = do
       env <- mkBackendTestEnv ["ls"] []
       let failingErr = Backend.BackendBinaryNotFound
                          (CommandName "ls")
-      r <- mkTabBackendWith (failingBackendIO failingErr) env (ti 0)
-             KindShell ["ls"]
+      r <- mkRawShellTabWith (failingBackendIO failingErr) env (ti 0)
+             SK.TbLocal ["ls"]
       case r of
         Left (TabBackendConstructFailed _) -> pure ()
         other -> expectationFailure
@@ -522,8 +515,8 @@ spec = do
         <> " _bio_mkSsh invocation") $ do
       env <- mkBackendTestEnv ["ssh"] ["bash"]
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@bad host", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@bad host", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -534,8 +527,8 @@ spec = do
     it "S2: ssh tab rejects hosts with leading dash" $ do
       env <- mkBackendTestEnv ["ssh"] ["bash"]
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@-oProxyCommand=evil", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@-oProxyCommand=evil", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -547,8 +540,8 @@ spec = do
     it "S2: ssh tab rejects hosts with shell metacharacters" $ do
       env <- mkBackendTestEnv ["ssh"] ["bash"]
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@evil;rm", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@evil;rm", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -560,8 +553,8 @@ spec = do
     it "S2: ssh tab rejects malformed user@host (missing @)" $ do
       env <- mkBackendTestEnv ["ssh"] ["bash"]
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["nohostmark", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["nohostmark", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -571,8 +564,8 @@ spec = do
     it "S2: ssh tab with allowlist not containing 'ssh' is rejected" $ do
       env <- mkBackendTestEnv [] ["bash"]   -- 'ssh' missing from local
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@host.example.com", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@host.example.com", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -586,8 +579,8 @@ spec = do
       -- 'ssh' is allowed locally; 'bash' is NOT allowed remotely.
       env <- mkBackendTestEnv ["ssh"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@host.example.com", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@host.example.com", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -601,8 +594,8 @@ spec = do
       env <- mkBackendTestEnv ["ssh"] ["bash"]
       cap <- newBackendCapture
       -- _env_vault is Nothing (the default from mkBackendTestEnv).
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@host.example.com", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@host.example.com", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -618,8 +611,8 @@ spec = do
       let missingVault = Just noOpVault
       writeIORef (_env_vault env) missingVault
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@host.example.com", "bash"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@host.example.com", "bash"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -632,7 +625,7 @@ spec = do
         <> " TabSpawnAuthDenied") $ do
       env <- mkBackendTestEnv ["ssh"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0) KindSsh []
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0) (SK.TbSsh (SK.SshConfig "" "" Nothing)) []
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -643,8 +636,8 @@ spec = do
         <> " TabSpawnAuthDenied") $ do
       env <- mkBackendTestEnv ["ssh"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindSsh ["user@host.example.com"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbSsh (SK.SshConfig "" "" Nothing)) ["user@host.example.com"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -656,8 +649,8 @@ spec = do
         <> " mkTmuxSession") $ do
       env <- mkBackendTestEnv ["tmux"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindTmux ["-evil:win"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbTmux (SK.TmuxConfig "" "" Nothing)) ["-evil:win"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -669,8 +662,8 @@ spec = do
     it "S3: tmux tab rejects empty session names" $ do
       env <- mkBackendTestEnv ["tmux"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindTmux [":win"]   -- empty session before ':'
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbTmux (SK.TmuxConfig "" "" Nothing)) [":win"]   -- empty session before ':'
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -680,8 +673,8 @@ spec = do
     it "S3: tmux tab rejects malformed spec (no colon)" $ do
       env <- mkBackendTestEnv ["tmux"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindTmux ["just-a-session"]   -- no ':' separator
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbTmux (SK.TmuxConfig "" "" Nothing)) ["just-a-session"]   -- no ':' separator
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -692,8 +685,8 @@ spec = do
         <> " is invoked with the smart-constructed TmuxTarget") $ do
       env <- mkBackendTestEnv ["tmux"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindTmux ["prod-session:main"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbTmux (SK.TmuxConfig "" "" Nothing)) ["prod-session:main"]
       case r of
         Right h -> do
           tmuxTargets <- readIORef (_bc_tmuxTargets cap)
@@ -705,8 +698,8 @@ spec = do
     it "S3: tmux tab accepts session:window.pane spec with pane" $ do
       env <- mkBackendTestEnv ["tmux"] []
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindTmux ["sess:win.pane1"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbTmux (SK.TmuxConfig "" "" Nothing)) ["sess:win.pane1"]
       case r of
         Right h -> do
           tmuxTargets <- readIORef (_bc_tmuxTargets cap)
@@ -719,8 +712,8 @@ spec = do
         <> " rejected") $ do
       env <- mkBackendTestEnv [] []  -- empty allowlist
       cap <- newBackendCapture
-      r <- mkTabBackendWith (fakeBackendIO cap) env (ti 0)
-             KindTmux ["sess:win"]
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbTmux (SK.TmuxConfig "" "" Nothing)) ["sess:win"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -767,7 +760,7 @@ spec = do
         Right _ -> expectationFailure "expected Left for too many dots"
 
     it ("status after spawn is Idle (sentinel replaced before"
-        <> " mkTabBackend returns)") $ do
+        <> " mkRawShellTab returns)") $ do
       env <- mkBackendTestEnv ["ls"] []
       cap <- newBackendCapture
       h <- spawnShellTab (fakeBackendIO cap) env 0 ["ls"]
@@ -817,12 +810,13 @@ spec = do
       -- NOT invoke the IO actions — they spawn real subprocesses, which
       -- would defeat the unit-test purpose. The production wiring is
       -- exercised by the integration tests that spawn a real shell.
-      let _ = _bio_mkShell realBackendIO
-          _ = _bio_mkSsh   realBackendIO
-          _ = _bio_mkTmux  realBackendIO
+      let _ = _bio_mkShell     realBackendIO
+          _ = _bio_mkSsh       realBackendIO
+          _ = _bio_mkTmux      realBackendIO
+          _ = _bio_mkContainer realBackendIO
       True `shouldBe` True
 
-    it ("mkTabBackend (production entry point) dispatches via"
+    it ("mkRawShellTab (production entry point) dispatches via"
         <> " realBackendIO; rejected commands surface as Left without"
         <> " spawning") $ do
       -- The production entry point hits realBackendIO, but the policy
@@ -830,7 +824,7 @@ spec = do
       -- spawn — proving the entry-point indirection works.
       env <- mkBackendTestEnv [] []
       let env' = env { _env_policy = withAutonomy Deny (_env_policy env) }
-      r <- mkTabBackend env' (ti 0) KindShell ["ls"]
+      r <- mkRawShellTab env' (ti 0) SK.TbLocal ["ls"]
       case r of
         Left (TabSpawnAuthDenied _) -> pure ()
         other -> expectationFailure
@@ -856,6 +850,110 @@ spec = do
                    ("expected Crashed status after backend throw; got "
                      <> show other)
       _tabHandle_close h CloseGraceful
+
+
+  describe "KindContainer (S9) — container denylist + exec argv (WU-10)" $ do
+    it ("S9: container tab rejects args containing --privileged"
+        <> " via denylist check") $ do
+      env <- mkBackendTestEnv ["docker"] []
+      cap <- newBackendCapture
+      let tgt = either (error . show) id (SK.mkContainerTarget "my-app")
+          cs  = SK.ContainerSpec { SK._cs_engine = SK.Docker, SK._cs_target = tgt }
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbContainer cs) ["--privileged"]
+      case r of
+        Left (TabSpawnAuthDenied _) -> pure ()
+        other -> expectationFailure
+                   ("expected Left TabSpawnAuthDenied (denylist); got "
+                     <> describeResult other)
+      -- No subprocess was spawned.
+      shellArgs <- readIORef (_bc_shellArgs cap)
+      shellArgs `shouldBe` []
+
+    it "S9: container tab rejects --cap-add" $ do
+      env <- mkBackendTestEnv ["docker"] []
+      cap <- newBackendCapture
+      let tgt = either (error . show) id (SK.mkContainerTarget "my-app")
+          cs  = SK.ContainerSpec { SK._cs_engine = SK.Docker, SK._cs_target = tgt }
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbContainer cs) ["--cap-add", "SYS_ADMIN"]
+      case r of
+        Left (TabSpawnAuthDenied _) -> pure ()
+        other -> expectationFailure
+                   ("expected Left TabSpawnAuthDenied (--cap-add); got "
+                     <> describeResult other)
+
+    it "S9: container tab accepts benign args like [\"--verbose\", \"--debug\"]" $ do
+      env <- mkBackendTestEnv ["docker"] []
+      cap <- newBackendCapture
+      let tgt = either (error . show) id (SK.mkContainerTarget "web")
+          cs  = SK.ContainerSpec { SK._cs_engine = SK.Docker, SK._cs_target = tgt }
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbContainer cs) ["--verbose", "--debug"]
+      case r of
+        Right h -> _tabHandle_close h CloseGraceful
+        Left e  -> expectationFailure
+                     ("expected Right; got Left " <> show e)
+
+    it ("S9: container tab with engine not on allowlist returns"
+        <> " Left TabSpawnAuthDenied") $ do
+      env <- mkBackendTestEnv [] []  -- empty allowlist
+      cap <- newBackendCapture
+      let tgt = either (error . show) id (SK.mkContainerTarget "c1")
+          cs  = SK.ContainerSpec { SK._cs_engine = SK.Docker, SK._cs_target = tgt }
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbContainer cs) []
+      case r of
+        Left (TabSpawnAuthDenied _) -> pure ()
+        other -> expectationFailure
+                   ("expected Left TabSpawnAuthDenied (engine missing); got "
+                     <> describeResult other)
+
+    it ("S9: container tab with allowed engine spawns;"
+        <> " _bio_mkContainer is invoked") $ do
+      env <- mkBackendTestEnv ["podman"] []
+      cap <- newBackendCapture
+      let tgt = either (error . show) id (SK.mkContainerTarget "my-pod")
+          cs  = SK.ContainerSpec { SK._cs_engine = SK.Podman, SK._cs_target = tgt }
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbContainer cs) []
+      case r of
+        Right h -> do
+          shellArgs <- readIORef (_bc_shellArgs cap)
+          shellArgs `shouldSatisfy` (not . null)
+          _tabHandle_close h CloseGraceful
+        Left e -> expectationFailure
+                    ("expected Right; got " <> show e)
+
+    it "S9: container tab rejects -v (short volume flag)" $ do
+      env <- mkBackendTestEnv ["docker"] []
+      cap <- newBackendCapture
+      let tgt = either (error . show) id (SK.mkContainerTarget "c1")
+          cs  = SK.ContainerSpec { SK._cs_engine = SK.Docker, SK._cs_target = tgt }
+      r <- mkRawShellTabWith (fakeBackendIO cap) env (ti 0)
+             (SK.TbContainer cs) ["-v", "/host:/container"]
+      case r of
+        Left (TabSpawnAuthDenied _) -> pure ()
+        other -> expectationFailure
+                   ("expected Left TabSpawnAuthDenied (-v); got "
+                     <> describeResult other)
+
+    it ("S9: container construction failure surfaces as Left"
+        <> " TabBackendConstructFailed") $ do
+      env <- mkBackendTestEnv ["docker"] []
+      let failingErr = Backend.BackendBinaryNotFound
+                         (CommandName "docker")
+      r <- mkRawShellTabWith (failingBackendIO failingErr) env (ti 0)
+             (SK.TbContainer (SK.ContainerSpec
+               { SK._cs_engine = SK.Docker
+               , SK._cs_target = either (error . show) id
+                                   (SK.mkContainerTarget "c1")
+               })) []
+      case r of
+        Left (TabBackendConstructFailed _) -> pure ()
+        other -> expectationFailure
+                   ("expected Left TabBackendConstructFailed; got "
+                     <> describeResult other)
 
 
 -- ---------------------------------------------------------------------------

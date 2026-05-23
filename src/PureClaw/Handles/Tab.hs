@@ -1,13 +1,30 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : PureClaw.Handles.Tab
 -- Description : Tabbed Chat type layer (WU1) — user-facing primitive: a tab.
 --
 -- A 'TabHandle' is the universal Handle-pattern carrier for one tab in
--- the Tabbed Chat surface. Tabs come in several 'TabKind's
--- ('KindAi' for an AI chat tab, 'KindHarness' for a managed harness,
--- and 'KindShell' \/ 'KindSsh' \/ 'KindTmux' for terminal-backend tabs).
+-- the Tabbed Chat surface. Each tab carries a 'TabKind' discriminator
+-- that classifies it as either a /session-backed/ tab
+-- (@'TkSession' sk@, where @sk@ is a 'PureClaw.Session.Kind.SessionKind')
+-- or a /raw terminal-backend/ tab
+-- (@'TkRawShell' tb@, where @tb@ is a 'PureClaw.Session.Kind.TerminalBackend').
 -- The dispatcher routes user input to the focused tab and per-tab
 -- output to the channel (focus-gated).
+--
+-- == Spec-vs-runtime layering (T6)
+--
+-- 'PureClaw.Session.Kind.SessionKind' and its component types
+-- ('ProviderSpec', 'HarnessSpec', 'TerminalBackend', etc.) are
+-- /serialisation-safe specs/ — they carry configuration data that can
+-- be round-tripped through JSON or TOML without IO.
+--
+-- Runtime-validated types ('SafePath', 'SshTarget', 'AuthorizedCommand',
+-- etc.) live in the factory and transport layers
+-- ('PureClaw.Tab.Ai', 'PureClaw.Tab.Backend', 'PureClaw.Tab.Harness')
+-- and are never stored in 'TabKind'. This module sits at the boundary:
+-- 'TabKind' references the spec layer but never exposes the runtime
+-- layer.
 --
 -- == Scope of WU1
 --
@@ -34,6 +51,12 @@ module PureClaw.Handles.Tab
   , unTabIndex
     -- * Tab kind
   , TabKind (..)
+    -- ** Legacy pattern synonyms (backward compatibility)
+  , pattern KindAi
+  , pattern KindHarness
+  , pattern KindShell
+  , pattern KindSsh
+  , pattern KindTmux
     -- * Tab status
   , TabStatus (..)
     -- * Tab handle
@@ -59,7 +82,7 @@ module PureClaw.Handles.Tab
   , BackendSpawnArgs (..)
   , mkTabAi
   , mkTabHarness
-  , mkTabBackend
+  , mkRawShellTab
   ) where
 
 import Data.Text (Text)
@@ -67,6 +90,16 @@ import Data.Time (UTCTime)
 
 import PureClaw.Agent.SlashCommands qualified as Slash
 import PureClaw.Handles.Backend qualified as Backend
+import PureClaw.Core.Types (ModelId (..), ProviderId (..))
+import PureClaw.Session.Kind
+  ( HarnessFlavour (..)
+  , HarnessSpec (..)
+  , ProviderSpec (..)
+  , SessionKind (..)
+  , SshConfig (..)
+  , TerminalBackend (..)
+  , TmuxConfig (..)
+  )
 
 
 -- ---------------------------------------------------------------------------
@@ -97,19 +130,86 @@ mkTabIndex n
 -- TabKind
 -- ---------------------------------------------------------------------------
 
--- | Kind of tab. Distinct constructors per backend kind so the parser
--- can dispatch to the right factory without an extra discriminator.
+-- | Kind of tab — two-level discriminator (WU-5 refactor, T4).
 --
--- @KindShell@ \/ @KindSsh@ \/ @KindTmux@ are sub-variants of the
--- conceptual \"KindBackend\" in design narrative; as constructors they
--- are distinct so 'mkTabBackend' can pattern-match.
+-- * @'TkSession' sk@ — session-backed tab. The 'SessionKind' payload
+--   ('SkProvider' or 'SkHarness') is a serialisation-safe /spec/
+--   (declared in "PureClaw.Session.Kind"); runtime-validated types
+--   ('SafePath', 'SshTarget', etc.) live in factory\/transport layers.
+--   This module sits at the boundary: 'TabKind' references the spec
+--   layer but never exposes the runtime layer (T6).
+--
+-- * @'TkRawShell' tb@ — raw terminal-backend tab (local shell, SSH,
+--   or tmux). The 'TerminalBackend' payload carries connection
+--   coordinates; the backend factory validates and connects.
 data TabKind
-  = KindAi
-  | KindHarness
-  | KindShell
-  | KindSsh
-  | KindTmux
-  deriving stock (Eq, Show, Bounded, Enum)
+  = TkSession  !SessionKind
+  | TkRawShell !TerminalBackend
+  deriving stock (Eq, Show)
+
+-- | @KindAi@ matches any provider-backed session tab. When used as
+-- an expression it constructs a 'TkSession' with a placeholder
+-- 'ProviderSpec' — production code should prefer the explicit
+-- constructor with a real spec.
+pattern KindAi :: TabKind
+pattern KindAi <- TkSession (SkProvider {})
+  where KindAi = TkSession (SkProvider defaultProviderSpec)
+
+-- | @KindHarness@ matches any harness-backed session tab. When used
+-- as an expression it constructs a 'TkSession' with a placeholder
+-- 'HarnessSpec'.
+pattern KindHarness :: TabKind
+pattern KindHarness <- TkSession (SkHarness {})
+  where KindHarness = TkSession (SkHarness defaultHarnessSpec)
+
+-- | @KindShell@ matches a local-shell backend tab.
+pattern KindShell :: TabKind
+pattern KindShell = TkRawShell TbLocal
+
+-- | @KindSsh@ matches an SSH backend tab. When used as an expression
+-- it constructs a 'TkRawShell' with a placeholder 'SshConfig'.
+pattern KindSsh :: TabKind
+pattern KindSsh <- TkRawShell (TbSsh {})
+  where KindSsh = TkRawShell (TbSsh defaultSshConfig)
+
+-- | @KindTmux@ matches a tmux backend tab. When used as an expression
+-- it constructs a 'TkRawShell' with a placeholder 'TmuxConfig'.
+pattern KindTmux :: TabKind
+pattern KindTmux <- TkRawShell (TbTmux {})
+  where KindTmux = TkRawShell (TbTmux defaultTmuxConfig)
+
+-- | Default 'ProviderSpec' used by the 'KindAi' pattern synonym.
+defaultProviderSpec :: ProviderSpec
+defaultProviderSpec = ProviderSpec
+  { _ps_provider = ProviderId "anthropic"
+  , _ps_model    = ModelId "placeholder"
+  , _ps_agent    = Nothing
+  }
+
+-- | Default 'HarnessSpec' used by the 'KindHarness' pattern synonym.
+defaultHarnessSpec :: HarnessSpec
+defaultHarnessSpec = HarnessSpec
+  { _h_flavour = HClaudeCode
+  , _h_backend = TbLocal
+  , _h_cwd     = Nothing
+  , _h_args    = []
+  }
+
+-- | Default 'SshConfig' used by the 'KindSsh' pattern synonym.
+defaultSshConfig :: SshConfig
+defaultSshConfig = SshConfig
+  { _sc_user = "placeholder"
+  , _sc_host = "placeholder"
+  , _sc_port = Nothing
+  }
+
+-- | Default 'TmuxConfig' used by the 'KindTmux' pattern synonym.
+defaultTmuxConfig :: TmuxConfig
+defaultTmuxConfig = TmuxConfig
+  { _tc_session = "placeholder"
+  , _tc_window  = "placeholder"
+  , _tc_pane    = Nothing
+  }
 
 
 -- ---------------------------------------------------------------------------
@@ -157,11 +257,12 @@ data TabStatus
 
 -- | Close semantics requested by the caller of '_tabHandle_close'.
 --
--- * 'CloseGraceful' — kind-specific graceful close: for 'KindAi'
---   archives the session via @_sh_save@; for non-AI kinds runs the
---   underlying destructive close (e.g. @_bh_close@, @_hh_stop@).
--- * 'CloseForce' — for 'KindAi' skips the archive (transcript deleted
---   from disk); for non-AI kinds is a no-op distinct from
+-- * 'CloseGraceful' — kind-specific graceful close: for AI sessions
+--   ('TkSession (SkProvider _)') archives the session via @_sh_save@;
+--   for non-AI kinds runs the underlying destructive close (e.g.
+--   @_bh_close@, @_hh_stop@).
+-- * 'CloseForce' — for AI sessions skips the archive (transcript
+--   deleted from disk); for non-AI kinds is a no-op distinct from
 --   'CloseGraceful' because close is already destructive there.
 data CloseMode
   = CloseGraceful
@@ -201,7 +302,7 @@ data TabRunner = TabRunner
 --
 -- Pure fields ('_tabHandle_index', '_tabHandle_name', '_tabHandle_kind')
 -- are bound at construction time. IO-action fields are kind-specific:
--- 'KindAi' enqueues into a per-tab @TBQueue InputEvent@; non-AI kinds
+-- 'TkSession (SkProvider _)' enqueues into a per-tab @TBQueue InputEvent@; non-AI kinds
 -- write to a 'PureClaw.Handles.Backend.BackendHandle' or
 -- 'PureClaw.Handles.Harness.HarnessHandle'.
 --
@@ -223,7 +324,7 @@ data TabHandle = TabHandle
     --   'Left' (e.g. 'TabConcurrencyLimit') so the dispatcher never
     --   blocks.
   , _tabHandle_enqueueSlash  :: Slash.SlashCommand -> IO (Either TabError ())
-    -- ^ H13: enqueue a 'SlashCmd' input event. For 'KindAi' the tab
+    -- ^ H13: enqueue a 'SlashCmd' input event. For AI sessions the tab
     --   loop runs @executeSlashCommand@ against its own per-tab
     --   context; for non-AI kinds the implementation returns
     --   @Left ('TabUnsupportedCommand' cmd)@ immediately without
@@ -231,7 +332,7 @@ data TabHandle = TabHandle
   , _tabHandle_close         :: CloseMode -> IO ()
     -- ^ H6 \/ H7 \/ H8 \/ H9 \/ H10: idempotent, never throws,
     --   kind-specific semantics. The 'CloseMode' selects graceful
-    --   vs forced archive behaviour for 'KindAi'.
+    --   vs forced archive behaviour for AI sessions.
   }
 
 
@@ -267,7 +368,7 @@ data SessionError = SessionError
 
 -- | Placeholder for the spawn-time authorization-failure vocabulary
 -- (channel-safe). The definitive shape lands in WU8 alongside
--- 'mkTabBackend' (which performs the 'authorize' check per S1). For
+-- 'mkRawShellTab' (which performs the 'authorize' check per S1). For
 -- WU1 we expose a single opaque constructor so 'TabSpawnAuthDenied'
 -- has somewhere to park its payload while the type layer compiles.
 data PublicAuthError = PublicAuthError
@@ -394,10 +495,10 @@ mkTabHarness :: TabIndex -> HarnessSpawnArgs -> IO (Either TabError TabHandle)
 mkTabHarness _ _ = error "PureClaw.Handles.Tab.mkTabHarness: not implemented \
                          \— filled in by WU7 (PureClaw.Tab.Harness)"
 
--- | Backend tab factory. Dispatches at construction time to the
--- 'KindShell' \/ 'KindSsh' \/ 'KindTmux' sub-factory. WU8 fills in the
--- body.
-mkTabBackend :: TabIndex -> TabKind -> BackendSpawnArgs
-             -> IO (Either TabError TabHandle)
-mkTabBackend _ _ _ = error "PureClaw.Handles.Tab.mkTabBackend: not implemented \
-                           \— filled in by WU8 (PureClaw.Tab.Backend)"
+-- | Raw-shell tab factory (F4). Dispatches at construction time on
+-- 'TerminalBackend' ('TbLocal' \/ 'TbSsh' \/ 'TbTmux'). WU8 fills in
+-- the body.
+mkRawShellTab :: TabIndex -> TerminalBackend -> BackendSpawnArgs
+              -> IO (Either TabError TabHandle)
+mkRawShellTab _ _ _ = error "PureClaw.Handles.Tab.mkRawShellTab: not implemented \
+                            \— filled in by WU8 (PureClaw.Tab.Backend)"

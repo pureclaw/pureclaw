@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Routing.RegistrySpec
 -- Description : E-series tests for Registry + AgentEnv (WU3 implementation).
@@ -49,6 +50,7 @@ import PureClaw.Handles.Tab
   , TabRunner (..)
   , TabStatus (..)
   , mkTabIndex
+  , pattern KindAi
   )
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)

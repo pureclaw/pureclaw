@@ -44,6 +44,10 @@ import PureClaw.Handles.Backend qualified as Backend
 import PureClaw.Handles.Channel (mkNoOpChannelHandle)
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Tab qualified as Tab
+import PureClaw.Session.Kind qualified as SK
+import PureClaw.Session.Kind
+  ( ProviderSpec (..)
+  )
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)
 import PureClaw.Routing.Config (defaultRoutingConfig)
@@ -73,10 +77,10 @@ _h2_mkTabHarness_sig
   -> IO (Either Tab.TabError Tab.TabHandle)
 _h2_mkTabHarness_sig = Tab.mkTabHarness
 
-_h2_mkTabBackend_sig
-  :: Tab.TabIndex -> Tab.TabKind -> Tab.BackendSpawnArgs
+_h2_mkRawShellTab_sig
+  :: Tab.TabIndex -> SK.TerminalBackend -> Tab.BackendSpawnArgs
   -> IO (Either Tab.TabError Tab.TabHandle)
-_h2_mkTabBackend_sig = Tab.mkTabBackend
+_h2_mkRawShellTab_sig = Tab.mkRawShellTab
 
 -- | Compile-time evidence for H13: '_tabHandle_enqueueSlash' has the
 -- 'SlashCommand -> IO (Either TabError ())' shape.
@@ -131,6 +135,15 @@ sampleTabErrors =
           (Backend.BackendBufferQuotaExceeded 100)
       ]
 
+-- | Test-helper 'ProviderSpec' used when constructing synthetic
+-- @TkSession (SkProvider _)@ values in tests.
+testProviderSpec :: ProviderSpec
+testProviderSpec = ProviderSpec
+  { _ps_provider = ProviderId "anthropic"
+  , _ps_model    = ModelId "test-model"
+  , _ps_agent    = Nothing
+  }
+
 -- | Synthetic 'Tab.TabHandle' with stub IO actions. Lets the WU1
 -- coverage tests below exercise every field selector without
 -- waiting for a real factory body (WU6/7/8). Each IO field returns a
@@ -143,7 +156,7 @@ syntheticHandle =
   in  Tab.TabHandle
         { Tab._tabHandle_index         = idx
         , Tab._tabHandle_name          = Tab.TabName "synthetic"
-        , Tab._tabHandle_kind          = Tab.KindAi
+        , Tab._tabHandle_kind          = Tab.TkSession (SK.SkProvider testProviderSpec)
         , Tab._tabHandle_status        = pure Tab.Active
         , Tab._tabHandle_send          = \_ -> pure (Right ())
         , Tab._tabHandle_enqueueSlash  = \_ -> pure (Right ())
@@ -179,12 +192,12 @@ spec = do
     -- The compile-time _h2_*_sig bindings above are the real check;
     -- the runtime assertion is a no-op tautology that exists only so
     -- hspec reports the test as run.
-    it "H2: factories mkTabAi, mkTabHarness, mkTabBackend exist with IO (Either TabError TabHandle) return type" $ do
+    it "H2: factories mkTabAi, mkTabHarness, mkRawShellTab exist with IO (Either TabError TabHandle) return type" $ do
       -- Witnesses: each *_sig binding above gives the expected
       -- signature. Re-mention them locally to keep the linker happy.
       let _ = _h2_mkTabAi_sig
           _ = _h2_mkTabHarness_sig
-          _ = _h2_mkTabBackend_sig
+          _ = _h2_mkRawShellTab_sig
       True `shouldBe` True
 
     -- H3: TabError enumerates exactly the documented 10 constructors.
@@ -335,16 +348,13 @@ spec = do
     -- H12: kind is a pure field, not IO.
     it "H12: _tabHandle_kind is a pure field (no IO read)" $ do
       -- _h12_kind_is_pure has type TabHandle -> TabKind (not IO TabKind).
-      -- The runtime assertion exercises every TabKind so any reduction
-      -- in the variant set fails here.
-      let kinds = [minBound .. maxBound] :: [Tab.TabKind]
-      kinds `shouldBe`
-        [ Tab.KindAi
-        , Tab.KindHarness
-        , Tab.KindShell
-        , Tab.KindSsh
-        , Tab.KindTmux
-        ]
+      -- The runtime assertion exercises both TabKind constructors so
+      -- the two-level structure compiles.
+      let aiKind = Tab.TkSession (SK.SkProvider testProviderSpec)
+          shellKind = Tab.TkRawShell SK.TbLocal
+      Tab._tabHandle_kind syntheticHandle `shouldBe` aiKind
+      -- Verify both constructors exist and are distinct.
+      aiKind `shouldSatisfy` (/= shellKind)
 
     -- H13: enqueueSlash has the right type. Runtime behaviour test
     -- (KindAi enqueues; non-AI returns TabUnsupportedCommand) needs
@@ -406,12 +416,12 @@ spec = do
       let args = Tab.HarnessSpawnArgs { Tab._harness_requestedName = "h" }
       Tab.mkTabHarness idx args `shouldThrow` notImpl
 
-    it "mkTabBackend stub: throws ErrorCall containing 'not implemented'" $ do
+    it "mkRawShellTab stub: throws ErrorCall containing 'not implemented'" $ do
       let args = Tab.BackendSpawnArgs
                    { Tab._backend_requestedName = "b"
                    , Tab._backend_args          = []
                    }
-      Tab.mkTabBackend idx Tab.KindShell args `shouldThrow` notImpl
+      Tab.mkRawShellTab idx SK.TbLocal args `shouldThrow` notImpl
 
     -- (b) Smart-constructor negative path.
     it "mkTabIndex rejects negative inputs" $ do
@@ -424,7 +434,7 @@ spec = do
       let h = syntheticHandle
       Tab.unTabIndex (Tab._tabHandle_index h) `shouldBe` 0
       Tab.unTabName  (Tab._tabHandle_name  h) `shouldBe` "synthetic"
-      Tab._tabHandle_kind h `shouldBe` Tab.KindAi
+      Tab._tabHandle_kind h `shouldBe` Tab.TkSession (SK.SkProvider testProviderSpec)
       Tab._tabHandle_status        h           >>= (`shouldBe` Tab.Active)
       Tab._tabHandle_send          h "msg"     >>= (`shouldBe` Right ())
       Tab._tabHandle_enqueueSlash  h Slash.CmdHelp

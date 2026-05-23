@@ -17,9 +17,12 @@
   --accent-gradient:  linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
 
   /* ── Text ───────────────────────────────────────────────────────────── */
-  --text-primary:   #E8E9F0;   /* Headings, body text */
-  --text-muted:     #6B7094;   /* Secondary text, labels */
-  --text-faint:     rgba(107, 112, 148, 0.5); /* Timestamps, tertiary info */
+  /* All text tokens are kept ≥ 4.5:1 against --bg-base AND --bg-elevated
+   * (WCAG AA for body text). Hierarchy below this floor comes from weight
+   * and size — not from dimmer luminance. See DESIGN.md → Minimum Contrast. */
+  --text-primary:   #E8E9F0;   /* Headings, body text (≈14.8:1 on bg-base) */
+  --text-muted:     #9598B8;   /* Secondary text, labels   (≈6.5:1 / 5.5:1) */
+  --text-faint:     #8A8FAD;   /* Timestamps, tertiary info (≈5.7:1 / 4.9:1) */
 
   /* ── Borders ────────────────────────────────────────────────────────── */
   --border:         #252A40;

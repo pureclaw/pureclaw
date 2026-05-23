@@ -4,16 +4,22 @@ module PureClaw.Frontend.Server
     -- * Configuration
   , FrontendConfig (..)
   , defaultFrontendConfig
+    -- * Warp settings
+  , mkFrontendSettings
+    -- * Middleware
+  , corsMiddleware
     -- * Re-export environment
   , FrontendEnv (..)
+  , ProviderInfo (..)
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
 import Data.Text qualified as T
-import Network.HTTP.Types
+import Network.HTTP.Types qualified as HTTP
 import Network.Socket (SockAddr)
 import Network.Wai
 import Network.Wai.Handler.Warp qualified as Warp
@@ -24,12 +30,12 @@ import System.FilePath ((</>), takeExtension)
 
 import PureClaw.Frontend.API
 import PureClaw.Frontend.Stream (streamApp)
-import PureClaw.Handles.Log (LogHandle(..))
+import PureClaw.Handles.Log
 
 -- | Frontend server configuration.
 data FrontendConfig = FrontendConfig
-  { _fsc_port         :: Int
-  , _fsc_staticDir    :: FilePath
+  { _fsc_port          :: Int
+  , _fsc_staticDir     :: FilePath
   , _fc_allowedOrigins :: [Text]
     -- ^ Exact-match allowlist of @Origin@ headers permitted to upgrade to
     -- the WS endpoint. Matching is case-insensitive on scheme + host per
@@ -46,15 +52,47 @@ defaultFrontendConfig = FrontendConfig
   { _fsc_port          = 8080
   , _fsc_staticDir     = "frontend/dist"
   , _fc_allowedOrigins = [ "http://localhost:8080"
-                          , "http://127.0.0.1:8080"
-                          ]
+                         , "http://127.0.0.1:8080"
+                         ]
   }
+
+-- | Build the pure subset of Warp settings from the frontend config.
+-- Binds the port and applies @setTimeout 30@ to non-hijacked HTTP routes.
+-- The connection cap (@setMaxTotalConnections@ substitute) is applied
+-- by 'runFrontend' on top of these settings because it requires a
+-- runtime 'TVar' counter.
+mkFrontendSettings :: FrontendConfig -> Warp.Settings
+mkFrontendSettings cfg =
+  Warp.setPort (_fsc_port cfg)
+    $ Warp.setTimeout 30
+      Warp.defaultSettings
+
+-- | CORS middleware that restricts the @Access-Control-Allow-Origin@
+-- header to @http:\/\/localhost:\<port\>@ and handles OPTIONS preflight
+-- requests with a 200 response.
+corsMiddleware :: FrontendConfig -> Middleware
+corsMiddleware cfg app req respond
+  | requestMethod req == "OPTIONS" =
+      respond $ responseLBS HTTP.status200 corsHeaders ""
+  | otherwise =
+      app req $ \resp ->
+        respond (mapResponseHeaders (corsHeaders ++) resp)
+  where
+    origin :: BS.ByteString
+    origin = "http://localhost:" <> BS8.pack (show (_fsc_port cfg))
+
+    corsHeaders :: [HTTP.Header]
+    corsHeaders =
+      [ ("Access-Control-Allow-Origin",  origin)
+      , ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+      , ("Access-Control-Allow-Headers", "Content-Type")
+      ]
 
 -- | Start the frontend server with API endpoints and static file serving.
 -- API routes (@\/api\/*@) are handled by 'apiApp'; the WS endpoint at
 -- @\/api\/stream@ is composed via 'WaiWS.websocketsOr' from 'streamApp';
 -- everything else falls through to the static file server with SPA
--- fallback.
+-- fallback. CORS middleware is applied to all HTTP routes.
 --
 -- Warp hardening (D20): an accept-side connection counter caps concurrent
 -- HTTP connections at 1024 (Warp 3.4 dropped the dedicated
@@ -72,12 +110,11 @@ runFrontend cfg mEnv logger = do
   logInfo $ "  URL:     http://localhost:" <> T.pack (show (_fsc_port cfg))
   counterTv <- newTVarIO 0
   let cap = 1024 :: Int
-      settings = Warp.setPort (_fsc_port cfg)
-               $ Warp.setTimeout 30
-               $ Warp.setOnOpen  (onOpenCounter counterTv cap)
+      settings = Warp.setOnOpen  (onOpenCounter counterTv cap)
                $ Warp.setOnClose (onCloseCounter counterTv)
-                 Warp.defaultSettings
-  Warp.runSettings settings (combinedApp cfg mEnv (_fsc_staticDir cfg))
+               $ mkFrontendSettings cfg
+      app = corsMiddleware cfg (combinedApp cfg mEnv (_fsc_staticDir cfg))
+  Warp.runSettings settings app
 
 -- | Connection-open callback. Blocks (via STM @retry@) when the active
 -- count reaches the cap so Warp pauses 'accept' until a slot opens up.
@@ -109,8 +146,8 @@ combinedApp cfg mEnv staticDir = WaiWS.websocketsOr
     apiOrStatic req respond = case pathInfo req of
       ("api" : _) -> case mEnv of
         Just env -> apiApp env req respond
-        Nothing  -> respond $ responseLBS status503
-          [(hContentType, "application/json")]
+        Nothing  -> respond $ responseLBS HTTP.status503
+          [(HTTP.hContentType, "application/json")]
           "{\"error\":\"API not available in standalone serve mode\"}"
       _ -> staticApp staticDir req respond
 
@@ -129,7 +166,7 @@ staticApp dir req respond = do
   let segments = pathInfo req
   -- Reject path traversal
   if any (\s -> s == ".." || s == ".") segments
-    then respond $ responseLBS status400 [] "Invalid path"
+    then respond $ responseLBS HTTP.status400 [] "Invalid path"
     else do
       let relPath  = T.unpack (T.intercalate "/" segments)
           filePath = dir </> if null relPath then "index.html" else relPath
@@ -142,13 +179,13 @@ staticApp dir req respond = do
           indexExists <- doesFileExist indexPath
           if indexExists
             then serveFile indexPath respond
-            else respond $ responseLBS status404 [] "Not found"
+            else respond $ responseLBS HTTP.status404 [] "Not found"
 
 serveFile :: FilePath -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 serveFile path respond = do
   contents <- LBS.readFile path
   let ct = mimeType (takeExtension path)
-  respond $ responseLBS status200 [(hContentType, ct)] contents
+  respond $ responseLBS HTTP.status200 [(HTTP.hContentType, ct)] contents
 
 -- | Map file extensions to MIME types.
 mimeType :: String -> BS.ByteString

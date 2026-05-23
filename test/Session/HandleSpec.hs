@@ -16,6 +16,7 @@ import Data.Time
   )
 import System.Directory
   ( createDirectoryIfMissing
+  , doesDirectoryExist
   , doesFileExist
   )
 import System.FilePath ((</>))
@@ -27,6 +28,7 @@ import PureClaw.Agent.AgentDef (mkAgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
+  , ModelId (..)
   , SessionId (..)
   , parseSessionId
   )
@@ -40,6 +42,8 @@ import PureClaw.Session.Handle
   , ResolvedRuntime (..)
   , ResumeError (..)
   , SessionHandle (..)
+  , SetArchivedError (..)
+  , SetDescriptionError (..)
   , listSessions
   , loadRecentMessages
   , markBootstrapConsumed
@@ -48,6 +52,8 @@ import PureClaw.Session.Handle
   , resolveResumedTarget
   , resolveSessionRef
   , resumeSession
+  , setArchived
+  , setDescription
   , validateRuntime
   )
 import PureClaw.Providers.Class
@@ -56,9 +62,6 @@ import PureClaw.Providers.Class
   , Role (..)
   )
 import PureClaw.Session.Types
-  ( RuntimeType (..)
-  , SessionMeta (..)
-  )
 import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)
@@ -77,12 +80,15 @@ mkMeta :: Text -> UTCTime -> SessionMeta
 mkMeta sid t = SessionMeta
   { _sm_id                = parseSessionId sid
   , _sm_agent             = Nothing
-  , _sm_runtime           = RTProvider
+  , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "test-model") (ModelId "test-model") Nothing)
   , _sm_model             = "test-model"
   , _sm_channel           = "cli"
   , _sm_createdAt         = t
   , _sm_lastActive        = t
   , _sm_bootstrapConsumed = False
+  , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
   }
 
 -- Convenience: get the low 9 perm bits of a path.
@@ -213,18 +219,20 @@ spec = do
       _sh_dir sh `shouldBe` ""
 
   describe "validateRuntime" $ do
-    it "RTProvider always returns RuntimeOk TargetProvider" $
-      validateRuntime Map.empty RTProvider `shouldBe` RuntimeOk TargetProvider
+    it "SkProvider always returns RuntimeOk TargetProvider" $
+      validateRuntime Map.empty (SkProvider (ProviderSpec (inferProviderId "") (ModelId "") Nothing)) `shouldBe` RuntimeOk TargetProvider
 
-    it "RTHarness present in map returns RuntimeOk (TargetHarness name)" $ do
+    it "SkHarness present in map returns RuntimeOk (TargetHarness name)" $ do
       let h = noOpHarness
           m = Map.singleton "cc" h
-      case validateRuntime m (RTHarness "cc") of
+          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+      case validateRuntime m (SkHarness hSpec) of
         RuntimeOk (TargetHarness n) -> n `shouldBe` "cc"
         other -> expectationFailure ("expected RuntimeOk TargetHarness, got: " <> show other)
 
-    it "RTHarness absent returns RuntimeFallback TargetProvider with warning" $
-      case validateRuntime Map.empty (RTHarness "dead") of
+    it "SkHarness absent returns RuntimeFallback TargetProvider with warning" $
+      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing []
+      in case validateRuntime Map.empty (SkHarness hSpec) of
         RuntimeFallback TargetProvider msg ->
           ("dead" `T.isInfixOf` msg && "falling back" `T.isInfixOf` msg)
             `shouldBe` True
@@ -320,6 +328,80 @@ spec = do
       loaded <- readIORef (_sh_meta sh')
       _sm_bootstrapConsumed loaded `shouldBe` True
       _th_close (_sh_transcript sh')
+
+  describe "setArchived" $ do
+    it "writes the archive flag back to session.json without touching anything else" $ withTmp $ \base -> do
+      let meta = mkMeta "arch-1" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      result <- setArchived base (parseSessionId "arch-1") True
+      result `shouldBe` Right ()
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "arch-1" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_archived onDisk `shouldBe` True
+      -- Bootstrap state and other fields must be untouched.
+      _sm_bootstrapConsumed onDisk `shouldBe` _sm_bootstrapConsumed meta
+      _sm_id onDisk `shouldBe` _sm_id meta
+
+    it "is reversible — archive then unarchive restores the flag" $ withTmp $ \base -> do
+      let meta = mkMeta "arch-2" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setArchived base (parseSessionId "arch-2") True
+      _ <- setArchived base (parseSessionId "arch-2") False
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "arch-2" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_archived onDisk `shouldBe` False
+
+    it "leaves the transcript and session directory in place after archive" $ withTmp $ \base -> do
+      let meta = mkMeta "arch-3" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setArchived base (parseSessionId "arch-3") True
+      doesDirectoryExist (base </> "arch-3") `shouldReturn` True
+      doesFileExist (base </> "arch-3" </> "session.json") `shouldReturn` True
+
+    it "returns SetArchivedSessionMissing for an unknown session" $ withTmp $ \base -> do
+      result <- setArchived base (parseSessionId "nope-1") True
+      result `shouldBe` Left SetArchivedSessionMissing
+
+  describe "setDescription" $ do
+    it "writes the description back to session.json" $ withTmp $ \base -> do
+      let meta = mkMeta "desc-1" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      result <- setDescription base (parseSessionId "desc-1") (Just "kernel build pipeline")
+      result `shouldBe` Right ()
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "desc-1" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description onDisk `shouldBe` Just "kernel build pipeline"
+
+    it "trims surrounding whitespace and treats all-whitespace as a clear" $ withTmp $ \base -> do
+      let meta = mkMeta "desc-2" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setDescription base (parseSessionId "desc-2") (Just "  hello world  ")
+      Right d1 <- Aeson.eitherDecodeFileStrict' (base </> "desc-2" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description d1 `shouldBe` Just "hello world"
+      _ <- setDescription base (parseSessionId "desc-2") (Just "   ")
+      Right d2 <- Aeson.eitherDecodeFileStrict' (base </> "desc-2" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description d2 `shouldBe` Nothing
+
+    it "Nothing clears a previously-set description" $ withTmp $ \base -> do
+      let meta = mkMeta "desc-3" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setDescription base (parseSessionId "desc-3") (Just "first attempt")
+      _ <- setDescription base (parseSessionId "desc-3") Nothing
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "desc-3" </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_description onDisk `shouldBe` Nothing
+
+    it "returns SetDescriptionSessionMissing for an unknown session" $ withTmp $ \base -> do
+      result <- setDescription base (parseSessionId "nope-2") (Just "x")
+      result `shouldBe` Left SetDescriptionSessionMissing
 
   describe "loadRecentMessages" $ do
     it "returns all messages when fewer than maxCount exist" $ withTmp $ \base -> do
@@ -422,22 +504,24 @@ spec = do
       _th_close th
 
   describe "resolveResumedTarget" $ do
-    it "RTProvider resolves to TargetProvider without logging a warning" $ do
+    it "SkProvider resolves to TargetProvider without logging a warning" $ do
       (logger, warnRef) <- mkCaptureLogger
-      tgt <- resolveResumedTarget logger Map.empty RTProvider
+      tgt <- resolveResumedTarget logger Map.empty (SkProvider (ProviderSpec (inferProviderId "") (ModelId "") Nothing))
       tgt `shouldBe` TargetProvider
       readIORef warnRef `shouldReturn` []
 
-    it "RTHarness present resolves to TargetHarness without a warning" $ do
+    it "SkHarness present resolves to TargetHarness without a warning" $ do
       (logger, warnRef) <- mkCaptureLogger
       let harnesses = Map.singleton "cc" noOpHarness
-      tgt <- resolveResumedTarget logger harnesses (RTHarness "cc")
+          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+      tgt <- resolveResumedTarget logger harnesses (SkHarness hSpec)
       tgt `shouldBe` TargetHarness "cc"
       readIORef warnRef `shouldReturn` []
 
-    it "RTHarness missing logs a warning and falls back to TargetProvider" $ do
+    it "SkHarness missing logs a warning and falls back to TargetProvider" $ do
       (logger, warnRef) <- mkCaptureLogger
-      tgt <- resolveResumedTarget logger Map.empty (RTHarness "dead")
+      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing []
+      tgt <- resolveResumedTarget logger Map.empty (SkHarness hSpec)
       tgt `shouldBe` TargetProvider
       warnings <- readIORef warnRef
       case warnings of

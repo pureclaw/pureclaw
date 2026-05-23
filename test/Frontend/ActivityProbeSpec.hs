@@ -220,16 +220,23 @@ spec = do
         Left  e -> expectationFailure $
           "probe crash should be caught, not propagated: " <> show e
 
-  describe "handleNewSession — D18 (publishes SaSessionCreated to the broker)" $
-    it "POST /api/sessions/new publishes ActivityChanged sid (SaSessionCreated meta)" $ do
+  describe "handleNewTab — D18 (publishes SaSessionCreated to the broker)" $
+    it "POST /api/tabs/new publishes ActivityChanged sid (SaSessionCreated meta)" $ do
       broker <- mkInProcessBroker defaultBrokerConfig
       eSub   <- _streamBroker_subscribe broker
       sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
       withSystemTempDirectory "pureclaw-d18" $ \tmp -> do
         env <- mkFrontendEnvForD18 broker tmp
         let app   = apiApp env
-            body  = "{}"
-            path  = ["api", "sessions", "new"]
+            -- POST /api/tabs/new with a session kind (TkSession SkProvider).
+            -- Main deprecated POST /api/sessions/new to 410 Gone during the
+            -- merge; the broker-publish behavior moved into handleNewTab's
+            -- TkSession branch (see Frontend.API ActivityChanged publish
+            -- after _sh_save sh).
+            body  = "{\"kind\":{\"tag\":\"session\",\"session_kind\":\
+                    \{\"tag\":\"provider\",\"provider\":\"anthropic\",\
+                    \\"model\":\"claude-3-7-sonnet\"}}}"
+            path  = ["api", "tabs", "new"]
         runWaiApp app methodPost path body
         -- Drain queued events; the publish ordering for D18 is
         -- "publish then write meta" or "write meta then publish" — we
@@ -272,6 +279,7 @@ mkFrontendEnvForD18 broker sessionsDir = do
   harnessesRef <- newIORef Map.empty
   providerRef  <- newIORef Nothing
   modelRef     <- newIORef Nothing
+  tabCountRef  <- newIORef 0
   pure FrontendEnv
     { _fe_harnesses    = harnessesRef
     , _fe_sessionsDir  = sessionsDir
@@ -284,6 +292,12 @@ mkFrontendEnvForD18 broker sessionsDir = do
     , _fe_defaultAgent = Nothing
     , _fe_broker       = Just broker
     , _fe_streamGuard  = Nothing
+    , _fe_maxTabs      = 32  -- non-zero so handleNewTab doesn't return 409
+    , _fe_tabCount     = tabCountRef
+    , _fe_listTabs     = pure []
+    , _fe_closeTab     = \_ -> pure (Left "not wired in test")
+    , _fe_listModels   = \_ -> pure []
+    , _fe_listProviders = pure []
     }
 
 -- | Run a WAI 'Application' with a one-shot request body.

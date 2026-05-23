@@ -37,9 +37,11 @@ import PureClaw.Frontend.Stream
   , encodeServerEvent
   )
 import PureClaw.Session.Types
-  ( RuntimeType (..)
+  ( SessionKind (..)
+  , ProviderSpec (..)
   , SessionMeta (..)
   )
+import PureClaw.Core.Types (ModelId (..), ProviderId (..))
 import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)
@@ -101,12 +103,15 @@ sampleSessionMeta :: SessionMeta
 sampleSessionMeta = SessionMeta
   { _sm_id                = sid
   , _sm_agent             = Nothing
-  , _sm_runtime           = RTProvider
+  , _sm_kind              = SkProvider (ProviderSpec (ProviderId "anthropic") (ModelId "claude-3-7-sonnet") Nothing)
   , _sm_model             = "claude-3-7-sonnet"
   , _sm_channel           = "web"
   , _sm_createdAt         = helloTime
   , _sm_lastActive        = helloTime
   , _sm_bootstrapConsumed = True
+  , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
   }
 
 -- | Client→server focus op (no since).

@@ -250,6 +250,7 @@ Development patterns and standards are documented in `.claude/guides/`:
 
 - **AgentEnv**: All `runAgentLoop` parameters are collected into a single `AgentEnv` record. Pass `AgentEnv` to the agent loop and to slash command handlers (replaces the old `SlashEnv`). Decompose fields at call sites as needed.
 - **Handle pattern**: Every capability is a record of IO actions. No global state. Handles are passed explicitly.
+- **Session/Tab unification**: `SessionKind` (`SkProvider | SkHarness`) is the persistent what-kind-of-AI on `SessionMeta._sm_kind`. `TabKind` (`TkSession !SessionKind | TkRawShell !TerminalBackend`) is the runtime what-occupies-a-tab-slot. Leaf module `PureClaw.Session.Kind` holds all serializable spec types; factory/transport layers hold runtime-validated types. "Session" = persistent entity noun; "Tab" = slot affordance.
 
 ## Notes
 

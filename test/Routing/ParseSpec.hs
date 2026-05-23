@@ -102,6 +102,8 @@ testRoutingConfig = RT.RoutingConfig
   , RT._rc_maxConcurrentActive = 4
   , RT._rc_maxNameLen          = 32
   , RT._rc_sshIdentityKey      = "default-ssh-key"
+  , RT._rc_maxPureClawDepth   = 2
+  , RT._rc_pureClawDepth      = 0
   }
 
 -- | Build a 'Tab.TabIndex' for tests. Panics on the impossible
@@ -154,6 +156,33 @@ spec = do
     it "P11: parseInput \"/tab new shell\" yields ParsedSlashCmd (CmdTab (TabNewCmd (Just TkaShell) Nothing)) [tmux-packing]" $
       parse "/tab new shell" `shouldBe`
         Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaShell) Nothing)))
+
+    -- WU-11: /tab new provider
+    it "C1: parseInput \"/tab new provider\" yields ParsedSlashCmd (CmdTab (TabNewCmd (Just TkaProvider) Nothing))" $
+      parse "/tab new provider" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaProvider) Nothing)))
+
+    it "C1: parseInput \"/tab new provider anthropic claude-opus-4-7\" carries args" $
+      parse "/tab new provider anthropic claude-opus-4-7" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaProvider) (Just "anthropic claude-opus-4-7"))))
+
+    -- C2: /tab new harness
+    it "C2: parseInput \"/tab new harness claude-code local\" parses as TkaHarness with args" $
+      parse "/tab new harness claude-code local" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaHarness) (Just "claude-code local"))))
+
+    it "C2: parseInput \"/tab new harness codex tmux mysession:0\" parses correctly" $
+      parse "/tab new harness codex tmux mysession:0" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaHarness) (Just "codex tmux mysession:0"))))
+
+    -- C3: /tab new shell
+    it "C3: parseInput \"/tab new shell\" defaults to TkaShell with no args" $
+      parse "/tab new shell" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaShell) Nothing)))
+
+    it "C3: parseInput \"/tab new ssh admin@host:22\" parses as TkaSsh with args" $
+      parse "/tab new ssh admin@host:22" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabNewCmd (Just Slash.TkaSsh) (Just "admin@host:22"))))
 
     it "P12: parseInput \"/tab close 3\" yields ParsedSlashCmd (CmdTab (TabCloseCmd 3 ForceNo))" $
       parse "/tab close 3" `shouldBe`

@@ -14,9 +14,10 @@ module PureClaw.CLI.Commands
 
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
-import Control.Exception (IOException, bracket_, try)
-import Control.Monad (unless, when)
+import Control.Exception (IOException, SomeException, bracket_, try)
+import Control.Monad (filterM, unless, when)
 import Data.ByteString (ByteString)
+import Data.Either (fromRight)
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Map.Strict qualified as Map
@@ -144,6 +145,9 @@ data ChatOptions = ChatOptions
   , _co_agent         :: Maybe String
   , _co_session       :: Maybe String
   , _co_prefix        :: Maybe String
+  , _co_depth         :: Int
+    -- ^ Current HPureClaw recursion depth. Internal — set by the parent
+    -- process when spawning a child via @--depth N@. Not user-facing.
   }
   deriving stock (Show, Eq)
 
@@ -215,6 +219,12 @@ chatOptionsParser = ChatOptions
       ( long "prefix"
      <> help "Prefix for the new session ID (mutually exclusive with --session)"
       ))
+  <*> option auto
+      ( long "depth"
+     <> value 0
+     <> internal
+     <> help "HPureClaw recursion depth (internal, set by parent process)"
+      )
 
 -- | Parse a provider type from a CLI string.
 parseProviderType :: ReadM ProviderType
@@ -572,16 +582,23 @@ runChat opts = do
                 exitFailure
           Nothing -> do
             let sid = SessionTypes.newSessionId mPrefix now
+                mAgent = fmap AgentDef._ad_name mAgentDef
                 initialMeta = SessionTypes.SessionMeta
                   { SessionTypes._sm_id                = sid
-                  , SessionTypes._sm_agent             =
-                      fmap AgentDef._ad_name mAgentDef
-                  , SessionTypes._sm_runtime           = SessionTypes.RTProvider
+                  , SessionTypes._sm_agent             = mAgent
+                  , SessionTypes._sm_kind              = SessionTypes.SkProvider
+                      (SessionTypes.ProviderSpec
+                        (SessionTypes.inferProviderId (T.pack effectiveModel))
+                        (ModelId (T.pack effectiveModel))
+                        mAgent)
                   , SessionTypes._sm_model             = T.pack effectiveModel
                   , SessionTypes._sm_channel           = T.pack effectiveChannel
                   , SessionTypes._sm_createdAt         = now
                   , SessionTypes._sm_lastActive        = now
                   , SessionTypes._sm_bootstrapConsumed = False
+                  , SessionTypes._sm_archived          = False
+                  , SessionTypes._sm_description       = Nothing
+                  , SessionTypes._sm_autoSummary       = Nothing
                   }
             -- WU3: see broker construction at the top of startWithChannel.
             mkSessionHandle (Just broker) logger sessionsDir initialMeta
@@ -607,7 +624,7 @@ runChat opts = do
         providerRef <- newIORef mProvider
         modelRef    <- newIORef (Just model)
         -- Runtime validation on resume: if the session's recorded
-        -- runtime was an RTHarness, validate that the harness is still
+        -- kind was an SkHarness, validate that the harness is still
         -- running (it may have been discovered by 'discoverHarnesses'
         -- above). Missing harness falls back to TargetProvider with a
         -- warning; fresh sessions simply start at TargetProvider.
@@ -615,7 +632,7 @@ runChat opts = do
           Just _  -> do
             resumedMeta <- readIORef (_sh_meta sessionHandle)
             resolveResumedTarget logger discoveredHarnesses
-              (SessionTypes._sm_runtime resumedMeta)
+              (SessionTypes._sm_kind resumedMeta)
           Nothing -> pure TargetProvider
         targetRef   <- newIORef initialTarget
         windowIdxRef <- newIORef nextWindowIdx
@@ -630,7 +647,9 @@ runChat opts = do
         -- pre-allocate the tab registry, focus pointer, active-count
         -- TVar, runner placeholder map, and bounded channel-out queue.
         -- All start empty / Nothing / 0; live tabs land in WU5+.
-        routingCfg     <- Routing.loadRoutingConfig pureclawDir
+        routingCfg0    <- Routing.loadRoutingConfig pureclawDir
+        let routingCfg = routingCfg0
+              { Routing._rc_pureClawDepth = _co_depth opts }
         tabsRef        <- newIORef IntMap.empty
         focusRef       <- newIORef Nothing
         activeCountTv  <- newTVarIO 0
@@ -676,10 +695,34 @@ runChat opts = do
         -- @startWithChannel@ as the common parent, and both are
         -- guaranteed to be cancelled within 1 s of @runAgentLoopWith@
         -- returning or throwing.
+        feTabCountRef <- newIORef 0
+        let listModelsForProvider providerName =
+              case parseProviderMaybe (Just providerName) of
+                Nothing -> pure []
+                Just ptype -> do
+                  mProv <- resolveProvider ptype effectiveApiKey vaultOpt manager
+                  case mProv of
+                    Nothing -> pure []
+                    Just sp -> do
+                      result <- try @SomeException (listModels sp)
+                      case result of
+                        Left  _   -> pure []
+                        Right ids -> pure (map unModelId ids)
+            listConfiguredProviders = do
+              let all_ = [minBound .. maxBound] :: [ProviderType]
+              keepers <- filterM
+                (\p -> hasProviderCredentials manager p effectiveApiKey vaultOpt)
+                all_
+              pure $ map
+                (\p -> ProviderInfo
+                  { _pi_name      = T.pack (providerToText p)
+                  , _pi_isDefault = p == effectiveProvider
+                  })
+                keepers
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_sessionsDir  = sessionsDir
-              , _fe_recentLimit  = 20
+              , _fe_recentLimit  = 50
               , _fe_provider     = providerRef
               , _fe_model        = modelRef
               , _fe_systemPrompt = sysPrompt
@@ -688,6 +731,12 @@ runChat opts = do
               , _fe_defaultAgent = _fc_defaultAgent fileCfg
               , _fe_broker       = Just broker
               , _fe_streamGuard  = Just streamGuard
+              , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
+              , _fe_tabCount     = feTabCountRef
+              , _fe_listTabs     = pure []
+              , _fe_closeTab     = \_ -> pure (Left "not wired")
+              , _fe_listModels   = listModelsForProvider
+              , _fe_listProviders = listConfiguredProviders
               }
         Async.withAsync
           (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
@@ -784,6 +833,7 @@ buildRegistry :: SecurityPolicy -> ShellHandle -> WorkspaceRoot -> FileHandle ->
 buildRegistry policy sh workspace fh mh nh ch =
   let reg = uncurry registerTool
   in reg (shellTool policy sh)
+   $ reg (execTool policy sh)
    $ reg (fileReadTool workspace fh)
    $ reg (fileWriteTool workspace fh)
    $ reg (editTool workspace fh)
@@ -863,8 +913,46 @@ resolveProvider OpenAI keyOpt vaultOpt manager = do
 resolveProvider OpenRouter keyOpt vaultOpt manager = do
   mApiKey <- resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
   pure (fmap (MkProvider . mkOpenRouterProvider manager) mApiKey)
-resolveProvider Ollama _ _ manager =
-  pure (Just (MkProvider (mkOllamaProvider manager)))
+resolveProvider Ollama _ _ manager = do
+  provider <- mkOllamaProvider manager
+  pure (Just (MkProvider provider))
+
+-- | Cheap check for whether a provider is "configured" — i.e., the
+-- frontend should offer it in the provider dropdown.
+--
+--   * @Anthropic@: API key in flag/env/vault, or cached OAuth tokens in
+--     the vault. Does not refresh expired tokens.
+--   * @OpenAI@ \/ @OpenRouter@: API key in flag/env/vault.
+--   * @Ollama@: a sub-second HTTP probe of @\/api\/tags@ on @localhost:11434@.
+--
+-- Never throws. Intended to be safe to call on every modal open.
+hasProviderCredentials
+  :: HTTP.Manager
+  -> ProviderType
+  -> Maybe String
+  -> Maybe VaultHandle
+  -> IO Bool
+hasProviderCredentials _ Anthropic keyOpt vaultOpt = do
+  mApiKey <- resolveApiKey keyOpt "ANTHROPIC_API_KEY" vaultOpt
+  case mApiKey of
+    Just _  -> pure True
+    Nothing -> do
+      cachedBs <- tryVaultLookup vaultOpt oauthVaultKey
+      pure (isJust (cachedBs >>= eitherToMaybe . deserializeTokens))
+hasProviderCredentials _ OpenAI keyOpt vaultOpt =
+  isJust <$> resolveApiKey keyOpt "OPENAI_API_KEY" vaultOpt
+hasProviderCredentials _ OpenRouter keyOpt vaultOpt =
+  isJust <$> resolveApiKey keyOpt "OPENROUTER_API_KEY" vaultOpt
+hasProviderCredentials manager Ollama _ _ = do
+  result <- try @SomeException $ do
+    initReq <- HTTP.parseRequest "http://localhost:11434/api/tags"
+    let req = initReq
+          { HTTP.method          = "GET"
+          , HTTP.responseTimeout = HTTP.responseTimeoutMicro 1000000  -- 1s
+          }
+    _ <- HTTP.httpLbs req manager
+    pure True
+  pure (fromRight False result)
 
 -- | Vault key used to cache OAuth tokens between sessions.
 oauthVaultKey :: T.Text

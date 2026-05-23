@@ -19,6 +19,7 @@ import Toml qualified
 import PureClaw.Core.Types (ModelId (..), ProviderId (..))
 import PureClaw.Handles.Tab qualified as Tab
 import PureClaw.Routing.Config
+import PureClaw.Session.Kind qualified as SK
 import PureClaw.Routing.Types
 
 spec :: Spec
@@ -26,7 +27,11 @@ spec = do
   describe "defaultRoutingConfig" $ do
     it "uses the documented field values" $ do
       let c = defaultRoutingConfig
-      _rc_defaultKind c         `shouldBe` Tab.KindAi
+      _rc_defaultKind c         `shouldBe`
+        Tab.TkSession (SK.SkProvider (SK.ProviderSpec
+          (ProviderId "anthropic")
+          (ModelId "claude-sonnet-4-5")
+          Nothing))
       _aid_providerId (_rc_defaultAi c) `shouldBe` ProviderId "anthropic"
       _aid_modelId    (_rc_defaultAi c) `shouldBe` ModelId "claude-sonnet-4-5"
       _sd_command     (_rc_defaultShell c) `shouldBe` "bash"
@@ -38,6 +43,8 @@ spec = do
       _rc_maxConcurrentActive c `shouldBe` 4
       _rc_maxNameLen c          `shouldBe` 32
       _rc_sshIdentityKey c      `shouldBe` "default-ssh-key"
+      _rc_maxPureClawDepth c    `shouldBe` 2
+      _rc_pureClawDepth c       `shouldBe` 0
 
   describe "loadRoutingConfigFromFile" $ do
     it "returns defaultRoutingConfig when the file is missing" $ do
@@ -95,38 +102,74 @@ spec = do
         TIO.writeFile path $ T.unlines
           [ "[routing]"
           , "max_tabs = 5"
-          , "default_kind = \"harness\""
+          , "default_kind = \"shell\""
           ]
         cfg <- loadRoutingConfigFromFile path
         _rc_maxTabs cfg     `shouldBe` 5
-        _rc_defaultKind cfg `shouldBe` Tab.KindHarness
+        _rc_defaultKind cfg `shouldBe` Tab.TkRawShell SK.TbLocal
         -- Untouched fields fall back to defaults.
         _rc_inputQueueBound cfg     `shouldBe` _rc_inputQueueBound defaultRoutingConfig
         _rc_channelOutQBound cfg    `shouldBe` _rc_channelOutQBound defaultRoutingConfig
         _rc_defaultAi cfg           `shouldBe` _rc_defaultAi defaultRoutingConfig
         _rc_defaultShell cfg        `shouldBe` _rc_defaultShell defaultRoutingConfig
+        -- WU-9: depth fields fall through to defaults when absent in TOML
+        _rc_maxPureClawDepth cfg    `shouldBe` _rc_maxPureClawDepth defaultRoutingConfig
+        _rc_pureClawDepth cfg       `shouldBe` 0
+
+    it "rejects unsupported kinds (harness/ssh/tmux) and falls back to defaults" $ do
+      withSystemTempDirectory "pureclaw-routing-cfg" $ \tmp -> do
+        let path = tmp </> "harness.toml"
+        TIO.writeFile path "[routing]\ndefault_kind = \"harness\"\n"
+        cfg1 <- loadRoutingConfigFromFile path
+        cfg1 `shouldBe` defaultRoutingConfig
+
+        TIO.writeFile path "[routing]\ndefault_kind = \"ssh\"\n"
+        cfg2 <- loadRoutingConfigFromFile path
+        cfg2 `shouldBe` defaultRoutingConfig
+
+        TIO.writeFile path "[routing]\ndefault_kind = \"tmux\"\n"
+        cfg3 <- loadRoutingConfigFromFile path
+        cfg3 `shouldBe` defaultRoutingConfig
+
+    it "loads max_pureclaw_depth from TOML" $ do
+      withSystemTempDirectory "pureclaw-routing-cfg" $ \tmp -> do
+        let path = tmp </> "depth.toml"
+        TIO.writeFile path $ T.unlines
+          [ "[routing]"
+          , "max_pureclaw_depth = 5"
+          ]
+        cfg <- loadRoutingConfigFromFile path
+        _rc_maxPureClawDepth cfg `shouldBe` 5
+        -- pureClawDepth is CLI-only and always 0 from TOML
+        _rc_pureClawDepth cfg    `shouldBe` 0
 
     it "accepts a [routing]-less document with top-level keys" $ do
       withSystemTempDirectory "pureclaw-routing-cfg" $ \tmp -> do
         let path = tmp </> "toplevel.toml"
         TIO.writeFile path $ T.unlines
-          [ "default_kind = \"ssh\""
+          [ "default_kind = \"shell\""
           , "max_tabs = 3"
           ]
         cfg <- loadRoutingConfigFromFile path
-        _rc_defaultKind cfg `shouldBe` Tab.KindSsh
+        _rc_defaultKind cfg `shouldBe` Tab.TkRawShell SK.TbLocal
         _rc_maxTabs cfg     `shouldBe` 3
 
-    it "all five TabKind values round-trip through the codec" $ do
+    it "ai and shell round-trip through the TOML codec" $ do
       withSystemTempDirectory "pureclaw-routing-cfg" $ \tmp -> do
-        let path = tmp </> "tmux.toml"
-        TIO.writeFile path "[routing]\ndefault_kind = \"tmux\"\n"
-        cfg1 <- loadRoutingConfigFromFile path
-        _rc_defaultKind cfg1 `shouldBe` Tab.KindTmux
-
+        let path = tmp </> "kind.toml"
+        -- "ai" round-trips; the ProviderSpec comes from defaultAiDefaults.
         TIO.writeFile path "[routing]\ndefault_kind = \"ai\"\n"
+        cfg1 <- loadRoutingConfigFromFile path
+        _rc_defaultKind cfg1 `shouldBe`
+          Tab.TkSession (SK.SkProvider (SK.ProviderSpec
+            (ProviderId "anthropic")
+            (ModelId "claude-sonnet-4-5")
+            Nothing))
+
+        -- "shell" round-trips exactly.
+        TIO.writeFile path "[routing]\ndefault_kind = \"shell\"\n"
         cfg2 <- loadRoutingConfigFromFile path
-        _rc_defaultKind cfg2 `shouldBe` Tab.KindAi
+        _rc_defaultKind cfg2 `shouldBe` Tab.TkRawShell SK.TbLocal
 
     it "rejects an unknown tab kind by falling back to defaults" $ do
       withSystemTempDirectory "pureclaw-routing-cfg" $ \tmp -> do
@@ -158,10 +201,11 @@ spec = do
         Left errs -> expectationFailure
           ("decode failed: " <> T.unpack (Toml.prettyTomlDecodeErrors errs))
 
-    it "encodes every TabKind round-trip via the codec" $ do
-      -- Exercise the encode side of the codec for every TabKind so
-      -- 'showKind' is covered on all five branches.
-      let trip k = do
+    it "encodes ai and shell TabKind round-trip via the codec" $ do
+      -- Only "ai" and "shell" can round-trip through the TOML codec.
+      -- Harness/ssh/tmux require structured payloads that cannot be
+      -- represented as a single TOML string.
+      let tripExact k = do
             let cfg = defaultRoutingConfig { _rc_defaultKind = k }
                 encoded = Toml.encode routingConfigCodec cfg
             case Toml.decode routingConfigCodec encoded of
@@ -169,8 +213,50 @@ spec = do
               Left errs ->
                 expectationFailure
                   ("decode failed: " <> T.unpack (Toml.prettyTomlDecodeErrors errs))
-      trip Tab.KindAi
-      trip Tab.KindHarness
-      trip Tab.KindShell
-      trip Tab.KindSsh
-      trip Tab.KindTmux
+      -- "shell" round-trips exactly.
+      tripExact (Tab.TkRawShell SK.TbLocal)
+      -- "ai" round-trip normalizes ProviderSpec to the config default.
+      let aiCfg = defaultRoutingConfig
+            { _rc_defaultKind =
+                Tab.TkSession (SK.SkProvider (SK.ProviderSpec
+                  (ProviderId "anthropic")
+                  (ModelId "claude-sonnet-4-5")
+                  Nothing))
+            }
+          encoded = Toml.encode routingConfigCodec aiCfg
+      case Toml.decode routingConfigCodec encoded of
+        Right back -> _rc_defaultKind back `shouldBe`
+          Tab.TkSession (SK.SkProvider (SK.ProviderSpec
+            (ProviderId "anthropic")
+            (ModelId "claude-sonnet-4-5")
+            Nothing))
+        Left errs ->
+          expectationFailure
+            ("ai decode failed: " <> T.unpack (Toml.prettyTomlDecodeErrors errs))
+
+    it "showKind encodes all TabKind variants to the correct string" $ do
+      -- Exercises all branches of showKind for coverage, including kinds
+      -- that cannot round-trip through parseKind.
+      let encodeKind k =
+            let cfg = defaultRoutingConfig { _rc_defaultKind = k }
+            in Toml.encode routingConfigCodec cfg
+          containsKindStr expected encoded =
+            T.isInfixOf ("\"" <> expected <> "\"") encoded
+              `shouldBe` True
+      containsKindStr "ai"
+        (encodeKind (Tab.TkSession (SK.SkProvider (SK.ProviderSpec
+          (ProviderId "anthropic") (ModelId "claude-sonnet-4-5") Nothing))))
+      containsKindStr "harness"
+        (encodeKind (Tab.TkSession (SK.SkHarness (SK.HarnessSpec
+          SK.HClaudeCode SK.TbLocal Nothing []))))
+      containsKindStr "shell"
+        (encodeKind (Tab.TkRawShell SK.TbLocal))
+      containsKindStr "ssh"
+        (encodeKind (Tab.TkRawShell (SK.TbSsh (SK.SshConfig "" "" Nothing))))
+      containsKindStr "tmux"
+        (encodeKind (Tab.TkRawShell (SK.TbTmux (SK.TmuxConfig "" "" Nothing))))
+      case SK.mkContainerTarget "test-container" of
+        Right ct -> containsKindStr "container"
+          (encodeKind (Tab.TkRawShell (SK.TbContainer
+            (SK.ContainerSpec SK.Docker ct))))
+        Left _ -> expectationFailure "mkContainerTarget failed on valid input"

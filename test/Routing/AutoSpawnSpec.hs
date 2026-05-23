@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Routing.AutoSpawnSpec
 -- Description : A-series + B-series DoDs (WU9).
@@ -53,6 +54,9 @@ import PureClaw.Handles.Tab
   , TabName (..)
   , TabStatus (..)
   , mkTabIndex
+  , pattern KindAi
+  , pattern KindHarness
+  , pattern KindShell
   )
 import PureClaw.Handles.Tab qualified
 import PureClaw.MCP (McpServer)
@@ -534,12 +538,29 @@ spec = do
       out <- renderDashboard env
       let lined = T.lines out
       length lined `shouldBe` 3
-      -- The focused tab carries an asterisk; the kind keywords appear.
-      out `shouldSatisfy` T.isInfixOf "ai"
-      out `shouldSatisfy` T.isInfixOf "shell"
-      out `shouldSatisfy` T.isInfixOf "harness"
+      -- The focused tab carries an asterisk; the kind:detail keywords appear.
+      out `shouldSatisfy` T.isInfixOf "provider:anthropic"
+      out `shouldSatisfy` T.isInfixOf "shell:local"
+      out `shouldSatisfy` T.isInfixOf "harness:claude-code"
       out `shouldSatisfy` T.isInfixOf "/1"
       out `shouldSatisfy` T.isInfixOf "*"
+
+    -- WU-11 C5: /tab list shows kind info
+    it "C5: dashboard includes kind detail (provider:anthropic, harness:claude-code, shell:local)" $ do
+      env <- mkAutoSpawnEnv
+      -- KindAi uses defaultProviderSpec with ProviderId "anthropic"
+      st0 <- mkSyntheticTab (ti 0) KindAi "first" (Idle t0)
+      -- KindShell = TkRawShell TbLocal
+      st1 <- mkSyntheticTab (ti 1) KindShell "sh" (Idle t0)
+      -- KindHarness uses defaultHarnessSpec with HClaudeCode
+      st2 <- mkSyntheticTab (ti 2) KindHarness "h" (Idle t0)
+      _ <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      _ <- insertTab (_env_tabs env) (ti 1) (_st_handle st1)
+      _ <- insertTab (_env_tabs env) (ti 2) (_st_handle st2)
+      out <- renderDashboard env
+      out `shouldSatisfy` T.isInfixOf "provider:anthropic"
+      out `shouldSatisfy` T.isInfixOf "harness:claude-code"
+      out `shouldSatisfy` T.isInfixOf "shell:local"
 
     it "B3: /tabs rendering for ≥ 8 tabs uses bullet rendering" $ do
       env <- mkAutoSpawnEnv
@@ -665,6 +686,7 @@ spec = do
     it "kindKeyword + tabKindArgToKind cover every TabKindArg arm" $ do
       let ks =
             [ PureClaw.Agent.SlashCommands.TkaAi
+            , PureClaw.Agent.SlashCommands.TkaProvider
             , PureClaw.Agent.SlashCommands.TkaHarness
             , PureClaw.Agent.SlashCommands.TkaShell
             , PureClaw.Agent.SlashCommands.TkaSsh
@@ -672,7 +694,26 @@ spec = do
             ]
           kindMap = map PureClaw.Routing.AutoSpawn.tabKindArgToKind ks
           keywords = map PureClaw.Routing.AutoSpawn.kindKeyword kindMap
-      keywords `shouldBe` ["ai", "harness", "shell", "ssh", "tmux"]
+      -- TkaAi and TkaProvider both map to TkSession (SkProvider _) -> "ai"
+      keywords `shouldBe` ["ai", "ai", "harness", "shell", "ssh", "tmux"]
+
+    -- WU-11 S5: maxTabs enforcement on /tab new provider
+    it "S5: /tab new provider at full capacity emits TabLimitExceeded" $ do
+      env0 <- mkAutoSpawnEnv
+      let envFull = env0
+            { _env_routingConfig = (_env_routingConfig env0)
+                { _rc_maxTabs = 1 }
+            }
+      st0 <- mkSyntheticTab (ti 0) KindAi "t0" (Idle t0)
+      _   <- insertTab (_env_tabs envFull) (ti 0) (_st_handle st0)
+      queue <- newIORef []
+      ds  <- newDispatcherState envFull (syntheticFactoryFromQueue queue)
+      dispatchOne envFull ds (UserId "u") "/tab new provider"
+      drained <- drainQueue (_env_channelOutQ envFull)
+      banners drained `shouldSatisfy`
+        any (\t -> "/tab new" `T.isInfixOf` t && "tab:" `T.isInfixOf` t)
+      tabs <- readIORef (_env_tabs envFull)
+      IntMap.size tabs `shouldBe` 1
 
     it "splitArgs: Nothing yields []; Just splits on whitespace" $ do
       PureClaw.Routing.AutoSpawn.splitArgs Nothing `shouldBe` []

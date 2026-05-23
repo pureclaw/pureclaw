@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Coexistence.SlashCmdSpec
 -- Description : K-series Tabbed Chat coexistence DoDs (WU10).
@@ -56,6 +57,8 @@ import PureClaw.Handles.Tab
   , TabName (..)
   , TabStatus (..)
   , mkTabIndex
+  , pattern KindAi
+  , pattern KindShell
   )
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)

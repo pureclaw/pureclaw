@@ -73,6 +73,7 @@ mkTestFrontendEnv sessionsDir broker guard = do
   harnesses    <- newIORef Map.empty
   providerRef  <- newIORef Nothing
   modelRef     <- newIORef Nothing
+  tabCountRef  <- newIORef 0
   pure FrontendEnv
     { _fe_harnesses    = harnesses
     , _fe_sessionsDir  = sessionsDir
@@ -85,6 +86,12 @@ mkTestFrontendEnv sessionsDir broker guard = do
     , _fe_defaultAgent = Nothing
     , _fe_broker       = Just broker
     , _fe_streamGuard  = Just guard
+    , _fe_maxTabs      = 0
+    , _fe_tabCount     = tabCountRef
+    , _fe_listTabs     = pure []
+    , _fe_closeTab     = \_ -> pure (Left "not wired in test")
+    , _fe_listModels   = \_ -> pure []
+    , _fe_listProviders = pure []
     }
 
 -- | Variant of 'mkTestFrontendEnv' that lets the caller construct the

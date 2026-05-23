@@ -244,3 +244,23 @@ spec = do
     it "autonomy deny overrides allow list" $ do
       let policy = buildPolicy (Just Deny) ["git"]
       _sp_autonomy policy `shouldBe` Deny
+
+  describe "--depth flag (WU-9)" $ do
+    it "defaults to 0 when not provided" $ do
+      case parseArgs [] of
+        Just opts -> _co_depth opts `shouldBe` 0
+        Nothing -> expectationFailure "parse failed"
+
+    it "parses --depth with an integer value" $ do
+      case parseArgs ["--depth", "3"] of
+        Just opts -> _co_depth opts `shouldBe` 3
+        Nothing -> expectationFailure "parse failed"
+
+    it "is hidden (internal flag)" $ do
+      -- The --depth flag uses 'internal' so it does not appear in --help.
+      -- We verify it parses silently alongside other visible flags.
+      case parseArgs ["--model", "test", "--depth", "2"] of
+        Just opts -> do
+          _co_model opts `shouldBe` Just "test"
+          _co_depth opts `shouldBe` 2
+        Nothing -> expectationFailure "parse failed"

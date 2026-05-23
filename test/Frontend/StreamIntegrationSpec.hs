@@ -82,9 +82,11 @@ import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Session.Handle (mkSessionHandle, SessionHandle (..))
 import PureClaw.Session.Types
-  ( RuntimeType (..)
+  ( SessionKind (..)
+  , ProviderSpec (..)
   , SessionMeta (..)
   )
+import PureClaw.Core.Types (ModelId (ModelId), ProviderId (..))
 import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)
@@ -157,12 +159,15 @@ mkMeta :: Text -> SessionMeta
 mkMeta sidText = SessionMeta
   { _sm_id                = SessionId sidText
   , _sm_agent             = either (const Nothing) Just (mkAgentName "tester")
-  , _sm_runtime           = RTProvider
+  , _sm_kind              = SkProvider (ProviderSpec (ProviderId "stub") (ModelId "test-model") Nothing)
   , _sm_model             = "test-model"
   , _sm_channel           = "test"
   , _sm_createdAt         = sampleTime
   , _sm_lastActive        = sampleTime
   , _sm_bootstrapConsumed = True
+  , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
   }
 
 -- | Drain the hello event from a freshly opened connection.

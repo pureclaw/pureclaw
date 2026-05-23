@@ -42,6 +42,7 @@ import Toml qualified
 import PureClaw.Core.Types
 import PureClaw.Handles.Tab qualified as Tab
 import PureClaw.Routing.Types
+import PureClaw.Session.Kind qualified as SK
 
 
 -- ---------------------------------------------------------------------------
@@ -67,13 +68,23 @@ defaultShellDefaults = ShellDefaults
   { _sd_command = "bash"
   }
 
+-- | Default 'ProviderSpec' used when TOML parses @\"ai\"@ as the
+-- @default_kind@. Constructed from the same provider\/model pair as
+-- 'defaultAiDefaults' so the two stay in sync.
+defaultProviderSpecForConfig :: SK.ProviderSpec
+defaultProviderSpecForConfig = SK.ProviderSpec
+  { SK._ps_provider = _aid_providerId defaultAiDefaults
+  , SK._ps_model    = _aid_modelId    defaultAiDefaults
+  , SK._ps_agent    = Nothing
+  }
+
 -- | The default 'RoutingConfig' used when no on-disk config is found
 -- (or when on-disk fields are missing). Field values match the
 -- per-field documentation in 'RoutingConfig' and the design doc's
 -- RoutingConfig section.
 defaultRoutingConfig :: RoutingConfig
 defaultRoutingConfig = RoutingConfig
-  { _rc_defaultKind         = Tab.KindAi
+  { _rc_defaultKind         = Tab.TkSession (SK.SkProvider defaultProviderSpecForConfig)
   , _rc_defaultAi           = defaultAiDefaults
   , _rc_defaultShell        = defaultShellDefaults
   , _rc_switchRecap         = 3
@@ -84,6 +95,8 @@ defaultRoutingConfig = RoutingConfig
   , _rc_maxConcurrentActive = 4
   , _rc_maxNameLen          = 32
   , _rc_sshIdentityKey      = "default-ssh-key"
+  , _rc_maxPureClawDepth   = 2
+  , _rc_pureClawDepth      = 0
   }
 
 
@@ -106,6 +119,7 @@ data PartialRoutingConfig = PartialRoutingConfig
   , _prc_maxConcurrentActive :: !(Maybe Int)
   , _prc_maxNameLen          :: !(Maybe Int)
   , _prc_sshIdentityKey      :: !(Maybe Text)
+  , _prc_maxPureClawDepth   :: !(Maybe Int)
   }
 
 -- | Fold a partial config onto the defaults.
@@ -122,6 +136,10 @@ overlayRoutingConfig p = RoutingConfig
   , _rc_maxConcurrentActive = pick _rc_maxConcurrentActive _prc_maxConcurrentActive
   , _rc_maxNameLen          = pick _rc_maxNameLen          _prc_maxNameLen
   , _rc_sshIdentityKey      = pick _rc_sshIdentityKey      _prc_sshIdentityKey
+  , _rc_maxPureClawDepth   = pick _rc_maxPureClawDepth   _prc_maxPureClawDepth
+    -- _rc_pureClawDepth is CLI-only (--depth flag), not TOML-configurable.
+    -- Always falls through to the default (0).
+  , _rc_pureClawDepth      = _rc_pureClawDepth defaultRoutingConfig
   }
   where
     pick :: (RoutingConfig -> a) -> (PartialRoutingConfig -> Maybe a) -> a
@@ -136,25 +154,30 @@ overlayRoutingConfig p = RoutingConfig
 
 -- | TOML codec for a 'TabKind' encoded as a snake_case string. Used
 -- for the @default_kind@ field.
+--
+-- Only @\"ai\"@ and @\"shell\"@ are valid TOML defaults. The new
+-- 'TabKind' carries structured payloads (@SessionKind@,
+-- @TerminalBackend@) that cannot be round-tripped through a single
+-- TOML string: @\"harness\"@, @\"ssh\"@, @\"tmux\"@ are rejected at
+-- parse time because they require configuration that must come from a
+-- richer TOML table (future work).
 tabKindCodec :: Toml.Key -> TomlCodec Tab.TabKind
 tabKindCodec = Toml.textBy showKind parseKind
   where
     showKind :: Tab.TabKind -> Text
     showKind k = case k of
-      Tab.KindAi      -> "ai"
-      Tab.KindHarness -> "harness"
-      Tab.KindShell   -> "shell"
-      Tab.KindSsh     -> "ssh"
-      Tab.KindTmux    -> "tmux"
+      Tab.TkSession (SK.SkProvider _)   -> "ai"
+      Tab.TkSession (SK.SkHarness _)    -> "harness"
+      Tab.TkRawShell SK.TbLocal         -> "shell"
+      Tab.TkRawShell (SK.TbSsh _)       -> "ssh"
+      Tab.TkRawShell (SK.TbTmux _)      -> "tmux"
+      Tab.TkRawShell (SK.TbContainer _) -> "container"
 
     parseKind :: Text -> Either Text Tab.TabKind
     parseKind t = case t of
-      "ai"      -> Right Tab.KindAi
-      "harness" -> Right Tab.KindHarness
-      "shell"   -> Right Tab.KindShell
-      "ssh"     -> Right Tab.KindSsh
-      "tmux"    -> Right Tab.KindTmux
-      _         -> Left ("Unknown tab kind: " <> t)
+      "ai"      -> Right (Tab.TkSession (SK.SkProvider defaultProviderSpecForConfig))
+      "shell"   -> Right (Tab.TkRawShell SK.TbLocal)
+      _         -> Left ("Unknown or unsupported tab kind for TOML default: " <> t)
 
 -- | TOML codec for 'AiDefaults' (the @[default_ai]@ sub-table inside
 -- the @[routing]@ section).
@@ -183,6 +206,7 @@ partialRoutingCodec = PartialRoutingConfig
   <*> Toml.dioptional (Toml.int  "max_concurrent_active")             .= _prc_maxConcurrentActive
   <*> Toml.dioptional (Toml.int  "max_name_len")                      .= _prc_maxNameLen
   <*> Toml.dioptional (Toml.text "ssh_identity_key")                  .= _prc_sshIdentityKey
+  <*> Toml.dioptional (Toml.int  "max_pureclaw_depth")                .= _prc_maxPureClawDepth
 
 -- | Bidirectional TOML codec for the full 'RoutingConfig'.
 --
@@ -210,6 +234,7 @@ routingConfigCodec = Toml.dimap toPartial overlayRoutingConfig partialRoutingCod
       , _prc_maxConcurrentActive = Just (_rc_maxConcurrentActive rc)
       , _prc_maxNameLen          = Just (_rc_maxNameLen rc)
       , _prc_sshIdentityKey      = Just (_rc_sshIdentityKey rc)
+      , _prc_maxPureClawDepth   = Just (_rc_maxPureClawDepth rc)
       }
 
 

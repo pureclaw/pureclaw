@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Routing.DispatcherSpec
 -- Description : C-series + dispatcher-internal tests for WU5.
@@ -67,6 +68,11 @@ import PureClaw.Handles.Tab
   , TabRunner (..)
   , TabStatus (..)
   , mkTabIndex
+  , pattern KindAi
+  , pattern KindHarness
+  , pattern KindShell
+  , pattern KindSsh
+  , pattern KindTmux
   )
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class (SomeProvider)
