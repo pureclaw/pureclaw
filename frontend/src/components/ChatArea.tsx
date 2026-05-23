@@ -656,6 +656,16 @@ export function ChatArea({
     }
   }, [messages, hasFragment])
 
+  // When the user clicks a different session in the sidebar, force the next
+  // render to auto-scroll to the most recent message. Without this, the
+  // sticky-bottom ref ('wasAtBottom') retains the prior session's measured
+  // scroll state — a user reading history in session A (scrolled up) and
+  // switching to session B would land mid-transcript in B. Deep-link mode
+  // (hasFragment) is still respected by the effect above.
+  useEffect(() => {
+    wasAtBottom.current = true
+  }, [selectedSession?.id])
+
   const handleSend = () => {
     const trimmed = input.trim()
     if (!trimmed || sending || !onSend) return
