@@ -503,6 +503,81 @@ spec = do
       ms `shouldBe` []
       _th_close th
 
+    -- The next four tests regression-cover the "context recursion" bug
+    -- where loadRecentMessages was embedding the entire provider API
+    -- payload (full envelope: messages array, system_prompt, max_tokens,
+    -- ...) as message TEXT in the next turn's request. After 2 turns the
+    -- LLM saw deeply nested escape-encoded JSON instead of the actual
+    -- conversation; tokens exploded and responses degraded.
+    --
+    -- The fix extracts only the NEW message text from the payload (the
+    -- last element of `messages` for a Request, or the `content` array
+    -- for a Response). These tests pin both the Anthropic-style typed-
+    -- content shape AND the OpenAI-style string-content shape, plus
+    -- the plain-text fallback that the older tests above depend on.
+    it "extracts the NEW user text from an Anthropic-style request envelope" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-extract-anthr" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+          payload = "{\"max_tokens\":4096,\
+                    \\"messages\":[\
+                      \{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"first turn\"}]},\
+                      \{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"got it\"}]},\
+                      \{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"second turn\"}]}\
+                    \],\"system_prompt\":\"be helpful\",\"model\":\"claude\"}"
+      _th_record th (mkTextEntry "req-anthr" t0 Request payload)
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message User [TextBlock t]] -> t `shouldBe` "second turn"
+        _ -> expectationFailure ("expected single user message with 'second turn', got: " <> show ms)
+      _th_close th
+
+    it "extracts the assistant text from an Anthropic-style response payload" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-extract-resp" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+          payload = "{\"content\":[{\"type\":\"text\",\"text\":\"FPV joke\"}],\
+                    \\"model\":\"gemma4:26b\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}"
+      _th_record th (mkTextEntry "resp-anthr" t0 Response payload)
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message Assistant [TextBlock t]] -> t `shouldBe` "FPV joke"
+        _ -> expectationFailure ("expected single assistant message with 'FPV joke', got: " <> show ms)
+      _th_close th
+
+    it "extracts text from an OpenAI-style string-content message" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-extract-openai" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+          payload = "{\"model\":\"gpt-4\",\
+                    \\"messages\":[{\"role\":\"user\",\"content\":\"plain string content\"}]}"
+      _th_record th (mkTextEntry "req-openai" t0 Request payload)
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message User [TextBlock t]] -> t `shouldBe` "plain string content"
+        _ -> expectationFailure ("expected single user message, got: " <> show ms)
+      _th_close th
+
+    it "falls back to the raw payload when JSON does not match a known shape" $ withTmp $ \base -> do
+      -- Custom-harness transcripts and the older test fixtures record plain
+      -- text. Those entries must continue to round-trip verbatim.
+      let meta = mkMeta "lr-extract-fb" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkTextEntry "p1" t0 Request "this is a plain-text request, not JSON")
+      _th_record th (mkTextEntry "p2" t0 Response "{\"not_a_known\":\"shape\"}")
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message User [TextBlock a], Message Assistant [TextBlock b]] -> do
+          a `shouldBe` "this is a plain-text request, not JSON"
+          b `shouldBe` "{\"not_a_known\":\"shape\"}"
+        _ -> expectationFailure ("unexpected shape: " <> show ms)
+      _th_close th
+
   describe "resolveResumedTarget" $ do
     it "SkProvider resolves to TargetProvider without logging a warning" $ do
       (logger, warnRef) <- mkCaptureLogger
