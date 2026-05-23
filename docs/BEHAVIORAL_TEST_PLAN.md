@@ -484,3 +484,53 @@ The canonical request PureClaw must match:
 ```
 
 Streaming and thinking parameters may vary by model and session config — normalize these when comparing.
+
+---
+
+## Live Transcript Streaming — Manual Visual Tests
+
+The automated test suites (Hspec + Vitest) cover the wire protocol, broker, and reconciliation logic. Two user-observable behaviors are verified by **manual visual test** against the running app — they are not in the automated suite because the timing budgets (≤2.5 s) are dependent on real wall-clock and the assertion target is a rendered DOM element.
+
+### D16 — Sidebar harness-status spinner
+
+**Goal:** The sidebar shows a thinking spinner within ≤2.5 s of a harness transitioning to `thinking`, and clears the spinner within ≤2.5 s of the harness transitioning to `idle` or `stopped`. The 2.5 s budget = 2 s probe-loop interval + 0.5 s slack.
+
+**Setup:**
+1. Start the backend: `nix develop . --command cabal run pureclaw -- chat` (or whichever channel command spawns a harness).
+2. In a second terminal, start the dev server: `cd frontend && npm run dev`.
+3. Open `http://localhost:5173/` in a browser.
+4. Confirm at least one harness session appears in the sidebar.
+
+**Procedure:**
+1. Identify a sidebar row for an idle harness session. Note that the spinner is NOT shown.
+2. Send the harness a message from the CLI (or from another session that addresses the same harness). The harness transitions to `thinking`.
+3. Start a stopwatch when you press Enter on the CLI message.
+4. Observe the sidebar. **PASS if the spinner appears within 2.5 s.** **FAIL otherwise.**
+5. Wait for the harness to respond (it transitions back to `idle`).
+6. Restart the stopwatch when the response completes.
+7. **PASS if the spinner clears within 2.5 s.** **FAIL otherwise.**
+
+**Implementation reference:**
+- Activity probe loop: `src/PureClaw/Frontend/ActivityProbe.hs` (2 s tick interval, transitions only).
+- Wire event: `{type:"activity", sessionId, activity:{kind:"harness-status", status:"thinking" | "idle" | "stopped"}}`.
+- Frontend hook: `frontend/src/hooks/useSessionActivityStream.ts` (per-session state).
+- Component wiring: `frontend/src/components/Sidebar.tsx` `SessionRow` (renders `shimmer` class on `activity?.harness === 'thinking'`).
+
+### D15 — End-to-end transcript-entry latency
+
+**Goal:** p50 ≤ 50 ms, p95 ≤ 500 ms from `_th_record` return to `entry` event visible at a WS client on localhost, over a 100-entry burst.
+
+This is verified two ways:
+
+1. **FE-isolation budget (automated, Vitest):** `frontend/src/hooks/__tests__/useTranscriptStream.test.ts` simulates a 100-entry burst over `reconcileEntries` and asserts cumulative wall-clock < 50 ms. This verifies the FE reconciliation path is not the bottleneck but does NOT measure the full cross-process E2E.
+2. **Full E2E (manual, this section):**
+
+**Procedure:**
+1. Set up as in D16.
+2. Open the browser devtools Performance tab; start recording.
+3. From the CLI, trigger 100 transcript entries in rapid succession (e.g., a script that POSTs to `/api/sessions/{sid}/send` 100 times with no delay, or a deliberately chatty agent run).
+4. Stop the recording. Inspect the WebSocket frames: each `entry` event has a `timestamp` field (the entry's server-side `_te_timestamp`). The frame arrival time is observable in devtools.
+5. Compute: `t_arrive - t_record` per entry. The `t_record` is `_te_timestamp` (since `_te_id` is allocated before `_th_record`, this is a reasonable proxy for write completion).
+6. **PASS if p50 ≤ 50 ms and p95 ≤ 500 ms over the 100 entries.** **FAIL otherwise.**
+
+This manual test runs roughly once per release cycle, OR after any change to the broker, the WS endpoint, or the frontend reconciliation logic. Regressions are caught earlier by the automated FE-isolation budget.

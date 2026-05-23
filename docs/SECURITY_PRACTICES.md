@@ -562,7 +562,39 @@ gatewayWarpSettings cfg = Warp.defaultSettings
   & Warp.setMaxTotalConnections 100       -- connection cap
 ```
 
-**Why it matters:** ZeroClaw's raw TCP HTTP server allocated 64KB per connection with no limit — trivially memory-exhaustible ([#12](https://github.com/zeroclaw-labs/zeroclaw/issues/12)).
+#### 9.1.1 WebSocket endpoints need a separate keepalive
+
+`Warp.setTimeout` applies only to **non-hijacked** HTTP connections. Once `Network.Wai.Handler.WebSockets.websocketsOr` accepts an upgrade, the socket is hijacked out of Warp's connection table and the timeout reaper no longer sees it. A silent WS peer would otherwise hold the socket open indefinitely.
+
+The discipline: every WS handler must wrap its body in `Network.WebSockets.withPingThread`. PureClaw's transcript-streaming WS endpoint uses a 25 s ping interval with a 10 s pong timeout, so a silent peer is forcibly disconnected within ~35 s (see `src/PureClaw/Frontend/Stream.hs:runConnection`).
+
+```haskell
+import Network.WebSockets qualified as WS
+
+handleWS :: ServerApp
+handleWS pending = do
+  conn <- WS.acceptRequest pending
+  WS.withPingThread conn 25 (pure ()) $ do      -- 25s interval; lib waits 10s for pong
+    -- … your reader/writer loop here …
+    pure ()
+```
+
+Forced-disconnect events should be logged via `_lh_logWarn` with the Origin + remote address so operators can investigate slow-loris-style patterns.
+
+**Why it matters:** ZeroClaw's raw TCP HTTP server allocated 64KB per connection with no limit — trivially memory-exhaustible ([#12](https://github.com/zeroclaw-labs/zeroclaw/issues/12)). PureClaw's transcript-streaming WS endpoint added long-lived hijacked sockets, which made the `setTimeout` gap suddenly exploitable — `withPingThread` closes that loop.
+
+#### 9.1.2 WebSocket upgrades need an Origin allowlist
+
+WebSocket upgrades are NOT protected by browser CORS the way XHR requests are. A drive-by malicious local page can open the WS without a preflight. Every WS endpoint MUST validate the `Origin` request header against an exact-match allowlist BEFORE accepting the upgrade.
+
+```haskell
+-- normalize: lowercase scheme + host; strip trailing slash; no wildcards.
+originAllowed :: [Text] -> Text -> Bool
+originAllowed []      _      = False                          -- empty allowlist = deny
+originAllowed allowed origin = normalizeOrigin origin `elem` map normalizeOrigin allowed
+```
+
+Per-origin subscriber caps (PureClaw uses `_streamGuard_perOrigin`, keyed by the normalized Origin) prevent any one allowed origin from holding too many sockets simultaneously. See `src/PureClaw/Frontend/Stream.hs` for the StreamGuard pattern.
 
 **See also:** [Claude Code CVE-2025-55284](https://embracethered.com/blog/posts/2025/claude-code-exfiltration-via-dns-requests/) — overly broad "safe" command allowlist (including `ping`, `dig`, `nslookup`) enabled unbounded DNS exfiltration without user confirmation.
 
