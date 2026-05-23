@@ -594,6 +594,19 @@ originAllowed []      _      = False                          -- empty allowlist
 originAllowed allowed origin = normalizeOrigin origin `elem` map normalizeOrigin allowed
 ```
 
+PureClaw also accepts Origin if it equals the **Host-reflected origin** — i.e. `<scheme>://<the request's Host header>`. This lets a user open the URL from a LAN IP, alternate interface, or shared link without enumerating each in the allowlist:
+
+```haskell
+-- Used by the upgrade handler; the second argument is `Just "http://<host>"`
+-- when the request carries a Host header.
+originAcceptable :: Maybe Text -> [Text] -> Text -> Bool
+originAcceptable mHostReflected allowed origin =
+     originAllowed allowed origin
+  || maybe False ((== origin) . normalizeOrigin) mHostReflected
+```
+
+This does **not** broaden the threat surface beyond the HTTP API today: any client able to reach the configured bind address can already hit the HTTP routes. It still blocks the drive-by case the allowlist was added for — a malicious page at `attacker.com` opening WS to the PureClaw host gets neither match (its Origin will not equal the server's Host, because the server's Host is the address the browser connected to, which is by construction the legit server).
+
 Per-origin subscriber caps (PureClaw uses `_streamGuard_perOrigin`, keyed by the normalized Origin) prevent any one allowed origin from holding too many sockets simultaneously. See `src/PureClaw/Frontend/Stream.hs` for the StreamGuard pattern.
 
 **See also:** [Claude Code CVE-2025-55284](https://embracethered.com/blog/posts/2025/claude-code-exfiltration-via-dns-requests/) — overly broad "safe" command allowlist (including `ping`, `dig`, `nslookup`) enabled unbounded DNS exfiltration without user confirmation.

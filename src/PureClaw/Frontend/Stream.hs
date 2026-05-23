@@ -26,6 +26,7 @@ module PureClaw.Frontend.Stream
     -- * Origin normalization (exported for testing)
   , normalizeOrigin
   , originAllowed
+  , originAcceptable
     -- * StreamGuard operations
   , tryClaim
   , releaseClaim
@@ -73,6 +74,7 @@ import Data.IORef
   , writeIORef
   )
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -273,6 +275,28 @@ originAllowed :: [Text] -> Text -> Bool
 originAllowed []      _      = False
 originAllowed allowed origin = origin `elem` map normalizeOrigin allowed
 
+-- | Accept the given (already-normalized) origin if it matches the configured
+-- allowlist OR matches the Host-reflected origin — i.e. the
+-- @scheme://Host-header@ the request itself arrived on.
+--
+-- The Host-reflection relaxation lets a user open the URL from a LAN IP,
+-- shared link, or alternative interface (anything that resolves to the
+-- bound address) without enumerating each one in @_fc_allowedOrigins@.
+-- It does NOT broaden the threat surface beyond what the HTTP API already
+-- accepts: any client able to reach the configured bind address can hit
+-- the HTTP routes today, and Host-reflection makes the WS endpoint match
+-- that posture.
+--
+-- It does still block the drive-by case the strict allowlist was added for:
+-- a malicious page at @attacker.com@ gets neither the allowlist match nor
+-- the Host-reflection match (its Origin won't equal the server's Host
+-- header — the server's Host header is the address the BROWSER connected
+-- to, which is by construction the legit server, not the attacker).
+originAcceptable :: Maybe Text -> [Text] -> Text -> Bool
+originAcceptable mHostReflected allowed origin =
+     originAllowed allowed origin
+  || maybe False ((== origin) . normalizeOrigin) mHostReflected
+
 -- ---------------------------------------------------------------------------
 -- StreamGuard
 -- ---------------------------------------------------------------------------
@@ -391,24 +415,32 @@ handleUpgrade
   -> WS.PendingConnection
   -> IO ()
 handleUpgrade allowed env broker guard pending = do
-  let logger    = _fe_logger env
-      req       = WS.pendingRequest pending
-      headers   = WS.requestHeaders req
-      mOriginBS = lookup "Origin" headers
-      remote    = maybe "<unknown>" TE.decodeUtf8 (lookup "Host" headers)
+  let logger        = _fe_logger env
+      req           = WS.pendingRequest pending
+      headers       = WS.requestHeaders req
+      mOriginBS     = lookup "Origin" headers
+      mHostHeader   = TE.decodeUtf8 <$> lookup "Host" headers
+      hostRemote    = fromMaybe "<unknown>" mHostHeader
+      -- Host-reflected origin: scheme://<Host header>, with scheme matching
+      -- the upgrade's TLS state. Used by 'originAcceptable' to allow a
+      -- request whose Origin matches the address the request itself hit
+      -- (typically: localhost vs LAN IP, or any alternate interface the
+      -- user reached the server through).
+      scheme        = if WS.requestSecure req then "https" else "http"
+      mHostReflected = (\h -> scheme <> "://" <> h) <$> mHostHeader
   case mOriginBS of
     Nothing -> do
       _lh_logWarn logger $
-        "WS upgrade rejected: missing Origin (remote=" <> remote <> ")"
+        "WS upgrade rejected: missing Origin (remote=" <> hostRemote <> ")"
       WS.rejectRequestWith pending (rejection 403 "missing Origin")
     Just rawBytes -> do
       let originRaw  = TE.decodeUtf8 rawBytes
           normalized = normalizeOrigin originRaw
-      if not (originAllowed allowed normalized)
+      if not (originAcceptable mHostReflected allowed normalized)
         then do
           _lh_logWarn logger $
-            "WS upgrade rejected: Origin not allowed (origin="
-              <> originRaw <> ", remote=" <> remote <> ")"
+            "WS upgrade rejected: Origin not in allowlist and does not match Host (origin="
+              <> originRaw <> ", host=" <> hostRemote <> ")"
           WS.rejectRequestWith pending (rejection 403 "Origin not allowed")
         else do
           claimed <- atomically (tryClaim guard normalized)
@@ -416,7 +448,7 @@ handleUpgrade allowed env broker guard pending = do
             then do
               _lh_logWarn logger $
                 "WS upgrade rejected: per-origin cap reached (origin="
-                  <> originRaw <> ", remote=" <> remote <> ")"
+                  <> originRaw <> ", host=" <> hostRemote <> ")"
               WS.rejectRequestWith pending
                 (rejection 503 "per-origin cap reached")
             else do

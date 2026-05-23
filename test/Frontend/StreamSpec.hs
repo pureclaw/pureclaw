@@ -44,6 +44,7 @@ import PureClaw.Frontend.Stream
   , errorCodeText
   , normalizeOrigin
   , originAllowed
+  , originAcceptable
   , releaseClaim
   , tryClaim
   )
@@ -89,6 +90,56 @@ spec = do
     it "normalizes the allowlist entries before matching" $
       originAllowed ["HTTP://LOCALHOST:8080"] "http://localhost:8080"
         `shouldBe` True
+
+  describe "originAcceptable (Host-reflection)" $ do
+    let allowed = ["http://localhost:8080"]
+        normalize = normalizeOrigin
+
+    it "accepts an origin that's in the allowlist (allowlist wins)" $
+      originAcceptable Nothing allowed (normalize "http://localhost:8080")
+        `shouldBe` True
+
+    it "accepts a non-allowlisted origin that matches the Host-reflected origin" $
+      -- Browser hit http://192.168.80.201:8080 → Host=192.168.80.201:8080 →
+      -- Host-reflected = http://192.168.80.201:8080 (matches Origin).
+      originAcceptable
+        (Just "http://192.168.80.201:8080")
+        allowed
+        (normalize "http://192.168.80.201:8080")
+        `shouldBe` True
+
+    it "rejects a drive-by origin that matches neither the allowlist nor Host" $
+      -- A malicious page at attacker.com tries to open WS to the LAN-IP
+      -- server. Origin=http://attacker.com; Host=192.168.80.201:8080.
+      -- Neither match → reject.
+      originAcceptable
+        (Just "http://192.168.80.201:8080")
+        allowed
+        (normalize "http://attacker.com")
+        `shouldBe` False
+
+    it "rejects substring-attack origin even when Host is the legit address" $
+      -- The classic D31 substring attack: Origin claims to be localhost.evil.com
+      -- but Host is localhost:8080. The Host-reflected origin (http://localhost:8080)
+      -- does not equal Origin (http://localhost.evil.com:8080) — exact match.
+      originAcceptable
+        (Just "http://localhost:8080")
+        allowed
+        (normalize "http://localhost.evil.com:8080")
+        `shouldBe` False
+
+    it "normalizes the Host-reflected origin before comparing" $
+      -- Host arrives as Mixed-Case (some user agents normalize, some don't).
+      -- normalizeOrigin lowercases scheme + host but keeps the port verbatim.
+      originAcceptable
+        (Just "HTTP://LocalHost:8080")
+        []
+        (normalize "http://localhost:8080")
+        `shouldBe` True
+
+    it "rejects everything when there's no Host header AND empty allowlist" $
+      originAcceptable Nothing [] (normalize "http://localhost:8080")
+        `shouldBe` False
 
   describe "StreamGuard.tryClaim / releaseClaim" $ do
     it "admits up to the per-origin cap and rejects the next claim" $ do
