@@ -177,6 +177,37 @@ spec = do
       _sm_lastActive loaded `shouldBe` newTime
       _th_close (_sh_transcript sh)
 
+  describe "mkSessionHandle (touchLastActive)" $ do
+    it "bumps _sm_lastActive after _th_record and persists to disk" $ withTmp $ \base -> do
+      let meta = mkMeta "touch-1" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      -- Confirm initial lastActive is t0.
+      metaBefore <- readIORef (_sh_meta sh)
+      _sm_lastActive metaBefore `shouldBe` t0
+      -- Record a transcript entry.
+      _th_record (_sh_transcript sh) (mkEntry "e1" t0)
+      -- The IORef must have been bumped past t0.
+      metaAfter <- readIORef (_sh_meta sh)
+      _sm_lastActive metaAfter `shouldSatisfy` (> t0)
+      -- The on-disk session.json must reflect the bumped time.
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (_sh_dir sh </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_lastActive onDisk `shouldSatisfy` (> t0)
+      _th_close (_sh_transcript sh)
+
+    it "bumps _sm_lastActive on resumed sessions too" $ withTmp $ \base -> do
+      let meta = mkMeta "touch-2" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      Right sh' <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "touch-2")
+      _th_record (_sh_transcript sh') (mkEntry "e2" t0)
+      metaAfter' <- readIORef (_sh_meta sh')
+      _sm_lastActive metaAfter' `shouldSatisfy` (> t0)
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (_sh_dir sh' </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_lastActive onDisk `shouldSatisfy` (> t0)
+      _th_close (_sh_transcript sh')
+
   describe "resumeSession" $ do
     it "round-trips an existing session and reopens transcript for append" $ withTmp $ \base -> do
       let meta = mkMeta "gamma-1" t0
@@ -188,7 +219,10 @@ spec = do
         Left err -> expectationFailure ("expected success, got: " <> show err)
         Right sh' -> do
           loaded <- readIORef (_sh_meta sh')
-          loaded `shouldBe` meta
+          -- _sm_lastActive was bumped by the _th_record above, so compare
+          -- all fields except lastActive and verify lastActive >= t0.
+          loaded { _sm_lastActive = t0 } `shouldBe` meta
+          _sm_lastActive loaded `shouldSatisfy` (>= t0)
           _th_record (_sh_transcript sh') (mkEntry "e2" t0)
           _th_close (_sh_transcript sh')
 

@@ -48,7 +48,7 @@ import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, secondsToDiffTime)
 import Data.Vector qualified as V
 import System.Directory
   ( createDirectoryIfMissing
@@ -169,11 +169,13 @@ mkSessionHandle mBroker logger baseDir meta = do
   metaRef <- newIORef meta
   saveMeta dir metaRef
   tx <- mkBroadcastingFileTranscriptHandle mBroker (_sm_id meta) logger txp
+  let save = saveMeta dir metaRef
+      tx'  = touchLastActive metaRef save tx
   pure SessionHandle
     { _sh_meta       = metaRef
-    , _sh_transcript = tx
+    , _sh_transcript = tx'
     , _sh_dir        = dir
-    , _sh_save       = saveMeta dir metaRef
+    , _sh_save       = save
     }
 
 -- | Atomically persist the metadata IORef to @\<dir\>/session.json@ by
@@ -188,6 +190,20 @@ saveMeta dir ref = do
   LBS.writeFile tmpP (Aeson.encode meta)
   setFileMode tmpP 0o600
   renameFile tmpP finalP
+
+-- | Wrap a 'TranscriptHandle' so that after every successful
+-- '_th_record' call, @_sm_lastActive@ is bumped to 'getCurrentTime'
+-- and the session metadata is persisted to disk via the supplied save
+-- action. This keeps the sidebar's "last active" column accurate
+-- without requiring every transcript call site to remember the bump.
+touchLastActive :: IORef SessionMeta -> IO () -> TranscriptHandle -> TranscriptHandle
+touchLastActive metaRef save th = th
+  { _th_record = \entry -> do
+      _th_record th entry
+      now <- getCurrentTime
+      atomicModifyIORef' metaRef (\m -> (m { _sm_lastActive = now }, ()))
+      save
+  }
 
 -- ----------------------------------------------------------------------------
 -- No-op handle
@@ -282,11 +298,13 @@ resumeSession mBroker logger baseDir sid = do
         Right meta -> do
           metaRef <- newIORef (meta :: SessionMeta)
           tx <- mkBroadcastingFileTranscriptHandle mBroker sid logger txP
+          let save = saveMeta dir metaRef
+              tx'  = touchLastActive metaRef save tx
           pure (Right SessionHandle
             { _sh_meta       = metaRef
-            , _sh_transcript = tx
+            , _sh_transcript = tx'
             , _sh_dir        = dir
-            , _sh_save       = saveMeta dir metaRef
+            , _sh_save       = save
             })
 
 -- ----------------------------------------------------------------------------
