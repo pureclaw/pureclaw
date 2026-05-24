@@ -36,9 +36,13 @@ body {
   100% { background-position: 0% 50%; }
 }
 
+/* Ping-style: sharp onset, ease-out expansion, then hold at zero so each
+   cycle reads as a discrete pulse instead of a continuous wash. The sharp
+   leading edge is what makes the pulse register peripherally. */
 @keyframes thinkingHalo {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 108, 246, 0.45); }
-  50%      { box-shadow: 0 0 0 4px rgba(124, 108, 246, 0); }
+  0%        { box-shadow: 0 0 0 0    rgba(124, 108, 246, 0.7); }
+  70%       { box-shadow: 0 0 0 10px rgba(124, 108, 246, 0);   }
+  100%      { box-shadow: 0 0 0 10px rgba(124, 108, 246, 0);   }
 }
 
 @keyframes blink {
@@ -88,8 +92,8 @@ body {
   /* Gradient shift keeps the dot "alive" up close; the halo gives it a
      peripheral-vision-visible pulse on an 8px target. */
   animation:
-    thinkingGradient var(--gradient-duration)        ease            infinite,
-    thinkingHalo     var(--thinking-halo-duration)   ease-in-out     infinite;
+    thinkingGradient var(--gradient-duration)        ease                       infinite,
+    thinkingHalo     var(--thinking-halo-duration)   cubic-bezier(0, 0, 0.2, 1) infinite;
 }
 
 .dot-idle {

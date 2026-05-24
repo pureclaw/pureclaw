@@ -87,7 +87,7 @@
 
   --pulse-duration:         1.5s;   /* needs-input dot */
   --gradient-duration:      2s;     /* thinking dot — color shift */
-  --thinking-halo-duration: 1.6s;   /* thinking dot — halo pulse */
+  --thinking-halo-duration: 1.4s;   /* thinking dot — halo pulse */
   --shimmer-duration:       2.5s;   /* thinking row */
   --blink-duration:         1s;     /* cursor */
 }
