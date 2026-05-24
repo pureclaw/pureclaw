@@ -153,6 +153,7 @@ export function Sidebar({
         <ActiveTabs
           tabs={tabs}
           selectedId={selectedId}
+          sessionActivity={sessionActivity}
           onSelectTab={onSelectTab}
           onNewTab={onNewTab}
           onCloseTab={onCloseTab}
