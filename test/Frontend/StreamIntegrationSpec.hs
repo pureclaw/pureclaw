@@ -72,8 +72,11 @@ import Frontend.StreamHarness
 import PureClaw.Agent.AgentDef (mkAgentName)
 import PureClaw.Core.Types (SessionId (..))
 import PureClaw.Frontend.API (mkStreamGuard)
+import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
+  , BrokerEvent (..)
+  , SessionActivity (..)
   , StreamBroker (..)
   , defaultBrokerConfig
   , mkInProcessBroker
@@ -337,6 +340,32 @@ spec = do
                             _ -> drainUntilActivity (remaining - 1)
             drainUntilActivity 5
             _th_close (_sh_transcript shOther)
+
+  describe "activity snapshot on focus" $
+    it "emits the broker's current harness-status when a client focuses on a thinking session" $
+      withSystemTempDirectory "stream-int-act-snap" $ \tmp -> do
+        broker <- mkInProcessBroker defaultBrokerConfig
+        guard  <- mkStreamGuard 8
+        env    <- mkTestFrontendEnv tmp broker guard
+        let meta   = mkMeta "session-actsnap"
+            sidVal = _sm_id meta
+        -- Simulate a provider request already in flight at the moment the
+        -- client connects: the bracket_ in doCompletion has published
+        -- HarnessThinking, but no other event has been emitted since.
+        _streamBroker_publish broker
+          (ActivityChanged sidVal (SaHarnessStatus HarnessThinking))
+        withStreamServer testAllowedOrigins env $ \port ->
+          openWSClient port (Just defaultOrigin) $ \conn -> do
+            expectHello conn
+            sendFocus conn (unSessionId sidVal) Nothing
+            -- The first non-hello event must be the activity snapshot so
+            -- a tab opened mid-request lights up its thinking indicator
+            -- immediately rather than waiting for the request to end.
+            bs <- recvOrFailTimeout 1_000_000 conn
+            let v = decodeValue bs
+            eventType v `shouldBe` "activity"
+            show v `shouldContain` "thinking"
+            show v `shouldContain` T.unpack (unSessionId sidVal)
 
   describe "D11 — reconnect with since replays missed entries, no duplicates" $
     it "replays only entries after the since cursor, terminated by replay-end" $

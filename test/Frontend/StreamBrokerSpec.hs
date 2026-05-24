@@ -228,6 +228,35 @@ spec = do
           received <- atomically (readTBQueue (_sub_queue sub))
           received `shouldBe` ev
 
+  describe "_streamBroker_currentActivity" $ do
+    it "returns Nothing for a session that never published activity" $ do
+      broker <- mkInProcessBroker defaultBrokerConfig
+      st <- _streamBroker_currentActivity broker sid1
+      st `shouldBe` Nothing
+
+    it "remembers the most recent SaHarnessStatus per session" $ do
+      broker <- mkInProcessBroker defaultBrokerConfig
+      _streamBroker_publish broker
+        (ActivityChanged sid1 (SaHarnessStatus HarnessThinking))
+      st1 <- _streamBroker_currentActivity broker sid1
+      st1 `shouldBe` Just HarnessThinking
+      _streamBroker_publish broker
+        (ActivityChanged sid1 (SaHarnessStatus HarnessIdle))
+      st2 <- _streamBroker_currentActivity broker sid1
+      st2 `shouldBe` Just HarnessIdle
+
+    it "tracks distinct sessions independently" $ do
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let sid2 = SessionId "session-2"
+      _streamBroker_publish broker
+        (ActivityChanged sid1 (SaHarnessStatus HarnessThinking))
+      _streamBroker_publish broker
+        (ActivityChanged sid2 (SaHarnessStatus HarnessIdle))
+      st1 <- _streamBroker_currentActivity broker sid1
+      st2 <- _streamBroker_currentActivity broker sid2
+      st1 `shouldBe` Just HarnessThinking
+      st2 `shouldBe` Just HarnessIdle
+
   describe "introspect" $
     it "queueDepths reflects per-subscriber queue size" $ do
       broker <- mkInProcessBroker defaultBrokerConfig

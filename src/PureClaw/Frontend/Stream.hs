@@ -584,11 +584,29 @@ handleFocus env conn cs mSid mSince =
         sendError conn EcInvalidFrame "since exceeds 64 characters"
       Just sinceTok -> case mSid of
         Nothing  -> sendError conn EcInvalidFrame "since requires sessionId"
-        Just sid -> startReplay env conn cs sid sinceTok
+        Just sid -> do
+          startReplay env conn cs sid sinceTok
+          sendActivitySnapshot env conn sid
   where
     setLiveFocus = do
       abortInflightReplay conn cs
       writeIORef (_conn_focus cs) mSid
+      case mSid of
+        Just sid -> sendActivitySnapshot env conn sid
+        Nothing  -> pure ()
+
+-- | If the broker has a recorded 'HarnessActivity' for this session, push
+-- it to the freshly-focused client. Without this, a tab that connects
+-- /while/ a provider request is in flight never sees the in-progress
+-- 'HarnessThinking' event (it was published before the subscriber existed)
+-- and the thinking indicator stays dark until the request completes.
+sendActivitySnapshot :: FrontendEnv -> WS.Connection -> SessionId -> IO ()
+sendActivitySnapshot env conn sid = case _fe_broker env of
+  Nothing     -> pure ()
+  Just broker -> do
+    mAct <- _streamBroker_currentActivity broker sid
+    forM_ mAct $ \act ->
+      sendEvent conn (SeActivity sid (AkHarnessStatus act))
 
 -- | Abort any in-flight replay. If a replay was in progress, emit
 -- @replay-aborted@ and clear the buffer (D40).

@@ -54,7 +54,7 @@ import Data.Map.Strict qualified as Map
 import Data.Time (UTCTime)
 
 import PureClaw.Core.Types (SessionId)
-import PureClaw.Frontend.Activity.Types (HarnessActivity)
+import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Session.Types (SessionMeta)
 import PureClaw.Transcript.Types (TranscriptEntry)
 
@@ -180,6 +180,13 @@ data StreamBroker = StreamBroker
     -- 'BroadcastingTranscriptHandle' reads '_bc_maxEventBytes' through
     -- this; the WS handler reads '_bc_maxSubsPerOrigin'.
   , _streamBroker_config     :: BrokerConfig
+    -- | Most-recent 'HarnessActivity' observed for a session via an
+    -- 'ActivityChanged' / 'SaHarnessStatus' publish, or 'Nothing' if no
+    -- such event has been seen. The WS handler reads this on a fresh
+    -- focus so a client connecting mid-request sees the in-flight
+    -- thinking state immediately, rather than waiting for the next
+    -- transition.
+  , _streamBroker_currentActivity :: SessionId -> IO (Maybe HarnessActivity)
   }
 
 -- ---------------------------------------------------------------------------
@@ -188,8 +195,12 @@ data StreamBroker = StreamBroker
 
 -- | The mutable state of an in-process broker.
 data BrokerState = BrokerState
-  { _bst_nextId      :: !(TVar Int)
-  , _bst_subscribers :: !(TVar (Map SubscriberId Subscription))
+  { _bst_nextId           :: !(TVar Int)
+  , _bst_subscribers      :: !(TVar (Map SubscriberId Subscription))
+    -- | Latest 'SaHarnessStatus' seen for each session. Updated inside the
+    -- same STM transaction as the publish so a focus snapshot taken just
+    -- after a publish observes the post-publish state.
+  , _bst_currentActivity  :: !(TVar (Map SessionId HarnessActivity))
   }
 
 -- | Construct an in-process broker. The broker exists for the lifetime of
@@ -201,11 +212,13 @@ mkInProcessBroker cfg = do
   state <- BrokerState
     <$> newTVarIO 0
     <*> newTVarIO Map.empty
+    <*> newTVarIO Map.empty
   pure StreamBroker
-    { _streamBroker_publish    = publishEvent state
-    , _streamBroker_subscribe  = subscribeNew cfg state
-    , _streamBroker_introspect = introspect state
-    , _streamBroker_config     = cfg
+    { _streamBroker_publish          = publishEvent state
+    , _streamBroker_subscribe        = subscribeNew cfg state
+    , _streamBroker_introspect       = introspect state
+    , _streamBroker_config           = cfg
+    , _streamBroker_currentActivity  = currentActivity state
     }
 
 -- ---------------------------------------------------------------------------
@@ -222,8 +235,22 @@ mkInProcessBroker cfg = do
 -- post-publish state for every subscriber, never a mix.
 publishEvent :: BrokerState -> BrokerEvent -> IO ()
 publishEvent state ev = atomically $ do
+  -- Record the latest harness status for the affected session before fanning
+  -- out so a subsequent 'currentActivity' read observes the post-publish
+  -- value. Only 'SaHarnessStatus' contributes to the snapshot; entry/created
+  -- events carry no persistent state we need to replay on focus.
+  case ev of
+    ActivityChanged sid (SaHarnessStatus s) ->
+      modifyTVar' (_bst_currentActivity state) (Map.insert sid s)
+    _ -> pure ()
   subs <- readTVar (_bst_subscribers state)
   forM_ (Map.elems subs) $ \sub -> publishOne sub ev
+
+-- | Read the most recent 'HarnessActivity' the broker has observed for a
+-- session. STM-atomic and cheap.
+currentActivity :: BrokerState -> SessionId -> IO (Maybe HarnessActivity)
+currentActivity state sid =
+  Map.lookup sid <$> readTVarIO (_bst_currentActivity state)
 
 -- | Enqueue one event to one subscriber under the overflow protocol.
 -- Pure-STM so multiple invocations compose inside the publish transaction.
