@@ -59,13 +59,13 @@ describe('useSessionActivityStream', () => {
 
   it('starts with an empty sessions map', () => {
     const fake = makeFakeClient()
-    const { result } = renderHook(() => useSessionActivityStream(fake.client))
+    const { result } = renderHook(() => useSessionActivityStream(null, fake.client))
     expect(result.current.sessions).toEqual({})
   })
 
   it('entry-at increments unread count and updates lastEntryAt', () => {
     const fake = makeFakeClient()
-    const { result } = renderHook(() => useSessionActivityStream(fake.client))
+    const { result } = renderHook(() => useSessionActivityStream(null, fake.client))
     act(() => {
       fake.emitActivity('session-abc', {
         kind: 'entry-at',
@@ -87,7 +87,7 @@ describe('useSessionActivityStream', () => {
 
   it('harness-status updates the harness state', () => {
     const fake = makeFakeClient()
-    const { result } = renderHook(() => useSessionActivityStream(fake.client))
+    const { result } = renderHook(() => useSessionActivityStream(null, fake.client))
     act(() => {
       fake.emitActivity('session-abc', { kind: 'harness-status', status: 'thinking' })
     })
@@ -104,7 +104,7 @@ describe('useSessionActivityStream', () => {
 
   it('session-created adds an entry with default values', () => {
     const fake = makeFakeClient()
-    const { result } = renderHook(() => useSessionActivityStream(fake.client))
+    const { result } = renderHook(() => useSessionActivityStream(null, fake.client))
     act(() => {
       fake.emitActivity('session-new', {
         kind: 'session-created',
@@ -126,7 +126,7 @@ describe('useSessionActivityStream', () => {
 
   it('keeps separate per-session counters', () => {
     const fake = makeFakeClient()
-    const { result } = renderHook(() => useSessionActivityStream(fake.client))
+    const { result } = renderHook(() => useSessionActivityStream(null, fake.client))
     act(() => {
       fake.emitActivity('s1', { kind: 'entry-at', timestamp: '2026-05-23T18:00:00Z' })
       fake.emitActivity('s2', { kind: 'entry-at', timestamp: '2026-05-23T18:00:01Z' })
@@ -136,9 +136,69 @@ describe('useSessionActivityStream', () => {
     expect(result.current.sessions['s2']!.unread).toBe(1)
   })
 
+  it('does not increment unread for the focused session', () => {
+    const fake = makeFakeClient()
+    const { result } = renderHook(() =>
+      useSessionActivityStream('session-abc', fake.client),
+    )
+    act(() => {
+      fake.emitActivity('session-abc', {
+        kind: 'entry-at',
+        timestamp: '2026-05-23T18:00:00Z',
+      })
+      fake.emitActivity('session-abc', {
+        kind: 'entry-at',
+        timestamp: '2026-05-23T18:00:01Z',
+      })
+    })
+    // The user is already looking at session-abc, so the round-trip
+    // entries that just landed are not "unread".
+    expect(result.current.sessions['session-abc']!.unread).toBe(0)
+    // lastEntryAt should still update so the sidebar age stays fresh.
+    expect(result.current.sessions['session-abc']!.lastEntryAt).toBe('2026-05-23T18:00:01Z')
+  })
+
+  it('still increments unread for OTHER sessions while one is focused', () => {
+    const fake = makeFakeClient()
+    const { result } = renderHook(() =>
+      useSessionActivityStream('session-focus', fake.client),
+    )
+    act(() => {
+      fake.emitActivity('session-other', {
+        kind: 'entry-at',
+        timestamp: '2026-05-23T18:00:00Z',
+      })
+    })
+    expect(result.current.sessions['session-other']!.unread).toBe(1)
+  })
+
+  it('zeros unread for a session when it becomes focused', () => {
+    const fake = makeFakeClient()
+    const { result, rerender } = renderHook(
+      ({ focused }: { focused: string | null }) =>
+        useSessionActivityStream(focused, fake.client),
+      { initialProps: { focused: null as string | null } },
+    )
+    act(() => {
+      fake.emitActivity('session-abc', {
+        kind: 'entry-at',
+        timestamp: '2026-05-23T18:00:00Z',
+      })
+      fake.emitActivity('session-abc', {
+        kind: 'entry-at',
+        timestamp: '2026-05-23T18:00:01Z',
+      })
+    })
+    expect(result.current.sessions['session-abc']!.unread).toBe(2)
+    // Switching focus to session-abc clears the counter the user has
+    // now caught up on.
+    rerender({ focused: 'session-abc' })
+    expect(result.current.sessions['session-abc']!.unread).toBe(0)
+  })
+
   it('reflects status changes from the underlying client', async () => {
     const fake = makeFakeClient()
-    const { result } = renderHook(() => useSessionActivityStream(fake.client))
+    const { result } = renderHook(() => useSessionActivityStream(null, fake.client))
     expect(result.current.status).toBe('connecting')
     act(() => fake.setStatus('live'))
     await waitFor(() => expect(result.current.status).toBe('live'))

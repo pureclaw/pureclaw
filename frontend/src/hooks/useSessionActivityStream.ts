@@ -8,7 +8,7 @@
  *   - "X seconds ago" from `lastEntryAt`.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type {
   ActivityEvent,
   SessionActivityState,
@@ -56,6 +56,7 @@ export function applyActivity(
 }
 
 export function useSessionActivityStream(
+  focusedSessionId: string | null,
   client?: StreamClient,
 ): UseSessionActivityStream {
   const sc = client ?? streamClient()
@@ -63,12 +64,38 @@ export function useSessionActivityStream(
   const [status, setStatus] = useState<StreamStatus>(sc.status)
   const [lastError, setLastError] = useState<string | null>(sc.lastError())
 
+  // Latest focused id, accessed inside the activity callback. Using a ref
+  // avoids re-subscribing to the stream every time focus changes.
+  const focusedRef = useRef<string | null>(focusedSessionId)
+  useEffect(() => {
+    focusedRef.current = focusedSessionId
+  }, [focusedSessionId])
+
   useEffect(() => {
     const unsub = sc.onActivity((sid, event) => {
-      setSessions((prev) => applyActivity(prev, sid, event))
+      setSessions((prev) => {
+        const next = applyActivity(prev, sid, event)
+        // Entries arriving for the currently-viewed session are not
+        // "unread" — the user is looking at them right now.
+        if (
+          event.kind === 'entry-at' &&
+          focusedRef.current !== null &&
+          focusedRef.current === sid
+        ) {
+          return clearUnread(next, sid)
+        }
+        return next
+      })
     })
     return unsub
   }, [sc])
+
+  // When the focus changes to a session, zero its accumulated unread —
+  // by switching to it the user has caught up.
+  useEffect(() => {
+    if (focusedSessionId === null) return
+    setSessions((prev) => clearUnread(prev, focusedSessionId))
+  }, [focusedSessionId])
 
   useEffect(() => {
     const unsub = sc.onStatusChange((s) => {

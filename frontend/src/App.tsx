@@ -406,7 +406,7 @@ export default function App() {
   // We additionally reconcile against the manual-refresh `useTranscript` view
   // so behavior is unchanged when the WS connection is unavailable.
   const { entries: streamEntries } = useTranscriptStream(currentSessionId)
-  const { sessions: sessionActivity } = useSessionActivityStream()
+  const { sessions: sessionActivity } = useSessionActivityStream(currentSessionId)
   const entries = useMemo(() => {
     if (streamEntries.length === 0) return httpEntries
     let merged: TranscriptEntry[] = httpEntries
