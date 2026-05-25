@@ -27,7 +27,7 @@ import Data.Time (UTCTime (..), fromGregorian, picosecondsToDiffTime, secondsToD
 import Test.Hspec
 
 import Frontend.StreamHarness (readGoldenFixture)
-import PureClaw.Core.Types (SessionId (..))
+import PureClaw.Core.Types (ModelId (..), ProviderId (..), SessionId (..))
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.Stream
   ( ActivityKind (..)
@@ -41,7 +41,6 @@ import PureClaw.Session.Types
   , ProviderSpec (..)
   , SessionMeta (..)
   )
-import PureClaw.Core.Types (ModelId (..), ProviderId (..))
 import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)

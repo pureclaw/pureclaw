@@ -25,7 +25,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import PureClaw.Core.Types (ModelId (..), SessionId (..), parseSessionId)
+import PureClaw.Core.Types (ModelId (..), ProviderId (..), SessionId (..), parseSessionId)
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
@@ -59,7 +59,6 @@ import PureClaw.Session.Types
   , ProviderSpec (..)
   , SessionMeta (..)
   )
-import PureClaw.Core.Types (ProviderId (..))
 import PureClaw.Transcript.Provider (mkTranscriptProvider)
 import PureClaw.Transcript.Types
   ( Direction (..)

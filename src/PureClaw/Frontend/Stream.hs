@@ -599,9 +599,7 @@ handleFocus env conn cs mSid mSince =
     setLiveFocus = do
       abortInflightReplay conn cs
       writeIORef (_conn_focus cs) mSid
-      case mSid of
-        Just sid -> sendActivitySnapshot env conn sid
-        Nothing  -> pure ()
+      forM_ mSid (sendActivitySnapshot env conn)
 
 -- | If the broker has a recorded 'HarnessActivity' for this session, push
 -- it to the freshly-focused client. Without this, a tab that connects

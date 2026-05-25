@@ -70,7 +70,7 @@ import Frontend.StreamHarness
   , withStreamServer
   )
 import PureClaw.Agent.AgentDef (mkAgentName)
-import PureClaw.Core.Types (SessionId (..))
+import PureClaw.Core.Types (ModelId (ModelId), ProviderId (..), SessionId (..))
 import PureClaw.Frontend.API (mkStreamGuard)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.StreamBroker
@@ -89,7 +89,6 @@ import PureClaw.Session.Types
   , ProviderSpec (..)
   , SessionMeta (..)
   )
-import PureClaw.Core.Types (ModelId (ModelId), ProviderId (..))
 import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)
