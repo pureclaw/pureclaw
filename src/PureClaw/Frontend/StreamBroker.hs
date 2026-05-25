@@ -31,6 +31,7 @@ module PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   ) where
 
+import Data.Aeson (Value)
 import Control.Concurrent.STM
   ( STM
   , TBQueue
@@ -70,6 +71,10 @@ import PureClaw.Transcript.Types (TranscriptEntry)
 data BrokerEvent
   = EntryRecorded   !SessionId !TranscriptEntry
   | ActivityChanged !SessionId !SessionActivity
+    -- | Full sidebar list snapshot (tabs + recent + archived) pushed on
+    -- every mutation and once on WS connect. Carries pre-serialized JSON
+    -- so the WS handler can send it without knowing the domain types.
+  | ListsSnapshot   !Value
   deriving stock (Show, Eq)
 
 -- | Per-session live signals for sidebar/tab indicators.

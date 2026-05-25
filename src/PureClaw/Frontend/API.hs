@@ -8,6 +8,9 @@ module PureClaw.Frontend.API
   , mkStreamGuard
     -- * Shared helpers
   , isValidSessionId
+    -- * List snapshot (used by Stream.hs for WS push)
+  , computeListsSnapshot
+  , broadcastLists
     -- * Response types (exported for testing)
   , HarnessInfo (..)
   , HarnessActivity (..)
@@ -351,7 +354,8 @@ handleCloseTab env tidxText respond =
     [(idx, "")] -> do
       result <- _fe_closeTab env idx
       case result of
-        Right () ->
+        Right () -> do
+          broadcastLists env
           respond $ jsonResponse status200 (object ["closed" .= True])
         Left errMsg ->
           respond $ jsonResponse status404 (object ["error" .= errMsg])
@@ -394,6 +398,54 @@ handleArchivedSessions env respond = do
       infos = map (`toSessionInfo` Nothing) archived
   respond $ jsonResponse status200 infos
 
+-- ---------------------------------------------------------------------------
+-- List snapshots (WS push)
+-- ---------------------------------------------------------------------------
+
+-- | Compute the same sidebar payloads (tabs, recent sessions, archived
+-- sessions) that the three HTTP endpoints return, pre-serialized as a
+-- single JSON 'Value'. The WS handler sends this on connect and the
+-- mutation handlers call 'broadcastLists' to push it after every change.
+computeListsSnapshot :: FrontendEnv -> IO Aeson.Value
+computeListsSnapshot env = do
+  let limit   = _fe_recentLimit env
+      baseDir = _fe_sessionsDir env
+  tabs <- _fe_listTabs env
+  -- Recent sessions: exclude archived, exclude active-tab-backed, exclude
+  -- empty transcripts, enrich with first-message snippet — same pipeline
+  -- as handleRecentSessions.
+  allMetas <- listSessions baseDir Nothing (limit * 3)
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } <- tabs]
+      notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
+      visible       = filter (\m -> not (_sm_archived m) && notInTab m) allMetas
+  nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
+  let chosen = take limit nonEmpty
+  snippets <- traverse (firstMessageSnippet baseDir) chosen
+  let recentInfos = zipWith toSessionInfo chosen snippets
+  -- Archived: all archived sessions, sorted by lastActive descending
+  -- (listSessions already sorts; we just filter).
+  archivedMetas <- listSessions baseDir Nothing 1000
+  let archivedInfos = map (`toSessionInfo` Nothing) (filter _sm_archived archivedMetas)
+  pure $ object
+    [ "type"              .= ("lists" :: Text)
+    , "tabs"              .= tabs
+    , "recentSessions"    .= recentInfos
+    , "archivedSessions"  .= archivedInfos
+    ]
+
+-- | Compute and broadcast a lists snapshot to all WS subscribers.
+-- No-op when the broker is absent (test / legacy paths).
+broadcastLists :: FrontendEnv -> IO ()
+broadcastLists env = case _fe_broker env of
+  Nothing     -> pure ()
+  Just broker -> do
+    v <- computeListsSnapshot env
+    _streamBroker_publish broker (ListsSnapshot v)
+
+-- ---------------------------------------------------------------------------
+-- Archive / description
+-- ---------------------------------------------------------------------------
+
 -- | Toggle the archive flag on a session. The 'archived' argument is
 -- the **target** value (True for /archive, False for /unarchive), so
 -- the routes are idempotent: archiving an already-archived session is
@@ -409,7 +461,8 @@ handleSetArchived env sidText archived respond = do
   let sid = SessionId sidText
   result <- setArchived (_fe_sessionsDir env) sid archived
   case result of
-    Right () ->
+    Right () -> do
+      broadcastLists env
       respond $ jsonResponse status200 (object ["archived" .= archived])
     Left SetArchivedSessionMissing ->
       respondNotFound respond
@@ -432,7 +485,8 @@ handleSetDescription env sidText req respond = do
     Right (DescBody mDesc) -> do
       result <- setDescription (_fe_sessionsDir env) (SessionId sidText) mDesc
       case result of
-        Right () ->
+        Right () -> do
+          broadcastLists env
           respond $ jsonResponse status200 (object ["description" .= mDesc])
         Left SetDescriptionSessionMissing ->
           respondNotFound respond
@@ -755,6 +809,7 @@ createTab env tabKind respond = do
           _streamBroker_publish broker
             (ActivityChanged (_sm_id meta) (SaSessionCreated meta))
         Nothing -> pure ()
+      broadcastLists env
       respond $ jsonResponse status200 NewTabResponse
         { _ntresp_tabIndex  = curCount
         , _ntresp_sessionId = Just (unSessionId sid)

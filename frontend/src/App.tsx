@@ -3,7 +3,8 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTabs, useRecentSessions, useArchivedSessions, useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, resumeArchivedSession } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, resumeArchivedSession } from './hooks/useApi'
+import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
 import { useSessionActivityStream } from './hooks/useSessionActivityStream'
@@ -331,9 +332,7 @@ function modelContextWindow(model: string | null): number {
 }
 
 export default function App() {
-  const { tabs, refresh: refreshTabs } = useTabs()
-  const { sessions: rawSessions } = useRecentSessions()
-  const { sessions: archivedSessions } = useArchivedSessions()
+  const { tabs, recentSessions: rawSessions, archivedSessions } = useListsStream()
   const { agents } = useAgents()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
@@ -531,14 +530,10 @@ export default function App() {
       if (!res.ok) return
       const tab = await res.json() as import('./hooks/useApi').NewTabResponse
 
-      // Force the tabs list to refresh BEFORE we flip selectedId. Without
-      // this, sessionIdFromSelection("tab:N", tabs) returns null until
-      // the next poll (useTabs polls on an interval). Downstream session-
-      // derived state (useTranscript/useSendMessage/useTranscriptStream
-      // focus) would all bind to null, the refreshRef captures the
-      // no-op refresh, and the new tab's first transcript entries
-      // silently fail to render until a manual page reload.
-      await refreshTabs()
+      // The server's createTab handler calls broadcastLists before
+      // returning, so a WS lists snapshot arrives ~immediately. A brief
+      // null-binding cycle is harmless — hooks handle null session id
+      // gracefully and the next render carries the new tab.
 
       // Switch the active tab *immediately* after creation so the
       // composer disappears and the main window begins tracking the

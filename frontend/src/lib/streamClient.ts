@@ -17,6 +17,7 @@
 import type {
   ActivityEvent,
   ClientOp,
+  ListsSnapshot,
   ServerEvent,
   StreamClient,
   StreamStatus,
@@ -45,6 +46,7 @@ class StreamClientImpl implements StreamClient {
   private statusListeners = new Set<(s: StreamStatus) => void>()
   private entryListeners = new Set<(e: TranscriptEntry) => void>()
   private activityListeners = new Set<(sid: string, a: ActivityEvent) => void>()
+  private listsListeners = new Set<(snapshot: ListsSnapshot) => void>()
 
   constructor(url: string) {
     this.url = url
@@ -91,6 +93,13 @@ class StreamClientImpl implements StreamClient {
     this.activityListeners.add(cb)
     return () => {
       this.activityListeners.delete(cb)
+    }
+  }
+
+  onLists(cb: (snapshot: ListsSnapshot) => void): () => void {
+    this.listsListeners.add(cb)
+    return () => {
+      this.listsListeners.delete(cb)
     }
   }
 
@@ -221,6 +230,9 @@ class StreamClientImpl implements StreamClient {
       }
       case 'activity':
         for (const cb of this.activityListeners) cb(event.sessionId, event.activity)
+        break
+      case 'lists':
+        for (const cb of this.listsListeners) cb(event)
         break
       case 'replay-end':
         if (

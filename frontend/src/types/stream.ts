@@ -5,7 +5,7 @@
 // frames use `type`; client -> server frames use `op`. Keeping them distinct
 // guards against accidental cross-dispatch during refactors.
 
-import type { HarnessActivity, TranscriptEntry } from '../types'
+import type { HarnessActivity, SessionInfo, TabInfo, TranscriptEntry } from '../types'
 
 // -- Server -> Client ---------------------------------------------------------
 
@@ -74,6 +74,13 @@ export interface ErrorEvent {
   message: string
 }
 
+export interface ListsEvent {
+  type: 'lists'
+  tabs: TabInfo[]
+  recentSessions: SessionInfo[]
+  archivedSessions: SessionInfo[]
+}
+
 export type ServerEvent =
   | HelloEvent
   | EntryEvent
@@ -81,6 +88,7 @@ export type ServerEvent =
   | ReplayEndEvent
   | OverflowEvent
   | ErrorEvent
+  | ListsEvent
 
 // -- Client -> Server ---------------------------------------------------------
 
@@ -97,6 +105,12 @@ export type StreamStatus =
   | 'replaying'
   | 'closed'
 
+export interface ListsSnapshot {
+  tabs: TabInfo[]
+  recentSessions: SessionInfo[]
+  archivedSessions: SessionInfo[]
+}
+
 export interface StreamClient {
   /** Current connection status. */
   readonly status: StreamStatus
@@ -106,6 +120,8 @@ export interface StreamClient {
   onEntry(cb: (e: TranscriptEntry) => void): () => void
   /** Subscribe to activity events for ALL sessions. */
   onActivity(cb: (sessionId: string, a: ActivityEvent) => void): () => void
+  /** Subscribe to sidebar list snapshots (tabs + sessions). */
+  onLists(cb: (snapshot: ListsSnapshot) => void): () => void
   /** Subscribe to status changes. */
   onStatusChange(cb: (s: StreamStatus) => void): () => void
   /** Last error message, or null when no terminal error has occurred. */

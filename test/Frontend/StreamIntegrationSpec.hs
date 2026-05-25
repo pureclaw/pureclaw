@@ -173,12 +173,18 @@ mkMeta sidText = SessionMeta
   , _sm_autoSummary       = Nothing
   }
 
--- | Drain the hello event from a freshly opened connection.
+-- | Drain the hello + initial lists snapshot from a freshly opened
+-- connection. The server pushes both before entering the reader/writer
+-- race: hello first, then the sidebar lists snapshot.
 expectHello :: WS.Connection -> IO ()
 expectHello conn = do
   bs <- recvOrFail conn
   let v = decodeValue bs
   eventType v `shouldBe` "hello"
+  -- Drain the lists snapshot that always follows hello.
+  bs2 <- recvOrFail conn
+  let v2 = decodeValue bs2
+  eventType v2 `shouldBe` "lists"
 
 -- | Send a focus op and discard the next zero or one events that are
 -- merely echoes; useful when we don't care about activity.
@@ -395,6 +401,7 @@ spec = do
                     "entry"      -> collectUntilReplayEnd (bs : acc)
                     "replay-end" -> pure (reverse acc, v)
                     "activity"   -> collectUntilReplayEnd acc
+                    "lists"      -> collectUntilReplayEnd acc
                     other        -> do
                       expectationFailure
                         ("unexpected event during replay: " <> show other)

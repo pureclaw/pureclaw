@@ -87,7 +87,8 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import PureClaw.Core.Types (SessionId (..))
 import PureClaw.Frontend.API
-  ( FrontendEnv (..)
+  ( computeListsSnapshot
+  , FrontendEnv (..)
   , HarnessActivity (..)
   , StreamGuard (..)
   , TranscriptEntryInfo (..)
@@ -490,6 +491,13 @@ runConnection env sub conn cs = do
   let logger = _fe_logger env
   handle (escapeHandler logger) $ do
     sendHello conn
+    -- Push initial sidebar lists so the client renders without waiting
+    -- for the first mutation or a fallback HTTP poll.
+    case _fe_broker env of
+      Just _broker -> do
+        snapshot <- computeListsSnapshot env
+        WS.sendTextData conn (Aeson.encode snapshot)
+      Nothing -> pure ()
     WS.withPingThread conn pingInterval (pure ()) $
       Async.race_ (readerLoop env conn cs)
                   (writerLoop sub conn cs)
@@ -732,4 +740,6 @@ writerLoop sub conn cs = loop
       sendEvent conn (SeActivity sid (AkHarnessStatus s))
     handleEvent (ActivityChanged sid (SaSessionCreated meta)) =
       sendEvent conn (SeActivity sid (AkSessionCreated meta))
+    handleEvent (ListsSnapshot v) =
+      WS.sendTextData conn (Aeson.encode v)
 

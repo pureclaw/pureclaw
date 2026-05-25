@@ -114,6 +114,9 @@ function makeFakeClient(): {
         activityListeners.delete(cb)
       }
     },
+    onLists() {
+      return () => {}
+    },
     onStatusChange(cb) {
       statusListeners.add(cb)
       return () => {
