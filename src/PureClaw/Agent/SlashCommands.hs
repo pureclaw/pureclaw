@@ -2170,7 +2170,8 @@ executeSessionCommand env sub ctx = do
           send ("Multiple sessions match: " <> names)
           pure ctx
         Right sid -> do
-          eHandle <- Session.resumeSession (_env_logger env) sessionsDir sid
+          eHandle <- Session.resumeSession
+                       (_env_broker env) (_env_logger env) sessionsDir sid
           case eHandle of
             Left err -> do
               send ("Failed to resume session: " <> T.pack (show err))
@@ -2189,7 +2190,8 @@ executeSessionCommand env sub ctx = do
           pure ctx
         (m : _) -> do
           let sid = SessionTypes._sm_id m
-          eHandle <- Session.resumeSession (_env_logger env) sessionsDir sid
+          eHandle <- Session.resumeSession
+                       (_env_broker env) (_env_logger env) sessionsDir sid
           case eHandle of
             Left err -> do
               send ("Failed to resume session: " <> T.pack (show err))
@@ -2297,7 +2299,8 @@ executeSessionCommand env sub ctx = do
                 , SessionTypes._sm_description       = Nothing
                 , SessionTypes._sm_autoSummary       = Nothing
                 }
-          newHandle <- Session.mkSessionHandle (_env_logger envS) sessionsDir meta
+          newHandle <- Session.mkSessionHandle
+                         (_env_broker envS) (_env_logger envS) sessionsDir meta
           writeIORef (_env_session envS) newHandle
           writeIORef (_env_target envS) (SessionTypes.defaultTarget kind)
           let agentMsg = case mAgent of

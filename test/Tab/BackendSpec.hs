@@ -238,6 +238,7 @@ mkBackendTestEnv allowedLocal allowedRemote = do
     , _env_channelOutQ       = channelOutQ
     , _env_routingConfig     = routing
     , _env_fork              = defaultEnvFork
+    , _env_broker              = Nothing
     }
 
 -- | Briefly yield so the drainer\/writer helper threads get a chance

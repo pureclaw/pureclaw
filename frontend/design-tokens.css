@@ -85,8 +85,9 @@
   --duration-slow:    300ms;
   --ease-out:         cubic-bezier(0.16, 1, 0.3, 1);
 
-  --pulse-duration:    1.5s;   /* needs-input dot */
-  --gradient-duration: 2s;     /* thinking dot */
-  --shimmer-duration:  2.5s;   /* thinking row */
-  --blink-duration:    1s;     /* cursor */
+  --pulse-duration:         1.5s;   /* needs-input dot */
+  --gradient-duration:      2s;     /* thinking dot — color shift */
+  --thinking-halo-duration: 1.4s;   /* thinking dot — halo pulse */
+  --shimmer-duration:       2.5s;   /* thinking row */
+  --blink-duration:         1s;     /* cursor */
 }

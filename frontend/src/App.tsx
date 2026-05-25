@@ -3,8 +3,11 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTabs, useRecentSessions, useArchivedSessions, useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, resumeArchivedSession } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab } from './hooks/useApi'
+import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
+import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
+import { useSessionActivityStream } from './hooks/useSessionActivityStream'
 import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -329,9 +332,7 @@ function modelContextWindow(model: string | null): number {
 }
 
 export default function App() {
-  const { tabs } = useTabs()
-  const { sessions: rawSessions } = useRecentSessions()
-  const { sessions: archivedSessions } = useArchivedSessions()
+  const { tabs, recentSessions: rawSessions, archivedSessions } = useListsStream()
   const { agents } = useAgents()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
@@ -399,35 +400,80 @@ export default function App() {
   }, [agents, selectedAgent])
 
   const currentSessionId = sessionIdFromSelection(selectedId, tabs)
-  const { entries, loading, refresh } = useTranscript(currentSessionId)
+  const { entries: httpEntries, loading, refresh } = useTranscript(currentSessionId)
+  // Live WebSocket tail: merges its own HTTP-seed + WS-delivered entries.
+  // We additionally reconcile against the manual-refresh `useTranscript` view
+  // so behavior is unchanged when the WS connection is unavailable.
+  const { entries: streamEntries } = useTranscriptStream(currentSessionId)
+  const { sessions: sessionActivity } = useSessionActivityStream(currentSessionId)
+  const entries = useMemo(() => {
+    if (streamEntries.length === 0) return httpEntries
+    let merged: TranscriptEntry[] = httpEntries
+    for (const e of streamEntries) merged = reconcileEntries(merged, e)
+    return merged
+  }, [httpEntries, streamEntries])
   const { send, sending } = useSendMessage(currentSessionId, refresh)
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
   const entryCountAtSend = useRef(0)
   const transcriptMessages = useMemo(() => transcriptToMessages(entries), [entries])
 
-  // Combine transcript messages with optimistic pending message + thinking indicator
+  // Is the currently-focused session processing a request right now?
+  // Sourced from the live activity stream: provider sessions emit this
+  // from doCompletion's bracket; harness sessions emit this from the
+  // 2s probe loop. Drives both the sidebar spinner (already wired in
+  // Sidebar.tsx) and the bottom-of-chat thinking indicator below.
+  const sessionIsThinking = currentSessionId !== null
+    && sessionActivity?.[currentSessionId]?.harness === 'thinking'
+
+  // Combine transcript messages with a thinking indicator at the bottom.
+  // Two cases compose to render the indicator:
+  //   1. Local optimistic: the LOCAL tab just sent a message — show
+  //      `pending-user` + `pending-thinking` immediately so the user
+  //      sees their typed message echoed before the HTTP POST returns.
+  //   2. Remote-driven: some OTHER tab/device sent a message on the
+  //      same session — `pendingMessage` is null but the broker's
+  //      SaHarnessStatus thinking event reached us via WS. Render just
+  //      a `remote-thinking` block so the user can see the session is
+  //      currently busy.
+  // The two are mutually exclusive in the messages array (case 1 takes
+  // precedence) so the indicator never duplicates.
   const messages = useMemo(() => {
-    if (!pendingMessage) return transcriptMessages
     const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    return [
-      ...transcriptMessages,
-      {
-        id: 'pending-user',
-        agentName: 'You',
-        agentStatus: 'completed' as const,
-        timestamp: now,
-        blocks: [{ text: pendingMessage }],
-      },
-      {
-        id: 'pending-thinking',
-        agentName: 'Assistant',
-        agentStatus: 'thinking' as const,
-        timestamp: now,
-        blocks: [],
-        isGenerating: true,
-      },
-    ]
-  }, [transcriptMessages, pendingMessage])
+    if (pendingMessage) {
+      return [
+        ...transcriptMessages,
+        {
+          id: 'pending-user',
+          agentName: 'You',
+          agentStatus: 'completed' as const,
+          timestamp: now,
+          blocks: [{ text: pendingMessage }],
+        },
+        {
+          id: 'pending-thinking',
+          agentName: 'Assistant',
+          agentStatus: 'thinking' as const,
+          timestamp: now,
+          blocks: [],
+          isGenerating: true,
+        },
+      ]
+    }
+    if (sessionIsThinking) {
+      return [
+        ...transcriptMessages,
+        {
+          id: 'remote-thinking',
+          agentName: 'Assistant',
+          agentStatus: 'thinking' as const,
+          timestamp: now,
+          blocks: [],
+          isGenerating: true,
+        },
+      ]
+    }
+    return transcriptMessages
+  }, [transcriptMessages, pendingMessage, sessionIsThinking])
 
   // Clear pending message when transcript gains new entries after the send
   useEffect(() => {
@@ -444,10 +490,13 @@ export default function App() {
       await setSessionPrompt(currentSessionId, customPromptFile.content, name)
       setCustomPromptFile(null)
     }
+    if (currentSessionId && archivedSessions.some((s) => s.id === currentSessionId)) {
+      await setSessionArchived(currentSessionId, false)
+    }
     entryCountAtSend.current = entries.length
     setPendingMessage(message)
     send(message)
-  }, [send, entries.length, customPromptFile, currentSessionId])
+  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions])
 
   // Compose mode is implicit: selectedId === null means "no tab focused,
   // show the inline new-tab composer in the ChatArea". Clicking the "New
@@ -483,6 +532,11 @@ export default function App() {
       })
       if (!res.ok) return
       const tab = await res.json() as import('./hooks/useApi').NewTabResponse
+
+      // The server's createTab handler calls broadcastLists before
+      // returning, so a WS lists snapshot arrives ~immediately. A brief
+      // null-binding cycle is harmless — hooks handle null session id
+      // gracefully and the next render carries the new tab.
 
       // Switch the active tab *immediately* after creation so the
       // composer disappears and the main window begins tracking the
@@ -570,16 +624,6 @@ export default function App() {
     }
   }, [tabs, selectedId])
 
-  // L3: Resume archived session — unarchive then create a new tab.
-  const handleResumeArchivedSession = useCallback(async (id: string) => {
-    const tab = await resumeArchivedSession(id)
-    if (tab) {
-      const newId = `tab:${tab.tab_index}`
-      setSelectedId(newId)
-      window.history.pushState(null, '', pathFromSelectedId(newId))
-    }
-  }, [])
-
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
     ? deriveAgent(selectedId, tabs, sessions)
@@ -609,6 +653,7 @@ export default function App() {
           sessions={sessions}
           archivedSessions={archivedSessions}
           selectedId={selectedId}
+          sessionActivity={sessionActivity}
           onSelectTab={handleSelectTab}
           onSelectSession={handleSelectSession}
           onNewTab={handleNewTab}
@@ -616,7 +661,6 @@ export default function App() {
           onUnarchiveSession={handleUnarchiveSession}
           onCloseTab={handleCloseTab}
           onArchiveTab={handleArchiveTab}
-          onResumeArchivedSession={handleResumeArchivedSession}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}

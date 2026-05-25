@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import type { SessionInfo, TabInfo } from '../types'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
+import type { SessionActivityState } from '../types/stream'
 import { ActiveTabs } from './ActiveTabs'
-import { ArchivedSessions } from './ArchivedSessions'
+import { ActivityDot } from './StatusDot'
 
 function SectionHeader({ label }: { label: string }) {
   return (
@@ -35,35 +37,73 @@ function ArchiveButton({ onArchive }: { onArchive: () => void }) {
   )
 }
 
+function UnarchiveButton({ onUnarchive }: { onUnarchive: () => void }) {
+  return (
+    <button
+      className="btn btn-ghost"
+      style={{ fontSize: 10, padding: '1px 6px', lineHeight: 1.4 }}
+      aria-label="Unarchive"
+      onClick={(e) => { e.stopPropagation(); onUnarchive() }}
+    >
+      Unarchive
+    </button>
+  )
+}
+
 function SessionRow({
   session,
   selected,
   onSelect,
   onArchive,
+  onUnarchive,
+  activity,
 }: {
   session: SessionInfo
   selected: boolean
   onSelect: () => void
-  onArchive: (id: string) => void
+  onArchive?: (id: string) => void
+  onUnarchive?: (id: string) => void
+  activity?: SessionActivityState
 }) {
+  const isThinking = activity?.harness === 'thinking'
+  const unread = activity?.unread ?? 0
+
   const rowClasses = [
     'agent-row session-row px-3 py-2',
     selected ? 'selected' : '',
+    isThinking ? 'shimmer' : '',
   ].filter(Boolean).join(' ')
 
   const displayName = sessionDisplayTitle(session)
-  const age = formatAge(session.lastActive)
+  const ageBasis = activity?.lastEntryAt ?? session.lastActive
+  const age = formatAge(ageBasis)
 
   return (
     <div className={rowClasses} onClick={onSelect}>
       <div className="flex items-center gap-2">
+        {isThinking && <ActivityDot activity="thinking" />}
         <span
           className="text-sm truncate mr-auto"
           style={{ color: 'var(--text-muted)', letterSpacing: 'var(--tracking-tight)' }}
         >
           {displayName}
         </span>
-        <ArchiveButton onArchive={() => onArchive(session.id)} />
+        {unread > 0 && (
+          <span
+            className="pill"
+            style={{
+              background: 'var(--accent-primary)',
+              color: 'var(--text-primary)',
+              padding: '0 0.4em',
+              fontSize: '0.7em',
+            }}
+            aria-label={`${unread} new entries`}
+          >
+            {unread}
+          </span>
+        )}
+        {onArchive && <ArchiveButton onArchive={() => onArchive(session.id)} />}
+        {onUnarchive && <UnarchiveButton onUnarchive={() => onUnarchive(session.id)} />}
         <span className="pill token-count">{age}</span>
       </div>
       {(session.agent || session.model) && (
@@ -72,6 +112,55 @@ function SessionRow({
           style={{ color: 'var(--text-faint)', lineHeight: 'var(--leading-tight)' }}
         >
           {sessionSubtitle(session)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ArchivedSection({
+  sessions,
+  selectedId,
+  onSelectSession,
+  onUnarchive,
+}: {
+  sessions: SessionInfo[]
+  selectedId: string | null
+  onSelectSession: (id: string) => void
+  onUnarchive: (id: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (sessions.length === 0) return null
+
+  return (
+    <div className="shrink-0 flex flex-col" style={{ borderTop: '1px solid var(--border)', maxHeight: '50%' }}>
+      <div
+        className="px-3 py-1.5 flex items-center justify-between cursor-pointer shrink-0"
+        style={{ color: 'var(--text-muted)' }}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span
+          className="text-xs font-semibold uppercase"
+          style={{ letterSpacing: '0.08em' }}
+        >
+          Archived ({sessions.length})
+        </span>
+        <span data-testid="collapse-icon" style={{ fontSize: 12 }}>
+          {expanded ? '▾' : '▸'}
+        </span>
+      </div>
+      {expanded && (
+        <div className="overflow-y-auto sidebar-scroll">
+          {sessions.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              selected={selectedId === `session:${s.id}`}
+              onSelect={() => onSelectSession(s.id)}
+              onUnarchive={onUnarchive}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -94,6 +183,7 @@ export function Sidebar({
   sessions,
   archivedSessions,
   selectedId,
+  sessionActivity,
   onSelectTab,
   onSelectSession,
   onNewTab,
@@ -101,12 +191,12 @@ export function Sidebar({
   onUnarchiveSession,
   onCloseTab,
   onArchiveTab,
-  onResumeArchivedSession,
 }: {
   tabs: TabInfo[]
   sessions: SessionInfo[]
   archivedSessions: SessionInfo[]
   selectedId: string | null
+  sessionActivity?: Record<string, SessionActivityState>
   onSelectTab: (index: number) => void
   onSelectSession: (id: string) => void
   onNewTab: () => void
@@ -114,17 +204,17 @@ export function Sidebar({
   onUnarchiveSession: (id: string) => void
   onCloseTab: (index: number) => void
   onArchiveTab: (index: number) => void
-  onResumeArchivedSession: (id: string) => void
 }) {
   return (
     <div
       className="shrink-0 flex flex-col"
       style={{ width: 'var(--sidebar-width)', background: 'var(--bg-surface)', borderRight: '1px solid var(--border)' }}
     >
-      <div className="flex-1 overflow-y-auto sidebar-scroll py-1">
+      <div className="flex-1 overflow-y-auto sidebar-scroll py-1 min-h-0">
         <ActiveTabs
           tabs={tabs}
           selectedId={selectedId}
+          sessionActivity={sessionActivity}
           onSelectTab={onSelectTab}
           onNewTab={onNewTab}
           onCloseTab={onCloseTab}
@@ -141,17 +231,11 @@ export function Sidebar({
                 selected={selectedId === `session:${s.id}`}
                 onSelect={() => onSelectSession(s.id)}
                 onArchive={onArchiveSession}
+                activity={sessionActivity?.[s.id]}
               />
             ))}
           </>
         )}
-
-        <ArchivedSessions
-          sessions={archivedSessions}
-          selectedId={selectedId}
-          onSelectSession={onResumeArchivedSession}
-          onUnarchive={onUnarchiveSession}
-        />
 
         {tabs.length === 0 && sessions.length === 0 && archivedSessions.length === 0 && (
           <div className="px-3 py-4 text-xs" style={{ color: 'var(--text-muted)' }}>
@@ -159,6 +243,12 @@ export function Sidebar({
           </div>
         )}
       </div>
+      <ArchivedSection
+        sessions={archivedSessions}
+        selectedId={selectedId}
+        onSelectSession={onSelectSession}
+        onUnarchive={onUnarchiveSession}
+      />
     </div>
   )
 }

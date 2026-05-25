@@ -3,6 +3,14 @@ module PureClaw.Frontend.API
     apiApp
     -- * Environment
   , FrontendEnv (..)
+    -- * Stream connection guard (per-origin cap)
+  , StreamGuard (..)
+  , mkStreamGuard
+    -- * Shared helpers
+  , isValidSessionId
+    -- * List snapshot (used by Stream.hs for WS push)
+  , computeListsSnapshot
+  , broadcastLists
     -- * Response types (exported for testing)
   , HarnessInfo (..)
   , HarnessActivity (..)
@@ -16,7 +24,8 @@ module PureClaw.Frontend.API
   , NewTabResponse (..)
   ) where
 
-import Control.Exception (IOException, SomeException, try)
+import Control.Concurrent.STM (TVar, newTVarIO)
+import Control.Exception (IOException, SomeException, bracket_, try)
 import Control.Monad (filterM)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
@@ -28,6 +37,7 @@ import Data.Vector qualified as V
 import System.IO (IOMode (..), withFile)
 import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
+import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -42,6 +52,13 @@ import System.FilePath ((</>), takeDirectory)
 import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
 import PureClaw.Agent.Context
 import PureClaw.Core.Types (ModelId (..), SessionId (..), unModelId, unSessionId)
+import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
+import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
+import PureClaw.Frontend.StreamBroker
+  ( BrokerEvent (..)
+  , SessionActivity (..)
+  , StreamBroker (..)
+  )
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Tab (TabKind (..))
@@ -83,6 +100,16 @@ data FrontendEnv = FrontendEnv
     -- ^ On-disk agents directory (e.g. @~\/.pureclaw\/agents@).
   , _fe_defaultAgent :: Maybe Text
     -- ^ Default agent name from config.
+  , _fe_broker       :: Maybe StreamBroker
+    -- ^ Optional in-process broker for live transcript streaming. When
+    -- 'Just', the @POST \/sessions\/\<id\>\/send@ completion path opens its
+    -- transcript handle via 'mkBroadcastingFileTranscriptHandle' so that
+    -- provider Request\/Response entries reach subscribers in real time
+    -- (DoD D25). 'Nothing' preserves the legacy non-broadcasting path.
+  , _fe_streamGuard  :: Maybe StreamGuard
+    -- ^ Optional per-origin WS subscriber counter. The WS endpoint uses
+    -- this to enforce '_bc_maxSubsPerOrigin' (DoD D30). 'Nothing' disables
+    -- the WS endpoint entirely (it returns 503).
   , _fe_maxTabs      :: Int
     -- ^ Maximum number of tabs allowed (A8 enforcement).
   , _fe_tabCount     :: IORef Int
@@ -110,17 +137,39 @@ data FrontendEnv = FrontendEnv
     -- config file). Never throws.
   }
 
--- | Activity state of a harness, derived from tmux screen capture.
-data HarnessActivity
-  = HarnessThinking
-  | HarnessIdle
-  | HarnessStopped
-  deriving stock (Show, Eq)
+-- | Per-origin WS subscriber counter. Lives at the same lifetime as the
+-- broker (constructed once in @startWithChannel@). The WS handler calls
+-- 'tryClaim' on upgrade (rejecting with 503 if the cap is reached) and
+-- 'release' on disconnect. Key is the normalized Origin string (see
+-- 'normalizeOrigin' in "PureClaw.Frontend.Stream").
+data StreamGuard = StreamGuard
+  { _streamGuard_perOrigin    :: !(TVar (Map Text Int))
+    -- ^ Live count per normalized Origin string.
+  , _streamGuard_maxPerOrigin :: !Int
+    -- ^ Maximum simultaneous WS subscriptions per origin.
+  }
 
-instance ToJSON HarnessActivity where
-  toJSON HarnessThinking = Aeson.String "thinking"
-  toJSON HarnessIdle     = Aeson.String "idle"
-  toJSON HarnessStopped  = Aeson.String "stopped"
+-- | Construct a fresh 'StreamGuard' with the given per-origin cap.
+mkStreamGuard :: Int -> IO StreamGuard
+mkStreamGuard maxPer = do
+  ref <- newTVarIO Map.empty
+  pure StreamGuard
+    { _streamGuard_perOrigin    = ref
+    , _streamGuard_maxPerOrigin = maxPer
+    }
+
+-- | Shared session-ID validation used by every endpoint that consumes a
+-- caller-supplied session id (HTTP @\/transcript@, @\/send@, @\/prompt@
+-- and the WS @focus@ op). Rejects @..@ and @\/@ to foreclose path
+-- traversal; rejects the empty string. Behavioural surface is intentionally
+-- the same across the HTTP and WS paths so D26's "shared helper" property
+-- holds: changing the rule here changes it everywhere.
+isValidSessionId :: Text -> Bool
+isValidSessionId sid
+  | T.null sid = False
+  | T.isInfixOf ".." sid = False
+  | T.isInfixOf "/" sid = False
+  | otherwise = True
 
 -- | JSON-serializable harness info for the frontend.
 data HarnessInfo = HarnessInfo
@@ -305,7 +354,8 @@ handleCloseTab env tidxText respond =
     [(idx, "")] -> do
       result <- _fe_closeTab env idx
       case result of
-        Right () ->
+        Right () -> do
+          broadcastLists env
           respond $ jsonResponse status200 (object ["closed" .= True])
         Left errMsg ->
           respond $ jsonResponse status404 (object ["error" .= errMsg])
@@ -348,6 +398,56 @@ handleArchivedSessions env respond = do
       infos = map (`toSessionInfo` Nothing) archived
   respond $ jsonResponse status200 infos
 
+-- ---------------------------------------------------------------------------
+-- List snapshots (WS push)
+-- ---------------------------------------------------------------------------
+
+-- | Compute the same sidebar payloads (tabs, recent sessions, archived
+-- sessions) that the three HTTP endpoints return, pre-serialized as a
+-- single JSON 'Value'. The WS handler sends this on connect and the
+-- mutation handlers call 'broadcastLists' to push it after every change.
+computeListsSnapshot :: FrontendEnv -> IO Aeson.Value
+computeListsSnapshot env = do
+  let limit   = _fe_recentLimit env
+      baseDir = _fe_sessionsDir env
+  tabs <- _fe_listTabs env
+  -- Recent sessions: exclude archived, exclude active-tab-backed, exclude
+  -- empty transcripts, enrich with first-message snippet — same pipeline
+  -- as handleRecentSessions.
+  allMetas <- listSessions baseDir Nothing (limit * 3)
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } <- tabs]
+      notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
+      visible       = filter (\m -> not (_sm_archived m) && notInTab m) allMetas
+  nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
+  let chosen = take limit nonEmpty
+  snippets <- traverse (firstMessageSnippet baseDir) chosen
+  let recentInfos = zipWith toSessionInfo chosen snippets
+  -- Archived: all archived sessions, sorted by lastActive descending
+  -- (listSessions already sorts; we just filter).
+  archivedMetas <- listSessions baseDir Nothing 1000
+  let archivedChosen = filter _sm_archived archivedMetas
+  archivedSnippets <- traverse (firstMessageSnippet baseDir) archivedChosen
+  let archivedInfos = zipWith toSessionInfo archivedChosen archivedSnippets
+  pure $ object
+    [ "type"              .= ("lists" :: Text)
+    , "tabs"              .= tabs
+    , "recentSessions"    .= recentInfos
+    , "archivedSessions"  .= archivedInfos
+    ]
+
+-- | Compute and broadcast a lists snapshot to all WS subscribers.
+-- No-op when the broker is absent (test / legacy paths).
+broadcastLists :: FrontendEnv -> IO ()
+broadcastLists env = case _fe_broker env of
+  Nothing     -> pure ()
+  Just broker -> do
+    v <- computeListsSnapshot env
+    _streamBroker_publish broker (ListsSnapshot v)
+
+-- ---------------------------------------------------------------------------
+-- Archive / description
+-- ---------------------------------------------------------------------------
+
 -- | Toggle the archive flag on a session. The 'archived' argument is
 -- the **target** value (True for /archive, False for /unarchive), so
 -- the routes are idempotent: archiving an already-archived session is
@@ -363,7 +463,8 @@ handleSetArchived env sidText archived respond = do
   let sid = SessionId sidText
   result <- setArchived (_fe_sessionsDir env) sid archived
   case result of
-    Right () ->
+    Right () -> do
+      broadcastLists env
       respond $ jsonResponse status200 (object ["archived" .= archived])
     Left SetArchivedSessionMissing ->
       respondNotFound respond
@@ -386,7 +487,8 @@ handleSetDescription env sidText req respond = do
     Right (DescBody mDesc) -> do
       result <- setDescription (_fe_sessionsDir env) (SessionId sidText) mDesc
       case result of
-        Right () ->
+        Right () -> do
+          broadcastLists env
           respond $ jsonResponse status200 (object ["description" .= mDesc])
         Left SetDescriptionSessionMissing ->
           respondNotFound respond
@@ -514,8 +616,8 @@ toTranscriptEntryInfo e = TranscriptEntryInfo
 -- | Read transcript entries from a session's @transcript.jsonl@ file.
 handleTranscript :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleTranscript env sid respond = do
-  -- Reject path traversal
-  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+  -- Reject path traversal (shared helper — D26)
+  if not (isValidSessionId sid)
     then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
     else do
       let path = _fe_sessionsDir env </> T.unpack sid </> "transcript.jsonl"
@@ -696,8 +798,20 @@ createTab env tabKind respond = do
             , _sm_description       = Nothing
             , _sm_autoSummary       = Nothing
             }
-      sh <- mkSessionHandle (_fe_logger env) (_fe_sessionsDir env) meta
+      sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
       _sh_save sh
+      -- Publish the new-session signal to the live stream broker (D18). The
+      -- sidebar uses this to render the session row without polling. The
+      -- no-broker path is intentional ('Nothing' preserves the legacy
+      -- behaviour for one-off scripts and tests). Previously this lived in
+      -- the now-410'd POST /api/sessions/new handler; it moved here when
+      -- the session-tab unification merged on main.
+      case _fe_broker env of
+        Just broker ->
+          _streamBroker_publish broker
+            (ActivityChanged (_sm_id meta) (SaSessionCreated meta))
+        Nothing -> pure ()
+      broadcastLists env
       respond $ jsonResponse status200 NewTabResponse
         { _ntresp_tabIndex  = curCount
         , _ntresp_sessionId = Just (unSessionId sid)
@@ -738,7 +852,7 @@ handleNewSessionGone respond =
 -- the agent name in @session.json@.
 handleSetPrompt :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleSetPrompt env sid req respond = do
-  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+  if not (isValidSessionId sid)
     then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
     else do
       let sessionDir = _fe_sessionsDir env </> T.unpack sid
@@ -779,8 +893,8 @@ instance FromJSON SendRequest where
 -- | Send a user message to a session and get a completion.
 handleSend :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleSend env sid req respond = do
-  -- Validate session ID
-  if T.isInfixOf ".." sid || T.isInfixOf "/" sid
+  -- Validate session ID (shared helper — D26)
+  if not (isValidSessionId sid)
     then respond $ jsonResponse status400 (object ["error" .= ("Invalid session ID" :: Text)])
     else do
       let sessionDir = _fe_sessionsDir env </> T.unpack sid
@@ -803,7 +917,8 @@ handleSend env sid req respond = do
                 (_, Nothing) ->
                   respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
                 (Just provider, Just model) -> do
-                  result <- try @SomeException $ doCompletion env provider model userText transcriptPath
+                  result <- try @SomeException $
+                    doCompletion env (SessionId sid) provider model userText transcriptPath
                   case result of
                     Left e -> do
                       _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
@@ -812,10 +927,21 @@ handleSend env sid req respond = do
                       respond $ jsonResponse status200 (object ["response" .= respText])
 
 -- | Run a completion: load context, send to provider, record to transcript.
-doCompletion :: FrontendEnv -> SomeProvider -> ModelId -> Text -> FilePath -> IO Text
-doCompletion env provider model userText transcriptPath = do
-  -- Open a transcript handle for recording
-  th <- mkFileTranscriptHandle (_fe_logger env) transcriptPath
+-- The transcript handle is opened via 'mkBroadcastingFileTranscriptHandle'
+-- so the provider-wrapper Request\/Response entries reach the broker (D25)
+-- when one is configured on the 'FrontendEnv'.
+doCompletion
+  :: FrontendEnv
+  -> SessionId
+  -> SomeProvider
+  -> ModelId
+  -> Text
+  -> FilePath
+  -> IO Text
+doCompletion env sid provider model userText transcriptPath = do
+  -- Open a (possibly broadcasting) transcript handle for recording.
+  th <- mkBroadcastingFileTranscriptHandle
+          (_fe_broker env) sid (_fe_logger env) transcriptPath
   -- Load recent messages for context
   history <- loadRecentMessages th 50 100000
   -- Check for per-session custom prompt, falling back to global
@@ -839,7 +965,21 @@ doCompletion env provider model userText transcriptPath = do
         , _cr_tools        = []
         , _cr_toolChoice   = Nothing
         }
-  resp <- complete provider' req
+  -- Publish session-thinking activity events so the FE sidebar / chat
+  -- area can show a live indicator while the provider call is in flight.
+  -- For harness-backed sessions, the equivalent signal comes from the
+  -- 2s tmux probe loop in 'PureClaw.Frontend.ActivityProbe'; provider
+  -- sessions don't go through the harness map, so the only place we
+  -- can hook this is at the request boundary in 'doCompletion'.
+  -- 'bracket_' guarantees the Idle event fires even if 'complete' throws.
+  let publishStatus s = case _fe_broker env of
+        Just broker -> _streamBroker_publish broker
+          (ActivityChanged sid (SaHarnessStatus s))
+        Nothing -> pure ()
+  resp <- bracket_
+            (publishStatus HarnessThinking)
+            (publishStatus HarnessIdle)
+            (complete provider' req)
   _th_flush th
   _th_close th
   pure (responseText resp)

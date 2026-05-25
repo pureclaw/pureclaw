@@ -16,7 +16,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["vitest/globals", "@testing-library/jest-dom/vitest"]
+    "types": ["vitest/globals", "@testing-library/jest-dom/vitest", "node"]
   },
   "include": ["src"]
 }

@@ -117,6 +117,18 @@ import qualified Tab.BackendSpec
 import qualified Coexistence.SlashCmdSpec
 import qualified Security.TabSpec
 import qualified Onboarding.StartSpec
+-- WU1 (live transcript streaming)
+import qualified Frontend.StreamBrokerSpec
+-- WU2 (broadcasting transcript decorator)
+import qualified Frontend.BroadcastingTranscriptSpec
+-- WU3 (WS endpoint + wire protocol + Origin/cap enforcement)
+import qualified Frontend.StreamSpec
+-- WU3b (wire-protocol golden fixtures + WS integration tests)
+import qualified Frontend.StreamGoldensSpec
+import qualified Frontend.StreamIntegrationSpec
+-- WU4 (activity probe loop)
+import qualified Frontend.ActivityProbeSpec
+-- Frontend.APISpec is already imported at the top of this block (from main)
 
 -- WU-10 (Container + Local harness factory arms)
 import qualified Tab.ContainerSpec
@@ -237,6 +249,19 @@ main = hspec $ do
   describe "Coexistence.SlashCmd" Coexistence.SlashCmdSpec.spec
   describe "Security.Tab"         Security.TabSpec.spec
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
+  -- WU1 (live transcript streaming)
+  describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
+  -- WU2 (broadcasting transcript decorator)
+  describe "Frontend.BroadcastingTranscript"
+    Frontend.BroadcastingTranscriptSpec.spec
+  -- WU3 (WS endpoint + wire protocol)
+  describe "Frontend.Stream" Frontend.StreamSpec.spec
+  -- WU3b (wire-protocol golden fixtures + WS integration tests)
+  describe "Frontend.StreamGoldens" Frontend.StreamGoldensSpec.spec
+  describe "Frontend.StreamIntegration" Frontend.StreamIntegrationSpec.spec
+  -- WU4 (activity probe loop)
+  describe "Frontend.ActivityProbe" Frontend.ActivityProbeSpec.spec
+  -- Frontend.APISpec is registered earlier (from main's WU-7 unified endpoint)
   -- WU9 (HPureClaw depth limit)
   describe "Routing.DepthLimit"  Routing.DepthLimitSpec.spec
   -- WU-10 (Container + Local harness factory arms)

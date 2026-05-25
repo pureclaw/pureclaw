@@ -19,6 +19,7 @@ import Data.Text (Text)
 
 import PureClaw.Agent.AgentDef (AgentDef)
 import PureClaw.Core.Types
+import PureClaw.Frontend.StreamBroker (StreamBroker)
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
@@ -124,6 +125,14 @@ data AgentEnv = AgentEnv
     -- tests inject synchronous variants (T4) to make spawn paths
     -- deterministic. Tab loops (WU5\/WU6) MUST use this instead of
     -- 'Control.Concurrent.forkIO'.
+  , _env_broker :: Maybe StreamBroker
+    -- ^ Optional in-process pub\/sub broker for live transcript
+    -- streaming. When 'Just', every transcript write performed via the
+    -- session handles owned by this 'AgentEnv' fans out broker events
+    -- ('EntryRecorded' and 'ActivityChanged'). 'Nothing' preserves the
+    -- legacy no-broker path (tests, one-off scripts, the CLI before
+    -- WU3's lifecycle changes land). See "PureClaw.Frontend.StreamBroker"
+    -- and "PureClaw.Frontend.BroadcastingTranscript".
   }
 
 -- | Read the active session's transcript handle.

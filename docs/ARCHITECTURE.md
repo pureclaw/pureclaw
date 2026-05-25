@@ -392,3 +392,45 @@ layout immediately recognizable.
 ## What PureClaw Is
 
 A minimal, correct, auditable AI agent runtime where the type checker is the primary security control — and where any Haskell programmer can read the code and understand it.
+
+---
+
+## Live Transcript Streaming
+
+The web frontend receives real-time updates of session transcripts and harness activity via a WebSocket endpoint. The streaming layer is gated by an Origin allowlist, a per-origin subscriber cap, and a global broker cap; no auth in v1 by design (local-dev posture). See [`docs/transcript-streaming.md`](transcript-streaming.md) for the full design and DoD list.
+
+### Data flow
+
+```
+Transcript writers (mkSessionHandle, resumeSession, handleSend/doCompletion,
+SlashCommands' session-create path) → BroadcastingTranscriptHandle (decorates
+mkFileTranscriptHandle, publishes EntryRecorded + ActivityChanged after _th_record)
+                                ↓
+                          StreamBroker (in-process pub/sub, STM-atomic
+                          overflow protocol, bounded per-subscriber TBQueue)
+                                ↓
+                          Stream.streamApp (WS handler — Origin allowlist,
+                          StreamGuard per-origin cap, withPingThread keepalive,
+                          replay snapshot algorithm)
+                                ↓
+                          Frontend hooks (useTranscriptStream,
+                          useSessionActivityStream)
+```
+
+### Modules
+
+| Module | Role |
+|---|---|
+| `PureClaw.Frontend.StreamBroker` | In-process pub/sub broker (publish/subscribe/introspect/config) |
+| `PureClaw.Frontend.BroadcastingTranscript` | `TranscriptHandle` decorator that also publishes to the broker; **the sole write-path factory** for `mkFileTranscriptHandle` |
+| `PureClaw.Frontend.Stream` | WS endpoint + wire protocol + Origin allowlist + StreamGuard + replay algorithm |
+| `PureClaw.Frontend.ActivityProbe` | 2 s tick loop emitting `ActivityChanged sid (SaHarnessStatus _)` per harness state transition |
+| `PureClaw.Frontend.Activity.Types` | `HarnessActivity` (extracted from `Frontend.API` to break a cycle with the broker) |
+
+### Lifecycle
+
+`CLI.Commands.startWithChannel` constructs the broker + `StreamGuard` at the top of its body (before any `mkSessionHandle`/`resumeSession`), then nests two `Async.withAsync` scopes — one around `runFrontend`, one around `runActivityProbeLoop` — both inside `runAgentLoopWith`'s lifetime. When the agent loop exits, both background workers are cancelled within ~1 s. No bare `forkIO`.
+
+### Coverage gates and `_te_id` invariant
+
+`scripts/lint-transcript-handles.sh` enforces D6: `mkFileTranscriptHandle` may appear in exactly three files (definition, broadcasting wrapper, the read-only `Tools.SessionSearch` consumer). Any new write-path call site fails CI. Every `TranscriptEntry._te_id` is a unique UUID allocated BEFORE `_th_record` is called (see `Transcript.Combinator.withTranscript`) — this is the dedup invariant the replay snapshot algorithm relies on.

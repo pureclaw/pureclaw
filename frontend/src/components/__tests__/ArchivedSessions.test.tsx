@@ -1,7 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
-import { ArchivedSessions } from '../ArchivedSessions'
-import type { SessionInfo } from '../../types'
+import { Sidebar } from '../Sidebar'
+import type { SessionInfo, TabInfo } from '../../types'
 
 function makeSessions(...overrides: Partial<SessionInfo>[]): SessionInfo[] {
   return overrides.map((o, i) => ({
@@ -17,197 +17,122 @@ function makeSessions(...overrides: Partial<SessionInfo>[]): SessionInfo[] {
   }))
 }
 
+const defaultProps = {
+  tabs: [] as TabInfo[],
+  sessions: [] as SessionInfo[],
+  archivedSessions: [] as SessionInfo[],
+  selectedId: null as string | null,
+  onSelectTab: vi.fn(),
+  onSelectSession: vi.fn(),
+  onNewTab: vi.fn(),
+  onArchiveSession: vi.fn(),
+  onUnarchiveSession: vi.fn(),
+  onCloseTab: vi.fn(),
+  onArchiveTab: vi.fn(),
+}
+
 describe('ArchivedSessions', () => {
   it('is collapsed by default', () => {
-    const sessions = makeSessions({ description: 'old session' })
+    const archivedSessions = makeSessions({ description: 'old session' })
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
     )
-    // Session content should NOT be visible when collapsed
     expect(screen.queryByText('old session')).not.toBeInTheDocument()
   })
 
   it('shows count in header when collapsed', () => {
-    const sessions = makeSessions(
+    const archivedSessions = makeSessions(
       { description: 'one' },
       { description: 'two' },
       { description: 'three' },
     )
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
     )
     expect(screen.getByText(/Archived/)).toHaveTextContent('Archived (3)')
   })
 
   it('expands on header click to show sessions', () => {
-    const sessions = makeSessions(
-      { description: 'old session' },
-    )
+    const archivedSessions = makeSessions({ description: 'old session' })
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
     )
-
-    // Click to expand
     fireEvent.click(screen.getByText(/Archived/))
-
-    // Now the session should be visible
     expect(screen.getByText('old session')).toBeInTheDocument()
   })
 
   it('shows expand/collapse icons', () => {
-    const sessions = makeSessions({ description: 'test' })
+    const archivedSessions = makeSessions({ description: 'test' })
     const { container } = render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
     )
-
-    // Collapsed: should show right-pointing triangle
-    expect(container.querySelector('[data-testid="collapse-icon"]')).toHaveTextContent('▸') // ▸
-
-    // Expand
+    expect(container.querySelector('[data-testid="collapse-icon"]')).toHaveTextContent('▸')
     fireEvent.click(screen.getByText(/Archived/))
-
-    // Expanded: should show down-pointing triangle
-    expect(container.querySelector('[data-testid="collapse-icon"]')).toHaveTextContent('▾') // ▾
+    expect(container.querySelector('[data-testid="collapse-icon"]')).toHaveTextContent('▾')
   })
 
   it('shows unarchive button for each session when expanded', () => {
-    const sessions = makeSessions(
+    const archivedSessions = makeSessions(
       { description: 'session-a' },
       { description: 'session-b' },
     )
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
     )
-
-    // Expand
     fireEvent.click(screen.getByText(/Archived/))
-
     const unarchiveButtons = screen.getAllByRole('button', { name: /unarchive/i })
     expect(unarchiveButtons).toHaveLength(2)
   })
 
-  it('calls onUnarchive with session id when unarchive button is clicked', () => {
-    const onUnarchive = vi.fn()
-    const sessions = makeSessions(
-      { id: 'sess-abc', description: 'to-unarchive' },
-    )
+  it('calls onUnarchiveSession with session id when unarchive button is clicked', () => {
+    const onUnarchiveSession = vi.fn()
+    const archivedSessions = makeSessions({ id: 'sess-abc', description: 'to-unarchive' })
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={onUnarchive}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} onUnarchiveSession={onUnarchiveSession} />,
     )
-
-    // Expand first
     fireEvent.click(screen.getByText(/Archived/))
-
-    // Click unarchive
     const unarchiveBtn = screen.getByRole('button', { name: /unarchive/i })
     fireEvent.click(unarchiveBtn)
-
-    expect(onUnarchive).toHaveBeenCalledWith('sess-abc')
+    expect(onUnarchiveSession).toHaveBeenCalledWith('sess-abc')
   })
 
   it('calls onSelectSession with session id when a session row is clicked', () => {
     const onSelectSession = vi.fn()
-    const sessions = makeSessions(
-      { id: 'sess-xyz', description: 'click me' },
-    )
+    const archivedSessions = makeSessions({ id: 'sess-xyz', description: 'click me' })
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={onSelectSession}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} onSelectSession={onSelectSession} />,
     )
-
-    // Expand first
     fireEvent.click(screen.getByText(/Archived/))
-
-    // Click the session row
     fireEvent.click(screen.getByText('click me'))
-
     expect(onSelectSession).toHaveBeenCalledWith('sess-xyz')
   })
 
   it('does not render section when sessions array is empty', () => {
-    const { container } = render(
-      <ArchivedSessions
-        sessions={[]}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+    render(
+      <Sidebar {...defaultProps} archivedSessions={[]} />,
     )
-    expect(container.firstChild).toBeNull()
+    expect(screen.queryByText(/Archived/)).not.toBeInTheDocument()
   })
 
   it('shows relative time for each archived session', () => {
-    // 3 days ago
-    const sessions = makeSessions(
+    const archivedSessions = makeSessions(
       { description: 'old-one', lastActive: new Date(Date.now() - 3 * 86400000).toISOString() },
     )
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
     )
-
-    // Expand
     fireEvent.click(screen.getByText(/Archived/))
-
     expect(screen.getByText('3d')).toBeInTheDocument()
   })
 
   it('collapses when header is clicked a second time', () => {
-    const sessions = makeSessions({ description: 'toggling' })
+    const archivedSessions = makeSessions({ description: 'toggling' })
     render(
-      <ArchivedSessions
-        sessions={sessions}
-        selectedId={null}
-        onSelectSession={() => {}}
-        onUnarchive={() => {}}
-      />,
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
     )
-
     const header = screen.getByText(/Archived/)
-
-    // Expand
     fireEvent.click(header)
     expect(screen.getByText('toggling')).toBeInTheDocument()
-
-    // Collapse
     fireEvent.click(header)
     expect(screen.queryByText('toggling')).not.toBeInTheDocument()
   })

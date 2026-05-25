@@ -29,8 +29,10 @@ module PureClaw.Session.Handle
   ) where
 
 import Control.Exception (IOException, try)
+import Control.Monad (guard)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
   ( IORef
@@ -41,10 +43,13 @@ import Data.IORef
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import Data.Text.Encoding qualified as TE
+import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, secondsToDiffTime)
+import Data.Vector qualified as V
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
@@ -63,11 +68,14 @@ import PureClaw.Core.Types
   , SessionId (..)
   , parseSessionId
   )
+import PureClaw.Frontend.BroadcastingTranscript
+  ( mkBroadcastingFileTranscriptHandle
+  )
+import PureClaw.Frontend.StreamBroker (StreamBroker)
 import PureClaw.Handles.Harness (HarnessHandle)
 import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
-  , mkFileTranscriptHandle
   , mkNoOpTranscriptHandle
   )
 import PureClaw.Providers.Class
@@ -141,9 +149,18 @@ data ResolvedRuntime
 --
 -- Creates @\<baseDir\>/\<sessionId\>/@ with mode @0o700@, writes the
 -- initial @session.json@ (mode @0o600@) via 'saveMeta', and opens
--- @transcript.jsonl@ (mode @0o600@) through 'mkFileTranscriptHandle'.
-mkSessionHandle :: LogHandle -> FilePath -> SessionMeta -> IO SessionHandle
-mkSessionHandle logger baseDir meta = do
+-- @transcript.jsonl@ (mode @0o600@) through
+-- 'mkBroadcastingFileTranscriptHandle'. When the optional broker is
+-- 'Nothing' the helper falls back to a plain file handle; when 'Just',
+-- transcript writes are broadcast to the supplied 'StreamBroker' in
+-- addition to being persisted.
+mkSessionHandle
+  :: Maybe StreamBroker
+  -> LogHandle
+  -> FilePath
+  -> SessionMeta
+  -> IO SessionHandle
+mkSessionHandle mBroker logger baseDir meta = do
   let sid  = unSessionId (_sm_id meta)
       dir  = baseDir </> T.unpack sid
       txp  = dir </> "transcript.jsonl"
@@ -151,12 +168,14 @@ mkSessionHandle logger baseDir meta = do
   setFileMode dir 0o700
   metaRef <- newIORef meta
   saveMeta dir metaRef
-  tx <- mkFileTranscriptHandle logger txp
+  tx <- mkBroadcastingFileTranscriptHandle mBroker (_sm_id meta) logger txp
+  let save = saveMeta dir metaRef
+      tx'  = touchLastActive metaRef save tx
   pure SessionHandle
     { _sh_meta       = metaRef
-    , _sh_transcript = tx
+    , _sh_transcript = tx'
     , _sh_dir        = dir
-    , _sh_save       = saveMeta dir metaRef
+    , _sh_save       = save
     }
 
 -- | Atomically persist the metadata IORef to @\<dir\>/session.json@ by
@@ -171,6 +190,20 @@ saveMeta dir ref = do
   LBS.writeFile tmpP (Aeson.encode meta)
   setFileMode tmpP 0o600
   renameFile tmpP finalP
+
+-- | Wrap a 'TranscriptHandle' so that after every successful
+-- '_th_record' call, @_sm_lastActive@ is bumped to 'getCurrentTime'
+-- and the session metadata is persisted to disk via the supplied save
+-- action. This keeps the sidebar's "last active" column accurate
+-- without requiring every transcript call site to remember the bump.
+touchLastActive :: IORef SessionMeta -> IO () -> TranscriptHandle -> TranscriptHandle
+touchLastActive metaRef save th = th
+  { _th_record = \entry -> do
+      _th_record th entry
+      now <- getCurrentTime
+      atomicModifyIORef' metaRef (\m -> (m { _sm_lastActive = now }, ()))
+      save
+  }
 
 -- ----------------------------------------------------------------------------
 -- No-op handle
@@ -239,13 +272,16 @@ noOpMeta = SessionMeta
 -- ----------------------------------------------------------------------------
 
 -- | Reopen an existing session by ID. Reads @session.json@, validates
--- the JSON, and reopens @transcript.jsonl@ for append.
+-- the JSON, and reopens @transcript.jsonl@ for append. When the optional
+-- broker is 'Just', the reopened transcript handle broadcasts records to
+-- it; 'Nothing' yields a plain file handle.
 resumeSession
-  :: LogHandle
+  :: Maybe StreamBroker
+  -> LogHandle
   -> FilePath
   -> SessionId
   -> IO (Either ResumeError SessionHandle)
-resumeSession logger baseDir sid = do
+resumeSession mBroker logger baseDir sid = do
   let dir    = baseDir </> T.unpack (unSessionId sid)
       metaP  = dir </> "session.json"
       txP    = dir </> "transcript.jsonl"
@@ -261,12 +297,14 @@ resumeSession logger baseDir sid = do
               <> " — recovery hint: inspect or remove " <> metaP)))
         Right meta -> do
           metaRef <- newIORef (meta :: SessionMeta)
-          tx <- mkFileTranscriptHandle logger txP
+          tx <- mkBroadcastingFileTranscriptHandle mBroker sid logger txP
+          let save = saveMeta dir metaRef
+              tx'  = touchLastActive metaRef save tx
           pure (Right SessionHandle
             { _sh_meta       = metaRef
-            , _sh_transcript = tx
+            , _sh_transcript = tx'
             , _sh_dir        = dir
-            , _sh_save       = saveMeta dir metaRef
+            , _sh_save       = save
             })
 
 -- ----------------------------------------------------------------------------
@@ -551,11 +589,87 @@ loadRecentMessages th maxCount maxTokens = do
              else e : goBudget used' False es
   pure (map entryToMessage (reverse budgeted))
   where
+    -- Extract just the NEW message text from a recorded provider
+    -- request/response JSON payload — NOT the entire envelope. Falls back
+    -- to the raw payload when the JSON shape doesn't match (custom-harness
+    -- transcripts, plain-text test fixtures), so unrelated callers keep
+    -- working.
+    --
+    -- Why this is non-obvious: '_te_payload' is the full provider API
+    -- body (correct for debugging — you can replay the exact request).
+    -- But if we feed that ENTIRE envelope back into the next turn as
+    -- "message text", we get recursive wrapping: turn 2's request
+    -- contains turn 1's request-as-JSON, turn 3 contains turn 2's
+    -- request-as-JSON (which contains turn 1's request-as-JSON), and so
+    -- on. After a few turns the LLM sees a huge nested-escape-encoded
+    -- blob instead of a clean conversation. See the matching parse in
+    -- 'transcriptToMessages' in 'frontend/src/App.tsx' — both sides
+    -- need to do the same extraction.
     entryToMessage e =
       let role = case _te_direction e of
             Request  -> User
             Response -> Assistant
-      in Message role [TextBlock (_te_payload e)]
+          txt = case _te_direction e of
+            Request  -> extractNewMessageText  (_te_payload e)
+            Response -> extractAssistantText   (_te_payload e)
+      in Message role [TextBlock txt]
+
+-- | Extract the most recent message's text from a recorded provider request
+-- JSON payload. Handles common provider shapes:
+--   Anthropic: @{"messages":[..., {"role":..., "content":[{"type":"text","text":<>}, ...]}], ...}@
+--   OpenAI:    @{"messages":[..., {"role":..., "content":<string>}], ...}@
+-- Earlier messages in the array are conversation history that's already
+-- represented by prior transcript entries, so we want only the LAST one.
+-- Returns the raw payload unchanged when the JSON shape doesn't match.
+extractNewMessageText :: Text -> Text
+extractNewMessageText raw = fromMaybe raw $ do
+  Aeson.Object o    <- decodeText raw
+  Aeson.Array msgs  <- KM.lookup "messages" o
+  guard (not (V.null msgs))
+  Aeson.Object m    <- pure (V.last msgs)
+  case KM.lookup "content" m of
+    Just (Aeson.String t)  -> pure t
+    Just (Aeson.Array  cs) -> pure (extractTextBlocks cs)
+    _                      -> Nothing
+
+-- | Extract the assistant's reply text from a recorded provider response
+-- JSON payload. Handles:
+--   Anthropic: @{"content":[{"type":"text","text":<>}, ...], ...}@
+--   OpenAI:    @{"choices":[{"message":{"content":<string>}}], ...}@
+-- Tool-use / tool_call blocks are dropped from the context replay — they
+-- are conversation flow control, not message text the LLM needs verbatim.
+-- Returns the raw payload unchanged when the JSON shape doesn't match.
+extractAssistantText :: Text -> Text
+extractAssistantText raw = fromMaybe raw $ do
+  Aeson.Object o <- decodeText raw
+  case KM.lookup "content" o of
+    Just (Aeson.Array  cs) -> pure (extractTextBlocks cs)
+    Just (Aeson.String t)  -> pure t
+    _                      -> openaiChoiceText o
+
+-- | OpenAI-style fallback: messages live under @choices[0].message.content@.
+openaiChoiceText :: Aeson.Object -> Maybe Text
+openaiChoiceText o = do
+  Aeson.Array choices <- KM.lookup "choices" o
+  guard (not (V.null choices))
+  Aeson.Object c <- pure (V.head choices)
+  Aeson.Object m <- KM.lookup "message" c
+  case KM.lookup "content" m of
+    Just (Aeson.String t) -> pure t
+    _                     -> Nothing
+
+-- | Concatenate the @text@ fields of an Anthropic-style typed-content array,
+-- joining with newlines. Non-text blocks (tool_use, etc.) are skipped.
+extractTextBlocks :: V.Vector Aeson.Value -> Text
+extractTextBlocks = T.intercalate "\n" . mapMaybe asText . V.toList
+  where
+    asText (Aeson.Object o) = case KM.lookup "text" o of
+      Just (Aeson.String t) -> Just t
+      _                     -> Nothing
+    asText _ = Nothing
+
+decodeText :: Text -> Maybe Aeson.Value
+decodeText = Aeson.decode . LBS.fromStrict . TE.encodeUtf8
 
 -- | If any entry carries the compaction metadata key, return entries
 -- from the last such entry onward (inclusive).  Otherwise return the

@@ -1,0 +1,23 @@
+{
+  "type": "activity",
+  "sessionId": "session-abc-123",
+  "activity": {
+    "kind": "session-created",
+    "session": {
+      "archived": false,
+      "auto_summary": null,
+      "bootstrap_consumed": true,
+      "channel": "web",
+      "created_at": "2026-05-23T18:00:00Z",
+      "description": null,
+      "id": "session-abc-123",
+      "kind": {
+        "model": "claude-3-7-sonnet",
+        "provider": "anthropic",
+        "tag": "provider"
+      },
+      "last_active": "2026-05-23T18:00:00Z",
+      "model": "claude-3-7-sonnet"
+    }
+  }
+}

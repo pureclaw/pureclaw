@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import type { Agent, AgentInfo, Message, MessageContent, CodeSpan, ToolCallInfo, SessionInfo } from '../types'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import { StatusDot } from './StatusDot'
@@ -639,15 +639,22 @@ export function ChatArea({
     return () => window.removeEventListener('hashchange', update)
   }, [])
 
-  // Measure BEFORE React commits the next render — useLayoutEffect runs
-  // synchronously after DOM mutations but before the browser paints, so the
-  // measurement reflects the previous frame's scroll position.
-  useLayoutEffect(() => {
+  // Track sticky-bottom state from real scroll events. Measuring this in a
+  // post-render effect doesn't work: by then React has already committed the
+  // new messages, scrollHeight has grown, scrollTop hasn't moved, and the
+  // at-bottom check flips to false — exactly when we need it to stay true.
+  // A scroll listener records the user's actual intent.
+  useEffect(() => {
     if (hasFragment) return
     const el = scrollerRef.current
     if (!el) return
-    wasAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-  })
+    const onScroll = () => {
+      wasAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    }
+    onScroll()
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [hasFragment])
 
   useEffect(() => {
     if (hasFragment) return
@@ -655,6 +662,16 @@ export function ChatArea({
       messagesEndRef.current?.scrollIntoView({ block: 'end' })
     }
   }, [messages, hasFragment])
+
+  // When the user clicks a different session in the sidebar, force the next
+  // render to auto-scroll to the most recent message. Without this, the
+  // sticky-bottom ref ('wasAtBottom') retains the prior session's measured
+  // scroll state — a user reading history in session A (scrolled up) and
+  // switching to session B would land mid-transcript in B. Deep-link mode
+  // (hasFragment) is still respected by the effect above.
+  useEffect(() => {
+    wasAtBottom.current = true
+  }, [selectedSession?.id])
 
   const handleSend = () => {
     const trimmed = input.trim()

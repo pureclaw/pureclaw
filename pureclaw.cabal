@@ -156,8 +156,13 @@ library
     PureClaw.Scheduler.Cron
     PureClaw.Scheduler.Heartbeat
     -- Frontend
+    PureClaw.Frontend.Activity.Types
     PureClaw.Frontend.API
     PureClaw.Frontend.Server
+    PureClaw.Frontend.BroadcastingTranscript
+    PureClaw.Frontend.Stream
+    PureClaw.Frontend.StreamBroker
+    PureClaw.Frontend.ActivityProbe
     -- Transcript
     PureClaw.Transcript
     PureClaw.Transcript.Combinator
@@ -189,6 +194,7 @@ library
     mcp-types,
     memory,
     mtl,
+    network,
     optparse-applicative,
     posix-pty,
     process,
@@ -205,6 +211,7 @@ library
     vector,
     wai,
     wai-extra,
+    wai-websockets,
     warp,
     websockets,
   hs-source-dirs:   src
@@ -321,6 +328,20 @@ test-suite pureclaw-test
     Session.HandleSpec
     Handles.TranscriptSpec
     Handles.HarnessSpec
+    -- Frontend (live transcript streaming — WU1)
+    Frontend.StreamBrokerSpec
+    -- Frontend (live transcript streaming — WU2)
+    Frontend.BroadcastingTranscriptSpec
+    -- Frontend (live transcript streaming — WU3)
+    Frontend.StreamHarness
+    Frontend.StreamSpec
+    -- Frontend (live transcript streaming — WU3b: integration + goldens)
+    Frontend.StreamGoldensSpec
+    Frontend.StreamIntegrationSpec
+    -- Frontend (live transcript streaming — WU4)
+    Frontend.ActivityProbeSpec
+    -- Frontend (live transcript streaming — WU6: HTTP-API regression)
+    Frontend.APISpec
     Harness.ClaudeCodeSpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs
@@ -368,6 +389,7 @@ test-suite pureclaw-test
     http-client,
     http-client-tls,
     http-types,
+    network,
     optparse-applicative,
     stm,
     temporary,
@@ -375,11 +397,14 @@ test-suite pureclaw-test
     time,
     tomland,
     wai,
+    wai-websockets,
     warp,
+    websockets,
     hspec,
     typed-process,
     unix,
     uuid,
+    vector,
     QuickCheck,
   default-language: GHC2021
   default-extensions:

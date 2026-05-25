@@ -1,0 +1,12 @@
+{
+  "type": "entry",
+  "sessionId": "session-abc-123",
+  "entry": {
+    "id": "te-uuid-1",
+    "timestamp": "2026-05-23T18:00:01Z",
+    "direction": "response",
+    "payload": "hello world",
+    "harness": null,
+    "model": null
+  }
+}

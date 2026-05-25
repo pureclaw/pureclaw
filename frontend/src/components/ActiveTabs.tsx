@@ -1,4 +1,6 @@
 import type { TabInfo, TabStatus } from '../types'
+import type { SessionActivityState } from '../types/stream'
+import { ActivityDot } from './StatusDot'
 
 const statusIcon: Record<TabStatus, { char: string; color: string }> = {
   running: { char: '●', color: 'var(--success)' },       // ●
@@ -18,20 +20,24 @@ function TabRow({
   onSelect,
   onClose,
   onArchive,
+  activity,
 }: {
   tab: TabInfo
   selected: boolean
   onSelect: () => void
   onClose: () => void
   onArchive: () => void
+  activity?: SessionActivityState
 }) {
   const icon = statusIcon[tab.status]
   const isRawShell = tab.kind.startsWith('shell:')
   const isSessionBacked = tab.session_id !== null
+  const isThinking = activity?.harness === 'thinking'
 
   const rowClasses = [
     'agent-row px-3 py-2',
     selected ? 'selected' : '',
+    isThinking ? 'shimmer' : '',
   ].filter(Boolean).join(' ')
 
   return (
@@ -43,12 +49,16 @@ function TabRow({
         >
           {tab.index}
         </span>
-        <span
-          data-testid={`status-${tab.status}`}
-          style={{ color: icon.color, fontSize: 10, lineHeight: 1 }}
-        >
-          {icon.char}
-        </span>
+        {isThinking ? (
+          <ActivityDot activity="thinking" />
+        ) : (
+          <span
+            data-testid={`status-${tab.status}`}
+            style={{ color: icon.color, fontSize: 10, lineHeight: 1 }}
+          >
+            {icon.char}
+          </span>
+        )}
         <span
           className="text-sm font-medium"
           style={{ color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)' }}
@@ -118,6 +128,7 @@ function TabRow({
 export function ActiveTabs({
   tabs,
   selectedId,
+  sessionActivity,
   onSelectTab,
   onNewTab,
   onCloseTab,
@@ -125,6 +136,7 @@ export function ActiveTabs({
 }: {
   tabs: TabInfo[]
   selectedId: string | null
+  sessionActivity?: Record<string, SessionActivityState>
   onSelectTab: (index: number) => void
   onNewTab: () => void
   onCloseTab: (index: number) => void
@@ -160,6 +172,7 @@ export function ActiveTabs({
           onSelect={() => onSelectTab(tab.index)}
           onClose={() => onCloseTab(tab.index)}
           onArchive={() => onArchiveTab(tab.index)}
+          activity={tab.session_id ? sessionActivity?.[tab.session_id] : undefined}
         />
       ))}
     </>

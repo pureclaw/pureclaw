@@ -12,10 +12,10 @@ module PureClaw.CLI.Commands
   , buildPolicy
   ) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (IOException, SomeException, bracket_, try)
-import Control.Monad (filterM, unless, void, when)
+import Control.Monad (filterM, unless, when)
 import Data.ByteString (ByteString)
 import Data.Either (fromRight)
 import Data.IntMap.Strict qualified as IntMap
@@ -57,7 +57,14 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
+import PureClaw.Frontend.API (mkStreamGuard)
 import PureClaw.Frontend.Server
+import PureClaw.Frontend.StreamBroker
+  ( BrokerConfig (..)
+  , defaultBrokerConfig
+  , mkInProcessBroker
+  )
+import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
 import PureClaw.CLI.Import
@@ -512,6 +519,13 @@ runChat opts = do
 
   let startWithChannel :: ChannelHandle -> IO ()
       startWithChannel channel = do
+        -- WU3: construct the in-process broker and the WS per-origin guard
+        -- BEFORE any session-handle/transcript construction so every
+        -- write site (resumeSession, mkSessionHandle, handleSend) can
+        -- thread it down. Exactly one broker per process — see the
+        -- design doc §Lifecycle and Shutdown.
+        broker      <- mkInProcessBroker defaultBrokerConfig
+        streamGuard <- mkStreamGuard (_bc_maxSubsPerOrigin defaultBrokerConfig)
         -- Build registry: pure tools + IO tools (todo needs IORef state)
         (todoDef, todoHandler) <- todoTool
         let sessSearchTool = sessionSearchTool logger (pureclawDir </> "sessions")
@@ -551,7 +565,10 @@ runChat opts = do
         sessionHandle <- case _co_session opts of
           Just sidRaw -> do
             _lh_logInfo logger $ "Resuming session " <> T.pack sidRaw
-            result <- resumeSession logger sessionsDir
+            -- WU3: the broker is constructed at the top of
+            -- 'startWithChannel' and threaded through here so the resumed
+            -- session's transcript handle becomes a broadcasting handle.
+            result <- resumeSession (Just broker) logger sessionsDir
                         (parseSessionId (T.pack sidRaw))
             case result of
               Right resumed -> pure resumed
@@ -583,7 +600,8 @@ runChat opts = do
                   , SessionTypes._sm_description       = Nothing
                   , SessionTypes._sm_autoSummary       = Nothing
                   }
-            mkSessionHandle logger sessionsDir initialMeta
+            -- WU3: see broker construction at the top of startWithChannel.
+            mkSessionHandle (Just broker) logger sessionsDir initialMeta
         -- Log the active session ID so tests and humans can find it.
         do
           currentMeta <- readIORef (_sh_meta sessionHandle)
@@ -665,10 +683,18 @@ runChat opts = do
               , _env_channelOutQ      = channelOutQ
               , _env_routingConfig    = routingCfg
               , _env_fork             = defaultEnvFork
+              , _env_broker           = Just broker
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
-        -- Start the frontend server on a background thread
+        -- Start the frontend server and the activity probe loop under
+        -- structured 'Async.withAsync' scopes so both are automatically
+        -- cancelled when the agent loop exits or throws (WU3 + WU4
+        -- lifecycle changes). The probe loop is a sibling of the WAI
+        -- server inside @runAgentLoopWith@'s scope (D24): both share
+        -- @startWithChannel@ as the common parent, and both are
+        -- guaranteed to be cancelled within 1 s of @runAgentLoopWith@
+        -- returning or throwing.
         feTabCountRef <- newIORef 0
         let listModelsForProvider providerName =
               case parseProviderMaybe (Just providerName) of
@@ -703,6 +729,8 @@ runChat opts = do
               , _fe_logger       = logger
               , _fe_agentsDir    = agentsDir
               , _fe_defaultAgent = _fc_defaultAgent fileCfg
+              , _fe_broker       = Just broker
+              , _fe_streamGuard  = Just streamGuard
               , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
               , _fe_tabCount     = feTabCountRef
               , _fe_listTabs     = pure []
@@ -710,8 +738,11 @@ runChat opts = do
               , _fe_listModels   = listModelsForProvider
               , _fe_listProviders = listConfiguredProviders
               }
-        void $ forkIO $ runFrontend defaultFrontendConfig (Just frontendEnv) logger
-        runAgentLoopWith env reloadedMessages
+        Async.withAsync
+          (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
+          Async.withAsync
+            (runActivityProbeLoop broker harnessRef logger) $ \_probeAsync ->
+            runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of
     "signal" -> do

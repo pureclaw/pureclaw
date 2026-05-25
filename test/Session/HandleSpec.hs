@@ -135,13 +135,13 @@ spec = do
   describe "mkSessionHandle (create path)" $ do
     it "creates the session directory with mode 0o700" $ withTmp $ \base -> do
       let meta = mkMeta "alpha-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       bits <- permBits (_sh_dir sh)
       bits `shouldBe` 0o700
 
     it "writes session.json with mode 0o600" $ withTmp $ \base -> do
       let meta = mkMeta "alpha-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let metaPath = _sh_dir sh </> "session.json"
       doesFileExist metaPath `shouldReturn` True
       bits <- permBits metaPath
@@ -149,7 +149,7 @@ spec = do
 
     it "creates transcript.jsonl with mode 0o600" $ withTmp $ \base -> do
       let meta = mkMeta "alpha-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let txPath = _sh_dir sh </> "transcript.jsonl"
       doesFileExist txPath `shouldReturn` True
       bits <- permBits txPath
@@ -159,7 +159,7 @@ spec = do
   describe "mkSessionHandle (metadata persistence)" $ do
     it "save round-trips SessionMeta to disk" $ withTmp $ \base -> do
       let meta = mkMeta "beta-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _sh_save sh
       bytes <- Aeson.eitherDecodeFileStrict' (_sh_dir sh </> "session.json")
         :: IO (Either String SessionMeta)
@@ -168,7 +168,7 @@ spec = do
 
     it "subsequent saves persist updated last_active" $ withTmp $ \base -> do
       let meta = mkMeta "beta-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let newTime = addUTCTime 60 t0
       modifyIORef' (_sh_meta sh) (\m -> m { _sm_lastActive = newTime })
       _sh_save sh
@@ -177,25 +177,59 @@ spec = do
       _sm_lastActive loaded `shouldBe` newTime
       _th_close (_sh_transcript sh)
 
+  describe "mkSessionHandle (touchLastActive)" $ do
+    it "bumps _sm_lastActive after _th_record and persists to disk" $ withTmp $ \base -> do
+      let meta = mkMeta "touch-1" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      -- Confirm initial lastActive is t0.
+      metaBefore <- readIORef (_sh_meta sh)
+      _sm_lastActive metaBefore `shouldBe` t0
+      -- Record a transcript entry.
+      _th_record (_sh_transcript sh) (mkEntry "e1" t0)
+      -- The IORef must have been bumped past t0.
+      metaAfter <- readIORef (_sh_meta sh)
+      _sm_lastActive metaAfter `shouldSatisfy` (> t0)
+      -- The on-disk session.json must reflect the bumped time.
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (_sh_dir sh </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_lastActive onDisk `shouldSatisfy` (> t0)
+      _th_close (_sh_transcript sh)
+
+    it "bumps _sm_lastActive on resumed sessions too" $ withTmp $ \base -> do
+      let meta = mkMeta "touch-2" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      Right sh' <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "touch-2")
+      _th_record (_sh_transcript sh') (mkEntry "e2" t0)
+      metaAfter' <- readIORef (_sh_meta sh')
+      _sm_lastActive metaAfter' `shouldSatisfy` (> t0)
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (_sh_dir sh' </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_lastActive onDisk `shouldSatisfy` (> t0)
+      _th_close (_sh_transcript sh')
+
   describe "resumeSession" $ do
     it "round-trips an existing session and reopens transcript for append" $ withTmp $ \base -> do
       let meta = mkMeta "gamma-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_record (_sh_transcript sh) (mkEntry "e1" t0)
       _th_close (_sh_transcript sh)
-      result <- resumeSession mkNoOpLogHandle base (parseSessionId "gamma-1")
+      result <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "gamma-1")
       case result of
         Left err -> expectationFailure ("expected success, got: " <> show err)
         Right sh' -> do
           loaded <- readIORef (_sh_meta sh')
-          loaded `shouldBe` meta
+          -- _sm_lastActive was bumped by the _th_record above, so compare
+          -- all fields except lastActive and verify lastActive >= t0.
+          loaded { _sm_lastActive = t0 } `shouldBe` meta
+          _sm_lastActive loaded `shouldSatisfy` (>= t0)
           _th_record (_sh_transcript sh') (mkEntry "e2" t0)
           _th_close (_sh_transcript sh')
 
     it "returns ResumeMissingMetadata when session.json is missing" $ withTmp $ \base -> do
       -- Create the session dir but never write session.json
       createDirectoryIfMissing True (base </> "ghost")
-      result <- resumeSession mkNoOpLogHandle base (parseSessionId "ghost")
+      result <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "ghost")
       case result of
         Left (ResumeMissingMetadata p) -> p `shouldBe` (base </> "ghost" </> "session.json")
         Right _ -> expectationFailure "expected MissingMetadata, got: Right _"
@@ -205,7 +239,7 @@ spec = do
       let dir = base </> "broken"
       createDirectoryIfMissing True dir
       writeFile (dir </> "session.json") "{ this is not valid json"
-      result <- resumeSession mkNoOpLogHandle base (parseSessionId "broken")
+      result <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "broken")
       case result of
         Left (ResumeCorruptedMetadata p _) -> p `shouldBe` (dir </> "session.json")
         Right _ -> expectationFailure "expected CorruptedMetadata, got: Right _"
@@ -297,7 +331,7 @@ spec = do
   describe "markBootstrapConsumed" $ do
     it "flips _sm_bootstrapConsumed to True and persists to session.json" $ withTmp $ \base -> do
       let meta = mkMeta "bc-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _sm_bootstrapConsumed <$> readIORef (_sh_meta sh) `shouldReturn` False
       markBootstrapConsumed sh
       -- IORef reflects the change.
@@ -311,7 +345,7 @@ spec = do
 
     it "is idempotent on repeated invocations" $ withTmp $ \base -> do
       let meta = mkMeta "bc-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       markBootstrapConsumed sh
       markBootstrapConsumed sh
       markBootstrapConsumed sh
@@ -321,10 +355,10 @@ spec = do
 
     it "survives resumeSession (flag preserved on reload)" $ withTmp $ \base -> do
       let meta = mkMeta "bc-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       markBootstrapConsumed sh
       _th_close (_sh_transcript sh)
-      Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "bc-3")
+      Right sh' <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "bc-3")
       loaded <- readIORef (_sh_meta sh')
       _sm_bootstrapConsumed loaded `shouldBe` True
       _th_close (_sh_transcript sh')
@@ -332,7 +366,7 @@ spec = do
   describe "setArchived" $ do
     it "writes the archive flag back to session.json without touching anything else" $ withTmp $ \base -> do
       let meta = mkMeta "arch-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_close (_sh_transcript sh)
       result <- setArchived base (parseSessionId "arch-1") True
       result `shouldBe` Right ()
@@ -345,7 +379,7 @@ spec = do
 
     it "is reversible — archive then unarchive restores the flag" $ withTmp $ \base -> do
       let meta = mkMeta "arch-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_close (_sh_transcript sh)
       _ <- setArchived base (parseSessionId "arch-2") True
       _ <- setArchived base (parseSessionId "arch-2") False
@@ -355,7 +389,7 @@ spec = do
 
     it "leaves the transcript and session directory in place after archive" $ withTmp $ \base -> do
       let meta = mkMeta "arch-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_close (_sh_transcript sh)
       _ <- setArchived base (parseSessionId "arch-3") True
       doesDirectoryExist (base </> "arch-3") `shouldReturn` True
@@ -368,7 +402,7 @@ spec = do
   describe "setDescription" $ do
     it "writes the description back to session.json" $ withTmp $ \base -> do
       let meta = mkMeta "desc-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_close (_sh_transcript sh)
       result <- setDescription base (parseSessionId "desc-1") (Just "kernel build pipeline")
       result `shouldBe` Right ()
@@ -378,7 +412,7 @@ spec = do
 
     it "trims surrounding whitespace and treats all-whitespace as a clear" $ withTmp $ \base -> do
       let meta = mkMeta "desc-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_close (_sh_transcript sh)
       _ <- setDescription base (parseSessionId "desc-2") (Just "  hello world  ")
       Right d1 <- Aeson.eitherDecodeFileStrict' (base </> "desc-2" </> "session.json")
@@ -391,7 +425,7 @@ spec = do
 
     it "Nothing clears a previously-set description" $ withTmp $ \base -> do
       let meta = mkMeta "desc-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _th_close (_sh_transcript sh)
       _ <- setDescription base (parseSessionId "desc-3") (Just "first attempt")
       _ <- setDescription base (parseSessionId "desc-3") Nothing
@@ -406,7 +440,7 @@ spec = do
   describe "loadRecentMessages" $ do
     it "returns all messages when fewer than maxCount exist" $ withTmp $ \base -> do
       let meta = mkMeta "lr-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       _th_record th (mkTextEntry "e1" t0 Request  "hello")
       _th_record th (mkTextEntry "e2" t0 Response "hi there")
@@ -423,7 +457,7 @@ spec = do
 
     it "caps at maxCount and returns the MOST RECENT window (oldest-first)" $ withTmp $ \base -> do
       let meta = mkMeta "lr-2" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       mapM_ (\i -> _th_record th
                      (mkTextEntry (T.pack ("e" <> show i)) t0 Request
@@ -443,7 +477,7 @@ spec = do
 
     it "truncates by token budget (chars `div` 4) when budget smaller than count" $ withTmp $ \base -> do
       let meta = mkMeta "lr-3" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       -- Each payload is 400 chars → ~100 tokens; budget of 250 tokens → 2 messages fit.
       let big = T.replicate 400 "x"
@@ -458,7 +492,7 @@ spec = do
     it "preserves compaction summary across session resume" $ withTmp $ \base -> do
       -- Set up a session with several messages in the transcript
       let meta = mkMeta "compact-resume-1" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       -- Record 5 request/response pairs — simulating a conversation
       mapM_ (\i -> do
@@ -482,7 +516,7 @@ spec = do
       _th_flush th
       _th_close th
       -- Resume the session and load recent messages
-      Right sh' <- resumeSession mkNoOpLogHandle base (parseSessionId "compact-resume-1")
+      Right sh' <- resumeSession Nothing mkNoOpLogHandle base (parseSessionId "compact-resume-1")
       ms <- loadRecentMessages (_sh_transcript sh') 50 100000
       -- The resumed context should contain the compaction summary
       -- plus only entries AFTER the compaction boundary.
@@ -497,10 +531,85 @@ spec = do
 
     it "returns [] on an empty transcript" $ withTmp $ \base -> do
       let meta = mkMeta "lr-4" t0
-      sh <- mkSessionHandle mkNoOpLogHandle base meta
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       let th = _sh_transcript sh
       ms <- loadRecentMessages th 50 100000
       ms `shouldBe` []
+      _th_close th
+
+    -- The next four tests regression-cover the "context recursion" bug
+    -- where loadRecentMessages was embedding the entire provider API
+    -- payload (full envelope: messages array, system_prompt, max_tokens,
+    -- ...) as message TEXT in the next turn's request. After 2 turns the
+    -- LLM saw deeply nested escape-encoded JSON instead of the actual
+    -- conversation; tokens exploded and responses degraded.
+    --
+    -- The fix extracts only the NEW message text from the payload (the
+    -- last element of `messages` for a Request, or the `content` array
+    -- for a Response). These tests pin both the Anthropic-style typed-
+    -- content shape AND the OpenAI-style string-content shape, plus
+    -- the plain-text fallback that the older tests above depend on.
+    it "extracts the NEW user text from an Anthropic-style request envelope" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-extract-anthr" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+          payload = "{\"max_tokens\":4096,\
+                    \\"messages\":[\
+                      \{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"first turn\"}]},\
+                      \{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"got it\"}]},\
+                      \{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"second turn\"}]}\
+                    \],\"system_prompt\":\"be helpful\",\"model\":\"claude\"}"
+      _th_record th (mkTextEntry "req-anthr" t0 Request payload)
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message User [TextBlock t]] -> t `shouldBe` "second turn"
+        _ -> expectationFailure ("expected single user message with 'second turn', got: " <> show ms)
+      _th_close th
+
+    it "extracts the assistant text from an Anthropic-style response payload" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-extract-resp" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+          payload = "{\"content\":[{\"type\":\"text\",\"text\":\"FPV joke\"}],\
+                    \\"model\":\"gemma4:26b\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}"
+      _th_record th (mkTextEntry "resp-anthr" t0 Response payload)
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message Assistant [TextBlock t]] -> t `shouldBe` "FPV joke"
+        _ -> expectationFailure ("expected single assistant message with 'FPV joke', got: " <> show ms)
+      _th_close th
+
+    it "extracts text from an OpenAI-style string-content message" $ withTmp $ \base -> do
+      let meta = mkMeta "lr-extract-openai" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+          payload = "{\"model\":\"gpt-4\",\
+                    \\"messages\":[{\"role\":\"user\",\"content\":\"plain string content\"}]}"
+      _th_record th (mkTextEntry "req-openai" t0 Request payload)
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message User [TextBlock t]] -> t `shouldBe` "plain string content"
+        _ -> expectationFailure ("expected single user message, got: " <> show ms)
+      _th_close th
+
+    it "falls back to the raw payload when JSON does not match a known shape" $ withTmp $ \base -> do
+      -- Custom-harness transcripts and the older test fixtures record plain
+      -- text. Those entries must continue to round-trip verbatim.
+      let meta = mkMeta "lr-extract-fb" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkTextEntry "p1" t0 Request "this is a plain-text request, not JSON")
+      _th_record th (mkTextEntry "p2" t0 Response "{\"not_a_known\":\"shape\"}")
+      _th_flush th
+      ms <- loadRecentMessages th 50 100000
+      case ms of
+        [Message User [TextBlock a], Message Assistant [TextBlock b]] -> do
+          a `shouldBe` "this is a plain-text request, not JSON"
+          b `shouldBe` "{\"not_a_known\":\"shape\"}"
+        _ -> expectationFailure ("unexpected shape: " <> show ms)
       _th_close th
 
   describe "resolveResumedTarget" $ do
@@ -562,7 +671,7 @@ writeMetaWithAgent base sid offsetSecs mAgentText = do
         { _sm_agent      = mAgent
         , _sm_lastActive = lastActive
         }
-  sh <- mkSessionHandle mkNoOpLogHandle base meta
+  sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
   _sh_save sh
   _th_close (_sh_transcript sh)
 

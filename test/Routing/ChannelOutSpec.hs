@@ -135,6 +135,7 @@ mkChannelOutTestEnv ch = do
     , _env_channelOutQ      = channelOutQ
     , _env_routingConfig    = routing
     , _env_fork             = defaultEnvFork
+    , _env_broker             = Nothing
     }
 
 

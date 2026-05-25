@@ -199,6 +199,7 @@ mkAutoSpawnEnvWith ch routing = do
     , _env_channelOutQ       = channelOutQ
     , _env_routingConfig     = routing
     , _env_fork              = defaultEnvFork
+    , _env_broker              = Nothing
     }
 
 drainQueue :: TBQueue a -> IO [a]

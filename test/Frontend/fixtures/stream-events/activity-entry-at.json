@@ -1,0 +1,8 @@
+{
+  "type": "activity",
+  "sessionId": "session-abc-123",
+  "activity": {
+    "kind": "entry-at",
+    "timestamp": "2026-05-23T18:00:01.234Z"
+  }
+}
