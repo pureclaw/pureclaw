@@ -89,7 +89,7 @@ import Data.Word (Word64)
 import PureClaw.Agent.Context qualified as Ctx
 import PureClaw.Agent.Env (AgentEnv (..), envTranscript)
 import PureClaw.Agent.SlashCommands (SlashCommand, executeSlashCommand)
-import PureClaw.Core.Types (MessageTarget, ModelId)
+import PureClaw.Core.Types (MessageTarget, ModelId (..))
 import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Handles.Tab
   ( AiSpawnArgs (..)
@@ -104,7 +104,7 @@ import PureClaw.Handles.Tab
   , TabStatus (..)
   , unTabIndex
   )
-import PureClaw.Session.Kind (ProviderSpec (..), SessionKind (..))
+import PureClaw.Session.Kind (ProviderSpec (..), SessionKind (..), inferProviderId)
 import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
@@ -210,7 +210,8 @@ mkTabAi env idx args =
       -- close handler will later cancel.
       runner <- _env_fork env (loopBody env idx state)
       writeIORef (_ats_runner state) (Just runner)
-      pure (Right (mkHandle env idx (TabName nameTxt) state))
+      th <- mkHandle env idx (TabName nameTxt) state
+      pure (Right th)
 
 -- | Allocate the per-tab state. Initialises every IORef from
 -- 'AgentEnv' so the per-tab provider\/model\/target track the
@@ -245,23 +246,27 @@ allocState env rc = do
     }
 
 -- | Build the public 'TabHandle' record from the per-tab state.
-mkHandle :: AgentEnv -> TabIndex -> TabName -> AiTabState -> TabHandle
-mkHandle env idx name state =
+mkHandle :: AgentEnv -> TabIndex -> TabName -> AiTabState -> IO TabHandle
+mkHandle env idx name state = do
   let rc = _env_routingConfig env
+  mModel <- readIORef (_ats_model state)
+  let modelId = case mModel of
+        Just m  -> m
+        Nothing -> _aid_modelId (_rc_defaultAi rc)
       provSpec = ProviderSpec
-        { _ps_provider = _aid_providerId (_rc_defaultAi rc)
-        , _ps_model    = _aid_modelId    (_rc_defaultAi rc)
+        { _ps_provider = inferProviderId (unModelId modelId)
+        , _ps_model    = modelId
         , _ps_agent    = Nothing
         }
-  in TabHandle
-  { _tabHandle_index        = idx
-  , _tabHandle_name         = name
-  , _tabHandle_kind         = TkSession (SkProvider provSpec)
-  , _tabHandle_status       = readIORef (_ats_statusRef state)
-  , _tabHandle_send         = sendUserText state
-  , _tabHandle_enqueueSlash = enqueueSlashAi state
-  , _tabHandle_close        = closeTabAi env state
-  }
+  pure $ TabHandle
+    { _tabHandle_index        = idx
+    , _tabHandle_name         = name
+    , _tabHandle_kind         = TkSession (SkProvider provSpec)
+    , _tabHandle_status       = readIORef (_ats_statusRef state)
+    , _tabHandle_send         = sendUserText state
+    , _tabHandle_enqueueSlash = enqueueSlashAi state
+    , _tabHandle_close        = closeTabAi env state
+    }
 
 
 -- ---------------------------------------------------------------------------

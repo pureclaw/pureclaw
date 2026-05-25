@@ -715,8 +715,12 @@ runChat opts = do
                 all_
               pure $ map
                 (\p -> ProviderInfo
-                  { _pi_name      = T.pack (providerToText p)
-                  , _pi_isDefault = p == effectiveProvider
+                  { _pi_name         = T.pack (providerToText p)
+                  , _pi_isDefault    = p == effectiveProvider
+                  , _pi_defaultModel =
+                      if p == effectiveProvider
+                        then Just (unModelId model)
+                        else Nothing
                   })
                 keepers
         let frontendEnv = FrontendEnv

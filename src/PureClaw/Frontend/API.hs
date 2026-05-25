@@ -202,16 +202,17 @@ instance ToJSON AgentInfo where
 -- (from the CLI @--provider@ flag or the config file @provider@ field),
 -- and is true for at most one entry.
 data ProviderInfo = ProviderInfo
-  { _pi_name      :: Text
-  , _pi_isDefault :: Bool
+  { _pi_name         :: Text
+  , _pi_isDefault    :: Bool
+  , _pi_defaultModel :: Maybe Text
   }
   deriving stock (Show, Eq)
 
 instance ToJSON ProviderInfo where
-  toJSON pi_ = object
+  toJSON pi_ = object $
     [ "name"      .= _pi_name pi_
     , "isDefault" .= _pi_isDefault pi_
-    ]
+    ] ++ maybe [] (\m -> ["defaultModel" .= m]) (_pi_defaultModel pi_)
 
 -- | A point-in-time snapshot of a single tab, pre-resolved to
 -- JSON-friendly text values. The snapshot callback in 'FrontendEnv'

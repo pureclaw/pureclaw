@@ -243,6 +243,7 @@ export async function fetchProviderModels(provider: string): Promise<string[]> {
 export interface ProviderInfo {
   name: string
   isDefault: boolean
+  defaultModel?: string
 }
 
 /** Providers the user has actually configured (API key present, or

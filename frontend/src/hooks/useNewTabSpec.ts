@@ -132,21 +132,28 @@ export function useNewTabSpec(): NewTabSpec {
   }, [providersLoaded, configuredProviders, provider])
 
   // Fetch the model list when the provider changes (and we're in
-  // provider mode). Pre-select the first one so the form stays valid.
+  // provider mode). Pre-select the configured default if it appears in
+  // the list, otherwise fall back to the first entry.
   useEffect(() => {
     if (kind !== 'provider' || !provider) return
     let cancelled = false
     setModelsLoading(true)
     setModels([])
+    const info = configuredProviders.find((p) => p.name === provider)
     fetchProviderModels(provider).then((ids) => {
       if (cancelled) return
       setModels(ids)
       setModelsLoading(false)
       setUseCustomModel(false)
-      setModel(ids.length > 0 ? ids[0]! : '')
+      const dflt = info?.defaultModel
+      if (dflt && ids.includes(dflt)) {
+        setModel(dflt)
+      } else {
+        setModel(ids.length > 0 ? ids[0]! : '')
+      }
     })
     return () => { cancelled = true }
-  }, [kind, provider])
+  }, [kind, provider, configuredProviders])
 
   // Auto-select the configured default agent.
   useEffect(() => {
