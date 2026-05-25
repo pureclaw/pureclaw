@@ -3,7 +3,7 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, resumeArchivedSession } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab } from './hooks/useApi'
 import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
@@ -490,10 +490,13 @@ export default function App() {
       await setSessionPrompt(currentSessionId, customPromptFile.content, name)
       setCustomPromptFile(null)
     }
+    if (currentSessionId && archivedSessions.some((s) => s.id === currentSessionId)) {
+      await setSessionArchived(currentSessionId, false)
+    }
     entryCountAtSend.current = entries.length
     setPendingMessage(message)
     send(message)
-  }, [send, entries.length, customPromptFile, currentSessionId])
+  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions])
 
   // Compose mode is implicit: selectedId === null means "no tab focused,
   // show the inline new-tab composer in the ChatArea". Clicking the "New
@@ -621,16 +624,6 @@ export default function App() {
     }
   }, [tabs, selectedId])
 
-  // L3: Resume archived session — unarchive then create a new tab.
-  const handleResumeArchivedSession = useCallback(async (id: string) => {
-    const tab = await resumeArchivedSession(id)
-    if (tab) {
-      const newId = `tab:${tab.tab_index}`
-      setSelectedId(newId)
-      window.history.pushState(null, '', pathFromSelectedId(newId))
-    }
-  }, [])
-
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
     ? deriveAgent(selectedId, tabs, sessions)
@@ -668,7 +661,6 @@ export default function App() {
           onUnarchiveSession={handleUnarchiveSession}
           onCloseTab={handleCloseTab}
           onArchiveTab={handleArchiveTab}
-          onResumeArchivedSession={handleResumeArchivedSession}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}

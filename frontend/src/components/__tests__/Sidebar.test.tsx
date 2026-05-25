@@ -40,7 +40,6 @@ describe('Sidebar lifecycle transitions', () => {
     onUnarchiveSession: vi.fn(),
     onCloseTab: vi.fn(),
     onArchiveTab: vi.fn(),
-    onResumeArchivedSession: vi.fn(),
   }
 
   it('passes onCloseTab to ActiveTabs so close buttons appear', () => {
@@ -71,20 +70,20 @@ describe('Sidebar lifecycle transitions', () => {
     expect(onArchiveTab).toHaveBeenCalledWith(0)
   })
 
-  it('passes onResumeArchivedSession to ArchivedSessions', () => {
-    const onResumeArchivedSession = vi.fn()
+  it('clicking an archived session selects it without unarchiving', () => {
+    const onSelectSession = vi.fn()
     const archivedSessions = makeSessions({ id: 'arch-1', description: 'old session' })
     render(
       <Sidebar
         {...defaultProps}
         archivedSessions={archivedSessions}
-        onResumeArchivedSession={onResumeArchivedSession}
+        onSelectSession={onSelectSession}
       />,
     )
     // Expand the archived section
     fireEvent.click(screen.getByText(/Archived/))
     // Click on the archived session row
     fireEvent.click(screen.getByText('old session'))
-    expect(onResumeArchivedSession).toHaveBeenCalledWith('arch-1')
+    expect(onSelectSession).toHaveBeenCalledWith('arch-1')
   })
 })

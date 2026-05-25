@@ -1,8 +1,8 @@
+import { useState } from 'react'
 import type { SessionInfo, TabInfo } from '../types'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import type { SessionActivityState } from '../types/stream'
 import { ActiveTabs } from './ActiveTabs'
-import { ArchivedSessions } from './ArchivedSessions'
 import { ActivityDot } from './StatusDot'
 
 function SectionHeader({ label }: { label: string }) {
@@ -37,17 +37,32 @@ function ArchiveButton({ onArchive }: { onArchive: () => void }) {
   )
 }
 
+function UnarchiveButton({ onUnarchive }: { onUnarchive: () => void }) {
+  return (
+    <button
+      className="btn btn-ghost"
+      style={{ fontSize: 10, padding: '1px 6px', lineHeight: 1.4 }}
+      aria-label="Unarchive"
+      onClick={(e) => { e.stopPropagation(); onUnarchive() }}
+    >
+      Unarchive
+    </button>
+  )
+}
+
 function SessionRow({
   session,
   selected,
   onSelect,
   onArchive,
+  onUnarchive,
   activity,
 }: {
   session: SessionInfo
   selected: boolean
   onSelect: () => void
-  onArchive: (id: string) => void
+  onArchive?: (id: string) => void
+  onUnarchive?: (id: string) => void
   activity?: SessionActivityState
 }) {
   const isThinking = activity?.harness === 'thinking'
@@ -60,8 +75,6 @@ function SessionRow({
   ].filter(Boolean).join(' ')
 
   const displayName = sessionDisplayTitle(session)
-  // Prefer the live "last entry at" timestamp when available; fall back to
-  // the meta's lastActive otherwise.
   const ageBasis = activity?.lastEntryAt ?? session.lastActive
   const age = formatAge(ageBasis)
 
@@ -89,7 +102,8 @@ function SessionRow({
             {unread}
           </span>
         )}
-        <ArchiveButton onArchive={() => onArchive(session.id)} />
+        {onArchive && <ArchiveButton onArchive={() => onArchive(session.id)} />}
+        {onUnarchive && <UnarchiveButton onUnarchive={() => onUnarchive(session.id)} />}
         <span className="pill token-count">{age}</span>
       </div>
       {(session.agent || session.model) && (
@@ -101,6 +115,51 @@ function SessionRow({
         </div>
       )}
     </div>
+  )
+}
+
+function ArchivedSection({
+  sessions,
+  selectedId,
+  onSelectSession,
+  onUnarchive,
+}: {
+  sessions: SessionInfo[]
+  selectedId: string | null
+  onSelectSession: (id: string) => void
+  onUnarchive: (id: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (sessions.length === 0) return null
+
+  return (
+    <>
+      <div
+        className="px-3 py-1.5 flex items-center justify-between cursor-pointer"
+        style={{ color: 'var(--text-muted)' }}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span
+          className="text-xs font-semibold uppercase"
+          style={{ letterSpacing: '0.08em' }}
+        >
+          Archived ({sessions.length})
+        </span>
+        <span data-testid="collapse-icon" style={{ fontSize: 12 }}>
+          {expanded ? '▾' : '▸'}
+        </span>
+      </div>
+      {expanded && sessions.map((s) => (
+        <SessionRow
+          key={s.id}
+          session={s}
+          selected={selectedId === `session:${s.id}`}
+          onSelect={() => onSelectSession(s.id)}
+          onUnarchive={onUnarchive}
+        />
+      ))}
+    </>
   )
 }
 
@@ -128,7 +187,6 @@ export function Sidebar({
   onUnarchiveSession,
   onCloseTab,
   onArchiveTab,
-  onResumeArchivedSession,
 }: {
   tabs: TabInfo[]
   sessions: SessionInfo[]
@@ -142,7 +200,6 @@ export function Sidebar({
   onUnarchiveSession: (id: string) => void
   onCloseTab: (index: number) => void
   onArchiveTab: (index: number) => void
-  onResumeArchivedSession: (id: string) => void
 }) {
   return (
     <div
@@ -176,10 +233,10 @@ export function Sidebar({
           </>
         )}
 
-        <ArchivedSessions
+        <ArchivedSection
           sessions={archivedSessions}
           selectedId={selectedId}
-          onSelectSession={onResumeArchivedSession}
+          onSelectSession={onSelectSession}
           onUnarchive={onUnarchiveSession}
         />
 

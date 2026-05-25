@@ -425,7 +425,9 @@ computeListsSnapshot env = do
   -- Archived: all archived sessions, sorted by lastActive descending
   -- (listSessions already sorts; we just filter).
   archivedMetas <- listSessions baseDir Nothing 1000
-  let archivedInfos = map (`toSessionInfo` Nothing) (filter _sm_archived archivedMetas)
+  let archivedChosen = filter _sm_archived archivedMetas
+  archivedSnippets <- traverse (firstMessageSnippet baseDir) archivedChosen
+  let archivedInfos = zipWith toSessionInfo archivedChosen archivedSnippets
   pure $ object
     [ "type"              .= ("lists" :: Text)
     , "tabs"              .= tabs
