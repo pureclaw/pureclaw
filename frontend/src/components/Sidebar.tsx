@@ -134,9 +134,9 @@ function ArchivedSection({
   if (sessions.length === 0) return null
 
   return (
-    <>
+    <div className="shrink-0 flex flex-col" style={{ borderTop: '1px solid var(--border)', maxHeight: '50%' }}>
       <div
-        className="px-3 py-1.5 flex items-center justify-between cursor-pointer"
+        className="px-3 py-1.5 flex items-center justify-between cursor-pointer shrink-0"
         style={{ color: 'var(--text-muted)' }}
         onClick={() => setExpanded(!expanded)}
       >
@@ -150,16 +150,20 @@ function ArchivedSection({
           {expanded ? '▾' : '▸'}
         </span>
       </div>
-      {expanded && sessions.map((s) => (
-        <SessionRow
-          key={s.id}
-          session={s}
-          selected={selectedId === `session:${s.id}`}
-          onSelect={() => onSelectSession(s.id)}
-          onUnarchive={onUnarchive}
-        />
-      ))}
-    </>
+      {expanded && (
+        <div className="overflow-y-auto sidebar-scroll">
+          {sessions.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              selected={selectedId === `session:${s.id}`}
+              onSelect={() => onSelectSession(s.id)}
+              onUnarchive={onUnarchive}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -206,7 +210,7 @@ export function Sidebar({
       className="shrink-0 flex flex-col"
       style={{ width: 'var(--sidebar-width)', background: 'var(--bg-surface)', borderRight: '1px solid var(--border)' }}
     >
-      <div className="flex-1 overflow-y-auto sidebar-scroll py-1">
+      <div className="flex-1 overflow-y-auto sidebar-scroll py-1 min-h-0">
         <ActiveTabs
           tabs={tabs}
           selectedId={selectedId}
@@ -233,19 +237,18 @@ export function Sidebar({
           </>
         )}
 
-        <ArchivedSection
-          sessions={archivedSessions}
-          selectedId={selectedId}
-          onSelectSession={onSelectSession}
-          onUnarchive={onUnarchiveSession}
-        />
-
         {tabs.length === 0 && sessions.length === 0 && archivedSessions.length === 0 && (
           <div className="px-3 py-4 text-xs" style={{ color: 'var(--text-muted)' }}>
             No tabs or sessions yet.
           </div>
         )}
       </div>
+      <ArchivedSection
+        sessions={archivedSessions}
+        selectedId={selectedId}
+        onSelectSession={onSelectSession}
+        onUnarchive={onUnarchiveSession}
+      />
     </div>
   )
 }
