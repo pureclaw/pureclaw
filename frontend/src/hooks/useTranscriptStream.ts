@@ -58,18 +58,43 @@ export function useTranscriptStream(
   const [lastError, setLastError] = useState<string | null>(sc.lastError())
 
   // Initial HTTP GET seed + focus the session.
+  //
+  // NOTE on focus timing: the WS server filters EntryRecorded events by
+  // `_conn_focus` (PureClaw.Frontend.Stream.handleEvent). If focus isn't
+  // set when a broker event is published, the event is silently dropped
+  // for this connection. There are two cases that used to lose events:
+  //
+  //   1. General session switch: focus(sid, lastId) only fired AFTER the
+  //      seed HTTP GET resolved, so any live event during the GET round
+  //      trip was filtered out. Fix: set live focus eagerly, BEFORE the
+  //      seed fetch, then upgrade to a `since`-replay focus once the
+  //      seed lands.
+  //
+  //   2. Compose-send race: handleComposerSend (App.tsx) sets selectedId
+  //      to the new tab and triggers POST /send before the WS lists
+  //      snapshot has populated the local `tabs` array. During that
+  //      window, sessionIdFromSelection resolves to null and this hook
+  //      runs with sessionId === null. We must NOT downgrade focus to
+  //      null in that case — handleComposerSend has already eagerly
+  //      focused the new session id, and clearing it here would re-open
+  //      the drop window. Genuine compose-mode (no selection at all) is
+  //      indistinguishable from the lag, but a stale focus on a closed
+  //      session is harmless: the server still routes only matching
+  //      events, and no hook is subscribed to consume them.
   useEffect(() => {
     if (sessionId === null) {
       setEntries([])
-      sc.focus(null)
       return
     }
+    sc.focus(sessionId)
     let cancelled = false
     fetchTranscriptSeed(sessionId).then((seed) => {
       if (cancelled) return
       setEntries(seed)
       const lastId = seed.length > 0 ? seed[seed.length - 1]!.id : undefined
-      sc.focus(sessionId, lastId)
+      if (lastId !== undefined) {
+        sc.focus(sessionId, lastId)
+      }
     })
     return () => {
       cancelled = true

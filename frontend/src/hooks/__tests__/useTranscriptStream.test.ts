@@ -268,16 +268,47 @@ describe('useTranscriptStream (hook integration)', () => {
     })
   })
 
-  it('null sessionId clears entries and unfocuses', async () => {
+  it('null sessionId clears entries and does NOT downgrade focus', async () => {
+    // Why no focus(null): handleComposerSend eagerly focuses on the new
+    // session id before the WS lists snapshot has populated `tabs`. If
+    // this hook calls focus(null) during that brief tabs-lag window
+    // (sessionId resolves to null), the eager focus would be undone and
+    // the new session's first-message broker events would be dropped
+    // server-side. See useTranscriptStream.ts for the full rationale.
     fetchMock.mockResolvedValueOnce({ ok: true, json: async () => [] })
     const fake = makeFakeClient()
     const { result } = renderHook(() => useTranscriptStream(null, fake.client))
     await waitFor(() => {
       expect(result.current.entries).toEqual([])
     })
-    // Should have called focus(null) for the unfocus.
     const nullFocus = fake.focusCalls.find((c) => c.sessionId === null)
-    expect(nullFocus).toBeDefined()
+    expect(nullFocus).toBeUndefined()
+  })
+
+  it('eagerly focuses live BEFORE the seed fetch resolves', async () => {
+    // Defer the seed promise so we can assert focus was called while
+    // the fetch is still in flight. The eager focus is what prevents
+    // EntryRecorded events delivered during the seed round-trip from
+    // being filtered out server-side.
+    let resolveSeed: ((seed: TranscriptEntry[]) => void) | null = null
+    fetchMock.mockReturnValueOnce(new Promise((res) => {
+      resolveSeed = (seed) => res({ ok: true, json: async () => seed })
+    }))
+    const fake = makeFakeClient()
+    renderHook(() => useTranscriptStream('session-abc', fake.client))
+
+    await waitFor(() => {
+      expect(
+        fake.focusCalls.some((c) => c.sessionId === 'session-abc' && c.since === undefined),
+      ).toBe(true)
+    })
+    // Now finish the seed; the post-seed focus is conditional on having
+    // a lastId so an empty seed must NOT issue a redundant call.
+    const callsBeforeSeed = fake.focusCalls.length
+    resolveSeed!([])
+    await waitFor(() => {
+      expect(fake.focusCalls.length).toBe(callsBeforeSeed)
+    })
   })
 })
 

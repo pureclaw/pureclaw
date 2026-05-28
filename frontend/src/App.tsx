@@ -8,6 +8,7 @@ import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
 import { useSessionActivityStream } from './hooks/useSessionActivityStream'
+import { streamClient } from './lib/streamClient'
 import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
@@ -551,23 +552,39 @@ export default function App() {
       if (!res.ok) return
       const tab = await res.json() as import('./hooks/useApi').NewTabResponse
 
-      // The server's createTab handler calls broadcastLists before
-      // returning, so a WS lists snapshot arrives ~immediately. A brief
-      // null-binding cycle is harmless — hooks handle null session id
-      // gracefully and the next render carries the new tab.
+      // Pick a permanent, session-id-keyed selectedId rather than
+      // `tab:N`. Two reasons:
+      //
+      //   1. `sessionIdFromSelection('tab:N', tabs)` requires `tabs` to
+      //      contain index N. In gateway mode the server's _fe_listTabs
+      //      is currently `pure []`, so every WS lists snapshot delivers
+      //      empty tabs — `tab:N` can never resolve and every
+      //      session-bound hook is permanently bound to null.
+      //
+      //   2. The session id (e.g. `20260528-163436-088`) IS permanent —
+      //      it survives reloads and is bookmarkable. The tab index is
+      //      ephemeral state held only on the server until the next
+      //      restart.
+      //
+      // Eagerly focus the WS before issuing POST /send so the server's
+      // _conn_focus matches when doCompletion publishes its first entry.
+      if (tab.session_id) {
+        streamClient().focus(tab.session_id)
+      }
 
-      // Switch the active tab *immediately* after creation so the
+      // Switch to the new session immediately after creation so the
       // composer disappears and the main window begins tracking the
       // new session. The first-message send below blocks on the LLM
-      // response — doing it before the focus switch would leave the
-      // composer visible for the entire LLM completion.
-      const newId = `tab:${tab.tab_index}`
+      // response — doing it before the switch would leave the composer
+      // visible for the entire LLM completion.
+      const newId = tab.session_id ? `session:${tab.session_id}` : `tab:${tab.tab_index}`
       const trimmed = message.trim()
       const sendFirst = trimmed.length > 0
       if (sendFirst) {
-        // Mirror the first message locally so the new tab's transcript
-        // shows it immediately (instead of a blank screen until the
-        // send completes and the next transcript refresh lands).
+        // Mirror the first message locally so the new session's
+        // transcript shows it immediately (instead of a blank screen
+        // until the send completes and the next transcript refresh
+        // lands).
         entryCountAtSend.current = 0
         setPendingMessage(trimmed)
       }

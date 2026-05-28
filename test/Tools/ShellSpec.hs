@@ -87,6 +87,21 @@ spec = do
       (output, _) <- runTool handler input
       T.unpack output `shouldContain` "Exit code: 2"
 
+    it "flags non-zero exit as an error so the model and UI see it as a failure" $ do
+      let pr = ProcessResult { _pr_exitCode = ExitFailure 1, _pr_stdout = "", _pr_stderr = BS8.pack "cat: /etc/issue: No such file or directory" }
+      (sh, _) <- mkRecordingShell pr
+      let (_, handler) = shellTool shellPolicy sh
+          input        = object ["command" .= ("cat /etc/issue" :: String)]
+      (_, isErr) <- runTool handler input
+      isErr `shouldBe` True
+
+    it "leaves isErr=False on a clean exit" $ do
+      (sh, _) <- mkRecordingShell (okResult (BS8.pack "ok"))
+      let (_, handler) = shellTool shellPolicy sh
+          input        = object ["command" .= ("true" :: String)]
+      (_, isErr) <- runTool handler input
+      isErr `shouldBe` False
+
   describe "execTool (argv-direct)" $ do
     it "is named exec" $ do
       let (def', _) = execTool defaultPolicy mkNoOpShellHandle

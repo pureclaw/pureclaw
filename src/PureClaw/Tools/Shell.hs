@@ -20,16 +20,18 @@ import PureClaw.Tools.Registry
 
 -- | Run a process result through the same output-shaping logic both tools
 -- share: stdout + stderr + an "Exit code: N" suffix on failure, with a
--- placeholder for empty output. Returns (text, isError).
+-- placeholder for empty output. Returns (text, isError) where isError is
+-- True iff the process exited non-zero — the model and the frontend both
+-- key off this flag to decide whether the call succeeded.
 shapeResult :: ProcessResult -> (Text, Bool)
 shapeResult pr =
   let out      = T.pack (BS8.unpack (_pr_stdout pr))
       err      = T.pack (BS8.unpack (_pr_stderr pr))
-      exitInfo = case _pr_exitCode pr of
-        ExitSuccess     -> ""
-        ExitFailure n   -> "\nExit code: " <> T.pack (show n)
+      (exitInfo, isError) = case _pr_exitCode pr of
+        ExitSuccess     -> ("", False)
+        ExitFailure n   -> ("\nExit code: " <> T.pack (show n), True)
       combined = T.strip (out <> err <> exitInfo)
-  in  (if T.null combined then "(no output)" else combined, False)
+  in  (if T.null combined then "(no output)" else combined, isError)
 
 runAuthorized :: ShellHandle -> ExecOptions -> AuthorizedCommand -> IO (Text, Bool)
 runAuthorized sh opts cmd = do
