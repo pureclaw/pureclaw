@@ -96,11 +96,16 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
 
   for (const e of entries) {
     const ts = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const rawJson = e.payload
 
     if (e.direction === 'request') {
       const parsed = tryParseJson(e.payload)
       if (parsed) {
-        // Extract system prompt as a separate collapsed message (only first occurrence)
+        // Extract system prompt as a separate collapsed message (only first occurrence).
+        // The synthesized row deliberately omits rawJson: clicking JSON here would
+        // show the full request payload (system + messages + model + ...) rather
+        // than the system prompt, which is misleading. The user message that
+        // follows from the same entry carries the same payload.
         const sysPrompt = parsed.system_prompt as string | undefined
         if (sysPrompt && !seenSystemPrompts.has(sysPrompt)) {
           seenSystemPrompts.add(sysPrompt)
@@ -129,6 +134,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
                 timestamp: ts,
                 blocks: [{ id: 'u-' + e.id, text: textParts }],
                 meta: parsed.model as string | undefined,
+                rawJson,
               })
             }
           } else if (msg.role === 'assistant') {
@@ -142,6 +148,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
                 agentStatus: 'completed',
                 timestamp: ts,
                 blocks,
+                rawJson,
               })
             }
           }
@@ -154,6 +161,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           agentStatus: 'completed',
           timestamp: ts,
           blocks: [{ id: 'raw-' + e.id, text: e.payload }],
+          rawJson,
         })
       }
     } else {
@@ -180,6 +188,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           timestamp: ts,
           blocks,
           meta: usageMeta,
+          rawJson,
         })
       } else {
         // Non-JSON response (e.g. harness output)
@@ -189,6 +198,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           agentStatus: 'completed',
           timestamp: ts,
           blocks: [{ id: 'raw-' + e.id, text: e.payload }],
+          rawJson,
         })
       }
     }

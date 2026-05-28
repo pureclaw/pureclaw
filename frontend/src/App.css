@@ -278,11 +278,268 @@ body {
   box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 2px var(--accent-primary);
 }
 
-.anchor-handle-copied {
+.anchor-handle svg { display: block; }
+
+/* Square icon-only button used for inline header affordances (Link, JSON).
+   24x24 hit target, primary-color glyph, subtle hover background. Adjacent
+   icon-btns nudge closer so a pair reads as one unit. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--accent-primary);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease,
+              color var(--duration-fast) ease;
+}
+.icon-btn:hover {
+  background: var(--surface-hover);
+}
+.icon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 2px var(--accent-primary);
+}
+.icon-btn-success {
   color: var(--success);
 }
+.icon-btn svg { display: block; }
+.icon-btn + .icon-btn { margin-left: -4px; }
 
-.anchor-handle svg { display: block; }
+/* ── Raw-JSON modal ───────────────────────────────────────────────────── */
+
+.raw-json-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 32px;
+}
+
+.raw-json-modal {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  width: 100%;
+  height: 100%;
+  max-width: 1400px;
+  max-height: 1100px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.raw-json-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  flex-shrink: 0;
+}
+
+.raw-json-title {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.raw-json-close {
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background var(--duration-fast) ease,
+              color var(--duration-fast) ease,
+              border-color var(--duration-fast) ease;
+}
+.raw-json-close:hover {
+  background: var(--needs-input, #ff6b6b);
+  border-color: var(--needs-input, #ff6b6b);
+  color: #fff;
+}
+.raw-json-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-primary);
+}
+
+.raw-json-copy {
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium, 500);
+  line-height: 1;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  transition: background var(--duration-fast) ease,
+              color var(--duration-fast) ease,
+              border-color var(--duration-fast) ease;
+}
+.raw-json-copy:hover {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+.raw-json-copy:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-primary);
+}
+.raw-json-copy-copied {
+  color: var(--success);
+  border-color: var(--success);
+}
+.raw-json-copy-copied:hover {
+  background: var(--success);
+  color: #fff;
+}
+
+.raw-json-body {
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  white-space: pre;
+  flex: 1;
+}
+
+.raw-json-body-tree {
+  white-space: normal;
+  padding: 12px 8px;
+}
+
+.raw-json-body-empty {
+  white-space: normal;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-style: italic;
+}
+
+.raw-json-tabs {
+  display: inline-flex;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.raw-json-tab {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium, 500);
+  line-height: 1;
+  padding: 6px 12px;
+  border-radius: calc(var(--radius-sm) - 1px);
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.raw-json-tab:hover {
+  color: var(--text-primary);
+}
+.raw-json-tab-active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+.raw-json-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-primary);
+}
+
+/* ── JSON tree (Formatted tab) ────────────────────────────────────────── */
+
+.json-tree {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+
+.json-row {
+  display: block;
+  white-space: nowrap;
+}
+
+.json-key { color: var(--accent-secondary); }
+.json-string { color: var(--success); }
+.json-number { color: var(--accent-primary); }
+.json-boolean { color: var(--accent-primary); }
+.json-null { color: var(--text-faint); font-style: italic; }
+.json-punct { color: var(--text-muted); }
+.json-collapsed-summary { color: var(--text-faint); font-style: italic; }
+
+.json-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  padding: 0 6px 0 0;
+  font-family: var(--font-mono);
+}
+.json-toggle:hover { color: var(--accent-primary); }
+.json-toggle:focus-visible {
+  outline: none;
+  color: var(--accent-primary);
+}
+
+.json-string-block {
+  margin: 4px 0;
+  padding: 8px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--success);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-width: calc(100% - 32px);
+}
 
 /* ── Chat-header editable title ───────────────────────────────────────── */
 

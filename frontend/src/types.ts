@@ -114,4 +114,5 @@ export interface Message {
   blocks: MessageContent[]
   isGenerating?: boolean
   meta?: string            // e.g. model name, token usage
+  rawJson?: string         // full transcript-entry payload (pretty-printed when JSON)
 }
