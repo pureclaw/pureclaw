@@ -22,6 +22,7 @@ module PureClaw.Frontend.API
     -- * New tab request/response (exported for testing)
   , NewTabRequest (..)
   , NewTabResponse (..)
+  , BranchSpec (..)
   ) where
 
 import Control.Concurrent.STM (TVar, newTVarIO)
@@ -66,12 +67,16 @@ import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
-  ( SessionHandle (..)
+  ( BranchError (..)
+  , BranchSeed (..)
+  , BranchSpec (..)
+  , SessionHandle (..)
   , SetArchivedError (..)
   , SetDescriptionError (..)
   , listSessions
   , loadRecentMessages
   , mkSessionHandle
+  , resolveBranchSeed
   , setArchived
   , setDescription
   )
@@ -711,15 +716,20 @@ handleListProviders env respond = do
 -- { "kind": { "tag": "raw_shell",
 --             "backend": { "tag": "local" } } }
 -- @
-newtype NewTabRequest = NewTabRequest
-  { _ntr_kind :: TabKind
+data NewTabRequest = NewTabRequest
+  { _ntr_kind       :: TabKind
+  , _ntr_branchFrom :: Maybe BranchSpec
+    -- ^ Optional branch source. When 'Just', the new tab's session is
+    -- seeded from a copy of the named source session's transcript prefix
+    -- (parsed from the @"branch_from"@ key; absent ⇒ 'Nothing').
   }
 
 instance FromJSON NewTabRequest where
   parseJSON = Aeson.withObject "NewTabRequest" $ \o -> do
     kindObj <- o .: "kind"
     tabKind <- parseTabKind kindObj
-    pure (NewTabRequest tabKind)
+    branchFrom <- o .:? "branch_from"
+    pure (NewTabRequest tabKind branchFrom)
 
 -- | Parse a 'TabKind' from the JSON envelope used by POST /api/tabs/new.
 --
@@ -768,17 +778,53 @@ handleNewTab env req respond = do
     Left err ->
       respond $ jsonResponse status400
         (object ["error" .= ("Invalid JSON: " <> T.pack err)])
-    Right (NewTabRequest tabKind) -> do
-      -- A8: enforce maxTabs limit
-      curCount <- readIORef (_fe_tabCount env)
-      if curCount >= _fe_maxTabs env
-        then respond $ jsonResponse status409
-               (object ["error" .= ("maximum tab count reached" :: Text)])
-        else createTab env tabKind respond
+    Right (NewTabRequest tabKind mBranch) ->
+      case mBranch of
+        Nothing -> do
+          -- A8: enforce maxTabs limit
+          curCount <- readIORef (_fe_tabCount env)
+          if curCount >= _fe_maxTabs env
+            then respond $ jsonResponse status409
+                   (object ["error" .= ("maximum tab count reached" :: Text)])
+            else createTab env tabKind Nothing respond
+        Just branchSpec ->
+          -- Branch path: validate the request kind and resolve the seed
+          -- BEFORE the maxTabs gate / createTab so a failed branch never
+          -- consumes a tab slot or creates a directory (D5).
+          case tabKind of
+            TkSession (SkProvider _) -> do
+              seedResult <- resolveBranchSeed (_fe_sessionsDir env) branchSpec
+              case seedResult of
+                Left err -> respond (branchErrorResponse err)
+                Right seed -> do
+                  curCount <- readIORef (_fe_tabCount env)
+                  if curCount >= _fe_maxTabs env
+                    then respond $ jsonResponse status409
+                           (object ["error" .= ("maximum tab count reached" :: Text)])
+                    else createTab env tabKind (Just seed) respond
+            _ ->
+              respond $ jsonResponse status400
+                (object ["error" .= ("branch target must be a provider session" :: Text)])
 
--- | Actually create the tab and return a response.
-createTab :: FrontendEnv -> TabKind -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-createTab env tabKind respond = do
+-- | Map a 'BranchError' to its HTTP response. Invalid/traversal source id
+-- and non-provider sources are client errors (400); a missing source
+-- session or a missing entry id are not-found (404).
+branchErrorResponse :: BranchError -> Response
+branchErrorResponse err = case err of
+  BranchInvalidSourceId sid -> jsonResponse status400
+    (object ["error" .= ("invalid branch source id: " <> sid)])
+  BranchSourceNotProvider -> jsonResponse status400
+    (object ["error" .= ("branch source is not a provider session" :: Text)])
+  BranchSourceMissing _ -> jsonResponse status404
+    (object ["error" .= ("branch source session not found" :: Text)])
+  BranchEntryNotFound eid -> jsonResponse status404
+    (object ["error" .= ("branch source entry not found: " <> eid)])
+
+-- | Actually create the tab and return a response. With @'Just' seed@ the
+-- session is seeded from a branch source (see 'createBranchedSession');
+-- with 'Nothing' the behaviour is identical to a fresh New-tab session.
+createTab :: FrontendEnv -> TabKind -> Maybe BranchSeed -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+createTab env tabKind mSeed respond = do
   curCount <- readIORef (_fe_tabCount env)
   -- Bump tab count
   writeIORef (_fe_tabCount env) (curCount + 1)
@@ -798,11 +844,19 @@ createTab env tabKind respond = do
           agentName = case sk of
             SkProvider ps -> _ps_agent ps
             SkHarness  _  -> Nothing
+          -- For a branch, inherit _sm_kind / _sm_model / _sm_agent from
+          -- the source meta so the branch's sidebar row matches its
+          -- parent; otherwise use the request kind + global model.
+          (metaKind, metaModel, metaAgent) = case mSeed of
+            Just seed ->
+              let srcMeta = _bseed_sourceMeta seed
+              in ( _sm_kind srcMeta, _sm_model srcMeta, _sm_agent srcMeta )
+            Nothing -> (sk, modelText, agentName)
           meta = SessionMeta
             { _sm_id                = sid
-            , _sm_agent             = agentName
-            , _sm_kind              = sk
-            , _sm_model             = modelText
+            , _sm_agent             = metaAgent
+            , _sm_kind              = metaKind
+            , _sm_model             = metaModel
             , _sm_channel           = "web"
             , _sm_createdAt         = now
             , _sm_lastActive        = now
@@ -813,6 +867,17 @@ createTab env tabKind respond = do
             }
       sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
       _sh_save sh
+      -- For a branch, seed the new transcript with a verbatim copy of the
+      -- source prefix (preserving _te_id and order) and copy the source
+      -- custom-prompt.md so the first completion replays the prefix and
+      -- uses the inherited prompt.
+      case mSeed of
+        Just seed -> do
+          mapM_ (_th_record (_sh_transcript sh)) (_bseed_prefix seed)
+          maybe (pure ())
+            (TIO.writeFile (_sh_dir sh </> "custom-prompt.md"))
+            (_bseed_customPrompt seed)
+        Nothing -> pure ()
       -- Publish the new-session signal to the live stream broker (D18). The
       -- sidebar uses this to render the session row without polling. The
       -- no-broker path is intentional ('Nothing' preserves the legacy

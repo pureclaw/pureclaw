@@ -12,15 +12,17 @@ import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Network.HTTP.Types qualified as HTTP
 import Network.Wai qualified as Wai
 import Network.Wai.Internal (ResponseReceived (..))
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Core.Types (ModelId (..), SessionId (..), ToolCallId (..))
 import PureClaw.Frontend.API
 import PureClaw.Handles.Log (mkNoOpLogHandle)
@@ -32,7 +34,21 @@ import PureClaw.Providers.Class
   , SomeProvider (MkProvider)
   , ToolDefinition (..)
   )
-import PureClaw.Session.Types (SessionMeta (..), SessionKind (..), ProviderSpec (..), inferProviderId)
+import PureClaw.Session.Types
+  ( SessionMeta (..)
+  , SessionKind (..)
+  , ProviderSpec (..)
+  , HarnessSpec (..)
+  , TerminalBackend (..)
+  , TmuxConfig (..)
+  , fixedFlavourLookup
+  , inferProviderId
+  )
+import PureClaw.Transcript.Types
+  ( Direction (..)
+  , TranscriptEntry (..)
+  , encodePayload
+  )
 import PureClaw.Tools.Registry
   ( ToolHandler (..)
   , emptyRegistry
@@ -129,6 +145,280 @@ spec = do
           hasKey val "tab_index" `shouldBe` True
           hasKey val "session_id" `shouldBe` True
           hasKey val "kind" `shouldBe` True
+
+  -- -----------------------------------------------------------------------
+  -- WU1 — POST /api/tabs/new with branch_from (session branching)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/tabs/new (branch_from)" $ do
+    -- D1: a non-branch POST behaves byte-for-byte as today.
+    it "non-branch POST still creates a provider tab unchanged (D1)" $ do
+      withSystemTempDirectory "pureclaw-branch-d1" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] providerNewTabBody
+        st `shouldBe` HTTP.status200
+        case Aeson.decode respBody of
+          Just (val :: Aeson.Value) ->
+            lookupKey val "kind" `shouldBe` Just (Aeson.String "provider")
+          Nothing -> expectationFailure "Could not decode response JSON"
+        readIORef (_fe_tabCount env) `shouldReturn` 1
+
+    -- D3: branch copies the source prefix verbatim (incl. _te_id, order)
+    -- and inherits _sm_model / _sm_agent from the source meta.
+    it "copies the source prefix and inherits source metadata (D3, D3a)" $ do
+      withSystemTempDirectory "pureclaw-branch-d3" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-d3" (Just "helper") Nothing
+          [ branchReqEntry "e1" "q1"
+          , branchRespEntry "e2" "a1"
+          , branchReqEntry "e3" "q2"
+          , branchRespEntry "e4" "a2"
+          ]
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-d3" "e3")
+        st `shouldBe` HTTP.status200
+        newSid <- case Aeson.decode respBody of
+          Just (val :: Aeson.Value) -> case lookupKey val "session_id" of
+            Just (Aeson.String s) -> pure s
+            _ -> expectationFailure "expected session_id string" >> pure ""
+          Nothing -> expectationFailure "Could not decode response JSON" >> pure ""
+        -- New transcript holds exactly the inclusive prefix [e1,e2,e3].
+        entries <- readBranchTranscript tmpDir newSid
+        map _te_id entries `shouldBe` ["e1", "e2", "e3"]
+        -- Inherited metadata: agent carried through from the source.
+        Right meta <- Aeson.eitherDecodeFileStrict'
+          (tmpDir </> T.unpack newSid </> "session.json")
+          :: IO (Either String SessionMeta)
+        fmap unAgentName (_sm_agent meta) `shouldBe` Just "helper"
+        _sm_model meta `shouldBe` "claude-sonnet-4-20250514"
+
+    -- D3b: source without an agent ⇒ branch's agent is Nothing.
+    it "inherits Nothing agent when source has none (D3b)" $ do
+      withSystemTempDirectory "pureclaw-branch-d3b" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-d3b" Nothing Nothing
+          [ branchReqEntry "e1" "q1" ]
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-d3b" "e1")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        Right meta <- Aeson.eitherDecodeFileStrict'
+          (tmpDir </> T.unpack newSid </> "session.json")
+          :: IO (Either String SessionMeta)
+        _sm_agent meta `shouldBe` Nothing
+
+    -- D6: branch of a source WITH custom-prompt.md copies it.
+    it "copies custom-prompt.md from the source (D6)" $ do
+      withSystemTempDirectory "pureclaw-branch-d6" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-d6" Nothing (Just "you are a branch")
+          [ branchReqEntry "e1" "q1" ]
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-d6" "e1")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        let promptPath = tmpDir </> T.unpack newSid </> "custom-prompt.md"
+        doesFileExist promptPath `shouldReturn` True
+        contents <- TIO.readFile promptPath
+        contents `shouldBe` "you are a branch"
+
+    -- D6b: branch of a source WITHOUT custom-prompt.md creates none.
+    it "creates no custom-prompt.md when the source has none (D6b)" $ do
+      withSystemTempDirectory "pureclaw-branch-d6b" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-d6b" Nothing Nothing
+          [ branchReqEntry "e1" "q1" ]
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-d6b" "e1")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        let promptPath = tmpDir </> T.unpack newSid </> "custom-prompt.md"
+        doesFileExist promptPath `shouldReturn` False
+
+    -- D4: branch with a non-provider target TabKind ⇒ 400.
+    it "rejects a branch with a raw_shell target kind (D4)" $ do
+      withSystemTempDirectory "pureclaw-branch-d4" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-d4" Nothing Nothing
+          [ branchReqEntry "e1" "q1" ]
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let body = Aeson.encode $ object
+              [ "kind" .= object
+                  [ "tag" .= ("raw_shell" :: T.Text)
+                  , "backend" .= object ["tag" .= ("local" :: T.Text)]
+                  ]
+              , "branch_from" .= object
+                  [ "session_id"     .= ("src-d4" :: T.Text)
+                  , "up_to_entry_id" .= ("e1" :: T.Text)
+                  ]
+              ]
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] body
+        st `shouldBe` HTTP.status400
+        expectErrorContains respBody "provider session"
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    -- D5: error mapping + tab-count invariance.
+    it "maps an invalid/traversal source id to 400 (D5)" $ do
+      withSystemTempDirectory "pureclaw-branch-d5a" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "../evil" "e1")
+        st `shouldBe` HTTP.status400
+        expectErrorContains respBody "invalid branch source id"
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    it "maps an unknown source session to 404 (D5)" $ do
+      withSystemTempDirectory "pureclaw-branch-d5b" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "ghost" "e1")
+        st `shouldBe` HTTP.status404
+        expectErrorContains respBody "branch source session not found"
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    it "maps a harness source to 400 (D5)" $ do
+      withSystemTempDirectory "pureclaw-branch-d5c" $ \tmpDir -> do
+        writeHarnessBranchSource tmpDir "src-harness"
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-harness" "e1")
+        st `shouldBe` HTTP.status400
+        expectErrorContains respBody "not a provider session"
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    it "maps an unknown entry id to 404 (D5)" $ do
+      withSystemTempDirectory "pureclaw-branch-d5d" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-d5d" Nothing Nothing
+          [ branchReqEntry "e1" "q1" ]
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-d5d" "nope")
+        st `shouldBe` HTTP.status404
+        expectErrorContains respBody "branch source entry not found"
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    -- D5: repeated failing branch POSTs do not consume tab slots.
+    it "leaves _fe_tabCount unchanged after repeated failing branches (D5)" $ do
+      withSystemTempDirectory "pureclaw-branch-d5e" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let post = postJSON env ["api", "tabs", "new"] (branchBody "ghost" "e1")
+        (s1, _) <- post
+        (s2, _) <- post
+        (s3, _) <- post
+        [s1, s2, s3] `shouldBe` [HTTP.status404, HTTP.status404, HTTP.status404]
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    -- D6 integration: first /send on a branch replays the copied prefix
+    -- and uses the copied custom prompt.
+    it "first send replays the prefix and uses the copied custom prompt (D6)" $ do
+      withSystemTempDirectory "pureclaw-branch-d6-send" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-send" Nothing (Just "branch system prompt")
+          [ branchReqEntry "e1" "q1"
+          , branchRespEntry "e2" "a1"
+          ]
+        fakeProv <- newFakeProvider
+        queueResponse fakeProv CompletionResponse
+          { _crsp_content = [TextBlock "ok"]
+          , _crsp_model   = ModelId "claude-sonnet-4-20250514"
+          , _crsp_usage   = Nothing
+          }
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "claude-sonnet-4-20250514"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-send" "e2")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        (sendSt, _) <- postJSON env ["api", "sessions", newSid, "send"]
+          (Aeson.encode (object ["message" .= ("continue" :: T.Text)]))
+        sendSt `shouldBe` HTTP.status200
+        recorded <- peekRecorded fakeProv
+        case recorded of
+          (creq:_) -> do
+            -- The system prompt is the copied custom prompt.
+            _cr_systemPrompt creq `shouldBe` Just "branch system prompt"
+            -- The replayed prefix turns are present in the context.
+            let blob = T.intercalate "\n"
+                  [ t | Message _ blocks <- _cr_messages creq
+                      , TextBlock t <- blocks ]
+            (("q1" `T.isInfixOf` blob) && ("a1" `T.isInfixOf` blob))
+              `shouldBe` True
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- D6b integration: branch of a source with no custom-prompt.md falls
+    -- back to the global system prompt on first send.
+    it "first send falls back to global prompt when source has no custom prompt (D6b)" $ do
+      withSystemTempDirectory "pureclaw-branch-d6b-send" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-send-b" Nothing Nothing
+          [ branchReqEntry "e1" "q1" ]
+        fakeProv <- newFakeProvider
+        queueResponse fakeProv CompletionResponse
+          { _crsp_content = [TextBlock "ok"]
+          , _crsp_model   = ModelId "claude-sonnet-4-20250514"
+          , _crsp_usage   = Nothing
+          }
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "claude-sonnet-4-20250514"))
+        let env = env0
+              { _fe_provider = provRef
+              , _fe_model = modelRef
+              , _fe_systemPrompt = Just "GLOBAL PROMPT"
+              }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-send-b" "e1")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        (sendSt, _) <- postJSON env ["api", "sessions", newSid, "send"]
+          (Aeson.encode (object ["message" .= ("continue" :: T.Text)]))
+        sendSt `shouldBe` HTTP.status200
+        let promptPath = tmpDir </> T.unpack newSid </> "custom-prompt.md"
+        doesFileExist promptPath `shouldReturn` False
+        recorded <- peekRecorded fakeProv
+        case recorded of
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Just "GLOBAL PROMPT"
+          []       -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- A present-but-malformed branch_from (missing required keys) fails to
+    -- parse and returns 400 (also exercises the BranchSpec FromJSON failure
+    -- label).
+    it "rejects a malformed branch_from object with 400" $ do
+      withSystemTempDirectory "pureclaw-branch-malformed" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let body = Aeson.encode $ object
+              [ "kind" .= object
+                  [ "tag" .= ("session" :: T.Text)
+                  , "session_kind" .= object
+                      [ "tag"      .= ("provider" :: T.Text)
+                      , "provider" .= ("anthropic" :: T.Text)
+                      , "model"    .= ("claude-sonnet-4-20250514" :: T.Text)
+                      ]
+                  ]
+              , "branch_from" .= object [ "wrong_key" .= ("x" :: T.Text) ]
+              ]
+        (st, _) <- postJSON env ["api", "tabs", "new"] body
+        st `shouldBe` HTTP.status400
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    -- A branch_from that is not even a JSON object exercises the
+    -- BranchSpec 'withObject' type-mismatch label.
+    it "rejects a non-object branch_from with 400" $ do
+      withSystemTempDirectory "pureclaw-branch-nonobj" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let body = Aeson.encode $ object
+              [ "kind" .= object
+                  [ "tag" .= ("session" :: T.Text)
+                  , "session_kind" .= object
+                      [ "tag"      .= ("provider" :: T.Text)
+                      , "provider" .= ("anthropic" :: T.Text)
+                      , "model"    .= ("claude-sonnet-4-20250514" :: T.Text)
+                      ]
+                  ]
+              , "branch_from" .= ("not-an-object" :: T.Text)
+              ]
+        (st, _) <- postJSON env ["api", "tabs", "new"] body
+        st `shouldBe` HTTP.status400
+        readIORef (_fe_tabCount env) `shouldReturn` 0
 
   describe "POST /api/sessions/new (410 Gone)" $ do
     it "returns 410 Gone status" $ do
@@ -638,6 +928,153 @@ writeTestSession baseDir sid archived = do
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
   -- Write a non-empty transcript so hasTranscriptEntries returns True
   LBS.writeFile (dir </> "transcript.jsonl") "{\"id\":\"1\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"direction\":\"request\",\"payload\":\"hello\",\"metadata\":{}}\n"
+
+-- ---------------------------------------------------------------------------
+-- WU1 branch test helpers
+-- ---------------------------------------------------------------------------
+
+-- | A plain provider New-tab request body (no branch).
+providerNewTabBody :: LBS.ByteString
+providerNewTabBody = Aeson.encode $ object
+  [ "kind" .= object
+      [ "tag" .= ("session" :: Text)
+      , "session_kind" .= object
+          [ "tag"      .= ("provider" :: Text)
+          , "provider" .= ("anthropic" :: Text)
+          , "model"    .= ("claude-sonnet-4-20250514" :: Text)
+          ]
+      ]
+  ]
+
+-- | A provider New-tab request body carrying a @branch_from@ spec.
+branchBody :: Text -> Text -> LBS.ByteString
+branchBody sourceSid entryId = Aeson.encode $ object
+  [ "kind" .= object
+      [ "tag" .= ("session" :: Text)
+      , "session_kind" .= object
+          [ "tag"      .= ("provider" :: Text)
+          , "provider" .= ("anthropic" :: Text)
+          , "model"    .= ("claude-sonnet-4-20250514" :: Text)
+          ]
+      ]
+  , "branch_from" .= object
+      [ "session_id"     .= sourceSid
+      , "up_to_entry_id" .= entryId
+      ]
+  ]
+
+-- | Assert that a JSON error body has an @"error"@ string containing the
+-- given substring (also forces the error-message expression to evaluate).
+expectErrorContains :: LBS.ByteString -> Text -> IO ()
+expectErrorContains respBody needle = case Aeson.decode respBody of
+  Just (val :: Aeson.Value) -> case lookupKey val "error" of
+    Just (Aeson.String msg) ->
+      (needle `T.isInfixOf` msg) `shouldBe` True
+    _ -> expectationFailure "expected an 'error' string in the body"
+  Nothing -> expectationFailure "Could not decode error response JSON"
+
+-- | Decode the @session_id@ from a NewTabResponse body, failing the test
+-- if it is missing.
+decodeSessionId :: LBS.ByteString -> IO Text
+decodeSessionId respBody = case Aeson.decode respBody of
+  Just (val :: Aeson.Value) -> case lookupKey val "session_id" of
+    Just (Aeson.String s) -> pure s
+    _ -> expectationFailure "expected session_id string" >> pure ""
+  Nothing -> expectationFailure "Could not decode response JSON" >> pure ""
+
+-- | An Anthropic-shaped provider Request transcript entry whose extracted
+-- "new message text" is @msg@.
+branchReqEntry :: Text -> Text -> TranscriptEntry
+branchReqEntry eid msg = TranscriptEntry
+  { _te_id            = eid
+  , _te_timestamp     = epochT
+  , _te_harness       = Nothing
+  , _te_model         = Just "claude-sonnet-4-20250514"
+  , _te_direction     = Request
+  , _te_payload       = encodePayload (LBS.toStrict (Aeson.encode (object
+                          [ "messages" .= [object ["role" .= ("user" :: Text), "content" .= msg]] ])))
+  , _te_durationMs    = Nothing
+  , _te_correlationId = "corr"
+  , _te_metadata      = Map.empty
+  }
+  where epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+
+-- | An Anthropic-shaped provider Response transcript entry whose extracted
+-- assistant text is @msg@.
+branchRespEntry :: Text -> Text -> TranscriptEntry
+branchRespEntry eid msg = TranscriptEntry
+  { _te_id            = eid
+  , _te_timestamp     = epochT
+  , _te_harness       = Nothing
+  , _te_model         = Just "claude-sonnet-4-20250514"
+  , _te_direction     = Response
+  , _te_payload       = encodePayload (LBS.toStrict (Aeson.encode (object
+                          [ "content" .= [object ["type" .= ("text" :: Text), "text" .= msg]] ])))
+  , _te_durationMs    = Just 1
+  , _te_correlationId = "corr"
+  , _te_metadata      = Map.empty
+  }
+  where epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+
+-- | Write a provider source session on disk: @session.json@,
+-- @transcript.jsonl@ (entries in order), and optional @custom-prompt.md@.
+writeBranchSource
+  :: FilePath -> Text -> Maybe Text -> Maybe Text -> [TranscriptEntry] -> IO ()
+writeBranchSource baseDir sid mAgentText mPrompt entries = do
+  let dir = baseDir </> T.unpack sid
+  createDirectoryIfMissing True dir
+  let mAgent = mAgentText >>= \t -> either (const Nothing) Just (mkAgentName t)
+      meta = SessionMeta
+        { _sm_id                = SessionId sid
+        , _sm_agent             = mAgent
+        , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "claude-sonnet-4-20250514") (ModelId "claude-sonnet-4-20250514") mAgent)
+        , _sm_model             = "claude-sonnet-4-20250514"
+        , _sm_channel           = "web"
+        , _sm_createdAt         = epochT
+        , _sm_lastActive        = epochT
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        }
+      epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+  LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
+  LBS.writeFile (dir </> "transcript.jsonl")
+    (LBS.intercalate "\n" (map Aeson.encode entries) <> "\n")
+  maybe (pure ()) (TIO.writeFile (dir </> "custom-prompt.md")) mPrompt
+
+-- | Write a harness-backed source session on disk (for the D5 harness arm).
+writeHarnessBranchSource :: FilePath -> Text -> IO ()
+writeHarnessBranchSource baseDir sid = do
+  let dir = baseDir </> T.unpack sid
+  createDirectoryIfMissing True dir
+  let hSpec = HarnessSpec (fixedFlavourLookup "claude-code")
+        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+      meta = SessionMeta
+        { _sm_id                = SessionId sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = SkHarness hSpec
+        , _sm_model             = "claude-sonnet-4-20250514"
+        , _sm_channel           = "web"
+        , _sm_createdAt         = epochT
+        , _sm_lastActive        = epochT
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        }
+      epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+  LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
+  LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Read and decode a branched session's transcript.jsonl into entries.
+readBranchTranscript :: FilePath -> Text -> IO [TranscriptEntry]
+readBranchTranscript baseDir sid = do
+  raw <- LBS.readFile (baseDir </> T.unpack sid </> "transcript.jsonl")
+  let ls = filter (not . LBS.null) (LBS.split 0x0a raw)
+  pure (mapMaybe' Aeson.decode' ls)
+  where
+    mapMaybe' f = foldr (\x acc -> maybe acc (: acc) (f x)) []
 
 -- | GET a path from the apiApp and return (status, response body).
 getJSON :: FrontendEnv -> [Text] -> IO (HTTP.Status, LBS.ByteString)

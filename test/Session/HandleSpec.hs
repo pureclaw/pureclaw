@@ -8,6 +8,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.IO qualified as TIO
 import Data.Time
   ( UTCTime (..)
   , addUTCTime
@@ -24,7 +25,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
 
-import PureClaw.Agent.AgentDef (mkAgentName)
+import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( MessageTarget (..)
@@ -38,7 +39,10 @@ import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
   )
 import PureClaw.Session.Handle
-  ( ResolveError (..)
+  ( BranchError (..)
+  , BranchSeed (..)
+  , BranchSpec (..)
+  , ResolveError (..)
   , ResolvedRuntime (..)
   , ResumeError (..)
   , SessionHandle (..)
@@ -49,6 +53,7 @@ import PureClaw.Session.Handle
   , markBootstrapConsumed
   , mkNoOpSessionHandle
   , mkSessionHandle
+  , resolveBranchSeed
   , resolveResumedTarget
   , resolveSessionRef
   , resumeSession
@@ -639,6 +644,100 @@ spec = do
           ("falling back" `T.isInfixOf` msg) `shouldBe` True
         other -> expectationFailure ("expected 1 warning, got: " <> show other)
 
+  describe "resolveBranchSeed" $ do
+    it "returns the inclusive prefix [0..boundary] for a mid-transcript entry" $ withTmp $ \base -> do
+      writeSourceSession base "src-1" Nothing Nothing
+        [ mkTextEntry "e1" t0 Request  "q1"
+        , mkTextEntry "e2" t0 Response "a1"
+        , mkTextEntry "e3" t0 Request  "q2"
+        , mkTextEntry "e4" t0 Response "a2"
+        ]
+      result <- resolveBranchSeed base (BranchSpec "src-1" "e3")
+      case result of
+        Right seed -> map _te_id (_bseed_prefix seed) `shouldBe` ["e1", "e2", "e3"]
+        Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
+
+    it "branching from the first entry copies exactly that entry" $ withTmp $ \base -> do
+      writeSourceSession base "src-first" Nothing Nothing
+        [ mkTextEntry "e1" t0 Request  "q1"
+        , mkTextEntry "e2" t0 Response "a1"
+        ]
+      result <- resolveBranchSeed base (BranchSpec "src-first" "e1")
+      case result of
+        Right seed -> map _te_id (_bseed_prefix seed) `shouldBe` ["e1"]
+        Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
+
+    -- D3a: source with an agent name flows through into the seed's source meta.
+    it "carries the source meta (agent present)" $ withTmp $ \base -> do
+      writeSourceSession base "src-agent" (Just "helper") Nothing
+        [ mkTextEntry "e1" t0 Request "q1" ]
+      result <- resolveBranchSeed base (BranchSpec "src-agent" "e1")
+      case result of
+        Right seed -> case _sm_agent (_bseed_sourceMeta seed) of
+          Just a  -> unAgentName a `shouldBe` "helper"
+          Nothing -> expectationFailure "expected _sm_agent = Just helper"
+        Left err -> expectationFailure ("expected Right seed, got: " <> show err)
+
+    -- D3b: source without an agent name yields Nothing in the seed's source meta.
+    it "carries the source meta (agent absent)" $ withTmp $ \base -> do
+      writeSourceSession base "src-noagent" Nothing Nothing
+        [ mkTextEntry "e1" t0 Request "q1" ]
+      result <- resolveBranchSeed base (BranchSpec "src-noagent" "e1")
+      case result of
+        Right seed -> _sm_agent (_bseed_sourceMeta seed) `shouldBe` Nothing
+        Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
+
+    -- D6: source with a custom-prompt.md surfaces its contents in the seed.
+    it "reads custom-prompt.md when present" $ withTmp $ \base -> do
+      writeSourceSession base "src-prompt" Nothing (Just "you are a branch")
+        [ mkTextEntry "e1" t0 Request "q1" ]
+      result <- resolveBranchSeed base (BranchSpec "src-prompt" "e1")
+      case result of
+        Right seed -> _bseed_customPrompt seed `shouldBe` Just "you are a branch"
+        Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
+
+    -- D6b: source without a custom-prompt.md yields Nothing.
+    it "yields Nothing custom prompt when custom-prompt.md absent" $ withTmp $ \base -> do
+      writeSourceSession base "src-noprompt" Nothing Nothing
+        [ mkTextEntry "e1" t0 Request "q1" ]
+      result <- resolveBranchSeed base (BranchSpec "src-noprompt" "e1")
+      case result of
+        Right seed -> _bseed_customPrompt seed `shouldBe` Nothing
+        Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
+
+    it "rejects an invalid (traversal) source id with BranchInvalidSourceId" $ withTmp $ \base -> do
+      result <- resolveBranchSeed base (BranchSpec "../evil" "e1")
+      case result of
+        Left (BranchInvalidSourceId sid) -> sid `shouldBe` "../evil"
+        other -> expectationFailure ("expected BranchInvalidSourceId, got: " <> show other)
+
+    it "rejects an empty source id with BranchInvalidSourceId" $ withTmp $ \base -> do
+      result <- resolveBranchSeed base (BranchSpec "" "e1")
+      case result of
+        Left (BranchInvalidSourceId sid) -> sid `shouldBe` ""
+        other -> expectationFailure ("expected BranchInvalidSourceId, got: " <> show other)
+
+    it "returns BranchSourceMissing when session.json is absent" $ withTmp $ \base -> do
+      result <- resolveBranchSeed base (BranchSpec "ghost" "e1")
+      case result of
+        Left (BranchSourceMissing p) -> p `shouldBe` (base </> "ghost" </> "session.json")
+        other -> expectationFailure ("expected BranchSourceMissing, got: " <> show other)
+
+    it "returns BranchSourceNotProvider for a harness source" $ withTmp $ \base -> do
+      writeHarnessSession base "src-harness"
+      result <- resolveBranchSeed base (BranchSpec "src-harness" "e1")
+      case result of
+        Left BranchSourceNotProvider -> pure ()
+        other -> expectationFailure ("expected BranchSourceNotProvider, got: " <> show other)
+
+    it "returns BranchEntryNotFound when the entry id is absent" $ withTmp $ \base -> do
+      writeSourceSession base "src-missing-entry" Nothing Nothing
+        [ mkTextEntry "e1" t0 Request "q1" ]
+      result <- resolveBranchSeed base (BranchSpec "src-missing-entry" "nope")
+      case result of
+        Left (BranchEntryNotFound eid) -> eid `shouldBe` "nope"
+        other -> expectationFailure ("expected BranchEntryNotFound, got: " <> show other)
+
 -- ----------------------------------------------------------------------------
 -- Local helpers (used only by listSessions/resolveSessionRef tests)
 -- ----------------------------------------------------------------------------
@@ -678,3 +777,35 @@ writeMetaWithAgent base sid offsetSecs mAgentText = do
 -- | Always-running no-op harness used to populate validateRuntime maps.
 noOpHarness :: HarnessHandle
 noOpHarness = mkNoOpHarnessHandle
+
+-- | Write a provider source session on disk: @session.json@, a
+-- @transcript.jsonl@ seeded with the given entries (in order), and an
+-- optional @custom-prompt.md@. Used by the 'resolveBranchSeed' tests.
+writeSourceSession
+  :: FilePath        -- ^ base sessions dir
+  -> Text            -- ^ source session id
+  -> Maybe Text      -- ^ optional agent name
+  -> Maybe Text      -- ^ optional custom-prompt.md contents
+  -> [TranscriptEntry]
+  -> IO ()
+writeSourceSession base sid mAgentText mPrompt entries = do
+  let mAgent = mAgentText >>= \t -> case mkAgentName t of
+        Right a -> Just a
+        Left _  -> Nothing
+      meta = (mkMeta sid t0) { _sm_agent = mAgent }
+  sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+  mapM_ (_th_record (_sh_transcript sh)) entries
+  _th_close (_sh_transcript sh)
+  _sh_save sh
+  maybe (pure ()) (TIO.writeFile (_sh_dir sh </> "custom-prompt.md")) mPrompt
+
+-- | Write a harness-backed source session on disk (used to verify
+-- 'resolveBranchSeed' rejects non-provider sources).
+writeHarnessSession :: FilePath -> Text -> IO ()
+writeHarnessSession base sid = do
+  let hSpec = HarnessSpec (fixedFlavourLookup "claude-code")
+        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+      meta = (mkMeta sid t0) { _sm_kind = SkHarness hSpec }
+  sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+  _sh_save sh
+  _th_close (_sh_transcript sh)

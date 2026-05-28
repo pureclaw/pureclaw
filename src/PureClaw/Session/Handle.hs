@@ -8,6 +8,11 @@ module PureClaw.Session.Handle
     -- * Resume
   , ResumeError (..)
   , resumeSession
+    -- * Branch
+  , BranchError (..)
+  , BranchSpec (..)
+  , BranchSeed (..)
+  , resolveBranchSeed
     -- * Enumeration and lookup
   , listSessions
   , ResolveError (..)
@@ -34,6 +39,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as LBS
+import Data.ByteString.Lazy.Char8 qualified as LBSC
 import Data.IORef
   ( IORef
   , atomicModifyIORef'
@@ -48,6 +54,7 @@ import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, secondsToDiffTime)
 import Data.Vector qualified as V
 import System.Directory
@@ -306,6 +313,148 @@ resumeSession mBroker logger baseDir sid = do
             , _sh_dir        = dir
             , _sh_save       = save
             })
+
+-- ----------------------------------------------------------------------------
+-- Branch
+-- ----------------------------------------------------------------------------
+
+-- | Reasons a branch seed cannot be resolved from a source session.
+-- Constructors carry diagnostic payloads for parity with the existing
+-- 'ResumeError' style.
+data BranchError
+  = BranchInvalidSourceId Text
+    -- ^ The supplied source session id failed the traversal-safety guard
+    -- (empty / contains @..@ or @\/@). The 'Text' is the offending id.
+  | BranchSourceMissing FilePath
+    -- ^ No @session.json@ at the expected path for the source session.
+  | BranchSourceNotProvider
+    -- ^ The source session is harness-backed; branching is provider-only.
+  | BranchEntryNotFound Text
+    -- ^ No transcript entry with the requested @_te_id@ exists in the
+    -- source transcript. The 'Text' is the requested entry id.
+  deriving stock (Show, Eq)
+
+-- | A client-supplied branch request: the source session to copy from and
+-- the transcript entry id at which to cut the (inclusive) prefix.
+data BranchSpec = BranchSpec
+  { _bs_sourceSessionId :: Text
+  , _bs_upToEntryId     :: Text
+  }
+  deriving stock (Show, Eq)
+
+-- | Wire shape: @{ "session_id": ..., "up_to_entry_id": ... }@. Defined
+-- here (not in the API module) so it is not an orphan instance.
+instance Aeson.FromJSON BranchSpec where
+  parseJSON = Aeson.withObject "BranchSpec" $ \o ->
+    BranchSpec
+      <$> o Aeson..: "session_id"
+      <*> o Aeson..: "up_to_entry_id"
+
+-- | The resolved ingredients for seeding a branched session, read entirely
+-- from the on-disk source session (never from client-supplied payloads).
+data BranchSeed = BranchSeed
+  { _bseed_prefix       :: [TranscriptEntry]
+    -- ^ Source transcript entries @[0..boundary]@ (inclusive), in order.
+  , _bseed_sourceMeta   :: SessionMeta
+    -- ^ Source session metadata, so the branch can inherit
+    -- @_sm_kind@ / @_sm_model@ / @_sm_agent@.
+  , _bseed_customPrompt :: Maybe Text
+    -- ^ Contents of the source's @custom-prompt.md@, if present.
+  }
+  deriving stock (Show, Eq)
+
+-- | Traversal-safety guard for a branch source session id. Mirrors
+-- @PureClaw.Frontend.API.isValidSessionId@; replicated locally to avoid an
+-- import cycle (the API module imports this module). Rejects the empty
+-- string and anything containing @..@ or @\/@.
+isValidBranchSourceId :: Text -> Bool
+isValidBranchSourceId sid
+  | T.null sid = False
+  | T.isInfixOf ".." sid = False
+  | T.isInfixOf "/" sid = False
+  | otherwise = True
+
+-- | Resolve a 'BranchSpec' against the on-disk source session under
+-- @baseDir@, producing a 'BranchSeed' or a typed 'BranchError'.
+--
+-- Validates (in order): the source id is traversal-safe, the source
+-- @session.json@ exists and decodes, the source is provider-backed, and
+-- the requested entry id is present in the source @transcript.jsonl@. On
+-- success returns the inclusive prefix @[0..boundary]@, the source meta,
+-- and the source's @custom-prompt.md@ contents (if any).
+--
+-- The prefix is read verbatim from the source transcript on disk — never
+-- from any caller-supplied payload — so a branch cannot inject history.
+resolveBranchSeed :: FilePath -> BranchSpec -> IO (Either BranchError BranchSeed)
+resolveBranchSeed baseDir bs
+  | not (isValidBranchSourceId sourceId) =
+      pure (Left (BranchInvalidSourceId sourceId))
+  | otherwise = do
+      let dir   = baseDir </> T.unpack sourceId
+          metaP = dir </> "session.json"
+          txP   = dir </> "transcript.jsonl"
+          promptP = dir </> "custom-prompt.md"
+      exists <- doesFileExist metaP
+      if not exists
+        then pure (Left (BranchSourceMissing metaP))
+        else do
+          raw <- LBS.readFile metaP
+          case Aeson.eitherDecode' raw of
+            Left _ -> pure (Left (BranchSourceMissing metaP))
+            Right meta -> case _sm_kind (meta :: SessionMeta) of
+              SkHarness _ -> pure (Left BranchSourceNotProvider)
+              SkProvider _ -> do
+                entries <- readTranscriptEntries txP
+                case sliceInclusivePrefix (_bs_upToEntryId bs) entries of
+                  Nothing -> pure (Left (BranchEntryNotFound (_bs_upToEntryId bs)))
+                  Just prefix -> do
+                    mPrompt <- readCustomPrompt promptP
+                    pure (Right BranchSeed
+                      { _bseed_prefix       = prefix
+                      , _bseed_sourceMeta   = meta
+                      , _bseed_customPrompt = mPrompt
+                      })
+  where
+    sourceId = _bs_sourceSessionId bs
+
+-- | Read and decode a @transcript.jsonl@ file into 'TranscriptEntry'
+-- values, in file (oldest-first) order. Missing files and undecodable
+-- lines yield @[]@ / skipped lines respectively. This is a read-only path,
+-- so it intentionally does not open a file transcript /handle/ (those are
+-- reserved for write sites that must reach the broker).
+readTranscriptEntries :: FilePath -> IO [TranscriptEntry]
+readTranscriptEntries path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure []
+    else do
+      eRaw <- try (LBS.readFile path) :: IO (Either IOException LBS.ByteString)
+      case eRaw of
+        Left _    -> pure []
+        Right raw -> pure (mapMaybe Aeson.decode' (splitJsonlLines raw))
+
+-- | Split a lazy 'LBS.ByteString' into non-empty newline-delimited chunks.
+splitJsonlLines :: LBS.ByteString -> [LBS.ByteString]
+splitJsonlLines = filter (not . LBS.null) . LBSC.split '\n'
+
+-- | Return the inclusive prefix @[0..idx]@ up to and including the first
+-- entry whose @_te_id@ matches the target, or 'Nothing' if no such entry
+-- exists.
+sliceInclusivePrefix :: Text -> [TranscriptEntry] -> Maybe [TranscriptEntry]
+sliceInclusivePrefix target = go []
+  where
+    go _   [] = Nothing
+    go acc (e:es)
+      | _te_id e == target = Just (reverse (e : acc))
+      | otherwise          = go (e : acc) es
+
+-- | Read a @custom-prompt.md@ file if it exists, returning its contents.
+readCustomPrompt :: FilePath -> IO (Maybe Text)
+readCustomPrompt path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure Nothing
+    else Just <$> TIO.readFile path
 
 -- ----------------------------------------------------------------------------
 -- Enumeration and lookup
