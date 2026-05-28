@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import type { Agent, AgentInfo, Message, MessageContent, CodeSpan, ToolCallInfo, SessionInfo } from '../types'
+import { JsonTree } from './JsonTree'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import { StatusDot } from './StatusDot'
 import { BottomBar } from './BottomBar'
@@ -103,9 +105,47 @@ function useFragmentAnchor<T extends HTMLElement>(anchorId: string | undefined, 
   return targeted
 }
 
+/** Best-effort clipboard copy that survives non-secure contexts. Returns a
+ *  Promise<boolean> that resolves true if either the modern Clipboard API
+ *  or the legacy execCommand path succeeded. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // Fall through to the execCommand fallback (permissions / non-secure
+      // context / Firefox-on-some-pages all reject the same way).
+    }
+  }
+  return execCommandCopy(text)
+}
+
+function execCommandCopy(text: string): boolean {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  // Off-screen but still focusable.
+  ta.style.position = 'fixed'
+  ta.style.top = '0'
+  ta.style.left = '0'
+  ta.style.opacity = '0'
+  ta.style.pointerEvents = 'none'
+  ta.setAttribute('readonly', '')
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  document.body.removeChild(ta)
+  return ok
+}
+
 function copyAnchorLink(anchorId: string) {
   const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${anchorId}`
-  if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(url)
+  void copyTextToClipboard(url)
   if (window.location.hash !== `#${anchorId}`) {
     window.history.replaceState(null, '', url)
   }
@@ -114,8 +154,8 @@ function copyAnchorLink(anchorId: string) {
 function LinkIcon() {
   return (
     <svg
-      width="9" height="9" viewBox="0 0 16 16" fill="none"
-      stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+      width="13" height="13" viewBox="0 0 16 16" fill="none"
+      stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
       aria-hidden="true"
     >
       <path d="M6.5 8 a2.5 2.5 0 0 1 0 -3.5 L8 3 a2.5 2.5 0 0 1 3.5 3.5 L10 8" />
@@ -124,10 +164,31 @@ function LinkIcon() {
   )
 }
 
-/** Persistent "copy permalink" control. Major items (messages, tool calls)
- *  render one of these so the user can grab a direct URL without hunting
- *  for a hover affordance. After click, briefly flips to "Copied" so the
- *  action is visibly confirmed. See DESIGN.md → Context Reachability. */
+function BracesIcon() {
+  return (
+    <svg
+      width="13" height="13" viewBox="0 0 16 16" fill="none"
+      stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M6 3 q-2 0 -2 2 v1.5 q0 1.5 -1.5 1.5 q1.5 0 1.5 1.5 V11 q0 2 2 2" />
+      <path d="M10 3 q2 0 2 2 v1.5 q0 1.5 1.5 1.5 q-1.5 0 -1.5 1.5 V11 q0 2 -2 2" />
+    </svg>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      width="13" height="13" viewBox="0 0 16 16" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 8.5 L6.5 12 L13 4.5" />
+    </svg>
+  )
+}
+
 function AnchorHandle({ anchorId, label = 'Link' }: { anchorId: string; label?: string }) {
   const [copied, setCopied] = useState(false)
   const timerRef = useRef<number | null>(null)
@@ -146,21 +207,180 @@ function AnchorHandle({ anchorId, label = 'Link' }: { anchorId: string; label?: 
 
   return (
     <button
-      className={`anchor-handle${copied ? ' anchor-handle-copied' : ''}`}
+      className={`icon-btn${copied ? ' icon-btn-success' : ''}`}
       title={copied ? 'Link copied' : 'Copy permalink to this block'}
       aria-label={copied ? 'Link copied to clipboard' : `Copy permalink (${label})`}
       onClick={onClick}
     >
-      {copied ? (
-        <span className="anchor-handle-text">Copied</span>
-      ) : (
-        <>
-          <LinkIcon />
-          <span className="anchor-handle-text">{label}</span>
-        </>
-      )}
+      {copied ? <CheckIcon /> : <LinkIcon />}
     </button>
   )
+}
+
+function JsonButton({ onClick, kind }: { onClick: () => void; kind: 'message' | 'tool call' }) {
+  return (
+    <button
+      className="icon-btn"
+      title={`View raw JSON (${kind})`}
+      aria-label={`View raw JSON (${kind})`}
+      onClick={(e) => { e.stopPropagation(); onClick() }}
+    >
+      <BracesIcon />
+    </button>
+  )
+}
+
+function prettyJsonOrRaw(payload: string): string {
+  try {
+    return JSON.stringify(JSON.parse(payload), null, 2)
+  } catch {
+    return payload
+  }
+}
+
+// Stack of currently-open modals. Only the top entry consumes Escape so
+// that closing the topmost doesn't also collapse the one underneath.
+const openModalStack: symbol[] = []
+
+type JsonTab = 'formatted' | 'raw'
+
+function CopyJsonButton({ text }: { text: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const timerRef = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current)
+  }, [])
+
+  const onClick = () => {
+    void copyTextToClipboard(text).then((ok) => {
+      setState(ok ? 'copied' : 'failed')
+      if (timerRef.current != null) window.clearTimeout(timerRef.current)
+      timerRef.current = window.setTimeout(() => setState('idle'), 1400)
+    })
+  }
+
+  const label = state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy'
+  return (
+    <button
+      className={`raw-json-copy${state === 'copied' ? ' raw-json-copy-copied' : ''}${state === 'failed' ? ' raw-json-copy-failed' : ''}`}
+      aria-label="Copy raw JSON to clipboard"
+      title={label}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  )
+}
+
+function RawJsonModal({ title, body, onClose }: { title: string; body: string; onClose: () => void }) {
+  // Stash `onClose` in a ref so the effect that registers global state
+  // (modal stack + key listener + focus restore) does NOT re-run when the
+  // parent passes a fresh callback identity on each render.
+  const onCloseRef = useRef(onClose)
+  useEffect(() => { onCloseRef.current = onClose })
+
+  const closeBtnRef = useRef<HTMLButtonElement>(null)
+  const titleId = useRef(`raw-json-title-${Math.random().toString(36).slice(2, 10)}`).current
+  const pretty = prettyJsonOrRaw(body)
+  const parsed = tryParse(body)
+
+  const [tab, setTab] = useState<JsonTab>('formatted')
+
+  useEffect(() => {
+    const id = Symbol('raw-json-modal')
+    openModalStack.push(id)
+    const previouslyFocused = (document.activeElement as HTMLElement | null) ?? null
+    closeBtnRef.current?.focus()
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (openModalStack[openModalStack.length - 1] !== id) return
+      e.stopPropagation()
+      onCloseRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      const idx = openModalStack.indexOf(id)
+      if (idx >= 0) openModalStack.splice(idx, 1)
+      previouslyFocused?.focus?.()
+    }
+  }, [])
+
+  return createPortal(
+    <div
+      className="raw-json-backdrop"
+      data-testid="raw-json-backdrop"
+      onClick={() => onCloseRef.current()}
+    >
+      <div
+        className="raw-json-modal"
+        data-testid="raw-json-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="raw-json-header">
+          <span id={titleId} className="raw-json-title">{title}</span>
+          <div className="raw-json-tabs" role="tablist" aria-label="View mode">
+            <button
+              role="tab"
+              aria-selected={tab === 'formatted'}
+              className={`raw-json-tab${tab === 'formatted' ? ' raw-json-tab-active' : ''}`}
+              onClick={() => setTab('formatted')}
+            >
+              Formatted
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === 'raw'}
+              className={`raw-json-tab${tab === 'raw' ? ' raw-json-tab-active' : ''}`}
+              onClick={() => setTab('raw')}
+            >
+              Raw
+            </button>
+          </div>
+          <CopyJsonButton text={pretty} />
+          <button
+            ref={closeBtnRef}
+            className="raw-json-close"
+            aria-label="Close raw JSON view"
+            title="Close (Esc)"
+            onClick={() => onCloseRef.current()}
+          >
+            {'×'}
+          </button>
+        </div>
+        {tab === 'formatted' ? (
+          parsed.ok ? (
+            <div className="raw-json-body raw-json-body-tree">
+              <JsonTree value={parsed.value} />
+            </div>
+          ) : (
+            <div
+              className="raw-json-body raw-json-body-empty"
+              data-testid="formatted-json-body"
+            >
+              Payload is not valid JSON. Use the Raw tab to view the source.
+            </div>
+          )
+        ) : (
+          <pre className="raw-json-body" data-testid="raw-json-body">{pretty}</pre>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function tryParse(s: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(s) }
+  } catch {
+    return { ok: false }
+  }
 }
 
 function agentNameColor(message: Message): string {
@@ -283,12 +503,16 @@ function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string })
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
   const [expanded, setExpanded] = useState(targeted)
+  const [jsonOpen, setJsonOpen] = useState(false)
 
   useEffect(() => { if (targeted) setExpanded(true) }, [targeted])
 
   const summary = toolCallSummary(tc.input)
   const inputJson = (() => {
     try { return JSON.stringify(tc.input, null, 2) } catch { return String(tc.input) }
+  })()
+  const toolCallJson = (() => {
+    try { return JSON.stringify(tc, null, 2) } catch { return String(tc) }
   })()
 
   return (
@@ -331,6 +555,7 @@ function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string })
           </span>
         )}
         <AnchorHandle anchorId={anchorId} />
+        <JsonButton kind="tool call" onClick={() => setJsonOpen(true)} />
       </div>
       {expanded && (
         <div className="px-3 pb-3 pt-1 flex flex-col gap-2" style={{ borderTop: '1px solid var(--border)' }}>
@@ -349,6 +574,13 @@ function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string })
             </div>
           )}
         </div>
+      )}
+      {jsonOpen && (
+        <RawJsonModal
+          title={`Tool call \u00b7 ${tc.name}`}
+          body={toolCallJson}
+          onClose={() => setJsonOpen(false)}
+        />
       )}
     </div>
   )
@@ -402,12 +634,26 @@ function ChatMessage({ message }: { message: Message }) {
   const anchorId = `msg-${message.id}`
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
+  const [jsonOpen, setJsonOpen] = useState(false)
   return (
     <div
       ref={ref}
       id={anchorId}
       className="message-group flex flex-col gap-1 addressable-block"
-      style={targeted ? { outline: '1px solid var(--accent-primary)', outlineOffset: 4, borderRadius: 4 } : undefined}
+      style={
+        targeted
+          // Negative horizontal margins cancel the scroll container's 20px
+          // (px-5) padding so the highlight bleeds to its edges; matching
+          // horizontal padding keeps the content in the same column.
+          ? {
+              background: 'var(--bg-elevated)',
+              marginLeft: -20,
+              marginRight: -20,
+              paddingLeft: 20,
+              paddingRight: 20,
+            }
+          : undefined
+      }
     >
       <div className="flex items-center gap-2">
         <span className="text-xs font-semibold" style={{ color: agentNameColor(message) }}>
@@ -423,12 +669,22 @@ function ChatMessage({ message }: { message: Message }) {
         )}
         {message.isGenerating && <TypingIndicator />}
         <AnchorHandle anchorId={anchorId} />
+        {message.rawJson !== undefined && (
+          <JsonButton kind="message" onClick={() => setJsonOpen(true)} />
+        )}
       </div>
       <div className="text-sm" style={{ lineHeight: 'var(--leading-relaxed)' }}>
         {message.blocks.map((block, i) => (
           <MessageBlock key={block.id ?? i} block={block} />
         ))}
       </div>
+      {jsonOpen && message.rawJson !== undefined && (
+        <RawJsonModal
+          title={`${message.agentName} · raw JSON`}
+          body={message.rawJson}
+          onClose={() => setJsonOpen(false)}
+        />
+      )}
     </div>
   )
 }
