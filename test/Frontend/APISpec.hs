@@ -24,7 +24,22 @@ import Test.Hspec
 import PureClaw.Core.Types (ModelId (..), SessionId (..))
 import PureClaw.Frontend.API
 import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Core.Types (ToolCallId (..))
+import PureClaw.Providers.Class
+  ( CompletionRequest (..)
+  , CompletionResponse (..)
+  , ContentBlock (..)
+  , Message (..)
+  , SomeProvider (MkProvider)
+  , ToolDefinition (..)
+  )
 import PureClaw.Session.Types (SessionMeta (..), SessionKind (..), ProviderSpec (..), inferProviderId)
+import PureClaw.Tools.Registry
+  ( ToolHandler (..)
+  , emptyRegistry
+  , registerTool
+  )
+import Test.Fake.Provider (newFakeProvider, peekRecorded, queueResponse, queueResponses)
 
 spec :: Spec
 spec = do
@@ -345,6 +360,170 @@ spec = do
       st `shouldBe` HTTP.status404
 
   -- -----------------------------------------------------------------------
+  -- POST /api/sessions/{sid}/send — tool registry forwarding
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/sessions/{sid}/send" $ do
+    it "forwards registered tools into the CompletionRequest" $ do
+      withSystemTempDirectory "pureclaw-send-tools" $ \tmpDir -> do
+        let sid = "test-session-tools"
+            sessionDir = tmpDir </> T.unpack sid
+        createDirectoryIfMissing True sessionDir
+        LBS.writeFile (sessionDir </> "transcript.jsonl") ""
+
+        fakeProv <- newFakeProvider
+        queueResponse fakeProv CompletionResponse
+          { _crsp_content = [TextBlock "ok"]
+          , _crsp_model   = ModelId "test-model"
+          , _crsp_usage   = Nothing
+          }
+
+        let toolDef = ToolDefinition
+              { _td_name        = "test_tool"
+              , _td_description = "A tool used to verify registry forwarding"
+              , _td_inputSchema = object []
+              }
+            handler = ToolHandler (\_ -> pure ("ok", False))
+            reg = registerTool toolDef handler emptyRegistry
+
+        env0 <- mkTestFrontendEnv
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "test-model"))
+        let env = env0
+              { _fe_provider    = provRef
+              , _fe_model       = modelRef
+              , _fe_sessionsDir = tmpDir
+              , _fe_registry    = reg
+              }
+
+        let body = Aeson.encode (object ["message" .= ("hello" :: T.Text)])
+        (st, _) <- postJSON env ["api", "sessions", sid, "send"] body
+        st `shouldBe` HTTP.status200
+
+        recorded <- peekRecorded fakeProv
+        case recorded of
+          [creq] -> _cr_tools creq `shouldBe` [toolDef]
+          _      -> expectationFailure
+                    $ "Expected exactly 1 recorded CompletionRequest; got "
+                    <> show (length recorded)
+
+    it "executes tool calls and continues until the model returns text" $ do
+      withSystemTempDirectory "pureclaw-send-loop" $ \tmpDir -> do
+        let sid = "test-session-loop"
+            sessionDir = tmpDir </> T.unpack sid
+        createDirectoryIfMissing True sessionDir
+        LBS.writeFile (sessionDir </> "transcript.jsonl") ""
+
+        fakeProv <- newFakeProvider
+        -- Turn 1: model wants to call test_tool. Turn 2: model returns text.
+        queueResponses fakeProv
+          [ CompletionResponse
+              { _crsp_content =
+                  [ ToolUseBlock (ToolCallId "call-1") "test_tool" (object [])
+                  ]
+              , _crsp_model   = ModelId "test-model"
+              , _crsp_usage   = Nothing
+              }
+          , CompletionResponse
+              { _crsp_content = [TextBlock "final answer"]
+              , _crsp_model   = ModelId "test-model"
+              , _crsp_usage   = Nothing
+              }
+          ]
+
+        let toolDef = ToolDefinition
+              { _td_name        = "test_tool"
+              , _td_description = "Loop test tool"
+              , _td_inputSchema = object []
+              }
+            handler = ToolHandler (\_ -> pure ("tool-output", False))
+            reg = registerTool toolDef handler emptyRegistry
+
+        env0 <- mkTestFrontendEnv
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "test-model"))
+        let env = env0
+              { _fe_provider    = provRef
+              , _fe_model       = modelRef
+              , _fe_sessionsDir = tmpDir
+              , _fe_registry    = reg
+              }
+
+        let body = Aeson.encode (object ["message" .= ("hello" :: T.Text)])
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"] body
+        st `shouldBe` HTTP.status200
+        case Aeson.decode respBody of
+          Just val -> lookupKey val "response" `shouldBe` Just (Aeson.String "final answer")
+          Nothing  -> expectationFailure "Could not decode response JSON"
+
+        recorded <- peekRecorded fakeProv
+        length recorded `shouldBe` 2
+        case recorded of
+          [_, second] -> do
+            -- The second turn's messages should end with a tool_result
+            -- message echoing call-1, proving the loop fed results back.
+            let msgs = _cr_messages second
+                hasToolResult = any
+                  (\(Message _ blocks) -> any isMatchingToolResult blocks)
+                  msgs
+                isMatchingToolResult (ToolResultBlock (ToolCallId tid) _ _) =
+                  tid == "call-1"
+                isMatchingToolResult _ = False
+            hasToolResult `shouldBe` True
+          _ -> expectationFailure "expected 2 recorded requests"
+
+    it "stops at the configured iteration cap" $ do
+      withSystemTempDirectory "pureclaw-send-cap" $ \tmpDir -> do
+        let sid = "test-session-cap"
+            sessionDir = tmpDir </> T.unpack sid
+        createDirectoryIfMissing True sessionDir
+        LBS.writeFile (sessionDir </> "transcript.jsonl") ""
+
+        fakeProv <- newFakeProvider
+        -- Queue more tool_use responses than the cap so the loop must
+        -- bail out rather than terminate naturally.
+        let toolUseResp = CompletionResponse
+              { _crsp_content =
+                  [ ToolUseBlock (ToolCallId "loop") "spin" (object [])
+                  ]
+              , _crsp_model = ModelId "test-model"
+              , _crsp_usage = Nothing
+              }
+        queueResponses fakeProv (replicate 5 toolUseResp)
+
+        let toolDef = ToolDefinition
+              { _td_name        = "spin"
+              , _td_description = "always says spin again"
+              , _td_inputSchema = object []
+              }
+            handler = ToolHandler (\_ -> pure ("ok", False))
+            reg = registerTool toolDef handler emptyRegistry
+
+        env0 <- mkTestFrontendEnv
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "test-model"))
+        let env = env0
+              { _fe_provider    = provRef
+              , _fe_model       = modelRef
+              , _fe_sessionsDir = tmpDir
+              , _fe_registry    = reg
+              , _fe_maxToolIterations = 2
+              }
+
+        let body = Aeson.encode (object ["message" .= ("go" :: T.Text)])
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"] body
+        st `shouldBe` HTTP.status200
+        case Aeson.decode respBody of
+          Just val -> case lookupKey val "response" of
+            Just (Aeson.String txt) ->
+              txt `shouldSatisfy` T.isInfixOf "iteration cap"
+            _ -> expectationFailure "Expected a string response containing 'iteration cap'"
+          Nothing  -> expectationFailure "Could not decode response JSON"
+
+        recorded <- peekRecorded fakeProv
+        length recorded `shouldBe` 2
+
+  -- -----------------------------------------------------------------------
   -- WU-14: POST /api/tabs/{index}/close
   -- -----------------------------------------------------------------------
 
@@ -421,6 +600,8 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_listProviders = pure ([] :: [ProviderInfo])
     , _fe_broker       = Nothing
     , _fe_streamGuard  = Nothing
+    , _fe_registry    = emptyRegistry
+    , _fe_maxToolIterations = 90
     }
 
 -- | Build a FrontendEnv with a pre-set tab listing.

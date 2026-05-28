@@ -52,6 +52,7 @@ import PureClaw.Frontend.StreamBroker
   )
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Session.Types (SessionMeta (..))
+import PureClaw.Tools.Registry (emptyRegistry)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -298,6 +299,8 @@ mkFrontendEnvForD18 broker sessionsDir = do
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
     , _fe_listModels   = \_ -> pure []
     , _fe_listProviders = pure []
+    , _fe_registry    = emptyRegistry
+    , _fe_maxToolIterations = 90
     }
 
 -- | Run a WAI 'Application' with a one-shot request body.

@@ -346,3 +346,89 @@ describe('ChatArea raw-JSON modal', () => {
     }
   })
 })
+
+describe('ChatArea textarea focus management', () => {
+  it('focuses the message input on initial mount', () => {
+    render(<ChatArea selectedAgent={makeAgent()} messages={[]} />)
+    const textarea = document.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    expect(document.activeElement).toBe(textarea)
+  })
+
+  it('refocuses the message input when selectedId changes (session/tab switch)', () => {
+    const { rerender } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[]} selectedId={'tab:0'} />,
+    )
+    const textarea = document.querySelector('textarea')
+    expect(document.activeElement).toBe(textarea)
+
+    // Simulate the user clicking elsewhere (e.g. the sidebar) which
+    // takes focus away from the textarea.
+    const fakeBtn = document.createElement('button')
+    document.body.appendChild(fakeBtn)
+    fakeBtn.focus()
+    expect(document.activeElement).toBe(fakeBtn)
+
+    // Selecting a different tab should re-focus the textarea.
+    rerender(
+      <ChatArea selectedAgent={makeAgent()} messages={[]} selectedId={'tab:1'} />,
+    )
+    expect(document.activeElement).toBe(textarea)
+
+    // Same again — selecting an archived session.
+    fakeBtn.focus()
+    expect(document.activeElement).toBe(fakeBtn)
+    rerender(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        selectedId={'session:abc-123'}
+      />,
+    )
+    expect(document.activeElement).toBe(textarea)
+
+    document.body.removeChild(fakeBtn)
+  })
+
+  it('refocuses the message input on every New-tab click, even when already in compose mode', () => {
+    // Already in compose mode (selectedId=null), so a "+" click does
+    // NOT change selectedId. The newTabFocusTick prop is the recovery
+    // signal for this case.
+    const composer = {
+      panel: <div>compose panel</div>,
+      kind: 'provider' as const,
+      valid: true,
+      onSubmit: () => {},
+    }
+    const { rerender } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        selectedId={null}
+        newTabFocusTick={0}
+      />,
+    )
+
+    const textarea = document.querySelector('textarea')
+    expect(document.activeElement).toBe(textarea)
+
+    const fakeBtn = document.createElement('button')
+    document.body.appendChild(fakeBtn)
+    fakeBtn.focus()
+    expect(document.activeElement).toBe(fakeBtn)
+
+    rerender(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        selectedId={null}
+        newTabFocusTick={1}
+      />,
+    )
+    expect(document.activeElement).toBe(textarea)
+
+    document.body.removeChild(fakeBtn)
+  })
+})

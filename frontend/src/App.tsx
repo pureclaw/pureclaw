@@ -512,8 +512,16 @@ export default function App() {
   // show the inline new-tab composer in the ChatArea". Clicking the "New
   // tab" button just clears the selection — there's no separate modal
   // or composing flag.
+  //
+  // 'newTabFocusTick' increments on every click. ChatArea uses it as a
+  // useEffect dep to focus the message textarea after the click — even
+  // when already in compose mode (in which case the inComposeMode-based
+  // effect would not re-fire and the button click would have stolen
+  // focus).
+  const [newTabFocusTick, setNewTabFocusTick] = useState(0)
   const handleNewTab = useCallback(() => {
     setSelectedId(null)
+    setNewTabFocusTick((n) => n + 1)
     window.history.pushState(null, '', '/')
     setCustomPromptFile(null)
   }, [])
@@ -694,6 +702,8 @@ export default function App() {
             valid: composerSpec.validationError === null,
             onSubmit: handleComposerSend,
           } : null}
+          newTabFocusTick={newTabFocusTick}
+          selectedId={selectedId}
         />
       </div>
     </>

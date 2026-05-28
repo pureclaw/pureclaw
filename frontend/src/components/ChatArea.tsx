@@ -843,6 +843,8 @@ export function ChatArea({
   customPromptFile,
   onCustomPromptFile,
   composerControls,
+  newTabFocusTick,
+  selectedId,
 }: {
   selectedAgent: Agent
   selectedSession?: SessionInfo | null
@@ -871,12 +873,37 @@ export function ChatArea({
     valid: boolean
     onSubmit: (message: string) => void | Promise<void>
   } | null
+  /** Increments on every "New tab" button click in the Sidebar. ChatArea
+   *  uses it as a useEffect dep to focus the message textarea after the
+   *  click, even when already in compose mode (where the inComposeMode
+   *  transition wouldn't fire). */
+  newTabFocusTick?: number
+  /** The current selection identity ('tab:N' | 'session:id' | null).
+   *  Whenever it changes, ChatArea re-focuses the message textarea so
+   *  the user can type into the new session immediately without an
+   *  extra click. Covers sidebar tab clicks, session clicks, the
+   *  post-create transition into the new tab, and browser back/forward. */
+  selectedId?: string | null
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
   const wasAtBottom = useRef(true)
+
+  // Focus the message textarea on any user-initiated arrival at a
+  // session, so the user can start typing immediately without an extra
+  // click. Two signals feed this:
+  //   * 'selectedId' — covers selecting a tab or archived session in the
+  //     sidebar, the post-create transition into the new tab, browser
+  //     back/forward (popstate), and the initial mount.
+  //   * 'newTabFocusTick' — covers clicking the Sidebar's "+" button
+  //     while ALREADY in compose mode. selectedId stays null in that
+  //     case, but the click steals focus to the button, so a per-click
+  //     signal is required to recover focus.
+  useEffect(() => {
+    textareaRef.current?.focus()
+  }, [selectedId, newTabFocusTick])
 
   // Two scroll modes:
   //   1. Deep-link mode (URL has a fragment): suppress all auto-scroll. The

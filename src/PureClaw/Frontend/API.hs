@@ -26,7 +26,8 @@ module PureClaw.Frontend.API
 
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Control.Exception (IOException, SomeException, bracket_, try)
-import Control.Monad (filterM)
+import Control.Monad (filterM, when)
+import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
 import Data.Aeson.Types qualified as AesonTypes
@@ -51,7 +52,7 @@ import System.FilePath ((</>), takeDirectory)
 
 import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
 import PureClaw.Agent.Context
-import PureClaw.Core.Types (ModelId (..), SessionId (..), unModelId, unSessionId)
+import PureClaw.Core.Types (ModelId (..), SessionId (..), ToolCallId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
 import PureClaw.Frontend.StreamBroker
@@ -77,6 +78,7 @@ import PureClaw.Session.Handle
   )
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
+import PureClaw.Tools.Registry (ToolRegistry, executeTool, registryDefinitions)
 import PureClaw.Transcript.Provider
 import PureClaw.Transcript.Types
 
@@ -135,6 +137,17 @@ data FrontendEnv = FrontendEnv
     -- Each entry carries @isDefault@: true for the one provider the
     -- running PureClaw instance is configured to use (from CLI flag or
     -- config file). Never throws.
+  , _fe_registry     :: ToolRegistry
+    -- ^ Tool registry whose definitions are sent in the @tools@ field
+    -- of every provider completion request the frontend originates
+    -- (i.e. @POST \/api\/sessions\/\<id\>\/send@). Without this the
+    -- provider receives an empty tools array and cannot make tool calls.
+  , _fe_maxToolIterations :: Int
+    -- ^ Maximum number of @complete@ → tool-execution → re-@complete@
+    -- iterations 'doCompletion' will perform for a single user message
+    -- before giving up. Defends against a model that keeps tool-calling
+    -- without ever returning final text. Reaching the cap returns a
+    -- placeholder response; it does not throw.
   }
 
 -- | Per-origin WS subscriber counter. Lives at the same lifetime as the
@@ -927,10 +940,12 @@ handleSend env sid req respond = do
                     Right respText ->
                       respond $ jsonResponse status200 (object ["response" .= respText])
 
--- | Run a completion: load context, send to provider, record to transcript.
--- The transcript handle is opened via 'mkBroadcastingFileTranscriptHandle'
--- so the provider-wrapper Request\/Response entries reach the broker (D25)
--- when one is configured on the 'FrontendEnv'.
+-- | Run a completion: load context, send to provider, execute any tool
+-- calls the model emits, and loop until the model produces a turn with
+-- no tool calls (or the iteration cap is hit). The transcript handle is
+-- opened via 'mkBroadcastingFileTranscriptHandle' so each iteration's
+-- provider-wrapper Request\/Response entries reach the broker (D25) when
+-- one is configured on the 'FrontendEnv'.
 doCompletion
   :: FrontendEnv
   -> SessionId
@@ -958,14 +973,9 @@ doCompletion env sid provider model userText transcriptPath = do
       ctx = addMessage userMsg ctx0
       -- Wrap provider with transcript logging
       provider' = mkTranscriptProvider th (unModelId model) provider
-      req = CompletionRequest
-        { _cr_model        = model
-        , _cr_messages     = contextMessages ctx
-        , _cr_systemPrompt = contextSystemPrompt ctx
-        , _cr_maxTokens    = Just 4096
-        , _cr_tools        = []
-        , _cr_toolChoice   = Nothing
-        }
+      reg = _fe_registry env
+      tools = registryDefinitions reg
+      cap = _fe_maxToolIterations env
   -- Publish session-thinking activity events so the FE sidebar / chat
   -- area can show a live indicator while the provider call is in flight.
   -- For harness-backed sessions, the equivalent signal comes from the
@@ -977,13 +987,69 @@ doCompletion env sid provider model userText transcriptPath = do
         Just broker -> _streamBroker_publish broker
           (ActivityChanged sid (SaHarnessStatus s))
         Nothing -> pure ()
-  resp <- bracket_
-            (publishStatus HarnessThinking)
-            (publishStatus HarnessIdle)
-            (complete provider' req)
+  result <- bracket_
+              (publishStatus HarnessThinking)
+              (publishStatus HarnessIdle)
+              (runCompletionLoop env provider' model tools reg cap ctx)
   _th_flush th
   _th_close th
-  pure (responseText resp)
+  pure result
+
+-- | Loop: call the provider, execute any tool_use blocks, append the
+-- tool_result message to context, and recurse. Terminates when the
+-- model returns a turn without tool calls or when @iters@ reaches zero.
+runCompletionLoop
+  :: FrontendEnv
+  -> SomeProvider
+  -> ModelId
+  -> [ToolDefinition]
+  -> ToolRegistry
+  -> Int           -- ^ remaining iterations
+  -> Context
+  -> IO Text
+runCompletionLoop env provider' model tools reg iters ctx
+  | iters <= 0 = do
+      _lh_logWarn (_fe_logger env)
+        "Tool iteration cap reached; returning placeholder response"
+      pure "Tool iteration cap reached without a final response."
+  | otherwise = do
+      let req = CompletionRequest
+            { _cr_model        = model
+            , _cr_messages     = contextMessages ctx
+            , _cr_systemPrompt = contextSystemPrompt ctx
+            , _cr_maxTokens    = Just 4096
+            , _cr_tools        = tools
+            , _cr_toolChoice   = Nothing
+            }
+      resp <- complete provider' req
+      let calls = toolUseCalls resp
+          assistantMsg = Message Assistant (_crsp_content resp)
+          ctx' = addMessage assistantMsg ctx
+      if null calls
+        then pure (responseText resp)
+        else do
+          results <- mapM (executeOneCall env reg) calls
+          let ctx'' = addMessage (toolResultMessage results) ctx'
+          runCompletionLoop env provider' model tools reg (iters - 1) ctx''
+
+-- | Execute a single tool call against the registry, logging any
+-- unknown-tool or error condition.
+executeOneCall
+  :: FrontendEnv
+  -> ToolRegistry
+  -> (ToolCallId, Text, Value)
+  -> IO (ToolCallId, [ToolResultPart], Bool)
+executeOneCall env reg (callId, name, input) = do
+  _lh_logInfo (_fe_logger env) $ "Tool call: " <> name
+  result <- executeTool reg name input
+  case result of
+    Nothing -> do
+      _lh_logWarn (_fe_logger env) $ "Unknown tool: " <> name
+      pure (callId, [TRPText ("Unknown tool: " <> name)], True)
+    Just (parts, isErr) -> do
+      when isErr $ _lh_logWarn (_fe_logger env)
+        ("Tool error in " <> name)
+      pure (callId, parts, isErr)
 
 -- | Consume the full request body.
 consumeBody :: Request -> IO LBS.ByteString

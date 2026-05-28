@@ -50,6 +50,7 @@ import PureClaw.Frontend.API
 import PureClaw.Frontend.Stream (streamApp)
 import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Tools.Registry (emptyRegistry)
 
 -- | The default Origin used by tests. Tests that exercise the Origin
 -- allowlist may pass a different value via 'openWSClient'.
@@ -92,6 +93,8 @@ mkTestFrontendEnv sessionsDir broker guard = do
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
     , _fe_listModels   = \_ -> pure []
     , _fe_listProviders = pure []
+    , _fe_registry    = emptyRegistry
+    , _fe_maxToolIterations = 90
     }
 
 -- | Variant of 'mkTestFrontendEnv' that lets the caller construct the

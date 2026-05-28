@@ -37,7 +37,16 @@ that stays out of your way while giving you absolute operational control.
 git clone https://github.com/pureclaw/pureclaw.git
 cd pureclaw
 
-# Option 1: Nix (recommended — reproducible, no system deps needed)
+# Recommended for source builds — launches the gateway with the web UI.
+# Rebuilds frontend/dist/ first (so the bundled UI is never stale), then
+# starts the HTTP gateway via nix + cabal. Open http://localhost:8080/.
+make gateway-dev
+```
+
+For CLI-only use (no web UI) or to bypass the Makefile:
+
+```bash
+# Option 1: Nix (reproducible, no system deps needed)
 nix develop            # enter dev shell with GHC + cabal + hlint
 nix build              # build the executable
 nix run                # run directly
@@ -47,7 +56,7 @@ cabal build
 cabal run pureclaw
 ```
 
-Binary caches are configured in `flake.nix` — the first Nix build fetches pre-built dependencies rather than compiling from scratch.
+Binary caches are configured in `flake.nix` — the first Nix build fetches pre-built dependencies rather than compiling from scratch. `make gateway-dev` additionally requires `npm` on PATH for the frontend build (~500ms).
 
 ### Start a Chat
 
@@ -264,6 +273,8 @@ PureClaw includes an HTTP gateway for programmatic access with built-in security
 - **Bearer token auth** &mdash; hex-encoded tokens with constant-time comparison
 - **Localhost-only binding** by default (configurable)
 - **Connection limits** &mdash; 30s timeout, 100 concurrent connections
+
+Run from source with `make gateway-dev`, which rebuilds the React bundle (`frontend/dist/`) before launching `cabal run pureclaw -- gateway run`. The gateway's HTTP server serves the bundle as static assets, so the rebuild step is what keeps the web UI in sync with your latest frontend source changes.
 
 ## Contributing
 

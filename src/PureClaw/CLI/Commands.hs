@@ -741,6 +741,8 @@ runChat opts = do
               , _fe_closeTab     = \_ -> pure (Left "not wired")
               , _fe_listModels   = listModelsForProvider
               , _fe_listProviders = listConfiguredProviders
+              , _fe_registry     = fullRegistry
+              , _fe_maxToolIterations = 90
               }
         Async.withAsync
           (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
