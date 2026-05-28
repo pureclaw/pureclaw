@@ -11,9 +11,11 @@
 
 ---
 
-PureClaw is a complete AI agent runtime where **the insecure path is a compile error**. Shell execution requires `AuthorizedCommand`. File access requires `SafePath`. Secrets have redacted `Show`. If your code compiles, an entire class of security vulnerabilities is structurally impossible.  Haskell's type system does the heavy lifting.
+PureClaw puts you in control of your agents.  Not the other way around.
 
 ## Quick Start
+
+[Test Coverage](https://pureclaw.github.io/pureclaw/coverage/) - [Signal Dev Chat](https://pureclaw.s.gy/chat)
 
 ### Prerequisites
 
