@@ -1,7 +1,7 @@
 import { render, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ChatArea } from '../ChatArea'
-import type { Agent, Message, ToolCallInfo } from '../../types'
+import type { Agent, Message } from '../../types'
 
 function makeAgent(): Agent {
   return { id: 'a1', name: 'Coder', status: 'idle', tokenCount: '0' }
@@ -19,16 +19,6 @@ function makeMessage(id: string, text: string): Message {
 
 function makeMessageWithRawJson(id: string, text: string, rawJson: string): Message {
   return { ...makeMessage(id, text), rawJson }
-}
-
-function makeToolCallMessage(id: string, tc: ToolCallInfo): Message {
-  return {
-    id,
-    agentName: 'Assistant',
-    agentStatus: 'completed',
-    timestamp: '12:00',
-    blocks: [{ id: `tc-${tc.id}`, toolCall: tc }],
-  }
 }
 
 // jsdom doesn't compute layout, so we drive the at-bottom heuristic by
@@ -249,49 +239,6 @@ describe('ChatArea raw-JSON modal', () => {
     expect(queryByTestId('raw-json-modal')).toBeNull()
   })
 
-  it('exposes a JSON button on tool-call headers showing the tool-call payload', () => {
-    const tc: ToolCallInfo = {
-      id: 'tu_1',
-      name: 'shell',
-      input: { command: 'ls' },
-      result: 'a\nb',
-    }
-    const { getByLabelText, getByTestId, getByRole } = render(
-      <ChatArea selectedAgent={makeAgent()} messages={[makeToolCallMessage('m1', tc)]} />,
-    )
-    fireEvent.click(getByLabelText('View raw JSON (tool call)'))
-    fireEvent.click(getByRole('tab', { name: 'Raw' }))
-    const body = getByTestId('raw-json-body').textContent ?? ''
-    expect(body).toContain('"name": "shell"')
-    expect(body).toContain('"command": "ls"')
-    expect(body).toContain('"result": "a\\nb"')
-  })
-
-  it('Escape closes only the topmost modal when two are stacked', () => {
-    const tc: ToolCallInfo = { id: 'tu_1', name: 'shell', input: { command: 'ls' } }
-    const message: Message = {
-      id: 'm1',
-      agentName: 'Assistant',
-      agentStatus: 'completed',
-      timestamp: '12:00',
-      blocks: [{ id: `tc-${tc.id}`, toolCall: tc }],
-      rawJson: '{"x":1}',
-    }
-    const { getByLabelText, queryAllByTestId } = render(
-      <ChatArea selectedAgent={makeAgent()} messages={[message]} />,
-    )
-
-    fireEvent.click(getByLabelText('View raw JSON (message)'))
-    fireEvent.click(getByLabelText('View raw JSON (tool call)'))
-    expect(queryAllByTestId('raw-json-modal')).toHaveLength(2)
-
-    fireEvent.keyDown(window, { key: 'Escape' })
-    expect(queryAllByTestId('raw-json-modal')).toHaveLength(1)
-
-    fireEvent.keyDown(window, { key: 'Escape' })
-    expect(queryAllByTestId('raw-json-modal')).toHaveLength(0)
-  })
-
   it('restores focus to the triggering button on close', () => {
     const { getByLabelText } = render(
       <ChatArea
@@ -344,6 +291,39 @@ describe('ChatArea raw-JSON modal', () => {
         configurable: true,
       })
     }
+  })
+})
+
+describe('ChatArea permalink highlight', () => {
+  beforeEach(() => {
+    // jsdom doesn't implement scrollIntoView; useFragmentAnchor scrolls
+    // the targeted ref into view on focus and ChatArea scrolls the
+    // messages-end ref on render. Stub both to keep the renders quiet.
+    HTMLElement.prototype.scrollIntoView = vi.fn() as unknown as HTMLElement['scrollIntoView']
+    // Reset the URL hash so prior tests don't pre-target our message.
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('highlights the message immediately when the permalink button is clicked', () => {
+    const { container, getByLabelText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[makeMessage('m1', 'hello')]} />,
+    )
+    const msgEl = container.querySelector('#msg-m1') as HTMLElement | null
+    expect(msgEl).not.toBeNull()
+    // Initially not targeted: the highlight inline style isn't applied.
+    expect(msgEl!.style.background).toBe('')
+
+    fireEvent.click(getByLabelText('Copy permalink (Link)'))
+
+    // After clicking, useFragmentAnchor should observe the fragment via
+    // the synthetic hashchange dispatched by copyAnchorLink (history
+    // replaceState alone does NOT fire hashchange — that's the bug
+    // this regression test guards against).
+    expect(msgEl!.style.background).toBe('var(--bg-elevated)')
+    expect(window.location.hash).toBe('#msg-m1')
   })
 })
 

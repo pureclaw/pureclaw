@@ -425,6 +425,11 @@ export default function App() {
   }, [httpEntries, streamEntries])
   const { send, sending } = useSendMessage(currentSessionId, refresh)
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
+  // Model id to render as the agentName for the optimistic pending-thinking
+  // block. Captured at send-time from composerSpec (compose-send flow) or
+  // selectedSession (existing-session send). Cleared together with
+  // pendingMessage once the real transcript catches up.
+  const [pendingMessageModel, setPendingMessageModel] = useState<string | null>(null)
   const entryCountAtSend = useRef(0)
   const transcriptMessages = useMemo(() => transcriptToMessages(entries), [entries])
 
@@ -448,6 +453,23 @@ export default function App() {
   //      currently busy.
   // The two are mutually exclusive in the messages array (case 1 takes
   // precedence) so the indicator never duplicates.
+  // Model id to display on the thinking indicator. Prefer the explicit
+  // pending-thinking model captured at send-time (handles the brand-new
+  // session case where the recents list doesn't yet include this session
+  // and selectedSession?.model is null); fall back to the most recent
+  // assistant message's agentName (which is itself the model id thanks
+  // to transcriptToMessages); finally fall back to "Assistant".
+  const thinkingAgentName = (() => {
+    if (pendingMessageModel) return pendingMessageModel
+    for (let i = transcriptMessages.length - 1; i >= 0; i--) {
+      const m = transcriptMessages[i]!
+      if (m.agentName && m.agentName !== 'You' && m.agentName !== 'Assistant') {
+        return m.agentName
+      }
+    }
+    return rawSessions.find((s) => s.id === currentSessionId)?.model ?? 'Assistant'
+  })()
+
   const messages = useMemo(() => {
     const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     if (pendingMessage) {
@@ -462,7 +484,7 @@ export default function App() {
         },
         {
           id: 'pending-thinking',
-          agentName: 'Assistant',
+          agentName: thinkingAgentName,
           agentStatus: 'thinking' as const,
           timestamp: now,
           blocks: [],
@@ -475,7 +497,7 @@ export default function App() {
         ...transcriptMessages,
         {
           id: 'remote-thinking',
-          agentName: 'Assistant',
+          agentName: thinkingAgentName,
           agentStatus: 'thinking' as const,
           timestamp: now,
           blocks: [],
@@ -484,12 +506,13 @@ export default function App() {
       ]
     }
     return transcriptMessages
-  }, [transcriptMessages, pendingMessage, sessionIsThinking])
+  }, [transcriptMessages, pendingMessage, sessionIsThinking, thinkingAgentName])
 
   // Clear pending message when transcript gains new entries after the send
   useEffect(() => {
     if (pendingMessage && entries.length > entryCountAtSend.current) {
       setPendingMessage(null)
+      setPendingMessageModel(null)
     }
   }, [entries.length, pendingMessage])
 
@@ -505,9 +528,15 @@ export default function App() {
       await setSessionArchived(currentSessionId, false)
     }
     entryCountAtSend.current = entries.length
+    // Capture the model so the pending-thinking block can label itself
+    // with the actual model id instead of the generic "Assistant".
+    const sessionModel = sessions.find((s) => s.id === currentSessionId)?.model
+      ?? archivedSessions.find((s) => s.id === currentSessionId)?.model
+      ?? null
+    setPendingMessageModel(sessionModel)
     setPendingMessage(message)
     send(message)
-  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions])
+  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions, sessions])
 
   // Compose mode is implicit: selectedId === null means "no tab focused,
   // show the inline new-tab composer in the ChatArea". Clicking the "New
@@ -586,6 +615,10 @@ export default function App() {
         // until the send completes and the next transcript refresh
         // lands).
         entryCountAtSend.current = 0
+        // The session isn't yet in the recents list (empty transcript),
+        // so selectedSession?.model isn't available. Use the model the
+        // composer just submitted.
+        setPendingMessageModel(composerSpec.model || null)
         setPendingMessage(trimmed)
       }
       setSelectedId(newId)

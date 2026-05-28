@@ -148,6 +148,13 @@ function copyAnchorLink(anchorId: string) {
   void copyTextToClipboard(url)
   if (window.location.hash !== `#${anchorId}`) {
     window.history.replaceState(null, '', url)
+    // history.replaceState / pushState do NOT fire `hashchange`, so any
+    // listener wired up to react to the targeted block (useFragmentAnchor's
+    // highlight + scroll, App.tsx's hasFragment tracker) wouldn't run
+    // and the block would stay unhighlighted until a manual refresh
+    // re-evaluated `window.location.hash` from scratch. Dispatch the
+    // event ourselves so the listeners fire as if the user had navigated.
+    window.dispatchEvent(new Event('hashchange'))
   }
 }
 
@@ -439,7 +446,6 @@ function CollapsedBlock({ text, anchorId }: { text: string; anchorId?: string })
         ) : (
           <span className="flex-1 truncate">{preview}{truncated ? '\u2026' : ''}</span>
         )}
-        {anchorId && <AnchorHandle anchorId={anchorId} />}
       </div>
     </div>
   )
@@ -503,16 +509,12 @@ function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string })
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
   const [expanded, setExpanded] = useState(targeted)
-  const [jsonOpen, setJsonOpen] = useState(false)
 
   useEffect(() => { if (targeted) setExpanded(true) }, [targeted])
 
   const summary = toolCallSummary(tc.input)
   const inputJson = (() => {
     try { return JSON.stringify(tc.input, null, 2) } catch { return String(tc.input) }
-  })()
-  const toolCallJson = (() => {
-    try { return JSON.stringify(tc, null, 2) } catch { return String(tc) }
   })()
 
   return (
@@ -554,8 +556,6 @@ function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string })
             ok
           </span>
         )}
-        <AnchorHandle anchorId={anchorId} />
-        <JsonButton kind="tool call" onClick={() => setJsonOpen(true)} />
       </div>
       {expanded && (
         <div className="px-3 pb-3 pt-1 flex flex-col gap-2" style={{ borderTop: '1px solid var(--border)' }}>
@@ -574,13 +574,6 @@ function ToolCallBlock({ tc, anchorId }: { tc: ToolCallInfo; anchorId: string })
             </div>
           )}
         </div>
-      )}
-      {jsonOpen && (
-        <RawJsonModal
-          title={`Tool call \u00b7 ${tc.name}`}
-          body={toolCallJson}
-          onClose={() => setJsonOpen(false)}
-        />
       )}
     </div>
   )
