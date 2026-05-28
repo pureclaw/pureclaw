@@ -108,6 +108,10 @@ export interface MessageContent {
 
 export interface Message {
   id: string
+  /** Raw transcript-entry id (`_te_id`) this row was derived from. Present
+   *  on branchable rows (user + assistant); absent on synthesized rows
+   *  (e.g. the System prompt row). Used as the branch boundary key. */
+  entryId?: string
   agentName: string
   agentStatus: AgentStatus
   timestamp: string

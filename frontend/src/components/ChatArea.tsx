@@ -184,6 +184,22 @@ function BracesIcon() {
   )
 }
 
+function BranchIcon() {
+  return (
+    <svg
+      width="13" height="13" viewBox="0 0 16 16" fill="none"
+      stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="5" cy="4" r="1.6" />
+      <circle cx="5" cy="12" r="1.6" />
+      <circle cx="11" cy="7" r="1.6" />
+      <path d="M5 5.6 V10.4" />
+      <path d="M5 8 q0 -2.4 4.4 -2.4" />
+    </svg>
+  )
+}
+
 function CheckIcon() {
   return (
     <svg
@@ -233,6 +249,20 @@ function JsonButton({ onClick, kind }: { onClick: () => void; kind: 'message' | 
       onClick={(e) => { e.stopPropagation(); onClick() }}
     >
       <BracesIcon />
+    </button>
+  )
+}
+
+function BranchButton({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      className="icon-btn"
+      title="branch session from here"
+      aria-label="branch session from here"
+      disabled={disabled}
+      onClick={(e) => { e.stopPropagation(); onClick() }}
+    >
+      <BranchIcon />
     </button>
   )
 }
@@ -623,7 +653,15 @@ function TypingIndicator() {
   )
 }
 
-function ChatMessage({ message }: { message: Message }) {
+function ChatMessage({
+  message,
+  onBranch,
+  sending,
+}: {
+  message: Message
+  onBranch?: (entryId: string) => void
+  sending?: boolean
+}) {
   const anchorId = `msg-${message.id}`
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
@@ -664,6 +702,12 @@ function ChatMessage({ message }: { message: Message }) {
         <AnchorHandle anchorId={anchorId} />
         {message.rawJson !== undefined && (
           <JsonButton kind="message" onClick={() => setJsonOpen(true)} />
+        )}
+        {onBranch !== undefined && message.entryId !== undefined && (
+          <BranchButton
+            onClick={() => onBranch(message.entryId!)}
+            disabled={sending}
+          />
         )}
       </div>
       <div className="text-sm" style={{ lineHeight: 'var(--leading-relaxed)' }}>
@@ -838,6 +882,7 @@ export function ChatArea({
   composerControls,
   newTabFocusTick,
   selectedId,
+  onBranch,
 }: {
   selectedAgent: Agent
   selectedSession?: SessionInfo | null
@@ -877,6 +922,11 @@ export function ChatArea({
    *  extra click. Covers sidebar tab clicks, session clicks, the
    *  post-create transition into the new tab, and browser back/forward. */
   selectedId?: string | null
+  /** When defined, each transcript row that carries an `entryId` renders a
+   *  branch button wired to `onBranch(entryId)`. Supplied by App only for
+   *  persisted provider sessions; undefined for harness sessions and in
+   *  compose mode, which suppresses the button entirely. */
+  onBranch?: (entryId: string) => void
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1046,7 +1096,7 @@ export function ChatArea({
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>No messages yet. Select a session to view its transcript.</div>
           ) : (
             messages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} />
+              <ChatMessage key={msg.id} message={msg} onBranch={onBranch} sending={sending} />
             ))
           )}
           <div ref={messagesEndRef} />

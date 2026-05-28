@@ -90,7 +90,7 @@ function formatToolResultContent(content: unknown): string {
 }
 
 /** Convert transcript entries to the Message format ChatArea expects. */
-function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
+export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
   const messages: Message[] = []
   const seenSystemPrompts = new Set<string>()
   const toolResults = buildToolResultIndex(entries)
@@ -130,6 +130,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
             if (textParts) {
               messages.push({
                 id: e.id + '-user',
+                entryId: e.id,
                 agentName: 'You',
                 agentStatus: 'completed',
                 timestamp: ts,
@@ -145,6 +146,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
             if (blocks.length > 0) {
               messages.push({
                 id: e.id + '-asst',
+                entryId: e.id,
                 agentName: e.model ?? 'Assistant',
                 agentStatus: 'completed',
                 timestamp: ts,
@@ -184,6 +186,7 @@ function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
 
         messages.push({
           id: e.id,
+          entryId: e.id,
           agentName: e.model ?? e.harness ?? 'Assistant',
           agentStatus: 'completed',
           timestamp: ts,
