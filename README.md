@@ -11,7 +11,14 @@
 
 ---
 
-PureClaw puts you in control of your agents.  Not the other way around.
+**You control your agents, not the other way around.**
+
+Most agent runtimes give you almost zero visibility or control. You talk to
+one agent and have to trust it to spawn all the others effectively. PureClaw
+is different: it's a complete AI agent runtime that gives you the power to
+make agents **safe**, **auditable**, and **yours**. Proper secret handling,
+full transcript storage, type-level security guarantees, and an interface
+that stays out of your way while giving you absolute operational control.
 
 ## Quick Start
 
@@ -62,27 +69,39 @@ pureclaw --allow git --allow ls --memory sqlite
 
 ## PureClaw Philosophy
 
-### Mission
+### Safety
 
-To provide a high-integrity **command interface** for autonomous agents—automating the complexity of orchestration while providing the precision visibility required for absolute operational control.
+PureClaw gives you the power to make agents **safe** by controlling the side
+effects they can perform. Security is a property of the system, not a task
+for the developer. Type-level enforcement transforms security from a "policy
+to remember" into a "structural guarantee" — unauthorized actions are
+prevented before they can even be executed. The runtime is resource-aware,
+preventing runaway processes and token waste so that every agent execution is
+purposeful, predictable, and cost-effective.
 
-### Vision
+### Visibility & Auditability
 
-To be the industry-standard **orchestration layer** for the agentic era, making the transition from single-agent scripts to complex, multi-agent systems seamless, observable, and inherently safe.
+Getting the most out of your agents starts with visibility into what's
+happening. PureClaw stores the full transcript of every session by default.
+You don't just have visibility — you have full auditability. The interface
+uses **progressive disclosure** to give you essential system health at a
+glance, with deep audit logs available when you need forensic detail.
 
-### Core Values
+### Security
 
-#### **1. Seamless Orchestration (UX)**
-PureClaw gives you just the tools you need to command your agents while staying out of your way and giving you a frictionless experience.  It automates the heavy lifting of agent management so developers can focus on building intelligence, not plumbing.
+Proper handling of secrets was one of the very first features implemented in
+PureClaw. The vault encrypts secrets at rest and can require the presence of
+a physical token (YubiKey, NitroKey, etc) to decrypt them. This makes prompt
+injection attacks substantially more difficult.
 
-#### **2. Deep Observability (Visibility)**
-A command interface is only as good as the data it provides. We utilize **progressive disclosure** to ensure you always have the right level of detail: essential system health at a glance, and deep, tamper-proof audit logs available for forensic investigation.
+### User Experience
 
-#### **3. Structural Guardrails (Safety & Security)**
-Security should be a property of the system, not a task for the developer. By using type-level enforcement, we transform security from a "policy to remember" into a "structural guarantee," preventing unauthorized actions before they can even be executed.
-
-#### **4. Operational Efficiency (Reliability)**
-We design our runtime to be resource-aware. PureClaw prevents "runaway processes" (infinite loops) and "resource exhaustion" (token/compute waste), ensuring that every agent execution is purposeful, predictable, and cost-effective.
+In a space notorious for poor user experience, PureClaw makes UX a
+first-class priority. We believe you can build elegant interfaces that are
+easy for the novice while still giving advanced users maximum power. PureClaw
+gives you just the tools you need to command your agents while staying out of
+your way — automating the heavy lifting of agent management so you can focus
+on building intelligence, not plumbing.
 
 ## Why PureClaw?
 
