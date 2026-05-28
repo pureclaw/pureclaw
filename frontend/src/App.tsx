@@ -622,6 +622,22 @@ export default function App() {
       // field is merged here (not in buildBody, whose deps don't track
       // branch state).
       if (branchDraft) {
+        // The backend inherits kind/model/agent from the source session for
+        // a branch and only checks that the request kind is a *provider*
+        // session. The shared composer may currently be in 'harness' mode
+        // (the user toggled it on a prior New-tab), which would make the
+        // backend reject the branch with a misleading error. Force a
+        // provider session_kind here — the concrete provider/model are
+        // ignored by the branch path (inherited from source) but must form
+        // a valid provider shape.
+        body.kind = {
+          tag: 'session',
+          session_kind: {
+            tag: 'provider',
+            provider: composerSpec.provider,
+            model: composerSpec.model,
+          },
+        }
         body.branch_from = {
           session_id: branchDraft.sourceSessionId,
           up_to_entry_id: branchDraft.upToEntryId,

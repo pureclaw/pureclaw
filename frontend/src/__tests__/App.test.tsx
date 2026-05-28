@@ -107,7 +107,11 @@ vi.mock('../hooks/useNewTabSpec', () => ({
     backendConfig: {},
     updateBackendConfig: vi.fn(),
     validationError: null,
-    buildBody: () => ({ kind: { tag: 'session', session_kind: { tag: 'provider' } } }),
+    // Worst case for the branch flow: the shared composer is in 'harness'
+    // mode (the user toggled it on a prior New-tab). A branch send must
+    // override this to a provider kind (see the D-harness-override test),
+    // otherwise the backend rejects the branch with a misleading error.
+    buildBody: () => ({ kind: { tag: 'session', session_kind: { tag: 'harness', flavour: 'claude-code' } } }),
   }),
 }))
 
@@ -285,6 +289,32 @@ describe('App branch draft flow', () => {
 
     // Switched to the new session (URL reflects it).
     expect(window.location.pathname).toBe(`/session/${newSid}`)
+  })
+
+  it('forces a provider session_kind on a branch send even when the composer is in harness mode', async () => {
+    const fetchMock = mockFetchOk('new-99')
+    const utils = renderOnProviderSession('src-1')
+
+    fireEvent.click(utils.getAllByLabelText(BRANCH_LABEL)[1]!)
+    await waitFor(() => utils.getByPlaceholderText('Type your first message…'))
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'continue here' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+    })
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.find((c) => c[0] === '/api/tabs/new')).toBeTruthy()
+    })
+    const urls = fetchMock.mock.calls.map((c) => c[0] as string)
+    const newCall = fetchMock.mock.calls[urls.indexOf('/api/tabs/new')]!
+    const body = JSON.parse((newCall[1] as RequestInit).body as string)
+    // Even though buildBody() returned a harness kind, the branch path
+    // forces a provider session_kind so the backend's provider-only guard
+    // is never tripped.
+    expect(body.kind.session_kind.tag).toBe('provider')
+    expect(body.branch_from).toEqual({ session_id: 'src-1', up_to_entry_id: 'e2' })
   })
 
   it('D14: a non-OK branch POST shows a visible error and RETAINS the branch draft', async () => {
