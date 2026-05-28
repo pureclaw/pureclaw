@@ -27,9 +27,8 @@ module PureClaw.Frontend.API
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Control.Exception (IOException, SomeException, bracket_, try)
 import Control.Monad (filterM, when)
-import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
-import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
+import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
 import Data.Aeson.Types qualified as AesonTypes
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS

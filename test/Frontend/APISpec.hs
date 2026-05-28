@@ -21,10 +21,9 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import PureClaw.Core.Types (ModelId (..), SessionId (..))
+import PureClaw.Core.Types (ModelId (..), SessionId (..), ToolCallId (..))
 import PureClaw.Frontend.API
 import PureClaw.Handles.Log (mkNoOpLogHandle)
-import PureClaw.Core.Types (ToolCallId (..))
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
   , CompletionResponse (..)
