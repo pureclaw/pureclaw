@@ -105,9 +105,47 @@ function useFragmentAnchor<T extends HTMLElement>(anchorId: string | undefined, 
   return targeted
 }
 
+/** Best-effort clipboard copy that survives non-secure contexts. Returns a
+ *  Promise<boolean> that resolves true if either the modern Clipboard API
+ *  or the legacy execCommand path succeeded. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // Fall through to the execCommand fallback (permissions / non-secure
+      // context / Firefox-on-some-pages all reject the same way).
+    }
+  }
+  return execCommandCopy(text)
+}
+
+function execCommandCopy(text: string): boolean {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  // Off-screen but still focusable.
+  ta.style.position = 'fixed'
+  ta.style.top = '0'
+  ta.style.left = '0'
+  ta.style.opacity = '0'
+  ta.style.pointerEvents = 'none'
+  ta.setAttribute('readonly', '')
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  document.body.removeChild(ta)
+  return ok
+}
+
 function copyAnchorLink(anchorId: string) {
   const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${anchorId}`
-  if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(url)
+  void copyTextToClipboard(url)
   if (window.location.hash !== `#${anchorId}`) {
     window.history.replaceState(null, '', url)
   }
@@ -207,29 +245,29 @@ const openModalStack: symbol[] = []
 type JsonTab = 'formatted' | 'raw'
 
 function CopyJsonButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const timerRef = useRef<number | null>(null)
   useEffect(() => () => {
     if (timerRef.current != null) window.clearTimeout(timerRef.current)
   }, [])
 
   const onClick = () => {
-    if (navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(text)
-    }
-    setCopied(true)
-    if (timerRef.current != null) window.clearTimeout(timerRef.current)
-    timerRef.current = window.setTimeout(() => setCopied(false), 1400)
+    void copyTextToClipboard(text).then((ok) => {
+      setState(ok ? 'copied' : 'failed')
+      if (timerRef.current != null) window.clearTimeout(timerRef.current)
+      timerRef.current = window.setTimeout(() => setState('idle'), 1400)
+    })
   }
 
+  const label = state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy'
   return (
     <button
-      className={`raw-json-copy${copied ? ' raw-json-copy-copied' : ''}`}
+      className={`raw-json-copy${state === 'copied' ? ' raw-json-copy-copied' : ''}${state === 'failed' ? ' raw-json-copy-failed' : ''}`}
       aria-label="Copy raw JSON to clipboard"
-      title={copied ? 'Copied' : 'Copy to clipboard'}
+      title={label}
       onClick={onClick}
     >
-      {copied ? 'Copied' : 'Copy'}
+      {label}
     </button>
   )
 }

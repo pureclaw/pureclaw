@@ -425,6 +425,14 @@ body {
   background: var(--success);
   color: #fff;
 }
+.raw-json-copy-failed {
+  color: var(--needs-input);
+  border-color: var(--needs-input);
+}
+.raw-json-copy-failed:hover {
+  background: var(--needs-input);
+  color: #fff;
+}
 
 .raw-json-body {
   margin: 0;
