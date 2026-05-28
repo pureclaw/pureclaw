@@ -572,3 +572,63 @@ describe('ChatArea branch button (D9, D10)', () => {
     expect(onBranch).not.toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// D12a / D12b — read-only branch prefix above the composer
+// ---------------------------------------------------------------------------
+describe('ChatArea branch-draft prefix (D12a, D12b)', () => {
+  const BRANCH_LABEL = 'branch session from here'
+  const composer = {
+    panel: <div>compose panel</div>,
+    kind: 'provider' as const,
+    valid: true,
+    onSubmit: () => {},
+  }
+
+  it('renders prefixMessages read-only above the composer panel (D12b)', () => {
+    const prefix = [
+      makeMessageWithEntryId('p1', 'prefix one', 'te-1'),
+      makeMessageWithEntryId('p2', 'prefix two', 'te-2'),
+    ]
+    const { getByText, getByTestId } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        prefixMessages={prefix}
+        selectedId={null}
+      />,
+    )
+    expect(getByTestId('branch-prefix')).toBeTruthy()
+    expect(getByText('prefix one')).toBeTruthy()
+    expect(getByText('prefix two')).toBeTruthy()
+    expect(getByText('compose panel')).toBeTruthy()
+  })
+
+  it('prefix rows carry NO branch button even when onBranch is undefined in compose mode (D12a)', () => {
+    const prefix = [makeMessageWithEntryId('p1', 'prefix one', 'te-1')]
+    const { queryByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        prefixMessages={prefix}
+        selectedId={null}
+      />,
+    )
+    expect(queryByLabelText(BRANCH_LABEL)).toBeNull()
+  })
+
+  it('renders a compose error banner when composeError is set (D14)', () => {
+    const { getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        composeError={'Could not create the branch'}
+        selectedId={null}
+      />,
+    )
+    expect(getByRole('alert').textContent).toMatch(/could not create the branch/i)
+  })
+})

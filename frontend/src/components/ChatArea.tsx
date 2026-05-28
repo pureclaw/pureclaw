@@ -883,6 +883,8 @@ export function ChatArea({
   newTabFocusTick,
   selectedId,
   onBranch,
+  prefixMessages,
+  composeError,
 }: {
   selectedAgent: Agent
   selectedSession?: SessionInfo | null
@@ -927,6 +929,14 @@ export function ChatArea({
    *  persisted provider sessions; undefined for harness sessions and in
    *  compose mode, which suppresses the button entirely. */
   onBranch?: (entryId: string) => void
+  /** Read-only transcript prefix rendered ABOVE the composer panel in a
+   *  branch-draft compose flow. These rows carry no `onBranch` so they
+   *  render no branch button and offer no send affordance — the only send
+   *  path is the composer's first-send. Empty/undefined ⇒ nothing extra. */
+  prefixMessages?: Message[]
+  /** When set, an inline error banner is shown inside the composer region
+   *  (e.g. a failed branch create). Cleared by the caller. */
+  composeError?: string | null
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1081,7 +1091,31 @@ export function ChatArea({
       <div ref={scrollerRef} className="flex-1 overflow-y-auto chat-scroll px-5 py-6">
         <div className="flex flex-col gap-5">
           {composerControls ? (
-            composerControls.panel
+            <>
+              {prefixMessages && prefixMessages.length > 0 && (
+                <div className="flex flex-col gap-5" data-testid="branch-prefix">
+                  {prefixMessages.map((msg) => (
+                    // Read-only: no onBranch (no branch button) and no send
+                    // affordance — the only send path is the composer below.
+                    <ChatMessage key={msg.id} message={msg} />
+                  ))}
+                </div>
+              )}
+              {composeError && (
+                <div
+                  role="alert"
+                  className="text-sm rounded-md px-3 py-2"
+                  style={{
+                    background: 'rgba(255,107,107,0.10)',
+                    border: '1px solid var(--needs-input)',
+                    color: 'var(--needs-input)',
+                  }}
+                >
+                  {composeError}
+                </div>
+              )}
+              {composerControls.panel}
+            </>
           ) : loading ? (
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>Loading transcript...</div>
           ) : messages.length === 0 && onSend && agents && agents.length > 0 && onAgentChange && onCustomPromptFile ? (

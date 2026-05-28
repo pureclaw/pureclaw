@@ -48,6 +48,16 @@ interface ToolResultRecord {
   isError?: boolean
 }
 
+/** A pending branch-from-here action. Holds the source session + boundary
+ *  entry id (resolved by the backend at first send) and the read-only
+ *  transcript prefix to display in the compose view. The backend session
+ *  is created lazily on first send (mirroring "New tab"). */
+interface BranchDraft {
+  sourceSessionId: string
+  upToEntryId: string
+  prefixMessages: Message[]
+}
+
 /** Index every tool_use_id we have a tool_result for, scanning the full transcript. */
 function buildToolResultIndex(entries: TranscriptEntry[]): Map<string, ToolResultRecord> {
   const map = new Map<string, ToolResultRecord>()
@@ -552,12 +562,43 @@ export default function App() {
   // effect would not re-fire and the button click would have stolen
   // focus).
   const [newTabFocusTick, setNewTabFocusTick] = useState(0)
+
+  // Branch-from-here draft. When set, we're in compose mode showing a
+  // read-only transcript prefix; the backend session is created lazily on
+  // first send (see handleComposerSend). `branchError` surfaces a failed
+  // branch create while retaining the draft so the user can retry.
+  const [branchDraft, setBranchDraft] = useState<BranchDraft | null>(null)
+  const [branchError, setBranchError] = useState<string | null>(null)
+
   const handleNewTab = useCallback(() => {
     setSelectedId(null)
     setNewTabFocusTick((n) => n + 1)
     window.history.pushState(null, '', '/')
     setCustomPromptFile(null)
+    // Clicking New tab abandons any in-progress branch draft.
+    setBranchDraft(null)
+    setBranchError(null)
   }, [])
+
+  // Branch from a transcript entry: slice the currently-displayed messages
+  // up to & including the clicked row, stash them as the read-only prefix,
+  // and enter compose mode. No backend call here — creation is deferred to
+  // the first send (D12, lazy). A second branch click before sending
+  // overwrites the draft (latest wins, D15a).
+  const handleBranch = useCallback((entryId: string) => {
+    const idx = transcriptMessages.findIndex((m) => m.entryId === entryId)
+    const prefixMessages = idx >= 0 ? transcriptMessages.slice(0, idx + 1) : []
+    setBranchDraft({
+      sourceSessionId: currentSessionId ?? '',
+      upToEntryId: entryId,
+      prefixMessages,
+    })
+    setBranchError(null)
+    setSelectedId(null)
+    setNewTabFocusTick((n) => n + 1)
+    window.history.pushState(null, '', '/')
+    setCustomPromptFile(null)
+  }, [transcriptMessages, currentSessionId])
 
   // Shared composer state. Lives in App so that both the inline panel
   // (in ChatArea's messages region) and the existing bottom chat input
@@ -576,12 +617,34 @@ export default function App() {
   const handleComposerSend = useCallback(
     async (message: string) => {
       const body = composerSpec.buildBody()
+      // For a branch draft, name the source + boundary so the backend seeds
+      // the new session's transcript from the on-disk source prefix. The
+      // field is merged here (not in buildBody, whose deps don't track
+      // branch state).
+      if (branchDraft) {
+        body.branch_from = {
+          session_id: branchDraft.sourceSessionId,
+          up_to_entry_id: branchDraft.upToEntryId,
+        }
+      }
       const res = await fetch('/api/tabs/new', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (!res.ok) return
+      if (!res.ok) {
+        // Surface a visible error and RETAIN the branch draft so the user
+        // can retry (D14). A stale/deleted boundary entry yields a 404 here.
+        if (branchDraft) {
+          setBranchError('Could not create the branch — the source entry may no longer exist. Please try again.')
+        }
+        return
+      }
+      // Success: the draft has done its job; clear it before switching.
+      if (branchDraft) {
+        setBranchDraft(null)
+        setBranchError(null)
+      }
       const tab = await res.json() as import('./hooks/useApi').NewTabResponse
 
       // Pick a permanent, session-id-keyed selectedId rather than
@@ -645,7 +708,7 @@ export default function App() {
         refreshRef.current()
       }
     },
-    [composerSpec],
+    [composerSpec, branchDraft],
   )
 
   // Sync state from browser back/forward navigation
@@ -659,12 +722,18 @@ export default function App() {
     const newId = `tab:${index}`
     setSelectedId(newId)
     window.history.pushState(null, '', pathFromSelectedId(newId))
+    // Selecting another session/tab abandons any branch draft (D15).
+    setBranchDraft(null)
+    setBranchError(null)
   }, [])
 
   const handleSelectSession = useCallback((id: string) => {
     const newId = `session:${id}`
     setSelectedId(newId)
     window.history.pushState(null, '', pathFromSelectedId(newId))
+    // Selecting another session/tab abandons any branch draft (D15).
+    setBranchDraft(null)
+    setBranchError(null)
   }, [])
 
   // L1/L2: Close a tab (session-backed or raw shell).
@@ -757,6 +826,9 @@ export default function App() {
           } : null}
           newTabFocusTick={newTabFocusTick}
           selectedId={selectedId}
+          onBranch={selectedSession?.runtime === 'provider' ? handleBranch : undefined}
+          prefixMessages={composing && branchDraft ? branchDraft.prefixMessages : undefined}
+          composeError={composing && branchDraft ? branchError : null}
         />
       </div>
     </>
