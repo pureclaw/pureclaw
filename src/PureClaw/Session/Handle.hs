@@ -33,6 +33,8 @@ module PureClaw.Session.Handle
   , loadRecentMessages
     -- * Frozen system prompt (read from transcript)
   , frozenSystemPrompt
+    -- * Per-session model (read from transcript)
+  , lastRequestModel
   ) where
 
 import Control.Exception (IOException, try)
@@ -801,6 +803,34 @@ frozenSystemPrompt th = do
   pure $ case reverse entries of
     []      -> Nothing
     (e : _) -> Just (extractSystemPrompt (_te_payload e))
+
+-- | The model recorded by the most-recent provider 'Request' entry, read from
+-- the structured @_te_model@ column (set by 'mkTranscriptProvider' from
+-- @unModelId model@ at completion time). Like 'frozenSystemPrompt', the
+-- session's model \"rides in the transcript\": this is the per-session
+-- fallback model used by @doCompletion@ when a @/send@ request omits an
+-- explicit model (§9.2).
+--
+--   * @Nothing@   — there is NO prior 'Request' entry, or the last one
+--                   recorded no model (@_te_model = Nothing@). The caller
+--                   should fall back to the global model.
+--   * @Just m@    — the last 'Request' entry recorded model @m@; reuse it.
+--
+-- Only 'Request'-direction entries are considered, and the LAST such entry
+-- wins. 'loadRecentMessages' deliberately discards @_te_model@, so this raw
+-- read is the only way to recover it.
+lastRequestModel :: TranscriptHandle -> IO (Maybe Text)
+lastRequestModel th = do
+  entries <- _th_query th TranscriptFilter
+    { _tf_harness   = Nothing
+    , _tf_model     = Nothing
+    , _tf_direction = Just Request
+    , _tf_timeRange = Nothing
+    , _tf_limit     = Nothing
+    }
+  pure $ case reverse entries of
+    []      -> Nothing
+    (e : _) -> _te_model e
 
 -- | Parse the top-level @system_prompt@ field from a recorded provider
 -- 'Request' payload. A present JSON string yields @Just t@; an explicit

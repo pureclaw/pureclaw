@@ -81,6 +81,7 @@ import PureClaw.Session.Handle
   , SetArchivedError (..)
   , SetDescriptionError (..)
   , frozenSystemPrompt
+  , lastRequestModel
   , listSessions
   , loadRecentMessages
   , mkSessionHandle
@@ -969,12 +970,18 @@ handleSetPrompt env sid req respond = do
               _ -> pure ()
             respond $ jsonResponse status200 (object ["ok" .= True])
 
--- | Request body for sending a message.
-newtype SendRequest = SendRequest { _sr_message :: Text }
+-- | Request body for sending a message. The optional @model@ field (WU5,
+-- §9.2) lets a client pin the completion to a specific model for this turn;
+-- when omitted, 'doCompletion' falls back to the session's most-recent
+-- transcript model and then the global model.
+data SendRequest = SendRequest
+  { _sr_message :: Text
+  , _sr_model   :: Maybe Text
+  }
 
 instance FromJSON SendRequest where
   parseJSON = Aeson.withObject "SendRequest" $ \o ->
-    SendRequest <$> o .: "message"
+    SendRequest <$> o .: "message" <*> o .:? "model"
 
 -- | Send a user message to a session and get a completion.
 handleSend :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -994,7 +1001,7 @@ handleSend env sid req respond = do
           case Aeson.eitherDecode body of
             Left _ ->
               respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"message\": \"...\"}" :: Text)])
-            Right (SendRequest userText) -> do
+            Right (SendRequest userText reqModel) -> do
               mProvider <- readIORef (_fe_provider env)
               mModel <- readIORef (_fe_model env)
               case (mProvider, mModel) of
@@ -1004,7 +1011,7 @@ handleSend env sid req respond = do
                   respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
                 (Just provider, Just model) -> do
                   result <- try @SomeException $
-                    doCompletion env (SessionId sid) provider model userText transcriptPath
+                    doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
                   case result of
                     Left e -> do
                       _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
@@ -1022,14 +1029,29 @@ doCompletion
   :: FrontendEnv
   -> SessionId
   -> SomeProvider
-  -> ModelId
+  -> Maybe Text  -- ^ Request-supplied model (WU5, §9.2), if any.
+  -> ModelId     -- ^ Global fallback model (the @_fe_model@ IORef value).
   -> Text
   -> FilePath
   -> IO Text
-doCompletion env sid provider model userText transcriptPath = do
+doCompletion env sid provider reqModel fallbackModel userText transcriptPath = do
   -- Open a (possibly broadcasting) transcript handle for recording.
   th <- mkBroadcastingFileTranscriptHandle
           (_fe_broker env) sid (_fe_logger env) transcriptPath
+  -- Resolve the per-session model with precedence (§9.2): the request's
+  -- explicit model, else the most-recent model recorded in the transcript
+  -- (the "rides in the transcript" fallback — read from the structured
+  -- '_te_model' column, which 'loadRecentMessages' discards), else the
+  -- global '_fe_model' fallback. The chosen 'ModelId' flows into
+  -- 'mkTranscriptProvider' below so '_te_model' is recorded automatically.
+  -- A blank/whitespace request model (e.g. {"model":""}) is treated as
+  -- absent so it falls through to the transcript/global fallback rather
+  -- than sending an empty model id to the provider.
+  model <- case reqModel of
+    Just m | not (T.null (T.strip m)) -> pure (ModelId m)
+    _ -> do
+      mTranscriptModel <- lastRequestModel th
+      pure $ maybe fallbackModel ModelId mTranscriptModel
   -- Load recent messages for context
   history <- loadRecentMessages th 50 100000
   -- The system prompt is FROZEN per session: computed once on the first

@@ -1005,6 +1005,103 @@ spec = do
           [] -> expectationFailure "expected a recorded CompletionRequest"
 
   -- -----------------------------------------------------------------------
+  -- WU5: per-session model at completion (§9.2)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/sessions/{sid}/send (per-session model — WU5)" $ do
+    -- M1: /send carrying an explicit model uses it; the recorded transcript
+    -- _te_model column (and the provider request _cr_model) is that model.
+    it "uses the request's model when supplied (M1)" $ do
+      withSystemTempDirectory "pureclaw-wu5-m1" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-m1" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnceModel env "sess-m1" "hello" (Just "model-X")
+        case prov of
+          (creq:_) -> _cr_model creq `shouldBe` ModelId "model-X"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+        entries <- readBranchTranscript tmpDir "sess-m1"
+        lastRequestModelCol entries `shouldBe` Just "model-X"
+
+    -- M2a: no model in the request, but the transcript already has a prior
+    -- _te_model ⇒ fall back to that most-recent transcript model.
+    it "falls back to the most-recent transcript _te_model when no model given (M2a)" $ do
+      withSystemTempDirectory "pureclaw-wu5-m2a" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        -- Turn 1 records model "prior-model" in the transcript.
+        writeBranchSource tmpDir "sess-m2a" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        _ <- sendOnceModel env "sess-m2a" "turn one" (Just "prior-model")
+        -- Turn 2 sends NO model ⇒ should reuse "prior-model".
+        prov <- sendOnceModel env "sess-m2a" "turn two" Nothing
+        case prov of
+          [_, second] -> _cr_model second `shouldBe` ModelId "prior-model"
+          _ -> expectationFailure "expected two recorded requests"
+        entries <- readBranchTranscript tmpDir "sess-m2a"
+        lastRequestModelCol entries `shouldBe` Just "prior-model"
+
+    -- M2b: no model in the request AND no prior _te_model ⇒ fall back to the
+    -- global _fe_model IORef (the back-compat path).
+    it "falls back to the global model when no model and no transcript model (M2b)" $ do
+      withSystemTempDirectory "pureclaw-wu5-m2b" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-m2b" Nothing Nothing []
+        -- mkSendEnv seeds the global _fe_model to claude-sonnet-4-20250514.
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnceModel env "sess-m2b" "hello" Nothing
+        case prov of
+          (creq:_) -> _cr_model creq `shouldBe` ModelId "claude-sonnet-4-20250514"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+        entries <- readBranchTranscript tmpDir "sess-m2b"
+        lastRequestModelCol entries `shouldBe` Just "claude-sonnet-4-20250514"
+
+    -- M2c: a blank/whitespace request model is treated as absent and falls
+    -- through to the global fallback rather than sending an empty model id.
+    it "treats a blank request model as absent (M2c)" $ do
+      withSystemTempDirectory "pureclaw-wu5-m2c" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-m2c" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnceModel env "sess-m2c" "hello" (Just "   ")
+        case prov of
+          (creq:_) -> _cr_model creq `shouldBe` ModelId "claude-sonnet-4-20250514"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- M3: a session run with model A then model B records A then B (immutable
+    -- per-turn history), and after the B turn a no-model send uses B.
+    it "records per-turn model history A then B; next no-model send uses B (M3)" $ do
+      withSystemTempDirectory "pureclaw-wu5-m3" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-m3" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        _ <- sendOnceModel env "sess-m3" "turn one" (Just "model-A")
+        _ <- sendOnceModel env "sess-m3" "turn two" (Just "model-B")
+        -- Per-turn history in the transcript: A then B.
+        entries <- readBranchTranscript tmpDir "sess-m3"
+        requestModelCols entries `shouldBe` ["model-A", "model-B"]
+        -- A subsequent no-model send uses the most-recent (B).
+        prov <- sendOnceModel env "sess-m3" "turn three" Nothing
+        case prov of
+          [_, _, third] -> _cr_model third `shouldBe` ModelId "model-B"
+          _ -> expectationFailure "expected three recorded requests"
+
+    -- M4: the chosen model is written to _te_model and the recorded payload
+    -- model agrees with the column.
+    it "writes the chosen model to _te_model matching the payload model (M4)" $ do
+      withSystemTempDirectory "pureclaw-wu5-m4" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-m4" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnceModel env "sess-m4" "hello" (Just "chosen-model")
+        entries <- readBranchTranscript tmpDir "sess-m4"
+        -- The provider request payload model and the transcript column agree.
+        case prov of
+          (creq:_) -> _cr_model creq `shouldBe` ModelId "chosen-model"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+        lastRequestModelCol entries `shouldBe` Just "chosen-model"
+        lastRequestPayloadModel entries `shouldBe` Just "chosen-model"
+
+  -- -----------------------------------------------------------------------
   -- WU-14: POST /api/tabs/{index}/close
   -- -----------------------------------------------------------------------
 
@@ -1366,6 +1463,40 @@ setSessionAgent baseDir sid mAgentText = do
       let mAgent = mAgentText >>= \t -> either (const Nothing) Just (mkAgentName t)
       LBS.writeFile metaPath (Aeson.encode meta { _sm_agent = mAgent })
     Left e -> expectationFailure ("setSessionAgent: decode failed: " <> e)
+
+-- | Like 'sendOnceStatus' but lets the test attach an optional @model@ field
+-- to the @/send@ body (WU5). Asserts a 200 and returns recorded requests.
+sendOnceModel :: SendEnv -> Text -> Text -> Maybe Text -> IO [CompletionRequest]
+sendOnceModel se sid msg mModel = do
+  let body = Aeson.encode $ object $
+        ("message" .= msg) : maybe [] (\m -> ["model" .= m]) mModel
+  (st, _) <- postJSON (_se_env se) ["api", "sessions", sid, "send"] body
+  st `shouldBe` HTTP.status200
+  peekRecorded (_se_fake se)
+
+-- | The @_te_model@ column of the last Request-direction transcript entry.
+lastRequestModelCol :: [TranscriptEntry] -> Maybe Text
+lastRequestModelCol entries =
+  case reverse [ e | e <- entries, _te_direction e == Request ] of
+    []      -> Nothing
+    (e : _) -> _te_model e
+
+-- | The @_te_model@ columns of every Request-direction entry, oldest first
+-- (per-turn model history).
+requestModelCols :: [TranscriptEntry] -> [Text]
+requestModelCols entries =
+  [ m | e <- entries, _te_direction e == Request, Just m <- [_te_model e] ]
+
+-- | The top-level @model@ field of the last Request entry's recorded payload.
+lastRequestPayloadModel :: [TranscriptEntry] -> Maybe Text
+lastRequestPayloadModel entries =
+  case reverse [ e | e <- entries, _te_direction e == Request ] of
+    []      -> Nothing
+    (e : _) -> case Aeson.decode (LBS.fromStrict (TE.encodeUtf8 (_te_payload e))) of
+      Just (Aeson.Object o) -> case KM.lookup "model" o of
+        Just (Aeson.String t) -> Just t
+        _                     -> Nothing
+      _ -> Nothing
 
 -- | The top-level @system_prompt@ of the last Request entry, as a
 -- @Maybe Text@ (mirrors what 'frozenSystemPrompt' surfaces).
