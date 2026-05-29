@@ -1199,26 +1199,6 @@ export function ChatArea({
         return (
           <div className="shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
             <div className="px-4 py-3 flex items-end gap-3">
-              {showModelPicker && (
-                <select
-                  aria-label="session model"
-                  title="Model for this session"
-                  className="rounded-lg px-2 py-3 text-xs"
-                  style={{
-                    background: 'var(--bg-sunken)',
-                    border: '1px solid var(--border)',
-                    color: 'var(--text-primary)',
-                    outline: 'none',
-                    maxWidth: '180px',
-                  }}
-                  value={currentModel as string}
-                  onChange={(e) => onModelChange!(e.target.value)}
-                >
-                  {modelOptions.map((m) => (
-                    <option key={m} value={m}>{shortenModel(m)}</option>
-                  ))}
-                </select>
-              )}
               <textarea
                 ref={textareaRef}
                 className="flex-1 rounded-lg px-4 py-3 text-sm resize-none"
@@ -1245,6 +1225,26 @@ export function ChatArea({
               >
                 Send <span className="kbd">{'\u2318\u21B5'}</span>
               </button>
+              {showModelPicker && (
+                <select
+                  aria-label="session model"
+                  title="Model for this session"
+                  className="rounded-lg px-2 py-3 text-xs"
+                  style={{
+                    background: 'var(--bg-sunken)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                    outline: 'none',
+                    maxWidth: '180px',
+                  }}
+                  value={currentModel as string}
+                  onChange={(e) => onModelChange!(e.target.value)}
+                >
+                  {modelOptions.map((m) => (
+                    <option key={m} value={m}>{shortenModel(m)}</option>
+                  ))}
+                </select>
+              )}
             </div>
           </div>
         )
