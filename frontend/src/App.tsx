@@ -56,6 +56,11 @@ interface BranchDraft {
   sourceSessionId: string
   upToEntryId: string
   prefixMessages: Message[]
+  /** The model to use for the branch's first send. Read from the last
+   *  prefix transcript ENTRY's `_te_model` column (NOT from a display
+   *  string like `Message.agentName`). `null` ⇒ omit `model` from the
+   *  /send body so the backend falls back per §9.2 (R2/R5). */
+  prefixModel: string | null
 }
 
 /** Index every tool_use_id we have a tool_result for, scanning the full transcript. */
@@ -446,6 +451,37 @@ export default function App() {
   const entryCountAtSend = useRef(0)
   const transcriptMessages = useMemo(() => transcriptToMessages(entries), [entries])
 
+  // The most-recent `_te_model` COLUMN in the loaded transcript — the
+  // default for the per-session model dropdown ("the model rides in the
+  // transcript"). null when no entry carries a model.
+  const lastTranscriptModel = useMemo(() => {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const m = entries[i]!.model
+      if (m) return m
+    }
+    return null
+  }, [entries])
+
+  // Distinct `_te_model` values seen in the loaded transcript, newest
+  // first. Offered alongside the live provider model list so the user can
+  // switch back to any model already used in this session.
+  const transcriptModels = useMemo(() => {
+    const seen: string[] = []
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const m = entries[i]!.model
+      if (m && !seen.includes(m)) seen.push(m)
+    }
+    return seen
+  }, [entries])
+
+  // The user's per-session model override. Frontend-only state, NEVER
+  // persisted. `null` means "use the default" (lastTranscriptModel for an
+  // existing session, branchDraft.prefixModel in a branch draft); we reset
+  // it whenever the focused session changes so each session starts at its
+  // own default.
+  const [modelOverride, setModelOverride] = useState<string | null>(null)
+  useEffect(() => { setModelOverride(null) }, [currentSessionId])
+
   // Is the currently-focused session processing a request right now?
   // Sourced from the live activity stream: provider sessions emit this
   // from doCompletion's bracket; harness sessions emit this from the
@@ -548,8 +584,12 @@ export default function App() {
       ?? null
     setPendingMessageModel(sessionModel)
     setPendingMessage(message)
-    send(message)
-  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions, sessions])
+    // Carry the per-session model chosen in the input-row dropdown. When
+    // the user hasn't overridden it, fall back to the most-recent
+    // transcript `_te_model`; when that too is null, omit it (backend
+    // falls back per §9.2).
+    send(message, modelOverride ?? lastTranscriptModel)
+  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions, sessions, modelOverride, lastTranscriptModel])
 
   // Compose mode is implicit: selectedId === null means "no tab focused,
   // show the inline new-tab composer in the ChatArea". Clicking the "New
@@ -588,17 +628,32 @@ export default function App() {
   const handleBranch = useCallback((entryId: string) => {
     const idx = transcriptMessages.findIndex((m) => m.entryId === entryId)
     const prefixMessages = idx >= 0 ? transcriptMessages.slice(0, idx + 1) : []
+    // The branch's first-send model rides in the transcript: read the
+    // `_te_model` COLUMN of the boundary entry (the last prefix entry).
+    // Scan backwards from the boundary so a null-model boundary entry
+    // falls back to the most-recent prior `_te_model` in the prefix.
+    // Read from `entries` (the loaded TranscriptEntry rows), never from a
+    // display string like Message.agentName.
+    const boundaryIdx = entries.findIndex((e) => e.id === entryId)
+    let prefixModel: string | null = null
+    if (boundaryIdx >= 0) {
+      for (let i = boundaryIdx; i >= 0; i--) {
+        const m = entries[i]!.model
+        if (m) { prefixModel = m; break }
+      }
+    }
     setBranchDraft({
       sourceSessionId: currentSessionId ?? '',
       upToEntryId: entryId,
       prefixMessages,
+      prefixModel,
     })
     setBranchError(null)
     setSelectedId(null)
     setNewTabFocusTick((n) => n + 1)
     window.history.pushState(null, '', '/')
     setCustomPromptFile(null)
-  }, [transcriptMessages, currentSessionId])
+  }, [transcriptMessages, entries, currentSessionId])
 
   // Shared composer state. Lives in App so that both the inline panel
   // (in ChatArea's messages region) and the existing bottom chat input
@@ -617,6 +672,14 @@ export default function App() {
   const handleComposerSend = useCallback(
     async (message: string) => {
       const body = composerSpec.buildBody()
+      // Capture the branch state up-front: the draft is cleared on a
+      // successful create (below) before we issue /send, so we snapshot
+      // whether this is a branch send and its prefix model here.
+      const isBranchSend = branchDraft !== null
+      // Honor a user override of the input-row dropdown in a branch draft;
+      // otherwise use the source prefix's last model. This keeps the
+      // displayed dropdown value and the sent value in lockstep (U8).
+      const branchPrefixModel = modelOverride ?? branchDraft?.prefixModel ?? null
       // For a branch draft, name the source + boundary so the backend seeds
       // the new session's transcript from the on-disk source prefix. The
       // field is merged here (not in buildBody, whose deps don't track
@@ -708,11 +771,19 @@ export default function App() {
       setCustomPromptFile(null)
 
       if (sendFirst && tab.session_id) {
+        // The first-send model rides in the request body. For a branch
+        // use the source prefix's last `_te_model` (branchDraft.prefixModel,
+        // distinct from the inherited kind.model); for a fresh new-tab use
+        // the composer's selection. A null/empty value is omitted so the
+        // backend falls back per §9.2 (R2/R5).
+        const firstSendModel = isBranchSend ? branchPrefixModel : composerSpec.model
+        const sendBody: { message: string; model?: string } = { message: trimmed }
+        if (firstSendModel && firstSendModel.trim()) sendBody.model = firstSendModel
         try {
           await fetch(`/api/sessions/${encodeURIComponent(tab.session_id)}/send`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: trimmed }),
+            body: JSON.stringify(sendBody),
           })
         } catch {
           // Tab created; the message failed. The user can retry from
@@ -724,7 +795,7 @@ export default function App() {
         refreshRef.current()
       }
     },
-    [composerSpec, branchDraft],
+    [composerSpec, branchDraft, modelOverride],
   )
 
   // Sync state from browser back/forward navigation
@@ -800,6 +871,21 @@ export default function App() {
       : { ...base, description: override.length > 0 ? override : null }
   }, [sessions, archivedSessions, currentSessionId, descriptionOverrides])
 
+  // Value shown in the input-row model dropdown. In a branch draft the
+  // default is the source prefix's last model (U8, the same value U4
+  // sends); for an existing provider session it's the most-recent
+  // transcript `_te_model`. A user override (modelOverride) takes
+  // precedence. `null` ⇒ the dropdown is suppressed (fresh new-tab
+  // compose, harness sessions, or a model-less transcript).
+  const modelDropdownValue: string | null = (() => {
+    if (composing) {
+      if (branchDraft) return modelOverride ?? branchDraft.prefixModel
+      return null
+    }
+    if (selectedSession?.runtime === 'provider') return modelOverride ?? lastTranscriptModel
+    return null
+  })()
+
   return (
     <>
       <TopBar taskTitle={taskTitle} />
@@ -845,6 +931,9 @@ export default function App() {
           onBranch={selectedSession?.runtime === 'provider' ? handleBranch : undefined}
           prefixMessages={composing && branchDraft ? branchDraft.prefixMessages : undefined}
           composeError={composing && branchDraft ? branchError : null}
+          currentModel={modelDropdownValue}
+          availableModels={[...transcriptModels, ...composerSpec.models]}
+          onModelChange={modelDropdownValue !== null ? setModelOverride : undefined}
         />
       </div>
     </>

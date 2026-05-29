@@ -147,14 +147,20 @@ export function useTranscript(sessionId: string | null) {
 export function useSendMessage(sessionId: string | null, onComplete: () => void) {
   const [sending, setSending] = useState(false)
 
-  const send = useCallback(async (message: string) => {
+  // `model` selects the per-session model for this turn (frontend-only
+  // state, never persisted). When null/empty it is omitted from the body
+  // so the backend falls back to the most-recent transcript `_te_model`
+  // (else the global default) per §9.2.
+  const send = useCallback(async (message: string, model?: string | null) => {
     if (!sessionId || sending) return
     setSending(true)
     try {
+      const body: { message: string; model?: string } = { message }
+      if (model && model.trim()) body.model = model
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(body),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))

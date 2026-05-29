@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { Agent, AgentInfo, Message, MessageContent, CodeSpan, ToolCallInfo, SessionInfo } from '../types'
 import { JsonTree } from './JsonTree'
-import { sessionDisplayTitle, sessionSubtitle } from '../types'
+import { sessionDisplayTitle, sessionSubtitle, shortenModel } from '../types'
 import { StatusDot } from './StatusDot'
 import { BottomBar } from './BottomBar'
 
@@ -885,6 +885,9 @@ export function ChatArea({
   onBranch,
   prefixMessages,
   composeError,
+  currentModel,
+  availableModels,
+  onModelChange,
 }: {
   selectedAgent: Agent
   selectedSession?: SessionInfo | null
@@ -937,6 +940,16 @@ export function ChatArea({
   /** When set, an inline error banner is shown inside the composer region
    *  (e.g. a failed branch create). Cleared by the caller. */
   composeError?: string | null
+  /** The model the next /send should use for an existing session. Default
+   *  is the most-recent transcript `_te_model`; the user can override via
+   *  the input-row dropdown. Frontend-only state (never persisted). */
+  currentModel?: string | null
+  /** Models to offer in the input-row model dropdown. The current model is
+   *  always included even if absent from this list. */
+  availableModels?: string[]
+  /** Called with the newly-picked model id when the user changes the
+   *  input-row model dropdown. */
+  onModelChange?: (model: string) => void
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1168,9 +1181,44 @@ export function ChatArea({
             handleKeyDown(e)
           }
         }
+        // Per-session model dropdown. Rendered for an existing session (the
+        // input-row override) and for a branch draft (default = the source
+        // prefix's last model, U8 — a branch draft is detected by the
+        // presence of prefixMessages). A fresh new-tab compose has no
+        // prefix and lets the NewTabComposer panel own model selection, so
+        // the picker stays hidden there. The current model is always an
+        // option, even if it isn't in availableModels, so the displayed
+        // value can never disagree with what will be sent.
+        const isBranchDraft = (prefixMessages?.length ?? 0) > 0
+        const showModelPicker = onModelChange !== undefined
+          && (currentModel ?? null) !== null
+          && (!isCompose || isBranchDraft)
+        const modelOptions = showModelPicker
+          ? Array.from(new Set([currentModel as string, ...(availableModels ?? [])]))
+          : []
         return (
           <div className="shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
             <div className="px-4 py-3 flex items-end gap-3">
+              {showModelPicker && (
+                <select
+                  aria-label="session model"
+                  title="Model for this session"
+                  className="rounded-lg px-2 py-3 text-xs"
+                  style={{
+                    background: 'var(--bg-sunken)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                    outline: 'none',
+                    maxWidth: '180px',
+                  }}
+                  value={currentModel as string}
+                  onChange={(e) => onModelChange!(e.target.value)}
+                >
+                  {modelOptions.map((m) => (
+                    <option key={m} value={m}>{shortenModel(m)}</option>
+                  ))}
+                </select>
+              )}
               <textarea
                 ref={textareaRef}
                 className="flex-1 rounded-lg px-4 py-3 text-sm resize-none"

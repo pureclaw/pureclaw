@@ -402,6 +402,128 @@ describe('App branch draft flow', () => {
     expect(utils.getByPlaceholderText('Type your first message…')).toBeTruthy()
   })
 
+  it('U2/U5: overriding the model dropdown sends the chosen model on the next /send', async () => {
+    const sid = 'src-1'
+    state.recentSessions = [providerSession(sid)]
+    // Two request entries; the most-recent _te_model column is "opus-4".
+    state.transcripts[sid] = [
+      { ...userEntry('e1', 'first'), model: 'sonnet-4' },
+      { ...userEntry('e2', 'second'), model: 'opus-4' },
+    ]
+    window.history.replaceState(null, '', `/session/${sid}`)
+    const utils = render(<App />)
+
+    const select = utils.getByLabelText('session model') as HTMLSelectElement
+    // U1: default = most-recent _te_model.
+    expect(select.value).toBe('opus-4')
+
+    // Override to sonnet-4 then send.
+    fireEvent.change(select, { target: { value: 'sonnet-4' } })
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'go' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+    })
+    expect(sendSpy).toHaveBeenCalledWith('go', 'sonnet-4')
+  })
+
+  it('U3: changing the model dropdown makes NO backend PUT/persist call', async () => {
+    const fetchMock = mockFetchOk('new-1')
+    const sid = 'src-1'
+    state.recentSessions = [providerSession(sid)]
+    state.transcripts[sid] = [{ ...userEntry('e1', 'first'), model: 'opus-4' }]
+    window.history.replaceState(null, '', `/session/${sid}`)
+    const utils = render(<App />)
+
+    const sel = utils.getByLabelText('session model') as HTMLSelectElement
+    fireEvent.change(sel, { target: { value: 'sonnet-4' } })
+
+    // No PUT (description/prompt) and no /api/tabs/new call from a model change.
+    const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+    expect(putCalls.length).toBe(0)
+    expect(fetchMock.mock.calls.find((c) => c[0] === '/api/tabs/new')).toBeUndefined()
+  })
+
+  it('U6/U7: new-tab (non-branch) first send POSTs /send with the composer model', async () => {
+    const fetchMock = mockFetchOk('new-7')
+    render(<App />) // no selection → compose mode
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'hello new tab' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+    })
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some((c) => (c[0] as string).includes('/send'))).toBe(true)
+    })
+    const sendCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes('/send'))!
+    const sendBody = JSON.parse((sendCall[1] as RequestInit).body as string)
+    // composerSpec.model is mocked as 'sonnet' (the composer selection, not a global IORef).
+    expect(sendBody.model).toBe('sonnet')
+    expect(sendBody.message).toBe('hello new tab')
+  })
+
+  it('U4/U8: branch first send POSTs /send with branchDraft.prefixModel (distinct from kind.model)', async () => {
+    const fetchMock = mockFetchOk('new-99')
+    const sid = 'src-1'
+    state.recentSessions = [providerSession(sid)]
+    // The last prefix entry's _te_model column is "opus-4" — distinct from
+    // the composer's model ('sonnet').
+    state.transcripts[sid] = [
+      { ...userEntry('e1', 'first message'), model: 'sonnet-4' },
+      { ...userEntry('e2', 'second message'), model: 'opus-4' },
+    ]
+    window.history.replaceState(null, '', `/session/${sid}`)
+    const utils = render(<App />)
+
+    fireEvent.click(utils.getAllByLabelText(BRANCH_LABEL)[1]!)
+    await waitFor(() => utils.getByPlaceholderText('Type your first message…'))
+
+    // U8: in branch-draft compose mode the dropdown default = prefixModel.
+    const select = utils.getByLabelText('session model') as HTMLSelectElement
+    expect(select.value).toBe('opus-4')
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'branch on' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+    })
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some((c) => (c[0] as string).includes('/send'))).toBe(true)
+    })
+    const sendCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes('/send'))!
+    const sendBody = JSON.parse((sendCall[1] as RequestInit).body as string)
+    // U4: /send body model = prefixModel (opus-4), NOT the composer's 'sonnet'.
+    expect(sendBody.model).toBe('opus-4')
+  })
+
+  it('U4: a branch whose prefix entry has a null _te_model sends NO model field', async () => {
+    const fetchMock = mockFetchOk('new-100')
+    const sid = 'src-1'
+    state.recentSessions = [providerSession(sid)]
+    state.transcripts[sid] = [{ ...userEntry('e1', 'first message'), model: null }]
+    window.history.replaceState(null, '', `/session/${sid}`)
+    const utils = render(<App />)
+
+    fireEvent.click(utils.getAllByLabelText(BRANCH_LABEL)[0]!)
+    await waitFor(() => utils.getByPlaceholderText('Type your first message…'))
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'branch on' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+    })
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some((c) => (c[0] as string).includes('/send'))).toBe(true)
+    })
+    const sendCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes('/send'))!
+    const sendBody = JSON.parse((sendCall[1] as RequestInit).body as string)
+    expect('model' in sendBody).toBe(false)
+  })
+
   it('D15: selecting another session clears the branch draft', async () => {
     mockFetchOk('new-1')
     state.recentSessions = [providerSession('src-1'), providerSession('other-2')]

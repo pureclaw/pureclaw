@@ -632,3 +632,76 @@ describe('ChatArea branch-draft prefix (D12a, D12b)', () => {
     expect(getByRole('alert').textContent).toMatch(/could not create the branch/i)
   })
 })
+
+// ---------------------------------------------------------------------------
+// U1 / U2 — per-session model dropdown in the chat input row
+// ---------------------------------------------------------------------------
+describe('ChatArea model dropdown (U1, U2)', () => {
+  const MODEL_LABEL = 'session model'
+
+  it('renders the model dropdown for an existing session with the current model selected (U1)', () => {
+    const { getByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessage('m1', 'hi')]}
+        onSend={() => {}}
+        currentModel="sonnet-4"
+        availableModels={['sonnet-4', 'opus-4']}
+        onModelChange={() => {}}
+      />,
+    )
+    const select = getByLabelText(MODEL_LABEL) as HTMLSelectElement
+    expect(select).toBeTruthy()
+    expect(select.value).toBe('sonnet-4')
+  })
+
+  it('includes the current model in the options even when it is not in availableModels (U1)', () => {
+    const { getByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessage('m1', 'hi')]}
+        onSend={() => {}}
+        currentModel="legacy-model"
+        availableModels={['sonnet-4']}
+        onModelChange={() => {}}
+      />,
+    )
+    const select = getByLabelText(MODEL_LABEL) as HTMLSelectElement
+    expect(select.value).toBe('legacy-model')
+    const options = Array.from(select.options).map((o) => o.value)
+    expect(options).toContain('legacy-model')
+    expect(options).toContain('sonnet-4')
+  })
+
+  it('calls onModelChange when the user picks a different model (U2)', () => {
+    const onModelChange = vi.fn()
+    const { getByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessage('m1', 'hi')]}
+        onSend={() => {}}
+        currentModel="sonnet-4"
+        availableModels={['sonnet-4', 'opus-4']}
+        onModelChange={onModelChange}
+      />,
+    )
+    const select = getByLabelText(MODEL_LABEL) as HTMLSelectElement
+    fireEvent.change(select, { target: { value: 'opus-4' } })
+    expect(onModelChange).toHaveBeenCalledWith('opus-4')
+  })
+
+  it('does not render the model dropdown in compose mode (U1)', () => {
+    const { queryByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={{ panel: <div>p</div>, kind: 'provider', valid: true, onSubmit: () => {} }}
+        currentModel="sonnet-4"
+        availableModels={['sonnet-4']}
+        onModelChange={() => {}}
+        selectedId={null}
+      />,
+    )
+    expect(queryByLabelText(MODEL_LABEL)).toBeNull()
+  })
+})
