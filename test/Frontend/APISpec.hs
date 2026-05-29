@@ -1144,6 +1144,143 @@ spec = do
       received <- readIORef receivedRef
       received `shouldBe` Just 7
 
+  describe "PUT /api/sessions/{sid}/prompt (custom-prompt ⊕ agent — WU6)" $ do
+    -- C1: after set-prompt, session.json has _sm_agent == Nothing.
+    it "clears _sm_agent when a custom prompt is set (C1)" $ do
+      withSystemTempDirectory "pureclaw-wu6-c1" $ \tmpDir -> do
+        writeSessionBootstrap tmpDir "sess-c1" (Just "myagent") True
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-c1", "prompt"]
+          (Aeson.encode (object ["prompt" .= ("MY CUSTOM PROMPT" :: Text)]))
+        st `shouldBe` HTTP.status200
+        meta <- readSessionMeta tmpDir "sess-c1"
+        _sm_agent meta `shouldBe` Nothing
+        -- And the prompt file was written.
+        prompt <- TIO.readFile (tmpDir </> "sess-c1" </> "custom-prompt.md")
+        prompt `shouldBe` "MY CUSTOM PROMPT"
+
+    -- C2: a provided name lands in _sm_description (NOT as the agent).
+    it "stores a provided name in _sm_description, not as the agent (C2)" $ do
+      withSystemTempDirectory "pureclaw-wu6-c2" $ \tmpDir -> do
+        writeSessionBootstrap tmpDir "sess-c2" (Just "oldagent") True
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-c2", "prompt"]
+          (Aeson.encode (object
+            [ "prompt" .= ("CUSTOM" :: Text)
+            , "name"   .= ("My Friendly Title" :: Text)
+            ]))
+        st `shouldBe` HTTP.status200
+        meta <- readSessionMeta tmpDir "sess-c2"
+        _sm_description meta `shouldBe` Just "My Friendly Title"
+        _sm_agent meta `shouldBe` Nothing
+
+    -- C3: non-prompt metadata fields are unchanged by set-prompt.
+    it "leaves non-prompt metadata fields unchanged (C3)" $ do
+      withSystemTempDirectory "pureclaw-wu6-c3" $ \tmpDir -> do
+        writeSessionBootstrap tmpDir "sess-c3" (Just "myagent") True
+        metaBefore <- readSessionMeta tmpDir "sess-c3"
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-c3", "prompt"]
+          (Aeson.encode (object ["prompt" .= ("CUSTOM" :: Text)]))
+        st `shouldBe` HTTP.status200
+        metaAfter <- readSessionMeta tmpDir "sess-c3"
+        _sm_id metaAfter                `shouldBe` _sm_id metaBefore
+        _sm_kind metaAfter              `shouldBe` _sm_kind metaBefore
+        _sm_model metaAfter             `shouldBe` _sm_model metaBefore
+        _sm_channel metaAfter           `shouldBe` _sm_channel metaBefore
+        _sm_createdAt metaAfter         `shouldBe` _sm_createdAt metaBefore
+        _sm_lastActive metaAfter        `shouldBe` _sm_lastActive metaBefore
+        _sm_bootstrapConsumed metaAfter `shouldBe` _sm_bootstrapConsumed metaBefore
+        _sm_archived metaAfter          `shouldBe` _sm_archived metaBefore
+        _sm_autoSummary metaAfter       `shouldBe` _sm_autoSummary metaBefore
+
+    -- C4: a legacy session with BOTH an agent and a custom-prompt.md resolves
+    -- deterministically on its next first-uncomputed completion — custom-prompt
+    -- wins per §9.1 precedence (does NOT render the agent).
+    it "a legacy agent+custom-prompt session resolves with custom-prompt winning (C4)" $ do
+      withSystemTempDirectory "pureclaw-wu6-c4" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "AGENT SOUL" Nothing
+        -- A pre-existing (legacy) session that has BOTH an agent and a
+        -- custom-prompt.md on disk — no migration, written directly.
+        writeBranchSource tmpDir "sess-c4" (Just "myagent")
+          (Just "CUSTOM PROMPT WINS") []
+        env <- mkSendEnv tmpDir agentsDir (Just "GLOBAL PROMPT")
+        prov <- sendOnce env "sess-c4" "hello"
+        case prov of
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Just "CUSTOM PROMPT WINS"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- C5: a meta read/decode failure does NOT leave the agent⊕prompt
+    -- contradiction — no custom-prompt.md is written and the (malformed)
+    -- session.json is untouched.
+    it "does not write custom-prompt.md when session.json fails to decode (C5)" $ do
+      withSystemTempDirectory "pureclaw-wu6-c5" $ \tmpDir -> do
+        let dir = tmpDir </> "sess-c5"
+        createDirectoryIfMissing True dir
+        -- Malformed session.json that cannot decode as SessionMeta.
+        TIO.writeFile (dir </> "session.json") "{ not valid json at all"
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-c5", "prompt"]
+          (Aeson.encode (object ["prompt" .= ("SHOULD NOT BE WRITTEN" :: Text)]))
+        st `shouldBe` HTTP.status500
+        -- The prompt file must NOT have been written (no contradiction).
+        promptExists <- doesFileExist (dir </> "custom-prompt.md")
+        promptExists `shouldBe` False
+
+    -- A whitespace-only name clears the agent but stores no description.
+    it "treats a whitespace-only name as no description (C2 edge)" $ do
+      withSystemTempDirectory "pureclaw-wu6-ws" $ \tmpDir -> do
+        writeSessionBootstrap tmpDir "sess-ws" (Just "myagent") True
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-ws", "prompt"]
+          (Aeson.encode (object
+            [ "prompt" .= ("CUSTOM" :: Text)
+            , "name"   .= ("   " :: Text)
+            ]))
+        st `shouldBe` HTTP.status200
+        meta <- readSessionMeta tmpDir "sess-ws"
+        _sm_description meta `shouldBe` Nothing
+        _sm_agent meta `shouldBe` Nothing
+
+    -- Missing session.json ⇒ 404, and no custom-prompt.md is written.
+    it "returns 404 when session.json does not exist" $ do
+      withSystemTempDirectory "pureclaw-wu6-404" $ \tmpDir -> do
+        let dir = tmpDir </> "sess-404"
+        createDirectoryIfMissing True dir
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-404", "prompt"]
+          (Aeson.encode (object ["prompt" .= ("X" :: Text)]))
+        st `shouldBe` HTTP.status404
+        promptExists <- doesFileExist (dir </> "custom-prompt.md")
+        promptExists `shouldBe` False
+
+    -- Invalid session id ⇒ 400.
+    it "rejects an invalid session id with 400" $ do
+      withSystemTempDirectory "pureclaw-wu6-badid" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "bad/../id", "prompt"]
+          (Aeson.encode (object ["prompt" .= ("X" :: Text)]))
+        st `shouldBe` HTTP.status400
+
+    -- Malformed request JSON ⇒ 400.
+    it "rejects a malformed request body with 400" $ do
+      withSystemTempDirectory "pureclaw-wu6-badjson" $ \tmpDir -> do
+        writeSessionBootstrap tmpDir "sess-bj" Nothing True
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-bj", "prompt"]
+          "{ not json"
+        st `shouldBe` HTTP.status400
+
+    -- Missing 'prompt' field ⇒ 400.
+    it "rejects a body missing the 'prompt' field with 400" $ do
+      withSystemTempDirectory "pureclaw-wu6-noprompt" $ \tmpDir -> do
+        writeSessionBootstrap tmpDir "sess-np" Nothing True
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, _) <- putJSON env ["api", "sessions", "sess-np", "prompt"]
+          (Aeson.encode (object ["notprompt" .= ("X" :: Text)]))
+        st `shouldBe` HTTP.status400
+
 
 -- ---------------------------------------------------------------------------
 -- Test helpers
@@ -1543,6 +1680,42 @@ postJSON :: FrontendEnv -> [Text] -> LBS.ByteString
 postJSON env pathParts body = do
   (st, respBody, _) <- postJSONFull env pathParts body
   pure (st, respBody)
+
+-- | PUT a JSON body to the apiApp and return (status, response body).
+putJSON :: FrontendEnv -> [Text] -> LBS.ByteString
+        -> IO (HTTP.Status, LBS.ByteString)
+putJSON env pathParts body = do
+  ref <- newIORef (Nothing :: Maybe Wai.Response)
+  bodyRef <- newIORef (LBS.toChunks body)
+  let getChunk = do
+        chunks <- readIORef bodyRef
+        case chunks of
+          []     -> pure mempty
+          (c:cs) -> writeIORef bodyRef cs >> pure c
+      req = Wai.setRequestBodyChunks getChunk
+          $ Wai.defaultRequest
+        { Wai.requestMethod  = "PUT"
+        , Wai.pathInfo       = pathParts
+        , Wai.requestHeaders = [(HTTP.hContentType, "application/json")]
+        }
+      capture resp = do
+        writeIORef ref (Just resp)
+        pure ResponseReceived
+  _ <- apiApp env req capture
+  Just resp <- readIORef ref
+  let (st, _, _) = Wai.responseToStream resp
+  respBody <- extractBody resp
+  pure (st, respBody)
+
+-- | Read and decode a session's @session.json@ as 'SessionMeta', failing
+-- the test if it is missing or undecodable.
+readSessionMeta :: FilePath -> Text -> IO SessionMeta
+readSessionMeta baseDir sid = do
+  raw <- LBS.readFile (baseDir </> T.unpack sid </> "session.json")
+  case Aeson.eitherDecode' raw of
+    Right meta -> pure meta
+    Left e     -> expectationFailure ("readSessionMeta: decode failed: " <> e)
+                    >> error "unreachable"
 
 -- | POST a JSON body and return (status, body, headers).
 postJSONFull :: FrontendEnv -> [Text] -> LBS.ByteString

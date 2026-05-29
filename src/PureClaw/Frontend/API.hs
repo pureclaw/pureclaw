@@ -55,7 +55,6 @@ import PureClaw.Agent.AgentDef
   , composeAgentPromptWithBootstrap
   , discoverAgents
   , loadAgent
-  , mkAgentName
   , unAgentName
   )
 import PureClaw.Agent.Context
@@ -935,8 +934,22 @@ handleNewSessionGone respond =
       , "use"   .= ("/api/tabs/new" :: Text)
       ]))
 
--- | Set or replace the custom prompt for a session, optionally updating
--- the agent name in @session.json@.
+-- | Set or replace the custom prompt for a session (WU6, §9.3).
+--
+-- Enforces the @custom-prompt.md ⊕ agent@ invariant: a session may have a
+-- per-session agent /or/ a user-supplied custom prompt, never both. Setting
+-- a custom prompt therefore:
+--
+--   * clears @_sm_agent@ (the custom prompt supersedes the agent);
+--   * stores an optionally-provided @name@ in @_sm_description@ (a friendly
+--     title), /not/ as the agent;
+--   * leaves all other metadata fields untouched.
+--
+-- __Ordering / atomicity:__ the metadata is read, updated, and written
+-- (atomic tmp + rename) /before/ @custom-prompt.md@ is written. If the
+-- existing @session.json@ is missing or undecodable, no @custom-prompt.md@
+-- is written, so a meta failure can never leave a custom prompt sitting
+-- alongside a still-set agent.
 handleSetPrompt :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleSetPrompt env sid req respond = do
   if not (isValidSessionId sid)
@@ -953,22 +966,40 @@ handleSetPrompt env sid req respond = do
           Nothing ->
             respond $ jsonResponse status400 (object ["error" .= ("Missing 'prompt' field" :: Text)])
           Just prompt -> do
-            TIO.writeFile promptPath prompt
-            -- Update agent name in session metadata if a name was provided
-            let mName = Map.lookup "name" obj
-            case mName of
-              Just name | not (T.null name) -> do
-                raw <- LBS.readFile metaPath
-                case Aeson.eitherDecode' raw of
-                  Right meta -> do
-                    let agentName = either (const Nothing) Just (mkAgentName name)
-                        updated = (meta :: SessionMeta) { _sm_agent = agentName }
-                        tmpP = metaPath <> ".tmp"
-                    LBS.writeFile tmpP (Aeson.encode updated)
-                    renameFile tmpP metaPath
-                  Left _ -> pure ()
-              _ -> pure ()
-            respond $ jsonResponse status200 (object ["ok" .= True])
+            -- An optionally-provided friendly title, trimmed; an
+            -- all-whitespace value is treated as "no description".
+            let mDescription = do
+                  name <- Map.lookup "name" obj
+                  let trimmed = T.strip name
+                  if T.null trimmed then Nothing else Just trimmed
+            -- Step 1: read + update + atomically rewrite session.json FIRST.
+            -- Clear the agent (invariant) and set the description from name.
+            metaExists <- doesFileExist metaPath
+            if not metaExists
+              then respondNotFound respond
+              else do
+                eBytes <- try (LBS.readFile metaPath) :: IO (Either IOException LBS.ByteString)
+                case eBytes of
+                  Left e ->
+                    respond $ jsonResponse status500
+                      (object ["error" .= T.pack (show e)])
+                  Right raw -> case Aeson.eitherDecode' raw of
+                    Left err ->
+                      respond $ jsonResponse status500
+                        (object ["error" .= T.pack err])
+                    Right meta -> do
+                      let updated = (meta :: SessionMeta)
+                            { _sm_agent       = Nothing
+                            , _sm_description = mDescription
+                            }
+                          tmpP = metaPath <> ".tmp"
+                      LBS.writeFile tmpP (Aeson.encode updated)
+                      renameFile tmpP metaPath
+                      -- Step 2: only after the meta update succeeds do we
+                      -- write the custom prompt file. Now the agent is
+                      -- guaranteed cleared, so no contradiction can exist.
+                      TIO.writeFile promptPath prompt
+                      respond $ jsonResponse status200 (object ["ok" .= True])
 
 -- | Request body for sending a message. The optional @model@ field (WU5,
 -- §9.2) lets a client pin the completion to a specific model for this turn;
