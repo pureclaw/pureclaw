@@ -2,7 +2,7 @@
 
 **GitHub issue:** [#63](https://github.com/pureclaw/pureclaw/issues/63) — "Allow any historical partial session to be able to be used as the starting point of a new session"
 **Beads epic:** `pureclaw-o4l`
-**Status:** draft round 3 — Feasibility PASS, Scope & Alignment PASS (round 2); round 3 addresses remaining Completeness gaps (read-only prefix non-sendability, agent-present/absent + custom-prompt-present/absent arms, latest-wins re-click, WU3 file scope, no-CSS).
+**Status:** Branching (WU1–WU3) implemented & committed. **Scope expanded** (owner decision) to fix the session model/prompt architecture in the same PR — see §9. The expanded WUs (WU4–WU8 + a WU1 revision) are pending a fresh plan-review gate.
 
 ---
 
@@ -20,6 +20,8 @@ A user reviewing a session transcript wants to take the conversation *up to a pa
 | **Harness sessions** | **Hide** the branch button entirely (external-CLI sessions have no replayable history). |
 
 ## 3. Key architectural facts (verified against current code)
+
+> ⚠️ **Superseded in part by §9.** §3/§4/§5 describe the original branching-only design. The owner expanded scope (§9): **the model IS now per-session**, the system prompt is **frozen in the transcript**, and the fork **no longer copies `custom-prompt.md`**. Where §3/§4/§5 say "model is global / out of scope" or "a branch must copy custom-prompt.md," read §9 as authoritative.
 
 - **Conversation history is reconstructed from `transcript.jsonl` on every turn.** `doCompletion` (`src/PureClaw/Frontend/API.hs:948`) calls `loadRecentMessages` (`src/PureClaw/Session/Handle.hs:562`), which replays the transcript into provider `Message`s. There is **no separate conversation-state file**. So a branch == *a new session directory whose `transcript.jsonl` begins with a copy of the source prefix*; the next turn replays it automatically.
 - **The system prompt is NOT carried by the transcript.** `loadRecentMessages` → `extractNewMessageText` (`Session/Handle.hs:624`) keeps only the last message text per request entry and **discards** the `system_prompt` field. The prompt actually used at completion comes from `doCompletion` (`API.hs:966-968`): the per-session `custom-prompt.md` file in the session dir if present, else the global `_fe_systemPrompt env`. **Therefore a branch must copy the source session's `custom-prompt.md` (if any)** for prompt fidelity.
@@ -179,3 +181,62 @@ createTab :: FrontendEnv -> TabKind -> Maybe BranchSeed -> (Response -> IO Respo
 - **Branch during in-flight send:** branch button disabled while `sending` (D10), avoiding a race with the optimistic pending pair.
 - **Tab-count limit (A8):** branch goes through the same `_fe_maxTabs` gate; failed branches leave the count untouched (D5).
 - **Model/provider provenance:** the branch's *recorded* model/agent/kind are inherited from the source meta; the actual first completion uses the global provider/model exactly as any New-tab session does (existing behavior, not changed here).
+
+---
+
+## 9. Expanded scope: per-session model & frozen system prompt (owner decision)
+
+The original §8 note ("completion uses the global provider/model") reflected a **pre-existing bug**, not intended behavior. The owner directed this PR to also fix the session model/prompt architecture. **Unifying principle: a session's model and system prompt both "ride in the transcript."** Each request already records `_te_model` (structured column, `Transcript/Types.hs:36`, fed `unModelId model` at `API.hs:1039`) and `system_prompt` (in `_te_payload`, `Providers/Class.hs:277`). The transcript is append-only, so it is the per-session source of truth — **no new persistent state, no new `FrontendEnv` field**. This makes forking trivially faithful: copy the prefix and append; both the frozen prompt and the last-used model carry forward automatically.
+
+**This supersedes §3 (lines on "model is global"/"copy custom-prompt.md"), §4 Out-of-scope ("per-session model"/"changing loadRecentMessages"), and §5.1's custom-prompt copy.**
+
+### 9.1 Frozen system prompt (WU4)
+
+- **Freeze for the whole session.** The prompt is computed **once**, on the first message, and never recomputed. The committed `doCompletion` recompute (`API.hs:1029-1033`, currently `custom-prompt.md → global` on *every* turn) is **moved behind a first-turn-only guard**.
+- **Source of truth = the transcript.** A new helper reads the **last `Request`-direction entry**'s top-level `system_prompt` and returns `Maybe (Maybe Text)`: outer `Nothing` = "no prior request ⇒ compute & freeze now"; outer `Just p` = "a prior request exists ⇒ reuse its frozen prompt `p` **including `p = Nothing` (frozen-null stays null; do NOT recompute)**". The helper filters by `_te_direction == Request` (never a Response) and is distinct from `extractNewMessageText` (which strips `system_prompt`).
+- **First-turn precedence:** `custom-prompt.md` (user override) → **per-session agent** → global `_fe_systemPrompt`.
+- **Per-session agent rendering (new capability).** On the first turn with no `custom-prompt.md`, load the session's `_sm_agent` (inline read of `session.json` — `LBS.readFile (takeDirectory transcriptPath </> "session.json")` + `Aeson.eitherDecode'`, the pattern at `API.hs:952`/`Handle.hs:401`; no `SessionId`-keyed loader exists), look it up via `AgentDef.loadAgent _fe_agentsDir name` (or `discoverAgents`), and render with **`composeAgentPromptWithBootstrap lg def limit (_sm_bootstrapConsumed meta)`** so BOOTSTRAP.md follows the session's bootstrap-consumed state (reconciles with `touchBootstrapConsumed`, `Handle.hs:599`). Under freeze, whatever bootstrap state applied on turn 1 is baked into the frozen prompt for the session.
+- **Confined to the provider path.** Changes live only in the provider `doCompletion` branch; the harness send path (`API.hs:1043-1048`) and the committed WU3 read-only prefix render are untouched.
+- **DoD:** **F1** first-turn agent session renders & freezes the agent's prompt; **F2** turn ≥2 reuses the frozen prompt — agent-def edit between turns has **no** effect; **F3** `custom-prompt.md` overrides the agent on turn 1; **F4** no agent + no custom prompt ⇒ global; **F5** the recorded `system_prompt` is what later turns replay; **F6** bootstrap inclusion follows `_sm_bootstrapConsumed` (tested both states); **F7** `_sm_agent` names a missing/undiscoverable agent ⇒ fall back to global, logged, **not** a 500; **F8** agent renders to empty/whitespace ⇒ treated as no-agent ⇒ global; **F9** the helper returns `Maybe (Maybe Text)` and a frozen-`null` prompt stays null on turn ≥2 (does not recompute); **F11** turn ≥2 does **not** re-read `custom-prompt.md` (editing it mid-session has no effect); **F12** harness sends and the WU3 prefix render are unaffected (regression). 95% coverage on touched modules.
+
+### 9.2 Per-session model at completion (WU5)
+
+- `SendRequest` (`newtype`, `API.hs:965`) → **`data SendRequest { _sr_message :: Text, _sr_model :: Maybe Text }`**, parsed with `o .:? "model"`; update its `FromJSON` and the pattern at `API.hs:989`.
+- **Model precedence in `doCompletion`:** request `_sr_model` (build `ModelId reqText` — the constructor `ModelId (..)` is public, `Core/Types.hs:38`; no smart constructor) → else the **most-recent `_te_model` in the transcript** (the "rides in the transcript" fallback) → else the global `_fe_model` IORef. `_fe_model` is **retained** as the final fallback + composer seed; **no new `FrontendEnv` field**. Note `_sm_model :: Text` (sidebar display) is separate and unchanged here.
+- **Read path for the `_te_model` fallback:** `loadRecentMessages` returns `[Message]` and **discards `_te_model`** (`entryToMessage`, `Handle.hs:757-764`), so the fallback must read raw entries via `_th_query th` and take the last `_te_direction == Request` entry's `_te_model`. Reuse the **same last-`Request`-entry helper WU4 introduces** (§9.1) — surface both `system_prompt` and `_te_model` from one raw-entries read in `doCompletion` (where `th :: TranscriptHandle` is already in scope), rather than reinventing a second scan.
+- Recording: the chosen `ModelId` flows through `mkTranscriptProvider th (unModelId model)` (`API.hs:1039`), so `_te_model` is set automatically.
+- **DoD:** **M1** `/send` with a `model` uses it (assert recorded `_te_model`); **M2** `/send` **without** a `model` falls back to the most-recent `_te_model`, else global — a back-compat contract path (older/direct clients), not produced by WU8; **M3** a session run model A then B records A then B (immutable per-turn history) and B becomes the next default; **M4** WU5 writes `_te_model` to the chosen model and the payload `model` agrees.
+
+### 9.3 `handleSetPrompt` contradiction fix (WU6)
+
+- Setting a `custom-prompt.md` must **clear `_sm_agent`** (custom-prompt ⊕ agent invariant); a provided `name` is stored as `_sm_description`, not as the agent.
+- **Ordering:** update metadata **before/transactionally with** writing `custom-prompt.md` so a meta-decode failure cannot leave a prompt file alongside a still-set agent (the current code writes the file first then best-effort updates meta, swallowing failure at `API.hs:960`).
+- Existing on-disk sessions are **left untouched (no migration this PR)**. Re-attaching an agent after a custom prompt is **out of scope** (no endpoint; user clears the prompt manually).
+- **DoD:** **C1** after set-prompt, `session.json` has `_sm_agent = null`; **C2** a provided name lands in `_sm_description`; **C3** non-prompt metadata paths unchanged; **C4** a legacy session with **both** an agent and a `custom-prompt.md` resolves deterministically on its next first-uncomputed turn (custom-prompt wins per §9.1 precedence), tested, no migration; **C5** a meta read/decode failure does not leave the agent⊕prompt contradiction (test the `API.hs:960` decode-failure branch).
+
+### 9.4 Revise the fork (WU7 — supersedes WU1's prompt handling)
+
+- **Remove** `_bseed_customPrompt` from `BranchSeed` (`Handle.hs:355-361`), the `readCustomPrompt`/`_bseed_customPrompt` construction in `resolveBranchSeed` (`Handle.hs:411-416`), the now-orphaned `readCustomPrompt` **definition** (`Handle.hs:451+`, non-exported, only caller is the line being removed) and the now-unused `promptP` local in `resolveBranchSeed` (`Handle.hs:396`) — both trip `-Wunused-binds`/`-Werror` if left — and the `custom-prompt.md` write in `createTab` (`API.hs:872-879`). `resolveBranchSeed` and `BranchSeed { _bseed_prefix, _bseed_sourceMeta }` **remain** (prefix slice + source validation) — do not over-delete.
+- The fork copies the transcript prefix verbatim (unchanged) and inherits `_sm_kind`/`_sm_model`/`_sm_agent` from the source meta — **keeping the agent identity**. The frozen prompt and last model ride in the copied transcript (WU4/WU5).
+- **Build/test churn (mirrors §5.1's rigor — these are compile breakages under `-Werror`, not just stale tests):** grep shows `_bseed_customPrompt` / custom-prompt-copy references at `src/PureClaw/Session/Handle.hs` (record + `resolveBranchSeed`), `src/PureClaw/Frontend/API.hs:872-879`, `test/Session/HandleSpec.hs` (~691-705 assertions + the `writeSourceSession` helper ~783-800 that writes `custom-prompt.md` and takes a `Maybe Text` prompt arg + its call sites), and `test/Frontend/APISpec.hs:210-237` (the D6/D6b copy assertions). **All must be removed/rewritten together;** the committed D6/D6b *tests* are deleted, replaced by R1–R5.
+- **DoD:** **R1** a forked session's first completion uses the `system_prompt` from the copied transcript's last request (not recomputed) — **including the frozen-`null` case (does not recompute from the inherited `_sm_agent`)**; **R2** the fork's first model = the source prefix's last `_te_model` (satisfied by WU5's transcript-`_te_model` fallback — **so R2 depends on WU5, not WU8**); **R3** the fork keeps `_sm_agent` and has no `custom-prompt.md`; **R4** no remaining reference to `_bseed_customPrompt`/custom-prompt-copy in `src/` or `test/` (grep-clean) and the build is `-Werror` clean; **R5** a fork whose prefix has no `Request` entry (or no `_te_model`) falls back to global model + recomputed prompt (defined, tested). *Note:* on this empty-prefix fallback the inherited `_sm_agent` would be rendered under the branch's own `_sm_bootstrapConsumed = True` (hardcoded by `createTab`, `API.hs:863`), i.e. BOOTSTRAP.md is suppressed — intended (a fork is a continuation, not a fresh bootstrap). For a normal (non-empty-prefix) fork the prompt is reused from the copied transcript and the agent is never re-rendered, so this path is rare.
+- **Sequencing: WU7 depends on WU4 + WU5.**
+
+### 9.5 Frontend model dropdown (WU8)
+
+- **Files:** `frontend/src/components/ChatArea.tsx` (dropdown in the input row), `frontend/src/hooks/useApi.ts` (`useSendMessage` body gains `model`), `frontend/src/App.tsx` (existing-session send + composer/branch first-send pass the model), tests `frontend/src/components/__tests__/ChatArea.test.tsx` + `frontend/src/__tests__/App.test.tsx`. No new CSS.
+- A model selector in the chat input row. Default = the most-recent `_te_model` (read the `_tei_model` **column**, exposed at `API.hs:631`/`Stream.hs:167` — *not* the payload `model`) in the loaded transcript; user override = frontend-only state (not persisted); the chosen model is sent on **every** `/send`.
+- **`Message` carries no model**, so the branch path cannot read it from `branchDraft.prefixMessages`. `BranchDraft` gains **`prefixModel: string | null`**, populated in `handleBranch` by reading the last prefix **entry**'s `_tei_model` *column* from the loaded `entries` (the `_te_model` column exposed at `API.hs:631`/`Stream.hs:167`) — **not** from `Message.agentName` (a display string like `'Assistant'`/harness flavour).
+- **Three send paths must carry the model** (currently none do): (1) existing-session send via `useSendMessage` (`useApi.ts:154`, body `{message}`); (2) new-tab first-send via `handleComposerSend` (`App.tsx:712`, body `{message}`) using `composerSpec.model`; (3) branch first-send (also `handleComposerSend`) using **`branchDraft.prefixModel`** — distinct from the inherited `kind.model`. When the source value is `null`, omit `model` from the `/send` body (backend WU5 falls back per §9.2; R2/R5).
+- **DoD:** **U1** dropdown renders for an existing session, default = last `_te_model`; **U2** overriding sends the chosen model in the next `/send` body; **U3** the value lives only in frontend state (no backend write); **U4** branch first-send `/send` body `model` = `branchDraft.prefixModel` (asserted on the `/send` body, not `kind.model`); a `null` prefix model sends no `model` field; **U5** existing-session `/send` includes the dropdown model (`useSendMessage` body updated); **U6** new-tab first-send `/send` includes `composerSpec.model`; **U7** a brand-new session's first recorded `_te_model` matches the composer selection (not the global IORef); **U8** in branch-draft compose mode the dropdown default = `branchDraft.prefixModel` (the same value U4 sends, so display and sent value cannot disagree); if `null`, default to the composer/global seed. Frontend tests pass (`npm --prefix frontend test`).
+
+### 9.6 Revised work-unit sequence
+
+```
+WU1✔ → WU2✔ → WU3✔ (+ harness-override fix✔)   [branching, committed]
+WU6 (handleSetPrompt fix)            [independent]
+WU4 (frozen prompt + agent render) ┐
+WU5 (per-session model)            ┘→ WU7 (revise fork) → WU8 (frontend model dropdown)
+```
+- Logical deps: WU4 ⊥ WU5; both block WU7; WU6 independent; WU8 follows WU5's `/send model` contract and WU7 (branch prefix model).
+- **Serialization (file overlap, even where logically independent):** WU4, WU5, WU7 all edit `doCompletion`/`API.hs` → run **strictly serial**. WU8 + WU5's frontend touches share `App.tsx`/`ChatArea.tsx` → serial. No parallelism within these groups.
