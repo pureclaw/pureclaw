@@ -8,7 +8,6 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Text.IO qualified as TIO
 import Data.Time
   ( UTCTime (..)
   , addUTCTime
@@ -712,7 +711,7 @@ spec = do
 
   describe "resolveBranchSeed" $ do
     it "returns the inclusive prefix [0..boundary] for a mid-transcript entry" $ withTmp $ \base -> do
-      writeSourceSession base "src-1" Nothing Nothing
+      writeSourceSession base "src-1" Nothing
         [ mkTextEntry "e1" t0 Request  "q1"
         , mkTextEntry "e2" t0 Response "a1"
         , mkTextEntry "e3" t0 Request  "q2"
@@ -724,7 +723,7 @@ spec = do
         Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
 
     it "branching from the first entry copies exactly that entry" $ withTmp $ \base -> do
-      writeSourceSession base "src-first" Nothing Nothing
+      writeSourceSession base "src-first" Nothing
         [ mkTextEntry "e1" t0 Request  "q1"
         , mkTextEntry "e2" t0 Response "a1"
         ]
@@ -735,7 +734,7 @@ spec = do
 
     -- D3a: source with an agent name flows through into the seed's source meta.
     it "carries the source meta (agent present)" $ withTmp $ \base -> do
-      writeSourceSession base "src-agent" (Just "helper") Nothing
+      writeSourceSession base "src-agent" (Just "helper")
         [ mkTextEntry "e1" t0 Request "q1" ]
       result <- resolveBranchSeed base (BranchSpec "src-agent" "e1")
       case result of
@@ -746,29 +745,11 @@ spec = do
 
     -- D3b: source without an agent name yields Nothing in the seed's source meta.
     it "carries the source meta (agent absent)" $ withTmp $ \base -> do
-      writeSourceSession base "src-noagent" Nothing Nothing
+      writeSourceSession base "src-noagent" Nothing
         [ mkTextEntry "e1" t0 Request "q1" ]
       result <- resolveBranchSeed base (BranchSpec "src-noagent" "e1")
       case result of
         Right seed -> _sm_agent (_bseed_sourceMeta seed) `shouldBe` Nothing
-        Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
-
-    -- D6: source with a custom-prompt.md surfaces its contents in the seed.
-    it "reads custom-prompt.md when present" $ withTmp $ \base -> do
-      writeSourceSession base "src-prompt" Nothing (Just "you are a branch")
-        [ mkTextEntry "e1" t0 Request "q1" ]
-      result <- resolveBranchSeed base (BranchSpec "src-prompt" "e1")
-      case result of
-        Right seed -> _bseed_customPrompt seed `shouldBe` Just "you are a branch"
-        Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
-
-    -- D6b: source without a custom-prompt.md yields Nothing.
-    it "yields Nothing custom prompt when custom-prompt.md absent" $ withTmp $ \base -> do
-      writeSourceSession base "src-noprompt" Nothing Nothing
-        [ mkTextEntry "e1" t0 Request "q1" ]
-      result <- resolveBranchSeed base (BranchSpec "src-noprompt" "e1")
-      case result of
-        Right seed -> _bseed_customPrompt seed `shouldBe` Nothing
         Left err   -> expectationFailure ("expected Right seed, got: " <> show err)
 
     it "rejects an invalid (traversal) source id with BranchInvalidSourceId" $ withTmp $ \base -> do
@@ -797,7 +778,7 @@ spec = do
         other -> expectationFailure ("expected BranchSourceNotProvider, got: " <> show other)
 
     it "returns BranchEntryNotFound when the entry id is absent" $ withTmp $ \base -> do
-      writeSourceSession base "src-missing-entry" Nothing Nothing
+      writeSourceSession base "src-missing-entry" Nothing
         [ mkTextEntry "e1" t0 Request "q1" ]
       result <- resolveBranchSeed base (BranchSpec "src-missing-entry" "nope")
       case result of
@@ -844,17 +825,18 @@ writeMetaWithAgent base sid offsetSecs mAgentText = do
 noOpHarness :: HarnessHandle
 noOpHarness = mkNoOpHarnessHandle
 
--- | Write a provider source session on disk: @session.json@, a
--- @transcript.jsonl@ seeded with the given entries (in order), and an
--- optional @custom-prompt.md@. Used by the 'resolveBranchSeed' tests.
+-- | Write a provider source session on disk: @session.json@ and a
+-- @transcript.jsonl@ seeded with the given entries (in order). Used by the
+-- 'resolveBranchSeed' tests. The fork no longer copies @custom-prompt.md@
+-- (the frozen prompt rides in the transcript — see §9), so this helper does
+-- not write one.
 writeSourceSession
   :: FilePath        -- ^ base sessions dir
   -> Text            -- ^ source session id
   -> Maybe Text      -- ^ optional agent name
-  -> Maybe Text      -- ^ optional custom-prompt.md contents
   -> [TranscriptEntry]
   -> IO ()
-writeSourceSession base sid mAgentText mPrompt entries = do
+writeSourceSession base sid mAgentText entries = do
   let mAgent = mAgentText >>= \t -> case mkAgentName t of
         Right a -> Just a
         Left _  -> Nothing
@@ -863,7 +845,6 @@ writeSourceSession base sid mAgentText mPrompt entries = do
   mapM_ (_th_record (_sh_transcript sh)) entries
   _th_close (_sh_transcript sh)
   _sh_save sh
-  maybe (pure ()) (TIO.writeFile (_sh_dir sh </> "custom-prompt.md")) mPrompt
 
 -- | Write a harness-backed source session on disk (used to verify
 -- 'resolveBranchSeed' rejects non-provider sources).

@@ -208,29 +208,36 @@ spec = do
           :: IO (Either String SessionMeta)
         _sm_agent meta `shouldBe` Nothing
 
-    -- D6: branch of a source WITH custom-prompt.md copies it.
-    it "copies custom-prompt.md from the source (D6)" $ do
-      withSystemTempDirectory "pureclaw-branch-d6" $ \tmpDir -> do
-        writeBranchSource tmpDir "src-d6" Nothing (Just "you are a branch")
+    -- R3: a fork of a source that HAS a custom-prompt.md must NOT copy it
+    -- (the frozen prompt rides in the transcript, §9.4), while still
+    -- inheriting the source's agent identity (_sm_agent).
+    it "does not copy custom-prompt.md and keeps the source agent (R3)" $ do
+      withSystemTempDirectory "pureclaw-branch-r3" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-r3" (Just "helper") (Just "you are a branch")
           [ branchReqEntry "e1" "q1" ]
         env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
         (st, respBody) <- postJSON env ["api", "tabs", "new"]
-          (branchBody "src-d6" "e1")
+          (branchBody "src-r3" "e1")
         st `shouldBe` HTTP.status200
         newSid <- decodeSessionId respBody
+        -- No custom-prompt.md is written into the fork.
         let promptPath = tmpDir </> T.unpack newSid </> "custom-prompt.md"
-        doesFileExist promptPath `shouldReturn` True
-        contents <- TIO.readFile promptPath
-        contents `shouldBe` "you are a branch"
+        doesFileExist promptPath `shouldReturn` False
+        -- The fork still inherits the source's agent.
+        Right meta <- Aeson.eitherDecodeFileStrict'
+          (tmpDir </> T.unpack newSid </> "session.json")
+          :: IO (Either String SessionMeta)
+        fmap unAgentName (_sm_agent meta) `shouldBe` Just "helper"
 
-    -- D6b: branch of a source WITHOUT custom-prompt.md creates none.
-    it "creates no custom-prompt.md when the source has none (D6b)" $ do
-      withSystemTempDirectory "pureclaw-branch-d6b" $ \tmpDir -> do
-        writeBranchSource tmpDir "src-d6b" Nothing Nothing
+    -- R3 (no-source-prompt regression): a fork of a source WITHOUT a
+    -- custom-prompt.md likewise creates none.
+    it "creates no custom-prompt.md when the source has none (R3)" $ do
+      withSystemTempDirectory "pureclaw-branch-r3b" $ \tmpDir -> do
+        writeBranchSource tmpDir "src-r3b" Nothing Nothing
           [ branchReqEntry "e1" "q1" ]
         env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
         (st, respBody) <- postJSON env ["api", "tabs", "new"]
-          (branchBody "src-d6b" "e1")
+          (branchBody "src-r3b" "e1")
         st `shouldBe` HTTP.status200
         newSid <- decodeSessionId respBody
         let promptPath = tmpDir </> T.unpack newSid </> "custom-prompt.md"
@@ -308,27 +315,28 @@ spec = do
         [s1, s2, s3] `shouldBe` [HTTP.status404, HTTP.status404, HTTP.status404]
         readIORef (_fe_tabCount env) `shouldReturn` 0
 
-    -- D6 integration (UPDATED for §9.1 frozen-prompt; WU7/R1 will subsume
-    -- this): a branch's first /send replays the copied prefix AND freezes
-    -- the system_prompt recorded in the copied prefix's last Request entry,
-    -- rather than recomputing it. (Pre-§9 this asserted the copied
-    -- custom-prompt.md; §9 supersedes the fork's custom-prompt copy — the
-    -- prompt now rides in the transcript.)
-    it "first send replays the prefix and freezes the prefix's recorded prompt (D6)" $ do
-      withSystemTempDirectory "pureclaw-branch-d6-send" $ \tmpDir -> do
+    -- R1 + R2: a fork's first /send replays the copied prefix and (R1)
+    -- freezes the system_prompt recorded in the copied prefix's last Request
+    -- entry rather than recomputing it, and (R2) uses the prefix's last
+    -- _te_model as its first model (WU5's transcript-_te_model fallback),
+    -- with no model in the /send body. The global prompt and a distinct
+    -- global model are both set and must be ignored.
+    it "first send replays the prefix, freezes the prompt, and uses the prefix model (R1, R2)" $ do
+      withSystemTempDirectory "pureclaw-branch-r1r2-send" $ \tmpDir -> do
         writeBranchSource tmpDir "src-send" Nothing Nothing
-          [ branchReqEntryWithPrompt "e1" "q1" (Just "frozen prefix prompt")
+          [ (branchReqEntryWithPrompt "e1" "q1" (Just "frozen prefix prompt"))
+              { _te_model = Just "prefix-model" }
           , branchRespEntry "e2" "a1"
           ]
         fakeProv <- newFakeProvider
         queueResponse fakeProv CompletionResponse
           { _crsp_content = [TextBlock "ok"]
-          , _crsp_model   = ModelId "claude-sonnet-4-20250514"
+          , _crsp_model   = ModelId "prefix-model"
           , _crsp_usage   = Nothing
           }
         env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
         provRef  <- newIORef (Just (MkProvider fakeProv))
-        modelRef <- newIORef (Just (ModelId "claude-sonnet-4-20250514"))
+        modelRef <- newIORef (Just (ModelId "global-model-IGNORED"))
         let env = env0
               { _fe_provider = provRef
               , _fe_model = modelRef
@@ -344,7 +352,7 @@ spec = do
         recorded <- peekRecorded fakeProv
         case recorded of
           (creq:_) -> do
-            -- The frozen prompt comes from the copied transcript, not the
+            -- R1: the frozen prompt comes from the copied transcript, not the
             -- global fallback.
             _cr_systemPrompt creq `shouldBe` Just "frozen prefix prompt"
             -- The replayed prefix turns are present in the context.
@@ -354,13 +362,18 @@ spec = do
             (("q1" `T.isInfixOf` blob) && ("a1" `T.isInfixOf` blob))
               `shouldBe` True
           [] -> expectationFailure "expected a recorded CompletionRequest"
+        -- R2: the fork's first recorded _te_model is the prefix's last
+        -- Request _te_model, NOT the global IORef model.
+        entries <- readBranchTranscript tmpDir newSid
+        lastRequestModelCol entries `shouldBe` Just "prefix-model"
 
-    -- D6b integration (UPDATED for §9.1; WU7/R5 will subsume this): a branch
-    -- whose copied prefix's last Request recorded a null/absent system_prompt
-    -- freezes null — it does NOT recompute, so the global prompt is ignored.
-    it "first send freezes a null prefix prompt as null (D6b)" $ do
-      withSystemTempDirectory "pureclaw-branch-d6b-send" $ \tmpDir -> do
-        writeBranchSource tmpDir "src-send-b" Nothing Nothing
+    -- R1 (frozen-null): a fork whose copied prefix's last Request recorded a
+    -- null/absent system_prompt freezes null — it does NOT recompute from the
+    -- inherited _sm_agent or the global prompt.
+    it "first send freezes a null prefix prompt as null, not recomputed (R1)" $ do
+      withSystemTempDirectory "pureclaw-branch-r1null-send" $ \tmpDir -> do
+        -- Source HAS an agent; the frozen-null prompt must still win.
+        writeBranchSource tmpDir "src-send-b" (Just "helper") Nothing
           [ branchReqEntryWithPrompt "e1" "q1" Nothing ]
         fakeProv <- newFakeProvider
         queueResponse fakeProv CompletionResponse
@@ -387,6 +400,49 @@ spec = do
         case recorded of
           (creq:_) -> _cr_systemPrompt creq `shouldBe` Nothing
           []       -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- R5: a fork whose copied prefix has NO Request entry (only a Response)
+    -- has no frozen prompt and no transcript _te_model to inherit, so its
+    -- first /send falls back to the global model and recomputes the prompt
+    -- from the global default. (The inherited agent would render under the
+    -- fork's own _sm_bootstrapConsumed = True; here there is no agent, so the
+    -- global prompt is used.)
+    it "first send on a Request-less prefix falls back to global model + recomputed prompt (R5)" $ do
+      withSystemTempDirectory "pureclaw-branch-r5-send" $ \tmpDir -> do
+        -- Prefix is a single Response entry: no Request ⇒ no frozen prompt,
+        -- no transcript _te_model.
+        writeBranchSource tmpDir "src-send-r5" Nothing Nothing
+          [ branchRespEntry "e1" "a1" ]
+        fakeProv <- newFakeProvider
+        queueResponse fakeProv CompletionResponse
+          { _crsp_content = [TextBlock "ok"]
+          , _crsp_model   = ModelId "global-model"
+          , _crsp_usage   = Nothing
+          }
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "global-model"))
+        let env = env0
+              { _fe_provider = provRef
+              , _fe_model = modelRef
+              , _fe_systemPrompt = Just "GLOBAL DEFAULT PROMPT"
+              }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (branchBody "src-send-r5" "e1")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        (sendSt, _) <- postJSON env ["api", "sessions", newSid, "send"]
+          (Aeson.encode (object ["message" .= ("continue" :: T.Text)]))
+        sendSt `shouldBe` HTTP.status200
+        recorded <- peekRecorded fakeProv
+        case recorded of
+          (creq:_) ->
+            -- Recomputed from the global default (no frozen prompt to reuse).
+            _cr_systemPrompt creq `shouldBe` Just "GLOBAL DEFAULT PROMPT"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+        -- The first recorded _te_model is the global model fallback.
+        entries <- readBranchTranscript tmpDir newSid
+        lastRequestModelCol entries `shouldBe` Just "global-model"
 
     -- A present-but-malformed branch_from (missing required keys) fails to
     -- parse and returns 400 (also exercises the BranchSpec FromJSON failure

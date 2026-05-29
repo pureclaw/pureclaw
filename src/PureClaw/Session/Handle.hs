@@ -58,7 +58,6 @@ import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, secondsToDiffTime)
 import Data.Vector qualified as V
 import System.Directory
@@ -362,8 +361,6 @@ data BranchSeed = BranchSeed
   , _bseed_sourceMeta   :: SessionMeta
     -- ^ Source session metadata, so the branch can inherit
     -- @_sm_kind@ / @_sm_model@ / @_sm_agent@.
-  , _bseed_customPrompt :: Maybe Text
-    -- ^ Contents of the source's @custom-prompt.md@, if present.
   }
   deriving stock (Show, Eq)
 
@@ -384,8 +381,12 @@ isValidBranchSourceId sid
 -- Validates (in order): the source id is traversal-safe, the source
 -- @session.json@ exists and decodes, the source is provider-backed, and
 -- the requested entry id is present in the source @transcript.jsonl@. On
--- success returns the inclusive prefix @[0..boundary]@, the source meta,
--- and the source's @custom-prompt.md@ contents (if any).
+-- success returns the inclusive prefix @[0..boundary]@ and the source meta.
+--
+-- The frozen system prompt and last-used model ride in the copied
+-- transcript prefix (see @docs/session-branching.md@ §9), so the seed does
+-- not carry the source's @custom-prompt.md@; the fork inherits the agent
+-- identity from the source meta instead.
 --
 -- The prefix is read verbatim from the source transcript on disk — never
 -- from any caller-supplied payload — so a branch cannot inject history.
@@ -397,7 +398,6 @@ resolveBranchSeed baseDir bs
       let dir   = baseDir </> T.unpack sourceId
           metaP = dir </> "session.json"
           txP   = dir </> "transcript.jsonl"
-          promptP = dir </> "custom-prompt.md"
       exists <- doesFileExist metaP
       if not exists
         then pure (Left (BranchSourceMissing metaP))
@@ -411,12 +411,10 @@ resolveBranchSeed baseDir bs
                 entries <- readTranscriptEntries txP
                 case sliceInclusivePrefix (_bs_upToEntryId bs) entries of
                   Nothing -> pure (Left (BranchEntryNotFound (_bs_upToEntryId bs)))
-                  Just prefix -> do
-                    mPrompt <- readCustomPrompt promptP
+                  Just prefix ->
                     pure (Right BranchSeed
-                      { _bseed_prefix       = prefix
-                      , _bseed_sourceMeta   = meta
-                      , _bseed_customPrompt = mPrompt
+                      { _bseed_prefix     = prefix
+                      , _bseed_sourceMeta = meta
                       })
   where
     sourceId = _bs_sourceSessionId bs
@@ -451,14 +449,6 @@ sliceInclusivePrefix target = go []
     go acc (e:es)
       | _te_id e == target = Just (reverse (e : acc))
       | otherwise          = go (e : acc) es
-
--- | Read a @custom-prompt.md@ file if it exists, returning its contents.
-readCustomPrompt :: FilePath -> IO (Maybe Text)
-readCustomPrompt path = do
-  exists <- doesFileExist path
-  if not exists
-    then pure Nothing
-    else Just <$> TIO.readFile path
 
 -- ----------------------------------------------------------------------------
 -- Enumeration and lookup

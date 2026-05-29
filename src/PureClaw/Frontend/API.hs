@@ -876,15 +876,12 @@ createTab env tabKind mSeed respond = do
       sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
       _sh_save sh
       -- For a branch, seed the new transcript with a verbatim copy of the
-      -- source prefix (preserving _te_id and order) and copy the source
-      -- custom-prompt.md so the first completion replays the prefix and
-      -- uses the inherited prompt.
+      -- source prefix (preserving _te_id and order). The frozen system prompt
+      -- and last-used model ride in the copied transcript (see
+      -- docs/session-branching.md §9), so the fork does NOT copy the source's
+      -- custom-prompt.md; it inherits the agent identity via _sm_agent above.
       case mSeed of
-        Just seed -> do
-          mapM_ (_th_record (_sh_transcript sh)) (_bseed_prefix seed)
-          maybe (pure ())
-            (TIO.writeFile (_sh_dir sh </> "custom-prompt.md"))
-            (_bseed_customPrompt seed)
+        Just seed -> mapM_ (_th_record (_sh_transcript sh)) (_bseed_prefix seed)
         Nothing -> pure ()
       -- Publish the new-session signal to the live stream broker (D18). The
       -- sidebar uses this to render the session row without polling. The
