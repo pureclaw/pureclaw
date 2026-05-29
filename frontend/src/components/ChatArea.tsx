@@ -1229,13 +1229,14 @@ export function ChatArea({
                 <select
                   aria-label="session model"
                   title="Model for this session"
-                  className="rounded-lg px-2 py-3 text-xs"
+                  className="rounded-lg px-2 text-xs"
                   style={{
                     background: 'var(--bg-sunken)',
                     border: '1px solid var(--border)',
                     color: 'var(--text-primary)',
                     outline: 'none',
                     maxWidth: '180px',
+                    height: '44px',
                   }}
                   value={currentModel as string}
                   onChange={(e) => onModelChange!(e.target.value)}
