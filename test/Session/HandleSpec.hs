@@ -48,6 +48,7 @@ import PureClaw.Session.Handle
   , SessionHandle (..)
   , SetArchivedError (..)
   , SetDescriptionError (..)
+  , frozenSystemPrompt
   , listSessions
   , loadRecentMessages
   , markBootstrapConsumed
@@ -615,6 +616,71 @@ spec = do
           a `shouldBe` "this is a plain-text request, not JSON"
           b `shouldBe` "{\"not_a_known\":\"shape\"}"
         _ -> expectationFailure ("unexpected shape: " <> show ms)
+      _th_close th
+
+  describe "frozenSystemPrompt" $ do
+    -- A request entry whose payload is a CompletionRequest-shaped JSON
+    -- object carrying a top-level "system_prompt" of the given value.
+    let mkReqWithPrompt eid sp = mkTextEntry eid t0 Request
+          (TE.decodeUtf8 (BS.toStrict (Aeson.encode (Aeson.object
+            [ "messages" Aeson..= ([] :: [Aeson.Value])
+            , "system_prompt" Aeson..= sp ]))))
+
+    it "returns Nothing when there is no prior request entry (first turn)" $ withTmp $ \base -> do
+      let meta = mkMeta "fsp-empty" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_flush th
+      frozenSystemPrompt th `shouldReturn` Nothing
+      _th_close th
+
+    it "returns Nothing when only Response entries exist (no Request)" $ withTmp $ \base -> do
+      let meta = mkMeta "fsp-resp-only" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkTextEntry "r1" t0 Response "assistant reply")
+      _th_flush th
+      frozenSystemPrompt th `shouldReturn` Nothing
+      _th_close th
+
+    it "returns Just (Just p) for a prior request with a string system_prompt" $ withTmp $ \base -> do
+      let meta = mkMeta "fsp-str" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkReqWithPrompt "e1" (Just ("frozen prompt" :: Text)))
+      _th_flush th
+      frozenSystemPrompt th `shouldReturn` Just (Just "frozen prompt")
+      _th_close th
+
+    it "returns Just Nothing for a prior request with system_prompt null (F9)" $ withTmp $ \base -> do
+      let meta = mkMeta "fsp-null" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkReqWithPrompt "e1" (Nothing :: Maybe Text))
+      _th_flush th
+      frozenSystemPrompt th `shouldReturn` Just Nothing
+      _th_close th
+
+    it "returns Just Nothing for a prior request whose payload omits system_prompt" $ withTmp $ \base -> do
+      let meta = mkMeta "fsp-missing" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkTextEntry "e1" t0 Request
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+      _th_flush th
+      frozenSystemPrompt th `shouldReturn` Just Nothing
+      _th_close th
+
+    it "uses the LAST request entry, never a Response, ignoring earlier requests" $ withTmp $ \base -> do
+      let meta = mkMeta "fsp-last" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      let th = _sh_transcript sh
+      _th_record th (mkReqWithPrompt "e1" (Just ("old prompt" :: Text)))
+      _th_record th (mkTextEntry "e2" t0 Response "reply")
+      _th_record th (mkReqWithPrompt "e3" (Just ("newest prompt" :: Text)))
+      _th_record th (mkTextEntry "e4" t0 Response "reply2")
+      _th_flush th
+      frozenSystemPrompt th `shouldReturn` Just (Just "newest prompt")
       _th_close th
 
   describe "resolveResumedTarget" $ do

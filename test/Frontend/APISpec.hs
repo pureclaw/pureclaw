@@ -12,6 +12,7 @@ import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Network.HTTP.Types qualified as HTTP
@@ -54,7 +55,7 @@ import PureClaw.Tools.Registry
   , emptyRegistry
   , registerTool
   )
-import Test.Fake.Provider (newFakeProvider, peekRecorded, queueResponse, queueResponses)
+import Test.Fake.Provider (FakeProvider, newFakeProvider, peekRecorded, queueResponse, queueResponses)
 
 spec :: Spec
 spec = do
@@ -307,12 +308,16 @@ spec = do
         [s1, s2, s3] `shouldBe` [HTTP.status404, HTTP.status404, HTTP.status404]
         readIORef (_fe_tabCount env) `shouldReturn` 0
 
-    -- D6 integration: first /send on a branch replays the copied prefix
-    -- and uses the copied custom prompt.
-    it "first send replays the prefix and uses the copied custom prompt (D6)" $ do
+    -- D6 integration (UPDATED for §9.1 frozen-prompt; WU7/R1 will subsume
+    -- this): a branch's first /send replays the copied prefix AND freezes
+    -- the system_prompt recorded in the copied prefix's last Request entry,
+    -- rather than recomputing it. (Pre-§9 this asserted the copied
+    -- custom-prompt.md; §9 supersedes the fork's custom-prompt copy — the
+    -- prompt now rides in the transcript.)
+    it "first send replays the prefix and freezes the prefix's recorded prompt (D6)" $ do
       withSystemTempDirectory "pureclaw-branch-d6-send" $ \tmpDir -> do
-        writeBranchSource tmpDir "src-send" Nothing (Just "branch system prompt")
-          [ branchReqEntry "e1" "q1"
+        writeBranchSource tmpDir "src-send" Nothing Nothing
+          [ branchReqEntryWithPrompt "e1" "q1" (Just "frozen prefix prompt")
           , branchRespEntry "e2" "a1"
           ]
         fakeProv <- newFakeProvider
@@ -324,7 +329,11 @@ spec = do
         env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
         provRef  <- newIORef (Just (MkProvider fakeProv))
         modelRef <- newIORef (Just (ModelId "claude-sonnet-4-20250514"))
-        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        let env = env0
+              { _fe_provider = provRef
+              , _fe_model = modelRef
+              , _fe_systemPrompt = Just "GLOBAL (should be ignored)"
+              }
         (st, respBody) <- postJSON env ["api", "tabs", "new"]
           (branchBody "src-send" "e2")
         st `shouldBe` HTTP.status200
@@ -335,8 +344,9 @@ spec = do
         recorded <- peekRecorded fakeProv
         case recorded of
           (creq:_) -> do
-            -- The system prompt is the copied custom prompt.
-            _cr_systemPrompt creq `shouldBe` Just "branch system prompt"
+            -- The frozen prompt comes from the copied transcript, not the
+            -- global fallback.
+            _cr_systemPrompt creq `shouldBe` Just "frozen prefix prompt"
             -- The replayed prefix turns are present in the context.
             let blob = T.intercalate "\n"
                   [ t | Message _ blocks <- _cr_messages creq
@@ -345,12 +355,13 @@ spec = do
               `shouldBe` True
           [] -> expectationFailure "expected a recorded CompletionRequest"
 
-    -- D6b integration: branch of a source with no custom-prompt.md falls
-    -- back to the global system prompt on first send.
-    it "first send falls back to global prompt when source has no custom prompt (D6b)" $ do
+    -- D6b integration (UPDATED for §9.1; WU7/R5 will subsume this): a branch
+    -- whose copied prefix's last Request recorded a null/absent system_prompt
+    -- freezes null — it does NOT recompute, so the global prompt is ignored.
+    it "first send freezes a null prefix prompt as null (D6b)" $ do
       withSystemTempDirectory "pureclaw-branch-d6b-send" $ \tmpDir -> do
         writeBranchSource tmpDir "src-send-b" Nothing Nothing
-          [ branchReqEntry "e1" "q1" ]
+          [ branchReqEntryWithPrompt "e1" "q1" Nothing ]
         fakeProv <- newFakeProvider
         queueResponse fakeProv CompletionResponse
           { _crsp_content = [TextBlock "ok"]
@@ -372,11 +383,9 @@ spec = do
         (sendSt, _) <- postJSON env ["api", "sessions", newSid, "send"]
           (Aeson.encode (object ["message" .= ("continue" :: T.Text)]))
         sendSt `shouldBe` HTTP.status200
-        let promptPath = tmpDir </> T.unpack newSid </> "custom-prompt.md"
-        doesFileExist promptPath `shouldReturn` False
         recorded <- peekRecorded fakeProv
         case recorded of
-          (creq:_) -> _cr_systemPrompt creq `shouldBe` Just "GLOBAL PROMPT"
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Nothing
           []       -> expectationFailure "expected a recorded CompletionRequest"
 
     -- A present-but-malformed branch_from (missing required keys) fails to
@@ -813,6 +822,189 @@ spec = do
         length recorded `shouldBe` 2
 
   -- -----------------------------------------------------------------------
+  -- WU4: frozen system prompt + per-session agent rendering (§9.1)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/sessions/{sid}/send (frozen system prompt — WU4)" $ do
+    -- F1: first-turn agent session renders & freezes the agent's prompt.
+    it "renders the per-session agent's prompt on the first turn (F1)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f1" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "you are myagent" Nothing
+        writeBranchSource tmpDir "sess-f1" (Just "myagent") Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnce env "sess-f1" "hello"
+        case prov of
+          (creq:_) -> case _cr_systemPrompt creq of
+            Just p -> do
+              ("--- SOUL ---" `T.isInfixOf` p) `shouldBe` True
+              ("you are myagent" `T.isInfixOf` p) `shouldBe` True
+            Nothing -> expectationFailure "expected an agent-rendered system prompt"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- F2: turn ≥2 reuses the frozen prompt; an agent-def edit between turns
+    -- has NO effect (we point _fe_agentsDir at a different rendering for the
+    -- second send and assert the prompt did not change).
+    it "reuses the frozen prompt on turn 2; agent-def edits have no effect (F2)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f2" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "ORIGINAL SOUL" Nothing
+        writeBranchSource tmpDir "sess-f2" (Just "myagent") Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        _ <- sendOnce env "sess-f2" "turn one"
+        -- Mutate the agent definition between turns.
+        writeAgentDir agentsDir "myagent" "MUTATED SOUL" Nothing
+        prov <- sendOnce env "sess-f2" "turn two"
+        -- Two requests recorded; both must carry the ORIGINAL frozen prompt.
+        length prov `shouldBe` 2
+        let prompts = map _cr_systemPrompt prov
+        all (maybe False (T.isInfixOf "ORIGINAL SOUL")) prompts `shouldBe` True
+        any (maybe False (T.isInfixOf "MUTATED SOUL")) prompts `shouldBe` False
+
+    -- F3: custom-prompt.md overrides the agent on turn 1.
+    it "custom-prompt.md overrides the agent on the first turn (F3)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f3" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "AGENT SOUL" Nothing
+        writeBranchSource tmpDir "sess-f3" (Just "myagent") (Just "CUSTOM PROMPT WINS") []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnce env "sess-f3" "hello"
+        case prov of
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Just "CUSTOM PROMPT WINS"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- F4: no agent + no custom prompt ⇒ global.
+    it "falls back to the global prompt with no agent and no custom prompt (F4)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f4" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-f4" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir (Just "GLOBAL PROMPT")
+        prov <- sendOnce env "sess-f4" "hello"
+        case prov of
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Just "GLOBAL PROMPT"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- F5: the recorded system_prompt is what later turns replay (the frozen
+    -- value comes from the transcript, identical across turns).
+    it "later turns replay the recorded system_prompt (F5)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f5" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "FROZEN BODY" Nothing
+        writeBranchSource tmpDir "sess-f5" (Just "myagent") Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        _ <- sendOnce env "sess-f5" "turn one"
+        prov <- sendOnce env "sess-f5" "turn two"
+        -- The recorded transcript's last request system_prompt equals the
+        -- second send's system prompt.
+        entries <- readBranchTranscript tmpDir "sess-f5"
+        let lastReqSp = lastRequestSystemPrompt entries
+        case prov of
+          [_, second] -> _cr_systemPrompt second `shouldBe` lastReqSp
+          _ -> expectationFailure "expected two recorded requests"
+
+    -- F6: bootstrap inclusion follows _sm_bootstrapConsumed (both states).
+    it "includes BOOTSTRAP when _sm_bootstrapConsumed is False (F6a)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f6a" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "SOUL TEXT" (Just "BOOTSTRAP TEXT")
+        writeSessionBootstrap tmpDir "sess-f6a" (Just "myagent") False
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnce env "sess-f6a" "hello"
+        case prov of
+          (creq:_) -> case _cr_systemPrompt creq of
+            Just p -> ("BOOTSTRAP TEXT" `T.isInfixOf` p) `shouldBe` True
+            Nothing -> expectationFailure "expected an agent-rendered prompt"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    it "omits BOOTSTRAP when _sm_bootstrapConsumed is True (F6b)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f6b" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "SOUL TEXT" (Just "BOOTSTRAP TEXT")
+        writeSessionBootstrap tmpDir "sess-f6b" (Just "myagent") True
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnce env "sess-f6b" "hello"
+        case prov of
+          (creq:_) -> case _cr_systemPrompt creq of
+            Just p -> do
+              ("BOOTSTRAP TEXT" `T.isInfixOf` p) `shouldBe` False
+              ("SOUL TEXT" `T.isInfixOf` p) `shouldBe` True
+            Nothing -> expectationFailure "expected an agent-rendered prompt"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- F7: _sm_agent names a missing/undiscoverable agent ⇒ global, logged,
+    -- NOT a 500.
+    it "falls back to global (not 500) when the agent is missing (F7)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f7" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        -- agentsDir has no "ghostagent" directory.
+        writeBranchSource tmpDir "sess-f7" (Just "ghostagent") Nothing []
+        env <- mkSendEnv tmpDir agentsDir (Just "GLOBAL FALLBACK")
+        (st, prov) <- sendOnceStatus env "sess-f7" "hello"
+        st `shouldBe` HTTP.status200
+        case prov of
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Just "GLOBAL FALLBACK"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- F8: agent renders to empty/whitespace ⇒ treated as no-agent ⇒ global.
+    it "treats an empty-rendering agent as no agent ⇒ global (F8)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f8" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        -- Agent dir exists but has no section files ⇒ renders to "".
+        writeAgentDir agentsDir "emptyagent" "" Nothing
+        writeBranchSource tmpDir "sess-f8" (Just "emptyagent") Nothing []
+        env <- mkSendEnv tmpDir agentsDir (Just "GLOBAL FOR EMPTY")
+        prov <- sendOnce env "sess-f8" "hello"
+        case prov of
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Just "GLOBAL FOR EMPTY"
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+    -- F9 (integration): a frozen-null prompt stays null on turn ≥2 and is not
+    -- recomputed from the agent.
+    it "keeps a frozen-null prompt null on turn 2 (F9)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f9" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeAgentDir agentsDir "myagent" "WOULD RENDER" Nothing
+        -- No agent on the session, no custom prompt, no global ⇒ turn 1 freezes null.
+        writeBranchSource tmpDir "sess-f9" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        _ <- sendOnce env "sess-f9" "turn one"
+        -- Now attach an agent to the session meta to prove turn 2 does NOT recompute.
+        setSessionAgent tmpDir "sess-f9" (Just "myagent")
+        prov <- sendOnce env "sess-f9" "turn two"
+        case prov of
+          [_, second] -> _cr_systemPrompt second `shouldBe` Nothing
+          _ -> expectationFailure "expected two recorded requests"
+
+    -- F11: turn ≥2 does NOT re-read custom-prompt.md (editing it mid-session
+    -- has no effect).
+    it "does not re-read custom-prompt.md on turn 2 (F11)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f11" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-f11" Nothing (Just "ORIGINAL CUSTOM") []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        _ <- sendOnce env "sess-f11" "turn one"
+        -- Edit custom-prompt.md mid-session.
+        TIO.writeFile (tmpDir </> "sess-f11" </> "custom-prompt.md") "EDITED CUSTOM"
+        prov <- sendOnce env "sess-f11" "turn two"
+        case prov of
+          [_, second] -> _cr_systemPrompt second `shouldBe` Just "ORIGINAL CUSTOM"
+          _ -> expectationFailure "expected two recorded requests"
+
+    -- F12: the harness send path and behavior are unaffected (regression).
+    -- The provider doCompletion change does not touch harness sends; a
+    -- provider send with no agent/custom/global still freezes correctly,
+    -- proving the change is confined to the provider path.
+    it "leaves a plain provider send (no agent) producing a null frozen prompt (F12)" $ do
+      withSystemTempDirectory "pureclaw-wu4-f12" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeBranchSource tmpDir "sess-f12" Nothing Nothing []
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        prov <- sendOnce env "sess-f12" "hello"
+        case prov of
+          (creq:_) -> _cr_systemPrompt creq `shouldBe` Nothing
+          [] -> expectationFailure "expected a recorded CompletionRequest"
+
+  -- -----------------------------------------------------------------------
   -- WU-14: POST /api/tabs/{index}/close
   -- -----------------------------------------------------------------------
 
@@ -999,6 +1191,15 @@ branchReqEntry eid msg = TranscriptEntry
   }
   where epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
 
+-- | A CompletionRequest-shaped provider Request transcript entry carrying a
+-- top-level @system_prompt@ (used to exercise the WU4 frozen-prompt replay
+-- on a branched prefix).
+branchReqEntryWithPrompt :: Text -> Text -> Maybe Text -> TranscriptEntry
+branchReqEntryWithPrompt eid msg sp = (branchReqEntry eid msg)
+  { _te_payload = encodePayload (LBS.toStrict (Aeson.encode (object
+      [ "messages" .= [object ["role" .= ("user" :: Text), "content" .= msg]]
+      , "system_prompt" .= sp ]))) }
+
 -- | An Anthropic-shaped provider Response transcript entry whose extracted
 -- assistant text is @msg@.
 branchRespEntry :: Text -> Text -> TranscriptEntry
@@ -1066,6 +1267,117 @@ writeHarnessBranchSource baseDir sid = do
       epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
   LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- ---------------------------------------------------------------------------
+-- WU4 frozen-prompt test helpers
+-- ---------------------------------------------------------------------------
+
+-- | Write a minimal agent directory under @agentsDir/name@ with a SOUL.md
+-- (the @soul@ body; empty string ⇒ no SOUL.md so the agent renders empty)
+-- and an optional BOOTSTRAP.md.
+writeAgentDir :: FilePath -> Text -> Text -> Maybe Text -> IO ()
+writeAgentDir agentsDir name soul mBootstrap = do
+  let dir = agentsDir </> T.unpack name
+  createDirectoryIfMissing True dir
+  if T.null soul
+    then pure ()
+    else TIO.writeFile (dir </> "SOUL.md") soul
+  maybe (pure ()) (TIO.writeFile (dir </> "BOOTSTRAP.md")) mBootstrap
+
+-- | A send-ready environment: the 'FrontendEnv' plus the fake provider it
+-- is wired to (so tests can inspect recorded requests).
+data SendEnv = SendEnv
+  { _se_env  :: FrontendEnv
+  , _se_fake :: FakeProvider
+  }
+
+-- | Build a send-ready environment: a fake provider with several queued
+-- responses, a real sessions dir, an agents dir, and an optional global
+-- system prompt.
+mkSendEnv :: FilePath -> FilePath -> Maybe Text -> IO SendEnv
+mkSendEnv tmpDir agentsDir mGlobal = do
+  fakeProv <- newFakeProvider
+  -- Queue plenty of responses so multiple /send calls each get one.
+  queueResponses fakeProv (replicate 8 CompletionResponse
+    { _crsp_content = [TextBlock "ok"]
+    , _crsp_model   = ModelId "claude-sonnet-4-20250514"
+    , _crsp_usage   = Nothing
+    })
+  env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+  provRef  <- newIORef (Just (MkProvider fakeProv))
+  modelRef <- newIORef (Just (ModelId "claude-sonnet-4-20250514"))
+  let env = env0
+        { _fe_provider     = provRef
+        , _fe_model        = modelRef
+        , _fe_agentsDir    = agentsDir
+        , _fe_systemPrompt = mGlobal
+        }
+  pure (SendEnv env fakeProv)
+
+-- | POST one /send and return the recorded CompletionRequests so far
+-- (oldest first), asserting a 200.
+sendOnce :: SendEnv -> Text -> Text -> IO [CompletionRequest]
+sendOnce se sid msg = do
+  (st, prov) <- sendOnceStatus se sid msg
+  st `shouldBe` HTTP.status200
+  pure prov
+
+-- | Like 'sendOnce' but also returns the HTTP status (for the F7 not-500
+-- assertion).
+sendOnceStatus :: SendEnv -> Text -> Text -> IO (HTTP.Status, [CompletionRequest])
+sendOnceStatus se sid msg = do
+  (st, _) <- postJSON (_se_env se) ["api", "sessions", sid, "send"]
+    (Aeson.encode (object ["message" .= msg]))
+  prov <- peekRecorded (_se_fake se)
+  pure (st, prov)
+
+-- | Write a provider session whose @_sm_bootstrapConsumed@ is the given
+-- value (with an optional agent, no transcript entries, no custom prompt).
+writeSessionBootstrap :: FilePath -> Text -> Maybe Text -> Bool -> IO ()
+writeSessionBootstrap baseDir sid mAgentText boot = do
+  let dir = baseDir </> T.unpack sid
+  createDirectoryIfMissing True dir
+  let mAgent = mAgentText >>= \t -> either (const Nothing) Just (mkAgentName t)
+      meta = SessionMeta
+        { _sm_id                = SessionId sid
+        , _sm_agent             = mAgent
+        , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "claude-sonnet-4-20250514") (ModelId "claude-sonnet-4-20250514") mAgent)
+        , _sm_model             = "claude-sonnet-4-20250514"
+        , _sm_channel           = "web"
+        , _sm_createdAt         = epochT
+        , _sm_lastActive        = epochT
+        , _sm_bootstrapConsumed = boot
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        }
+      epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+  LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
+  LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Rewrite a session's @session.json@ to set or clear its agent (used by
+-- F9 to prove turn ≥2 does not recompute from a freshly-attached agent).
+setSessionAgent :: FilePath -> Text -> Maybe Text -> IO ()
+setSessionAgent baseDir sid mAgentText = do
+  let metaPath = baseDir </> T.unpack sid </> "session.json"
+  raw <- LBS.readFile metaPath
+  case Aeson.eitherDecode' raw of
+    Right (meta :: SessionMeta) -> do
+      let mAgent = mAgentText >>= \t -> either (const Nothing) Just (mkAgentName t)
+      LBS.writeFile metaPath (Aeson.encode meta { _sm_agent = mAgent })
+    Left e -> expectationFailure ("setSessionAgent: decode failed: " <> e)
+
+-- | The top-level @system_prompt@ of the last Request entry, as a
+-- @Maybe Text@ (mirrors what 'frozenSystemPrompt' surfaces).
+lastRequestSystemPrompt :: [TranscriptEntry] -> Maybe Text
+lastRequestSystemPrompt entries =
+  case reverse [ e | e <- entries, _te_direction e == Request ] of
+    []      -> Nothing
+    (e : _) -> case Aeson.decode (LBS.fromStrict (TE.encodeUtf8 (_te_payload e))) of
+      Just (Aeson.Object o) -> case KM.lookup "system_prompt" o of
+        Just (Aeson.String t) -> Just t
+        _                     -> Nothing
+      _ -> Nothing
 
 -- | Read and decode a branched session's transcript.jsonl into entries.
 readBranchTranscript :: FilePath -> Text -> IO [TranscriptEntry]

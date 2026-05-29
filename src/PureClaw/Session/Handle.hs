@@ -31,6 +31,8 @@ module PureClaw.Session.Handle
   , SetDescriptionError (..)
     -- * Resume context reload
   , loadRecentMessages
+    -- * Frozen system prompt (read from transcript)
+  , frozenSystemPrompt
   ) where
 
 import Control.Exception (IOException, try)
@@ -762,6 +764,54 @@ loadRecentMessages th maxCount maxTokens = do
             Request  -> extractNewMessageText  (_te_payload e)
             Response -> extractAssistantText   (_te_payload e)
       in Message role [TextBlock txt]
+
+-- | Read the session's frozen system prompt from the transcript.
+--
+-- The system prompt is computed once on the first turn and then \"rides in
+-- the transcript\": every recorded provider 'Request' entry carries the
+-- prompt actually used at completion time under the top-level
+-- @system_prompt@ field of its 'CompletionRequest' payload
+-- (see 'PureClaw.Providers.Class' ToJSON). This helper recovers it so
+-- @doCompletion@ can reuse the frozen value on turns ≥ 2 instead of
+-- recomputing.
+--
+-- The result distinguishes three cases:
+--
+--   * @Nothing@        — there is NO prior 'Request' entry, i.e. this is the
+--                        first turn. The caller should compute and freeze a
+--                        prompt now.
+--   * @Just (Just p)@  — a prior request recorded a non-null
+--                        @system_prompt@; reuse @p@ verbatim.
+--   * @Just Nothing@   — a prior request recorded @system_prompt: null@ (or
+--                        omitted the field entirely); the frozen prompt is
+--                        null and MUST stay null (do not recompute).
+--
+-- Only 'Request'-direction entries are considered (never a 'Response'), and
+-- the LAST such entry wins. This is distinct from 'extractNewMessageText',
+-- which deliberately discards @system_prompt@.
+frozenSystemPrompt :: TranscriptHandle -> IO (Maybe (Maybe Text))
+frozenSystemPrompt th = do
+  entries <- _th_query th TranscriptFilter
+    { _tf_harness   = Nothing
+    , _tf_model     = Nothing
+    , _tf_direction = Just Request
+    , _tf_timeRange = Nothing
+    , _tf_limit     = Nothing
+    }
+  pure $ case reverse entries of
+    []      -> Nothing
+    (e : _) -> Just (extractSystemPrompt (_te_payload e))
+
+-- | Parse the top-level @system_prompt@ field from a recorded provider
+-- 'Request' payload. A present JSON string yields @Just t@; an explicit
+-- @null@, a missing key, or a non-string\/non-decodable payload all yield
+-- @Nothing@ (frozen-null semantics — see 'frozenSystemPrompt').
+extractSystemPrompt :: Text -> Maybe Text
+extractSystemPrompt raw = do
+  Aeson.Object o <- decodeText raw
+  case KM.lookup "system_prompt" o of
+    Just (Aeson.String t) -> Just t
+    _                     -> Nothing
 
 -- | Extract the most recent message's text from a recorded provider request
 -- JSON payload. Handles common provider shapes:

@@ -50,7 +50,14 @@ import Network.Wai
 import System.Directory (doesFileExist, getFileSize, renameFile)
 import System.FilePath ((</>), takeDirectory)
 
-import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
+import PureClaw.Agent.AgentDef
+  ( AgentDef (..)
+  , composeAgentPromptWithBootstrap
+  , discoverAgents
+  , loadAgent
+  , mkAgentName
+  , unAgentName
+  )
 import PureClaw.Agent.Context
 import PureClaw.Core.Types (ModelId (..), SessionId (..), ToolCallId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
@@ -73,6 +80,7 @@ import PureClaw.Session.Handle
   , SessionHandle (..)
   , SetArchivedError (..)
   , SetDescriptionError (..)
+  , frozenSystemPrompt
   , listSessions
   , loadRecentMessages
   , mkSessionHandle
@@ -1024,13 +1032,19 @@ doCompletion env sid provider model userText transcriptPath = do
           (_fe_broker env) sid (_fe_logger env) transcriptPath
   -- Load recent messages for context
   history <- loadRecentMessages th 50 100000
-  -- Check for per-session custom prompt, falling back to global
+  -- The system prompt is FROZEN per session: computed once on the first
+  -- turn and thereafter replayed from the transcript unchanged (§9.1).
+  -- 'frozenSystemPrompt' reads the last recorded Request's system_prompt:
+  --   * Just frozen ⇒ a prior turn exists ⇒ reuse it verbatim (including a
+  --     frozen-null, which must stay null — do NOT recompute, do NOT
+  --     re-read custom-prompt.md).
+  --   * Nothing      ⇒ first turn ⇒ compute with precedence
+  --                    custom-prompt.md → per-session agent → global.
   let sessionDir = takeDirectory transcriptPath
-      customPromptPath = sessionDir </> "custom-prompt.md"
-  customExists <- doesFileExist customPromptPath
-  systemPrompt <- if customExists
-    then Just <$> TIO.readFile customPromptPath
-    else pure (_fe_systemPrompt env)
+  frozen <- frozenSystemPrompt th
+  systemPrompt <- case frozen of
+    Just p  -> pure p
+    Nothing -> computeFirstTurnPrompt env sessionDir
   -- Build context with system prompt and history
   let ctx0 = foldl (flip addMessage) (emptyContext systemPrompt) history
       userMsg = textMessage User userText
@@ -1058,6 +1072,81 @@ doCompletion env sid provider model userText transcriptPath = do
   _th_flush th
   _th_close th
   pure result
+
+-- | Section-character limit used when rendering a per-session agent's
+-- system prompt, matching the limit used elsewhere for web/session agent
+-- rendering (e.g. the @/agent@ slash command).
+agentPromptSectionLimit :: Int
+agentPromptSectionLimit = 8000
+
+-- | Compute the system prompt for the FIRST turn of a session (called only
+-- when 'frozenSystemPrompt' returns 'Nothing'). Precedence (§9.1):
+--
+--   1. @custom-prompt.md@ in the session dir (user override), if present.
+--   2. The per-session agent (from @session.json@'s @_sm_agent@), rendered
+--      with 'composeAgentPromptWithBootstrap' honoring the session's
+--      @_sm_bootstrapConsumed@ state. A missing/undiscoverable agent (F7)
+--      or an empty/whitespace render (F8) falls through to the global
+--      prompt — never a 500.
+--   3. The global @_fe_systemPrompt@.
+--
+-- The computed value is frozen into the transcript automatically because
+-- 'doCompletion' records the request that carries it.
+computeFirstTurnPrompt :: FrontendEnv -> FilePath -> IO (Maybe Text)
+computeFirstTurnPrompt env sessionDir = do
+  let customPromptPath = sessionDir </> "custom-prompt.md"
+  customExists <- doesFileExist customPromptPath
+  if customExists
+    then Just <$> TIO.readFile customPromptPath
+    else do
+      mAgentPrompt <- renderSessionAgentPrompt env sessionDir
+      case mAgentPrompt of
+        Just p  -> pure (Just p)
+        Nothing -> pure (_fe_systemPrompt env)
+
+-- | Render the per-session agent's system prompt, or 'Nothing' if there is
+-- no usable agent. Reads the session's @_sm_agent@ inline from
+-- @session.json@, looks the agent up under @_fe_agentsDir@, and renders it
+-- honoring @_sm_bootstrapConsumed@. Returns 'Nothing' (so the caller falls
+-- back to the global prompt) when:
+--
+--   * @session.json@ is missing or fails to decode;
+--   * @_sm_agent@ is 'Nothing';
+--   * the named agent is not found under @_fe_agentsDir@ (F7); or
+--   * the rendered prompt is empty/whitespace (F8).
+renderSessionAgentPrompt :: FrontendEnv -> FilePath -> IO (Maybe Text)
+renderSessionAgentPrompt env sessionDir = do
+  let metaPath = sessionDir </> "session.json"
+  readResult <- try @IOException (LBS.readFile metaPath)
+  let raw = either (Left . show) Right readResult
+  case raw >>= Aeson.eitherDecode' of
+    Left err -> do
+      _lh_logWarn (_fe_logger env) $
+        "Per-session agent: could not read session.json (" <>
+        T.pack metaPath <> "): " <> T.pack err <> " — falling back to global prompt"
+      pure Nothing
+    Right meta -> case _sm_agent (meta :: SessionMeta) of
+      Nothing   -> pure Nothing
+      Just name -> do
+        mDef <- loadAgent (_fe_agentsDir env) name
+        case mDef of
+          Nothing -> do
+            _lh_logWarn (_fe_logger env) $
+              "Per-session agent \"" <> unAgentName name <>
+              "\" not found under " <> T.pack (_fe_agentsDir env) <>
+              " — falling back to global prompt"
+            pure Nothing
+          Just def -> do
+            rendered <- composeAgentPromptWithBootstrap
+                          (_fe_logger env) def agentPromptSectionLimit
+                          (_sm_bootstrapConsumed meta)
+            if T.null (T.strip rendered)
+              then do
+                _lh_logWarn (_fe_logger env) $
+                  "Per-session agent \"" <> unAgentName name <>
+                  "\" rendered an empty prompt — falling back to global prompt"
+                pure Nothing
+              else pure (Just rendered)
 
 -- | Loop: call the provider, execute any tool_use blocks, append the
 -- tool_result message to context, and recurse. Terminates when the
