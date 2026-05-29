@@ -240,6 +240,31 @@ describe('App branch draft flow', () => {
     expect(utils.getByText('second message')).toBeTruthy()
   })
 
+  it('a branch draft hides the new-session composer form (inherits source settings)', async () => {
+    mockFetchOk('new-1')
+    const utils = renderOnProviderSession()
+    fireEvent.click(utils.getAllByLabelText(BRANCH_LABEL)[0]!)
+    await waitFor(() => {
+      expect(utils.getByPlaceholderText('Type your first message…')).toBeTruthy()
+    })
+    // The NewTabComposer "Tab kind" radiogroup must NOT render for a branch
+    // draft — it inherits the forked session's settings. The model dropdown
+    // (input-row) is still available.
+    expect(utils.queryByLabelText('Tab kind')).toBeNull()
+    expect(utils.queryByLabelText('session model')).toBeTruthy()
+  })
+
+  it('a normal New-tab compose DOES show the composer form', async () => {
+    mockFetchOk('new-1')
+    // No branch: render at root (compose mode) with no recent sessions.
+    window.history.replaceState(null, '', '/')
+    const utils = render(<App />)
+    await waitFor(() => {
+      expect(utils.getByPlaceholderText('Type your first message…')).toBeTruthy()
+    })
+    expect(utils.queryByLabelText('Tab kind')).toBeTruthy()
+  })
+
   it('D12a: prefix rows in branch-draft mode render NO branch button (non-interactive)', async () => {
     mockFetchOk('new-1')
     const utils = renderOnProviderSession()

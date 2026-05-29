@@ -921,9 +921,14 @@ export default function App() {
           customPromptFile={customPromptFile}
           onCustomPromptFile={setCustomPromptFile}
           composerControls={composing ? {
-            panel: <NewTabComposer spec={composerSpec} />,
+            // A branch draft inherits the source session's settings, so it
+            // suppresses the new-session form entirely and is gated only by
+            // the message input — the backend forces a provider kind and
+            // inherits kind/model/agent from the source. A normal "New tab"
+            // still shows the full composer.
+            panel: branchDraft ? null : <NewTabComposer spec={composerSpec} />,
             kind: composerSpec.kind,
-            valid: composerSpec.validationError === null,
+            valid: branchDraft ? true : composerSpec.validationError === null,
             onSubmit: handleComposerSend,
           } : null}
           newTabFocusTick={newTabFocusTick}
