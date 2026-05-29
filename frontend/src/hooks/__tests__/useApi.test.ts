@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { closeTab, resumeArchivedSession } from '../useApi'
+import { act, renderHook } from '@testing-library/react'
+import { closeTab, resumeArchivedSession, useSendMessage } from '../useApi'
 
 describe('closeTab', () => {
   const originalFetch = globalThis.fetch
@@ -87,5 +88,52 @@ describe('resumeArchivedSession', () => {
 
     const result = await resumeArchivedSession('sess-xyz')
     expect(result).toBeNull()
+  })
+})
+
+describe('useSendMessage model body (U5)', () => {
+  const originalFetch = globalThis.fetch
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) })
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('includes the chosen model in the /send body (U5)', async () => {
+    const onComplete = vi.fn()
+    const { result } = renderHook(() => useSendMessage('sess-1', onComplete))
+    await act(async () => {
+      await result.current.send('hello', 'opus-4')
+    })
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(call[0]).toBe('/api/sessions/sess-1/send')
+    const body = JSON.parse((call[1] as RequestInit).body as string)
+    expect(body).toEqual({ message: 'hello', model: 'opus-4' })
+  })
+
+  it('omits the model field when the chosen model is null/empty (U5, R2 fallback)', async () => {
+    const onComplete = vi.fn()
+    const { result } = renderHook(() => useSendMessage('sess-1', onComplete))
+    await act(async () => {
+      await result.current.send('hello', null)
+    })
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
+    const body = JSON.parse((call[1] as RequestInit).body as string)
+    expect(body).toEqual({ message: 'hello' })
+    expect('model' in body).toBe(false)
+  })
+
+  it('omits the model field when no model argument is given (back-compat)', async () => {
+    const onComplete = vi.fn()
+    const { result } = renderHook(() => useSendMessage('sess-1', onComplete))
+    await act(async () => {
+      await result.current.send('hello')
+    })
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
+    const body = JSON.parse((call[1] as RequestInit).body as string)
+    expect(body).toEqual({ message: 'hello' })
   })
 })

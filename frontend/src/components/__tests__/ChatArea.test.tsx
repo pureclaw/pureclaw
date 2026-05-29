@@ -1,7 +1,8 @@
 import { render, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ChatArea } from '../ChatArea'
-import type { Agent, Message } from '../../types'
+import { transcriptToMessages } from '../../App'
+import type { Agent, Message, TranscriptEntry } from '../../types'
 
 function makeAgent(): Agent {
   return { id: 'a1', name: 'Coder', status: 'idle', tokenCount: '0' }
@@ -410,5 +411,297 @@ describe('ChatArea textarea focus management', () => {
     expect(document.activeElement).toBe(textarea)
 
     document.body.removeChild(fakeBtn)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// D8 — transcriptToMessages entry-id plumbing
+// ---------------------------------------------------------------------------
+describe('transcriptToMessages entryId plumbing (D8)', () => {
+  function requestEntry(id: string, opts: { system?: string; userText?: string }): TranscriptEntry {
+    const messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }> = []
+    if (opts.userText !== undefined) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: opts.userText }] })
+    }
+    const payload: Record<string, unknown> = { model: 'sonnet', messages }
+    if (opts.system !== undefined) payload.system_prompt = opts.system
+    return {
+      id,
+      timestamp: '2024-01-01T00:00:00Z',
+      direction: 'request',
+      payload: JSON.stringify(payload),
+      harness: null,
+      model: 'sonnet',
+    }
+  }
+
+  function responseEntry(id: string, text: string): TranscriptEntry {
+    return {
+      id,
+      timestamp: '2024-01-01T00:00:01Z',
+      direction: 'response',
+      payload: JSON.stringify({ content: [{ type: 'text', text }] }),
+      harness: null,
+      model: 'sonnet',
+    }
+  }
+
+  it('sets entryId to the raw _te_id on the user row', () => {
+    const msgs = transcriptToMessages([requestEntry('te-1', { userText: 'hello' })])
+    const user = msgs.find((m) => m.id === 'te-1-user')
+    expect(user).toBeTruthy()
+    expect(user!.entryId).toBe('te-1')
+  })
+
+  it('sets entryId to the raw _te_id on the request-derived assistant row', () => {
+    const reqWithAsst: TranscriptEntry = {
+      id: 'te-2',
+      timestamp: '2024-01-01T00:00:00Z',
+      direction: 'request',
+      payload: JSON.stringify({
+        model: 'sonnet',
+        messages: [{ role: 'assistant', content: [{ type: 'text', text: 'prior turn' }] }],
+      }),
+      harness: null,
+      model: 'sonnet',
+    }
+    const msgs = transcriptToMessages([reqWithAsst])
+    const asst = msgs.find((m) => m.id === 'te-2-asst')
+    expect(asst).toBeTruthy()
+    expect(asst!.entryId).toBe('te-2')
+  })
+
+  it('sets entryId to the raw _te_id on the response row', () => {
+    const msgs = transcriptToMessages([responseEntry('te-3', 'hi there')])
+    const resp = msgs.find((m) => m.id === 'te-3')
+    expect(resp).toBeTruthy()
+    expect(resp!.entryId).toBe('te-3')
+  })
+
+  it('does NOT set entryId on the synthesized System row', () => {
+    const msgs = transcriptToMessages([
+      requestEntry('te-4', { system: 'You are helpful.', userText: 'hello' }),
+    ])
+    const sys = msgs.find((m) => m.id === 'te-4-sys')
+    expect(sys).toBeTruthy()
+    expect(sys!.entryId).toBeUndefined()
+    // adjacent user row from the same entry still carries entryId
+    const user = msgs.find((m) => m.id === 'te-4-user')
+    expect(user!.entryId).toBe('te-4')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// D9 / D10 — BranchButton rendering + wiring
+// ---------------------------------------------------------------------------
+function makeMessageWithEntryId(id: string, text: string, entryId?: string): Message {
+  const m = makeMessage(id, text)
+  if (entryId !== undefined) m.entryId = entryId
+  return m
+}
+
+describe('ChatArea branch button (D9, D10)', () => {
+  const BRANCH_LABEL = 'branch session from here'
+
+  it('renders a branch button next to the JSON button when onBranch and entryId are present (D9)', () => {
+    const onBranch = vi.fn()
+    const msg = { ...makeMessageWithRawJson('m1', 'hi', '{"model":"sonnet"}'), entryId: 'te-1' }
+    const { getByLabelText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[msg]} onBranch={onBranch} />,
+    )
+    expect(getByLabelText('View raw JSON (message)')).toBeTruthy()
+    const branchBtn = getByLabelText(BRANCH_LABEL)
+    expect(branchBtn).toBeTruthy()
+    expect(branchBtn.getAttribute('title')).toBe(BRANCH_LABEL)
+  })
+
+  it('calls onBranch with the entry id when clicked (D9)', () => {
+    const onBranch = vi.fn()
+    const msg = makeMessageWithEntryId('m1', 'hi', 'te-42')
+    const { getByLabelText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[msg]} onBranch={onBranch} />,
+    )
+    fireEvent.click(getByLabelText(BRANCH_LABEL))
+    expect(onBranch).toHaveBeenCalledTimes(1)
+    expect(onBranch).toHaveBeenCalledWith('te-42')
+  })
+
+  it('shows a branch button on the user row but NOT on the System row (D9)', () => {
+    const onBranch = vi.fn()
+    const sysRow: Message = {
+      id: 'te-1-sys',
+      agentName: 'System',
+      agentStatus: 'idle',
+      timestamp: '12:00',
+      blocks: [{ collapsedText: 'You are helpful.' }],
+    }
+    const userRow = makeMessageWithEntryId('te-1-user', 'hello', 'te-1')
+    const { getAllByLabelText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[sysRow, userRow]} onBranch={onBranch} />,
+    )
+    // Exactly one branch button — for the user row, not the System row.
+    expect(getAllByLabelText(BRANCH_LABEL)).toHaveLength(1)
+  })
+
+  it('renders no branch button when onBranch is undefined (D10)', () => {
+    const msg = makeMessageWithEntryId('m1', 'hi', 'te-1')
+    const { queryByLabelText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[msg]} />,
+    )
+    expect(queryByLabelText(BRANCH_LABEL)).toBeNull()
+  })
+
+  it('renders no branch button when the message has no entryId (D9)', () => {
+    const onBranch = vi.fn()
+    const msg = makeMessage('m1', 'hi')
+    const { queryByLabelText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[msg]} onBranch={onBranch} />,
+    )
+    expect(queryByLabelText(BRANCH_LABEL)).toBeNull()
+  })
+
+  it('disables the branch button while a send is in flight (D10)', () => {
+    const onBranch = vi.fn()
+    const msg = makeMessageWithEntryId('m1', 'hi', 'te-1')
+    const { getByLabelText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[msg]} onBranch={onBranch} sending />,
+    )
+    const branchBtn = getByLabelText(BRANCH_LABEL) as HTMLButtonElement
+    expect(branchBtn.disabled).toBe(true)
+    fireEvent.click(branchBtn)
+    expect(onBranch).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// D12a / D12b — read-only branch prefix above the composer
+// ---------------------------------------------------------------------------
+describe('ChatArea branch-draft prefix (D12a, D12b)', () => {
+  const BRANCH_LABEL = 'branch session from here'
+  const composer = {
+    panel: <div>compose panel</div>,
+    kind: 'provider' as const,
+    valid: true,
+    onSubmit: () => {},
+  }
+
+  it('renders prefixMessages read-only above the composer panel (D12b)', () => {
+    const prefix = [
+      makeMessageWithEntryId('p1', 'prefix one', 'te-1'),
+      makeMessageWithEntryId('p2', 'prefix two', 'te-2'),
+    ]
+    const { getByText, getByTestId } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        prefixMessages={prefix}
+        selectedId={null}
+      />,
+    )
+    expect(getByTestId('branch-prefix')).toBeTruthy()
+    expect(getByText('prefix one')).toBeTruthy()
+    expect(getByText('prefix two')).toBeTruthy()
+    expect(getByText('compose panel')).toBeTruthy()
+  })
+
+  it('prefix rows carry NO branch button even when onBranch is undefined in compose mode (D12a)', () => {
+    const prefix = [makeMessageWithEntryId('p1', 'prefix one', 'te-1')]
+    const { queryByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        prefixMessages={prefix}
+        selectedId={null}
+      />,
+    )
+    expect(queryByLabelText(BRANCH_LABEL)).toBeNull()
+  })
+
+  it('renders a compose error banner when composeError is set (D14)', () => {
+    const { getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={composer}
+        composeError={'Could not create the branch'}
+        selectedId={null}
+      />,
+    )
+    expect(getByRole('alert').textContent).toMatch(/could not create the branch/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// U1 / U2 — per-session model dropdown in the chat input row
+// ---------------------------------------------------------------------------
+describe('ChatArea model dropdown (U1, U2)', () => {
+  const MODEL_LABEL = 'session model'
+
+  it('renders the model dropdown for an existing session with the current model selected (U1)', () => {
+    const { getByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessage('m1', 'hi')]}
+        onSend={() => {}}
+        currentModel="sonnet-4"
+        availableModels={['sonnet-4', 'opus-4']}
+        onModelChange={() => {}}
+      />,
+    )
+    const select = getByLabelText(MODEL_LABEL) as HTMLSelectElement
+    expect(select).toBeTruthy()
+    expect(select.value).toBe('sonnet-4')
+  })
+
+  it('includes the current model in the options even when it is not in availableModels (U1)', () => {
+    const { getByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessage('m1', 'hi')]}
+        onSend={() => {}}
+        currentModel="legacy-model"
+        availableModels={['sonnet-4']}
+        onModelChange={() => {}}
+      />,
+    )
+    const select = getByLabelText(MODEL_LABEL) as HTMLSelectElement
+    expect(select.value).toBe('legacy-model')
+    const options = Array.from(select.options).map((o) => o.value)
+    expect(options).toContain('legacy-model')
+    expect(options).toContain('sonnet-4')
+  })
+
+  it('calls onModelChange when the user picks a different model (U2)', () => {
+    const onModelChange = vi.fn()
+    const { getByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessage('m1', 'hi')]}
+        onSend={() => {}}
+        currentModel="sonnet-4"
+        availableModels={['sonnet-4', 'opus-4']}
+        onModelChange={onModelChange}
+      />,
+    )
+    const select = getByLabelText(MODEL_LABEL) as HTMLSelectElement
+    fireEvent.change(select, { target: { value: 'opus-4' } })
+    expect(onModelChange).toHaveBeenCalledWith('opus-4')
+  })
+
+  it('does not render the model dropdown in compose mode (U1)', () => {
+    const { queryByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[]}
+        composerControls={{ panel: <div>p</div>, kind: 'provider', valid: true, onSubmit: () => {} }}
+        currentModel="sonnet-4"
+        availableModels={['sonnet-4']}
+        onModelChange={() => {}}
+        selectedId={null}
+      />,
+    )
+    expect(queryByLabelText(MODEL_LABEL)).toBeNull()
   })
 })

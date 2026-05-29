@@ -8,6 +8,11 @@ module PureClaw.Session.Handle
     -- * Resume
   , ResumeError (..)
   , resumeSession
+    -- * Branch
+  , BranchError (..)
+  , BranchSpec (..)
+  , BranchSeed (..)
+  , resolveBranchSeed
     -- * Enumeration and lookup
   , listSessions
   , ResolveError (..)
@@ -26,6 +31,10 @@ module PureClaw.Session.Handle
   , SetDescriptionError (..)
     -- * Resume context reload
   , loadRecentMessages
+    -- * Frozen system prompt (read from transcript)
+  , frozenSystemPrompt
+    -- * Per-session model (read from transcript)
+  , lastRequestModel
   ) where
 
 import Control.Exception (IOException, try)
@@ -34,6 +43,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as LBS
+import Data.ByteString.Lazy.Char8 qualified as LBSC
 import Data.IORef
   ( IORef
   , atomicModifyIORef'
@@ -306,6 +316,139 @@ resumeSession mBroker logger baseDir sid = do
             , _sh_dir        = dir
             , _sh_save       = save
             })
+
+-- ----------------------------------------------------------------------------
+-- Branch
+-- ----------------------------------------------------------------------------
+
+-- | Reasons a branch seed cannot be resolved from a source session.
+-- Constructors carry diagnostic payloads for parity with the existing
+-- 'ResumeError' style.
+data BranchError
+  = BranchInvalidSourceId Text
+    -- ^ The supplied source session id failed the traversal-safety guard
+    -- (empty / contains @..@ or @\/@). The 'Text' is the offending id.
+  | BranchSourceMissing FilePath
+    -- ^ No @session.json@ at the expected path for the source session.
+  | BranchSourceNotProvider
+    -- ^ The source session is harness-backed; branching is provider-only.
+  | BranchEntryNotFound Text
+    -- ^ No transcript entry with the requested @_te_id@ exists in the
+    -- source transcript. The 'Text' is the requested entry id.
+  deriving stock (Show, Eq)
+
+-- | A client-supplied branch request: the source session to copy from and
+-- the transcript entry id at which to cut the (inclusive) prefix.
+data BranchSpec = BranchSpec
+  { _bs_sourceSessionId :: Text
+  , _bs_upToEntryId     :: Text
+  }
+  deriving stock (Show, Eq)
+
+-- | Wire shape: @{ "session_id": ..., "up_to_entry_id": ... }@. Defined
+-- here (not in the API module) so it is not an orphan instance.
+instance Aeson.FromJSON BranchSpec where
+  parseJSON = Aeson.withObject "BranchSpec" $ \o ->
+    BranchSpec
+      <$> o Aeson..: "session_id"
+      <*> o Aeson..: "up_to_entry_id"
+
+-- | The resolved ingredients for seeding a branched session, read entirely
+-- from the on-disk source session (never from client-supplied payloads).
+data BranchSeed = BranchSeed
+  { _bseed_prefix       :: [TranscriptEntry]
+    -- ^ Source transcript entries @[0..boundary]@ (inclusive), in order.
+  , _bseed_sourceMeta   :: SessionMeta
+    -- ^ Source session metadata, so the branch can inherit
+    -- @_sm_kind@ / @_sm_model@ / @_sm_agent@.
+  }
+  deriving stock (Show, Eq)
+
+-- | Traversal-safety guard for a branch source session id. Mirrors
+-- @PureClaw.Frontend.API.isValidSessionId@; replicated locally to avoid an
+-- import cycle (the API module imports this module). Rejects the empty
+-- string and anything containing @..@ or @\/@.
+isValidBranchSourceId :: Text -> Bool
+isValidBranchSourceId sid
+  | T.null sid = False
+  | T.isInfixOf ".." sid = False
+  | T.isInfixOf "/" sid = False
+  | otherwise = True
+
+-- | Resolve a 'BranchSpec' against the on-disk source session under
+-- @baseDir@, producing a 'BranchSeed' or a typed 'BranchError'.
+--
+-- Validates (in order): the source id is traversal-safe, the source
+-- @session.json@ exists and decodes, the source is provider-backed, and
+-- the requested entry id is present in the source @transcript.jsonl@. On
+-- success returns the inclusive prefix @[0..boundary]@ and the source meta.
+--
+-- The frozen system prompt and last-used model ride in the copied
+-- transcript prefix (see @docs/session-branching.md@ §9), so the seed does
+-- not carry the source's @custom-prompt.md@; the fork inherits the agent
+-- identity from the source meta instead.
+--
+-- The prefix is read verbatim from the source transcript on disk — never
+-- from any caller-supplied payload — so a branch cannot inject history.
+resolveBranchSeed :: FilePath -> BranchSpec -> IO (Either BranchError BranchSeed)
+resolveBranchSeed baseDir bs
+  | not (isValidBranchSourceId sourceId) =
+      pure (Left (BranchInvalidSourceId sourceId))
+  | otherwise = do
+      let dir   = baseDir </> T.unpack sourceId
+          metaP = dir </> "session.json"
+          txP   = dir </> "transcript.jsonl"
+      exists <- doesFileExist metaP
+      if not exists
+        then pure (Left (BranchSourceMissing metaP))
+        else do
+          raw <- LBS.readFile metaP
+          case Aeson.eitherDecode' raw of
+            Left _ -> pure (Left (BranchSourceMissing metaP))
+            Right meta -> case _sm_kind (meta :: SessionMeta) of
+              SkHarness _ -> pure (Left BranchSourceNotProvider)
+              SkProvider _ -> do
+                entries <- readTranscriptEntries txP
+                case sliceInclusivePrefix (_bs_upToEntryId bs) entries of
+                  Nothing -> pure (Left (BranchEntryNotFound (_bs_upToEntryId bs)))
+                  Just prefix ->
+                    pure (Right BranchSeed
+                      { _bseed_prefix     = prefix
+                      , _bseed_sourceMeta = meta
+                      })
+  where
+    sourceId = _bs_sourceSessionId bs
+
+-- | Read and decode a @transcript.jsonl@ file into 'TranscriptEntry'
+-- values, in file (oldest-first) order. Missing files and undecodable
+-- lines yield @[]@ / skipped lines respectively. This is a read-only path,
+-- so it intentionally does not open a file transcript /handle/ (those are
+-- reserved for write sites that must reach the broker).
+readTranscriptEntries :: FilePath -> IO [TranscriptEntry]
+readTranscriptEntries path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure []
+    else do
+      eRaw <- try (LBS.readFile path) :: IO (Either IOException LBS.ByteString)
+      case eRaw of
+        Left _    -> pure []
+        Right raw -> pure (mapMaybe Aeson.decode' (splitJsonlLines raw))
+
+-- | Split a lazy 'LBS.ByteString' into non-empty newline-delimited chunks.
+splitJsonlLines :: LBS.ByteString -> [LBS.ByteString]
+splitJsonlLines = filter (not . LBS.null) . LBSC.split '\n'
+
+-- | Return the inclusive prefix @[0..idx]@ up to and including the first
+-- entry whose @_te_id@ matches the target, or 'Nothing' if no such entry
+-- exists.
+sliceInclusivePrefix :: Text -> [TranscriptEntry] -> Maybe [TranscriptEntry]
+sliceInclusivePrefix target = go []
+  where
+    go _   [] = Nothing
+    go acc (e:es)
+      | _te_id e == target = Just (reverse (e : acc))
+      | otherwise          = go (e : acc) es
 
 -- ----------------------------------------------------------------------------
 -- Enumeration and lookup
@@ -613,6 +756,82 @@ loadRecentMessages th maxCount maxTokens = do
             Request  -> extractNewMessageText  (_te_payload e)
             Response -> extractAssistantText   (_te_payload e)
       in Message role [TextBlock txt]
+
+-- | Read the session's frozen system prompt from the transcript.
+--
+-- The system prompt is computed once on the first turn and then \"rides in
+-- the transcript\": every recorded provider 'Request' entry carries the
+-- prompt actually used at completion time under the top-level
+-- @system_prompt@ field of its 'CompletionRequest' payload
+-- (see 'PureClaw.Providers.Class' ToJSON). This helper recovers it so
+-- @doCompletion@ can reuse the frozen value on turns ≥ 2 instead of
+-- recomputing.
+--
+-- The result distinguishes three cases:
+--
+--   * @Nothing@        — there is NO prior 'Request' entry, i.e. this is the
+--                        first turn. The caller should compute and freeze a
+--                        prompt now.
+--   * @Just (Just p)@  — a prior request recorded a non-null
+--                        @system_prompt@; reuse @p@ verbatim.
+--   * @Just Nothing@   — a prior request recorded @system_prompt: null@ (or
+--                        omitted the field entirely); the frozen prompt is
+--                        null and MUST stay null (do not recompute).
+--
+-- Only 'Request'-direction entries are considered (never a 'Response'), and
+-- the LAST such entry wins. This is distinct from 'extractNewMessageText',
+-- which deliberately discards @system_prompt@.
+frozenSystemPrompt :: TranscriptHandle -> IO (Maybe (Maybe Text))
+frozenSystemPrompt th = do
+  entries <- _th_query th TranscriptFilter
+    { _tf_harness   = Nothing
+    , _tf_model     = Nothing
+    , _tf_direction = Just Request
+    , _tf_timeRange = Nothing
+    , _tf_limit     = Nothing
+    }
+  pure $ case reverse entries of
+    []      -> Nothing
+    (e : _) -> Just (extractSystemPrompt (_te_payload e))
+
+-- | The model recorded by the most-recent provider 'Request' entry, read from
+-- the structured @_te_model@ column (set by 'mkTranscriptProvider' from
+-- @unModelId model@ at completion time). Like 'frozenSystemPrompt', the
+-- session's model \"rides in the transcript\": this is the per-session
+-- fallback model used by @doCompletion@ when a @/send@ request omits an
+-- explicit model (§9.2).
+--
+--   * @Nothing@   — there is NO prior 'Request' entry, or the last one
+--                   recorded no model (@_te_model = Nothing@). The caller
+--                   should fall back to the global model.
+--   * @Just m@    — the last 'Request' entry recorded model @m@; reuse it.
+--
+-- Only 'Request'-direction entries are considered, and the LAST such entry
+-- wins. 'loadRecentMessages' deliberately discards @_te_model@, so this raw
+-- read is the only way to recover it.
+lastRequestModel :: TranscriptHandle -> IO (Maybe Text)
+lastRequestModel th = do
+  entries <- _th_query th TranscriptFilter
+    { _tf_harness   = Nothing
+    , _tf_model     = Nothing
+    , _tf_direction = Just Request
+    , _tf_timeRange = Nothing
+    , _tf_limit     = Nothing
+    }
+  pure $ case reverse entries of
+    []      -> Nothing
+    (e : _) -> _te_model e
+
+-- | Parse the top-level @system_prompt@ field from a recorded provider
+-- 'Request' payload. A present JSON string yields @Just t@; an explicit
+-- @null@, a missing key, or a non-string\/non-decodable payload all yield
+-- @Nothing@ (frozen-null semantics — see 'frozenSystemPrompt').
+extractSystemPrompt :: Text -> Maybe Text
+extractSystemPrompt raw = do
+  Aeson.Object o <- decodeText raw
+  case KM.lookup "system_prompt" o of
+    Just (Aeson.String t) -> Just t
+    _                     -> Nothing
 
 -- | Extract the most recent message's text from a recorded provider request
 -- JSON payload. Handles common provider shapes:

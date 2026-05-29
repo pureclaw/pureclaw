@@ -22,6 +22,7 @@ module PureClaw.Frontend.API
     -- * New tab request/response (exported for testing)
   , NewTabRequest (..)
   , NewTabResponse (..)
+  , BranchSpec (..)
   ) where
 
 import Control.Concurrent.STM (TVar, newTVarIO)
@@ -49,7 +50,13 @@ import Network.Wai
 import System.Directory (doesFileExist, getFileSize, renameFile)
 import System.FilePath ((</>), takeDirectory)
 
-import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
+import PureClaw.Agent.AgentDef
+  ( AgentDef (..)
+  , composeAgentPromptWithBootstrap
+  , discoverAgents
+  , loadAgent
+  , unAgentName
+  )
 import PureClaw.Agent.Context
 import PureClaw.Core.Types (ModelId (..), SessionId (..), ToolCallId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
@@ -66,12 +73,18 @@ import PureClaw.Harness.ClaudeCode (isIdle)
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
-  ( SessionHandle (..)
+  ( BranchError (..)
+  , BranchSeed (..)
+  , BranchSpec (..)
+  , SessionHandle (..)
   , SetArchivedError (..)
   , SetDescriptionError (..)
+  , frozenSystemPrompt
+  , lastRequestModel
   , listSessions
   , loadRecentMessages
   , mkSessionHandle
+  , resolveBranchSeed
   , setArchived
   , setDescription
   )
@@ -711,15 +724,20 @@ handleListProviders env respond = do
 -- { "kind": { "tag": "raw_shell",
 --             "backend": { "tag": "local" } } }
 -- @
-newtype NewTabRequest = NewTabRequest
-  { _ntr_kind :: TabKind
+data NewTabRequest = NewTabRequest
+  { _ntr_kind       :: TabKind
+  , _ntr_branchFrom :: Maybe BranchSpec
+    -- ^ Optional branch source. When 'Just', the new tab's session is
+    -- seeded from a copy of the named source session's transcript prefix
+    -- (parsed from the @"branch_from"@ key; absent ⇒ 'Nothing').
   }
 
 instance FromJSON NewTabRequest where
   parseJSON = Aeson.withObject "NewTabRequest" $ \o -> do
     kindObj <- o .: "kind"
     tabKind <- parseTabKind kindObj
-    pure (NewTabRequest tabKind)
+    branchFrom <- o .:? "branch_from"
+    pure (NewTabRequest tabKind branchFrom)
 
 -- | Parse a 'TabKind' from the JSON envelope used by POST /api/tabs/new.
 --
@@ -768,17 +786,53 @@ handleNewTab env req respond = do
     Left err ->
       respond $ jsonResponse status400
         (object ["error" .= ("Invalid JSON: " <> T.pack err)])
-    Right (NewTabRequest tabKind) -> do
-      -- A8: enforce maxTabs limit
-      curCount <- readIORef (_fe_tabCount env)
-      if curCount >= _fe_maxTabs env
-        then respond $ jsonResponse status409
-               (object ["error" .= ("maximum tab count reached" :: Text)])
-        else createTab env tabKind respond
+    Right (NewTabRequest tabKind mBranch) ->
+      case mBranch of
+        Nothing -> do
+          -- A8: enforce maxTabs limit
+          curCount <- readIORef (_fe_tabCount env)
+          if curCount >= _fe_maxTabs env
+            then respond $ jsonResponse status409
+                   (object ["error" .= ("maximum tab count reached" :: Text)])
+            else createTab env tabKind Nothing respond
+        Just branchSpec ->
+          -- Branch path: validate the request kind and resolve the seed
+          -- BEFORE the maxTabs gate / createTab so a failed branch never
+          -- consumes a tab slot or creates a directory (D5).
+          case tabKind of
+            TkSession (SkProvider _) -> do
+              seedResult <- resolveBranchSeed (_fe_sessionsDir env) branchSpec
+              case seedResult of
+                Left err -> respond (branchErrorResponse err)
+                Right seed -> do
+                  curCount <- readIORef (_fe_tabCount env)
+                  if curCount >= _fe_maxTabs env
+                    then respond $ jsonResponse status409
+                           (object ["error" .= ("maximum tab count reached" :: Text)])
+                    else createTab env tabKind (Just seed) respond
+            _ ->
+              respond $ jsonResponse status400
+                (object ["error" .= ("branch target must be a provider session" :: Text)])
 
--- | Actually create the tab and return a response.
-createTab :: FrontendEnv -> TabKind -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-createTab env tabKind respond = do
+-- | Map a 'BranchError' to its HTTP response. Invalid/traversal source id
+-- and non-provider sources are client errors (400); a missing source
+-- session or a missing entry id are not-found (404).
+branchErrorResponse :: BranchError -> Response
+branchErrorResponse err = case err of
+  BranchInvalidSourceId sid -> jsonResponse status400
+    (object ["error" .= ("invalid branch source id: " <> sid)])
+  BranchSourceNotProvider -> jsonResponse status400
+    (object ["error" .= ("branch source is not a provider session" :: Text)])
+  BranchSourceMissing _ -> jsonResponse status404
+    (object ["error" .= ("branch source session not found" :: Text)])
+  BranchEntryNotFound eid -> jsonResponse status404
+    (object ["error" .= ("branch source entry not found: " <> eid)])
+
+-- | Actually create the tab and return a response. With @'Just' seed@ the
+-- session is seeded from a branch source (see 'createBranchedSession');
+-- with 'Nothing' the behaviour is identical to a fresh New-tab session.
+createTab :: FrontendEnv -> TabKind -> Maybe BranchSeed -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+createTab env tabKind mSeed respond = do
   curCount <- readIORef (_fe_tabCount env)
   -- Bump tab count
   writeIORef (_fe_tabCount env) (curCount + 1)
@@ -798,11 +852,19 @@ createTab env tabKind respond = do
           agentName = case sk of
             SkProvider ps -> _ps_agent ps
             SkHarness  _  -> Nothing
+          -- For a branch, inherit _sm_kind / _sm_model / _sm_agent from
+          -- the source meta so the branch's sidebar row matches its
+          -- parent; otherwise use the request kind + global model.
+          (metaKind, metaModel, metaAgent) = case mSeed of
+            Just seed ->
+              let srcMeta = _bseed_sourceMeta seed
+              in ( _sm_kind srcMeta, _sm_model srcMeta, _sm_agent srcMeta )
+            Nothing -> (sk, modelText, agentName)
           meta = SessionMeta
             { _sm_id                = sid
-            , _sm_agent             = agentName
-            , _sm_kind              = sk
-            , _sm_model             = modelText
+            , _sm_agent             = metaAgent
+            , _sm_kind              = metaKind
+            , _sm_model             = metaModel
             , _sm_channel           = "web"
             , _sm_createdAt         = now
             , _sm_lastActive        = now
@@ -813,6 +875,14 @@ createTab env tabKind respond = do
             }
       sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
       _sh_save sh
+      -- For a branch, seed the new transcript with a verbatim copy of the
+      -- source prefix (preserving _te_id and order). The frozen system prompt
+      -- and last-used model ride in the copied transcript (see
+      -- docs/session-branching.md §9), so the fork does NOT copy the source's
+      -- custom-prompt.md; it inherits the agent identity via _sm_agent above.
+      case mSeed of
+        Just seed -> mapM_ (_th_record (_sh_transcript sh)) (_bseed_prefix seed)
+        Nothing -> pure ()
       -- Publish the new-session signal to the live stream broker (D18). The
       -- sidebar uses this to render the session row without polling. The
       -- no-broker path is intentional ('Nothing' preserves the legacy
@@ -861,8 +931,22 @@ handleNewSessionGone respond =
       , "use"   .= ("/api/tabs/new" :: Text)
       ]))
 
--- | Set or replace the custom prompt for a session, optionally updating
--- the agent name in @session.json@.
+-- | Set or replace the custom prompt for a session (WU6, §9.3).
+--
+-- Enforces the @custom-prompt.md ⊕ agent@ invariant: a session may have a
+-- per-session agent /or/ a user-supplied custom prompt, never both. Setting
+-- a custom prompt therefore:
+--
+--   * clears @_sm_agent@ (the custom prompt supersedes the agent);
+--   * stores an optionally-provided @name@ in @_sm_description@ (a friendly
+--     title), /not/ as the agent;
+--   * leaves all other metadata fields untouched.
+--
+-- __Ordering / atomicity:__ the metadata is read, updated, and written
+-- (atomic tmp + rename) /before/ @custom-prompt.md@ is written. If the
+-- existing @session.json@ is missing or undecodable, no @custom-prompt.md@
+-- is written, so a meta failure can never leave a custom prompt sitting
+-- alongside a still-set agent.
 handleSetPrompt :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleSetPrompt env sid req respond = do
   if not (isValidSessionId sid)
@@ -879,29 +963,53 @@ handleSetPrompt env sid req respond = do
           Nothing ->
             respond $ jsonResponse status400 (object ["error" .= ("Missing 'prompt' field" :: Text)])
           Just prompt -> do
-            TIO.writeFile promptPath prompt
-            -- Update agent name in session metadata if a name was provided
-            let mName = Map.lookup "name" obj
-            case mName of
-              Just name | not (T.null name) -> do
-                raw <- LBS.readFile metaPath
-                case Aeson.eitherDecode' raw of
-                  Right meta -> do
-                    let agentName = either (const Nothing) Just (mkAgentName name)
-                        updated = (meta :: SessionMeta) { _sm_agent = agentName }
-                        tmpP = metaPath <> ".tmp"
-                    LBS.writeFile tmpP (Aeson.encode updated)
-                    renameFile tmpP metaPath
-                  Left _ -> pure ()
-              _ -> pure ()
-            respond $ jsonResponse status200 (object ["ok" .= True])
+            -- An optionally-provided friendly title, trimmed; an
+            -- all-whitespace value is treated as "no description".
+            let mDescription = do
+                  name <- Map.lookup "name" obj
+                  let trimmed = T.strip name
+                  if T.null trimmed then Nothing else Just trimmed
+            -- Step 1: read + update + atomically rewrite session.json FIRST.
+            -- Clear the agent (invariant) and set the description from name.
+            metaExists <- doesFileExist metaPath
+            if not metaExists
+              then respondNotFound respond
+              else do
+                eBytes <- try (LBS.readFile metaPath) :: IO (Either IOException LBS.ByteString)
+                case eBytes of
+                  Left e ->
+                    respond $ jsonResponse status500
+                      (object ["error" .= T.pack (show e)])
+                  Right raw -> case Aeson.eitherDecode' raw of
+                    Left err ->
+                      respond $ jsonResponse status500
+                        (object ["error" .= T.pack err])
+                    Right meta -> do
+                      let updated = (meta :: SessionMeta)
+                            { _sm_agent       = Nothing
+                            , _sm_description = mDescription
+                            }
+                          tmpP = metaPath <> ".tmp"
+                      LBS.writeFile tmpP (Aeson.encode updated)
+                      renameFile tmpP metaPath
+                      -- Step 2: only after the meta update succeeds do we
+                      -- write the custom prompt file. Now the agent is
+                      -- guaranteed cleared, so no contradiction can exist.
+                      TIO.writeFile promptPath prompt
+                      respond $ jsonResponse status200 (object ["ok" .= True])
 
--- | Request body for sending a message.
-newtype SendRequest = SendRequest { _sr_message :: Text }
+-- | Request body for sending a message. The optional @model@ field (WU5,
+-- §9.2) lets a client pin the completion to a specific model for this turn;
+-- when omitted, 'doCompletion' falls back to the session's most-recent
+-- transcript model and then the global model.
+data SendRequest = SendRequest
+  { _sr_message :: Text
+  , _sr_model   :: Maybe Text
+  }
 
 instance FromJSON SendRequest where
   parseJSON = Aeson.withObject "SendRequest" $ \o ->
-    SendRequest <$> o .: "message"
+    SendRequest <$> o .: "message" <*> o .:? "model"
 
 -- | Send a user message to a session and get a completion.
 handleSend :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -921,7 +1029,7 @@ handleSend env sid req respond = do
           case Aeson.eitherDecode body of
             Left _ ->
               respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"message\": \"...\"}" :: Text)])
-            Right (SendRequest userText) -> do
+            Right (SendRequest userText reqModel) -> do
               mProvider <- readIORef (_fe_provider env)
               mModel <- readIORef (_fe_model env)
               case (mProvider, mModel) of
@@ -931,7 +1039,7 @@ handleSend env sid req respond = do
                   respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
                 (Just provider, Just model) -> do
                   result <- try @SomeException $
-                    doCompletion env (SessionId sid) provider model userText transcriptPath
+                    doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
                   case result of
                     Left e -> do
                       _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
@@ -949,23 +1057,44 @@ doCompletion
   :: FrontendEnv
   -> SessionId
   -> SomeProvider
-  -> ModelId
+  -> Maybe Text  -- ^ Request-supplied model (WU5, §9.2), if any.
+  -> ModelId     -- ^ Global fallback model (the @_fe_model@ IORef value).
   -> Text
   -> FilePath
   -> IO Text
-doCompletion env sid provider model userText transcriptPath = do
+doCompletion env sid provider reqModel fallbackModel userText transcriptPath = do
   -- Open a (possibly broadcasting) transcript handle for recording.
   th <- mkBroadcastingFileTranscriptHandle
           (_fe_broker env) sid (_fe_logger env) transcriptPath
+  -- Resolve the per-session model with precedence (§9.2): the request's
+  -- explicit model, else the most-recent model recorded in the transcript
+  -- (the "rides in the transcript" fallback — read from the structured
+  -- '_te_model' column, which 'loadRecentMessages' discards), else the
+  -- global '_fe_model' fallback. The chosen 'ModelId' flows into
+  -- 'mkTranscriptProvider' below so '_te_model' is recorded automatically.
+  -- A blank/whitespace request model (e.g. {"model":""}) is treated as
+  -- absent so it falls through to the transcript/global fallback rather
+  -- than sending an empty model id to the provider.
+  model <- case reqModel of
+    Just m | not (T.null (T.strip m)) -> pure (ModelId m)
+    _ -> do
+      mTranscriptModel <- lastRequestModel th
+      pure $ maybe fallbackModel ModelId mTranscriptModel
   -- Load recent messages for context
   history <- loadRecentMessages th 50 100000
-  -- Check for per-session custom prompt, falling back to global
+  -- The system prompt is FROZEN per session: computed once on the first
+  -- turn and thereafter replayed from the transcript unchanged (§9.1).
+  -- 'frozenSystemPrompt' reads the last recorded Request's system_prompt:
+  --   * Just frozen ⇒ a prior turn exists ⇒ reuse it verbatim (including a
+  --     frozen-null, which must stay null — do NOT recompute, do NOT
+  --     re-read custom-prompt.md).
+  --   * Nothing      ⇒ first turn ⇒ compute with precedence
+  --                    custom-prompt.md → per-session agent → global.
   let sessionDir = takeDirectory transcriptPath
-      customPromptPath = sessionDir </> "custom-prompt.md"
-  customExists <- doesFileExist customPromptPath
-  systemPrompt <- if customExists
-    then Just <$> TIO.readFile customPromptPath
-    else pure (_fe_systemPrompt env)
+  frozen <- frozenSystemPrompt th
+  systemPrompt <- case frozen of
+    Just p  -> pure p
+    Nothing -> computeFirstTurnPrompt env sessionDir
   -- Build context with system prompt and history
   let ctx0 = foldl (flip addMessage) (emptyContext systemPrompt) history
       userMsg = textMessage User userText
@@ -993,6 +1122,81 @@ doCompletion env sid provider model userText transcriptPath = do
   _th_flush th
   _th_close th
   pure result
+
+-- | Section-character limit used when rendering a per-session agent's
+-- system prompt, matching the limit used elsewhere for web/session agent
+-- rendering (e.g. the @/agent@ slash command).
+agentPromptSectionLimit :: Int
+agentPromptSectionLimit = 8000
+
+-- | Compute the system prompt for the FIRST turn of a session (called only
+-- when 'frozenSystemPrompt' returns 'Nothing'). Precedence (§9.1):
+--
+--   1. @custom-prompt.md@ in the session dir (user override), if present.
+--   2. The per-session agent (from @session.json@'s @_sm_agent@), rendered
+--      with 'composeAgentPromptWithBootstrap' honoring the session's
+--      @_sm_bootstrapConsumed@ state. A missing/undiscoverable agent (F7)
+--      or an empty/whitespace render (F8) falls through to the global
+--      prompt — never a 500.
+--   3. The global @_fe_systemPrompt@.
+--
+-- The computed value is frozen into the transcript automatically because
+-- 'doCompletion' records the request that carries it.
+computeFirstTurnPrompt :: FrontendEnv -> FilePath -> IO (Maybe Text)
+computeFirstTurnPrompt env sessionDir = do
+  let customPromptPath = sessionDir </> "custom-prompt.md"
+  customExists <- doesFileExist customPromptPath
+  if customExists
+    then Just <$> TIO.readFile customPromptPath
+    else do
+      mAgentPrompt <- renderSessionAgentPrompt env sessionDir
+      case mAgentPrompt of
+        Just p  -> pure (Just p)
+        Nothing -> pure (_fe_systemPrompt env)
+
+-- | Render the per-session agent's system prompt, or 'Nothing' if there is
+-- no usable agent. Reads the session's @_sm_agent@ inline from
+-- @session.json@, looks the agent up under @_fe_agentsDir@, and renders it
+-- honoring @_sm_bootstrapConsumed@. Returns 'Nothing' (so the caller falls
+-- back to the global prompt) when:
+--
+--   * @session.json@ is missing or fails to decode;
+--   * @_sm_agent@ is 'Nothing';
+--   * the named agent is not found under @_fe_agentsDir@ (F7); or
+--   * the rendered prompt is empty/whitespace (F8).
+renderSessionAgentPrompt :: FrontendEnv -> FilePath -> IO (Maybe Text)
+renderSessionAgentPrompt env sessionDir = do
+  let metaPath = sessionDir </> "session.json"
+  readResult <- try @IOException (LBS.readFile metaPath)
+  let raw = either (Left . show) Right readResult
+  case raw >>= Aeson.eitherDecode' of
+    Left err -> do
+      _lh_logWarn (_fe_logger env) $
+        "Per-session agent: could not read session.json (" <>
+        T.pack metaPath <> "): " <> T.pack err <> " — falling back to global prompt"
+      pure Nothing
+    Right meta -> case _sm_agent (meta :: SessionMeta) of
+      Nothing   -> pure Nothing
+      Just name -> do
+        mDef <- loadAgent (_fe_agentsDir env) name
+        case mDef of
+          Nothing -> do
+            _lh_logWarn (_fe_logger env) $
+              "Per-session agent \"" <> unAgentName name <>
+              "\" not found under " <> T.pack (_fe_agentsDir env) <>
+              " — falling back to global prompt"
+            pure Nothing
+          Just def -> do
+            rendered <- composeAgentPromptWithBootstrap
+                          (_fe_logger env) def agentPromptSectionLimit
+                          (_sm_bootstrapConsumed meta)
+            if T.null (T.strip rendered)
+              then do
+                _lh_logWarn (_fe_logger env) $
+                  "Per-session agent \"" <> unAgentName name <>
+                  "\" rendered an empty prompt — falling back to global prompt"
+                pure Nothing
+              else pure (Just rendered)
 
 -- | Loop: call the provider, execute any tool_use blocks, append the
 -- tool_result message to context, and recurse. Terminates when the

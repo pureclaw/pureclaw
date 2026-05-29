@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { Agent, AgentInfo, Message, MessageContent, CodeSpan, ToolCallInfo, SessionInfo } from '../types'
 import { JsonTree } from './JsonTree'
-import { sessionDisplayTitle, sessionSubtitle } from '../types'
+import { sessionDisplayTitle, sessionSubtitle, shortenModel } from '../types'
 import { StatusDot } from './StatusDot'
 import { BottomBar } from './BottomBar'
 
@@ -184,6 +184,22 @@ function BracesIcon() {
   )
 }
 
+function BranchIcon() {
+  return (
+    <svg
+      width="13" height="13" viewBox="0 0 16 16" fill="none"
+      stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="5" cy="4" r="1.6" />
+      <circle cx="5" cy="12" r="1.6" />
+      <circle cx="11" cy="7" r="1.6" />
+      <path d="M5 5.6 V10.4" />
+      <path d="M5 8 q0 -2.4 4.4 -2.4" />
+    </svg>
+  )
+}
+
 function CheckIcon() {
   return (
     <svg
@@ -233,6 +249,20 @@ function JsonButton({ onClick, kind }: { onClick: () => void; kind: 'message' | 
       onClick={(e) => { e.stopPropagation(); onClick() }}
     >
       <BracesIcon />
+    </button>
+  )
+}
+
+function BranchButton({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      className="icon-btn"
+      title="branch session from here"
+      aria-label="branch session from here"
+      disabled={disabled}
+      onClick={(e) => { e.stopPropagation(); onClick() }}
+    >
+      <BranchIcon />
     </button>
   )
 }
@@ -623,7 +653,15 @@ function TypingIndicator() {
   )
 }
 
-function ChatMessage({ message }: { message: Message }) {
+function ChatMessage({
+  message,
+  onBranch,
+  sending,
+}: {
+  message: Message
+  onBranch?: (entryId: string) => void
+  sending?: boolean
+}) {
   const anchorId = `msg-${message.id}`
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
@@ -664,6 +702,12 @@ function ChatMessage({ message }: { message: Message }) {
         <AnchorHandle anchorId={anchorId} />
         {message.rawJson !== undefined && (
           <JsonButton kind="message" onClick={() => setJsonOpen(true)} />
+        )}
+        {onBranch !== undefined && message.entryId !== undefined && (
+          <BranchButton
+            onClick={() => onBranch(message.entryId!)}
+            disabled={sending}
+          />
         )}
       </div>
       <div className="text-sm" style={{ lineHeight: 'var(--leading-relaxed)' }}>
@@ -838,6 +882,12 @@ export function ChatArea({
   composerControls,
   newTabFocusTick,
   selectedId,
+  onBranch,
+  prefixMessages,
+  composeError,
+  currentModel,
+  availableModels,
+  onModelChange,
 }: {
   selectedAgent: Agent
   selectedSession?: SessionInfo | null
@@ -877,6 +927,29 @@ export function ChatArea({
    *  extra click. Covers sidebar tab clicks, session clicks, the
    *  post-create transition into the new tab, and browser back/forward. */
   selectedId?: string | null
+  /** When defined, each transcript row that carries an `entryId` renders a
+   *  branch button wired to `onBranch(entryId)`. Supplied by App only for
+   *  persisted provider sessions; undefined for harness sessions and in
+   *  compose mode, which suppresses the button entirely. */
+  onBranch?: (entryId: string) => void
+  /** Read-only transcript prefix rendered ABOVE the composer panel in a
+   *  branch-draft compose flow. These rows carry no `onBranch` so they
+   *  render no branch button and offer no send affordance — the only send
+   *  path is the composer's first-send. Empty/undefined ⇒ nothing extra. */
+  prefixMessages?: Message[]
+  /** When set, an inline error banner is shown inside the composer region
+   *  (e.g. a failed branch create). Cleared by the caller. */
+  composeError?: string | null
+  /** The model the next /send should use for an existing session. Default
+   *  is the most-recent transcript `_te_model`; the user can override via
+   *  the input-row dropdown. Frontend-only state (never persisted). */
+  currentModel?: string | null
+  /** Models to offer in the input-row model dropdown. The current model is
+   *  always included even if absent from this list. */
+  availableModels?: string[]
+  /** Called with the newly-picked model id when the user changes the
+   *  input-row model dropdown. */
+  onModelChange?: (model: string) => void
 }) {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1031,7 +1104,31 @@ export function ChatArea({
       <div ref={scrollerRef} className="flex-1 overflow-y-auto chat-scroll px-5 py-6">
         <div className="flex flex-col gap-5">
           {composerControls ? (
-            composerControls.panel
+            <>
+              {prefixMessages && prefixMessages.length > 0 && (
+                <div className="flex flex-col gap-5" data-testid="branch-prefix">
+                  {prefixMessages.map((msg) => (
+                    // Read-only: no onBranch (no branch button) and no send
+                    // affordance — the only send path is the composer below.
+                    <ChatMessage key={msg.id} message={msg} />
+                  ))}
+                </div>
+              )}
+              {composeError && (
+                <div
+                  role="alert"
+                  className="text-sm rounded-md px-3 py-2"
+                  style={{
+                    background: 'rgba(255,107,107,0.10)',
+                    border: '1px solid var(--needs-input)',
+                    color: 'var(--needs-input)',
+                  }}
+                >
+                  {composeError}
+                </div>
+              )}
+              {composerControls.panel}
+            </>
           ) : loading ? (
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>Loading transcript...</div>
           ) : messages.length === 0 && onSend && agents && agents.length > 0 && onAgentChange && onCustomPromptFile ? (
@@ -1046,7 +1143,7 @@ export function ChatArea({
             <div className="text-sm" style={{ color: 'var(--text-muted)' }}>No messages yet. Select a session to view its transcript.</div>
           ) : (
             messages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} />
+              <ChatMessage key={msg.id} message={msg} onBranch={onBranch} sending={sending} />
             ))
           )}
           <div ref={messagesEndRef} />
@@ -1084,6 +1181,21 @@ export function ChatArea({
             handleKeyDown(e)
           }
         }
+        // Per-session model dropdown. Rendered for an existing session (the
+        // input-row override) and for a branch draft (default = the source
+        // prefix's last model, U8 — a branch draft is detected by the
+        // presence of prefixMessages). A fresh new-tab compose has no
+        // prefix and lets the NewTabComposer panel own model selection, so
+        // the picker stays hidden there. The current model is always an
+        // option, even if it isn't in availableModels, so the displayed
+        // value can never disagree with what will be sent.
+        const isBranchDraft = (prefixMessages?.length ?? 0) > 0
+        const showModelPicker = onModelChange !== undefined
+          && (currentModel ?? null) !== null
+          && (!isCompose || isBranchDraft)
+        const modelOptions = showModelPicker
+          ? Array.from(new Set([currentModel as string, ...(availableModels ?? [])]))
+          : []
         return (
           <div className="shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
             <div className="px-4 py-3 flex items-end gap-3">
@@ -1113,6 +1225,27 @@ export function ChatArea({
               >
                 Send <span className="kbd">{'\u2318\u21B5'}</span>
               </button>
+              {showModelPicker && (
+                <select
+                  aria-label="session model"
+                  title="Model for this session"
+                  className="rounded-lg px-2 text-xs"
+                  style={{
+                    background: 'var(--bg-sunken)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                    outline: 'none',
+                    maxWidth: '180px',
+                    height: '44px',
+                  }}
+                  value={currentModel as string}
+                  onChange={(e) => onModelChange!(e.target.value)}
+                >
+                  {modelOptions.map((m) => (
+                    <option key={m} value={m}>{shortenModel(m)}</option>
+                  ))}
+                </select>
+              )}
             </div>
           </div>
         )
