@@ -149,6 +149,12 @@ spec = do
       Map.lookup "o" (_ms_fields src)
         `shouldBe` Just (Aeson.object ["inner" Aeson..= Aeson.String "xy"])
 
+    it "normalizes string values inside a JSON array field" $ do
+      let arr = Aeson.toJSON [Aeson.String "a\nb", Aeson.String "c\td"]
+          src = mkMessageSource CkTelegram Nothing (Map.fromList [("xs", arr)])
+      Map.lookup "xs" (_ms_fields src)
+        `shouldBe` Just (Aeson.toJSON [Aeson.String "ab", Aeson.String "cd"])
+
     it "bounds user id length to maxSourceLen" $ do
       let long = T.replicate (maxSourceLen + 100) "a"
           src = mkMessageSource CkSignal (Just (UserId long)) Map.empty

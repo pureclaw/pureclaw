@@ -3,11 +3,15 @@ module Integration.SignalFlowSpec (spec) where
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM
-import Data.Aeson (object, (.=))
+import Data.Aeson (Value (..), object, (.=))
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
+import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -19,13 +23,16 @@ import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
+import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Providers.Class
 import PureClaw.Routing.Config (defaultRoutingConfig)
 import PureClaw.Routing.Types (RoutingConfig (..))
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle (mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
+import PureClaw.Session.Handle (mkNoOpSessionHandle, mkSessionHandle, noOpOnFirstStreamDoneRef)
+import PureClaw.Session.Handle qualified as Session
+import PureClaw.Session.Types
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
@@ -216,6 +223,73 @@ spec = do
       -- Should get intermediate text + final response
       length sent `shouldSatisfy` (>= 1)
 
+    -- End-to-end dual-storage proof (WU5): a Signal DM carrying BOTH a phone
+    -- number AND a uuid must land in BOTH session.json (via _sm_source /
+    -- setSourceIfAbsent, set-once on first inbound) AND transcript.jsonl (via
+    -- mkTranscriptProvider's per-message source metadata on the Request entry).
+    -- Uses a REAL on-disk session handle (not the noOp one) and a non-streaming
+    -- provider so the transcript `complete` Request path is exercised.
+    it "persists a Signal DM's phone AND uuid into both session.json and transcript.jsonl" $
+      withSystemTempDirectory "pureclaw-signal-flow-spec" $ \baseDir -> do
+        sc <- mkTestSignalChannelForFlow
+        sentRef <- newIORef ([] :: [Text])
+        let handle = (toHandle sc)
+              { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
+
+        -- A real on-disk session handle with a fresh _sm_source = Nothing.
+        let sid  = "sess-srctest"
+            meta = mkSrcTestMeta sid
+        sh <- mkSessionHandle Nothing mkNoOpLogHandle baseDir meta
+
+        -- Build the test env, then OVERRIDE its (noOp) session with the real one
+        -- so the agent loop's transcript writes (and set-once source capture)
+        -- target the on-disk session.
+        baseEnv <- mkTestEnv (EchoProvider "Echo: ") handle
+        writeIORef (_env_session baseEnv) sh
+
+        agentThread <- async $ runAgentLoop baseEnv
+
+        -- A Signal DM carrying BOTH a phone (source) and a uuid (sourceUuid).
+        let envelope = SignalEnvelope
+              { _se_source    = "+15551234567"
+              , _se_sourceUuid = Just "uuid-abc-123"
+              , _se_timestamp = Just 1000
+              , _se_dataMessage = Just SignalDataMessage
+                  { _sdm_message   = "Hello"
+                  , _sdm_timestamp = 1000
+                  }
+              }
+        atomically $ writeTQueue (_sch_inbox sc) envelope
+        waitForResponses sentRef 1
+
+        cancelWith agentThread (userError "EOF")
+        _ <- waitCatch agentThread
+
+        -- Flush the transcript so transcript.jsonl is on disk before reading.
+        _th_flush (Session._sh_transcript sh)
+
+        -- session.json: phone AND uuid persisted via _sm_source.
+        sessionJson <- TIO.readFile (baseDir </> T.unpack sid </> "session.json")
+        T.unpack sessionJson `shouldContain` "+15551234567"
+        T.unpack sessionJson `shouldContain` "uuid-abc-123"
+        -- Robust structural check on the in-memory meta: _sm_source carries the
+        -- phone as the user id and the uuid in the fields map.
+        persisted <- readIORef (Session._sh_meta sh)
+        (_ms_userId =<< _sm_source persisted)
+          `shouldBe` Just (UserId "+15551234567")
+        case _sm_source persisted of
+          Just src ->
+            Map.lookup "uuid" (_ms_fields src)
+              `shouldBe` Just (String "uuid-abc-123")
+          Nothing -> expectationFailure "expected _sm_source to be Just"
+
+        -- transcript.jsonl: phone AND uuid recorded on the Request entry's
+        -- metadata.source (the substring check is sufficient — both only appear
+        -- because mkTranscriptProvider wrote _im_source into the Request metadata).
+        transcriptJsonl <- TIO.readFile (baseDir </> T.unpack sid </> "transcript.jsonl")
+        T.unpack transcriptJsonl `shouldContain` "+15551234567"
+        T.unpack transcriptJsonl `shouldContain` "uuid-abc-123"
+
 -- | A mock provider that returns a tool call on first request, then text.
 data ToolCallThenTextProvider = ToolCallThenTextProvider
 
@@ -239,6 +313,30 @@ instance Provider ToolCallThenTextProvider where
     where
       isResult (ToolResultBlock {}) = True
       isResult _ = False
+
+-- | A fresh provider-backed 'SessionMeta' with @_sm_source = Nothing@, mirroring
+-- the @mkMeta@ helper shape in @test/Session/HandleSpec.hs@. Used by the
+-- dual-storage end-to-end test so the agent loop captures the Signal source
+-- set-once into a real on-disk @session.json@.
+mkSrcTestMeta :: Text -> SessionMeta
+mkSrcTestMeta sid = SessionMeta
+  { _sm_id                = parseSessionId sid
+  , _sm_agent             = Nothing
+  , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "mock") (ModelId "mock") Nothing)
+  , _sm_model             = "mock"
+  , _sm_channel           = "signal"
+  , _sm_createdAt         = srcTestEpoch
+  , _sm_lastActive        = srcTestEpoch
+  , _sm_bootstrapConsumed = False
+  , _sm_archived          = False
+  , _sm_description       = Nothing
+  , _sm_autoSummary       = Nothing
+  , _sm_source            = Nothing
+  }
+
+-- | Fixed timestamp for 'mkSrcTestMeta' (2025-01-01T00:00:00Z).
+srcTestEpoch :: UTCTime
+srcTestEpoch = UTCTime (fromGregorian 2025 1 1) (secondsToDiffTime 0)
 
 -- | Create a test SignalChannel with mock transport.
 mkTestSignalChannelForFlow :: IO SignalChannel
