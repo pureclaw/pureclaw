@@ -219,6 +219,44 @@ spec = do
           replyMsg `shouldBe` "mock> reply"
         _ -> expectationFailure "expected two messages"
 
+    -- /bg — run a prompt in a fresh background session (issue #52)
+    it "/bg runs a background turn and pushes the result to the channel" $ do
+      (channel, sentRef) <- mkMockChannel []
+      env <- mkTestEnv (MockProvider "bg result") channel
+      runBackgroundTurn env "summarize the repo"
+      sent <- readIORef sentRef
+      sent `shouldBe` ["[bg done] bg result"]
+
+    it "/bg background turn maps a blank response to (no response)" $ do
+      (channel, sentRef) <- mkMockChannel []
+      env <- mkTestEnv (MockProvider "") channel
+      runBackgroundTurn env "do nothing"
+      sent <- readIORef sentRef
+      sent `shouldBe` ["[bg done] (no response)"]
+
+    it "/bg background turn with no provider reports it cannot run" $ do
+      (channel, sentRef) <- mkMockChannel []
+      env <- mkTestEnv (MockProvider "ignored") channel
+      writeIORef (_env_provider env) Nothing
+      runBackgroundTurn env "do thing"
+      sent <- readIORef sentRef
+      sent `shouldBe` ["[bg] Cannot run: no provider configured."]
+
+    it "/bg background turn surfaces provider failure without leaking details" $ do
+      (channel, sentRef) <- mkMockChannel []
+      env <- mkTestEnv FailingProvider channel
+      runBackgroundTurn env "do thing"
+      sent <- readIORef sentRef
+      sent `shouldBe` ["[bg] Something went wrong running the background task."]
+
+    it "/bg in the loop acknowledges in the foreground (not the dispatcher fallback)" $ do
+      (channel, sentRef) <- mkMockChannel ["/bg do a thing"]
+      env <- mkTestEnv (MockProvider "bg result") channel
+      runAgentLoop env
+      sent <- readIORef sentRef
+      any (T.isInfixOf "/bg: running") sent `shouldBe` True
+      any (T.isInfixOf "tabbed-chat dispatcher") sent `shouldBe` False
+
     -- Invariant: slash-prefixed messages NEVER reach the provider
     it "unknown slash command never calls provider" $ do
       callRef <- newIORef (0 :: Int)
