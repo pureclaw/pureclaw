@@ -87,6 +87,7 @@ import PureClaw.Session.Handle
   , resolveBranchSeed
   , setArchived
   , setDescription
+  , touchSessionLastActive
   )
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
@@ -1121,6 +1122,13 @@ doCompletion env sid provider reqModel fallbackModel userText transcriptPath = d
               (runCompletionLoop env provider' model tools reg cap ctx)
   _th_flush th
   _th_close th
+  -- Bump the session's on-disk _sm_lastActive so the sidebar "age" pill
+  -- reflects this completion. The gateway records through a raw
+  -- broadcasting transcript handle, which bypasses the touchLastActive
+  -- wrapper that live SessionHandles get, so we update the metadata
+  -- explicitly here and re-broadcast the lists snapshot to subscribers.
+  touchSessionLastActive (_fe_sessionsDir env) sid
+  broadcastLists env
   pure result
 
 -- | Section-character limit used when rendering a per-session agent's

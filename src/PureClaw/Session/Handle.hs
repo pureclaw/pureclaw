@@ -29,6 +29,8 @@ module PureClaw.Session.Handle
     -- * Description (disk-only)
   , setDescription
   , SetDescriptionError (..)
+    -- * Last-active (disk-only)
+  , touchSessionLastActive
     -- * Resume context reload
   , loadRecentMessages
     -- * Frozen system prompt (read from transcript)
@@ -646,6 +648,26 @@ setDescription baseDir sid mDesc =
   let normalized = mDesc >>= \t -> let s = T.strip t in if T.null s then Nothing else Just s
   in  updateSessionMeta baseDir sid (\m -> m { _sm_description = normalized })
         SetDescriptionSessionMissing SetDescriptionParseFailed
+
+-- | Best-effort bump of @_sm_lastActive@ to the current time, operating
+-- directly on the on-disk @session.json@ under @\<baseDir\>/\<sid\>/@ — no
+-- live 'SessionHandle' required.
+--
+-- The frontend gateway records transcript entries through a raw
+-- broadcasting handle (see @doCompletion@), not the
+-- 'touchLastActive'-wrapped 'SessionHandle' transcript, so the automatic
+-- bump never fires on that path. Without this call a provider session's
+-- @_sm_lastActive@ stays pinned at @_sm_createdAt@ and the sidebar's "age"
+-- pill shows the session's start time instead of its most recent activity.
+--
+-- Silent on a missing or corrupt @session.json@: keeping the sidebar pill
+-- fresh must never fail a completion the user already received.
+touchSessionLastActive :: FilePath -> SessionId -> IO ()
+touchSessionLastActive baseDir sid = do
+  now <- getCurrentTime
+  _ <- updateSessionMeta baseDir sid (\m -> m { _sm_lastActive = now })
+         () (const ())
+  pure ()
 
 -- | Shared read-modify-write helper for the disk-only meta mutators.
 -- Reads @session.json@, applies @f@, and writes back via tmp-file +

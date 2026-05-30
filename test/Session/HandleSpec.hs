@@ -58,6 +58,7 @@ import PureClaw.Session.Handle
   , resolveSessionRef
   , resumeSession
   , setArchived
+  , touchSessionLastActive
   , setDescription
   , validateRuntime
   )
@@ -441,6 +442,25 @@ spec = do
     it "returns SetDescriptionSessionMissing for an unknown session" $ withTmp $ \base -> do
       result <- setDescription base (parseSessionId "nope-2") (Just "x")
       result `shouldBe` Left SetDescriptionSessionMissing
+
+  describe "touchSessionLastActive" $ do
+    it "advances _sm_lastActive past _sm_createdAt, leaving other fields intact" $ withTmp $ \base -> do
+      let meta = mkMeta "touch-1" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      touchSessionLastActive base (parseSessionId "touch-1")
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "touch-1" </> "session.json")
+        :: IO (Either String SessionMeta)
+      -- createdAt is untouched; lastActive moves forward.
+      _sm_createdAt onDisk `shouldBe` t0
+      (_sm_lastActive onDisk > _sm_createdAt onDisk) `shouldBe` True
+      _sm_id onDisk `shouldBe` _sm_id meta
+      _sm_archived onDisk `shouldBe` _sm_archived meta
+
+    it "is a silent no-op for an unknown session" $ withTmp $ \base -> do
+      -- Must not throw even though there is no session.json to update.
+      touchSessionLastActive base (parseSessionId "nope-touch")
+      doesFileExist (base </> "nope-touch" </> "session.json") `shouldReturn` False
 
   describe "loadRecentMessages" $ do
     it "returns all messages when fewer than maxCount exist" $ withTmp $ \base -> do

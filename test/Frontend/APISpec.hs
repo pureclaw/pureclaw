@@ -877,6 +877,23 @@ spec = do
         recorded <- peekRecorded fakeProv
         length recorded `shouldBe` 2
 
+    -- The sidebar's "age" pill reads _sm_lastActive. The gateway records
+    -- transcript entries through a raw broadcasting handle (not a
+    -- SessionHandle), so the touchLastActive bump never fires here — a
+    -- completed /send must still advance _sm_lastActive past _sm_createdAt
+    -- on disk, otherwise every session's pill is frozen at its start time.
+    it "bumps _sm_lastActive on disk after a completion" $ do
+      withSystemTempDirectory "pureclaw-send-lastactive" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeSessionBootstrap tmpDir "sess-la" Nothing True
+        metaBefore <- readSessionMeta tmpDir "sess-la"
+        env <- mkSendEnv tmpDir agentsDir Nothing
+        _ <- sendOnce env "sess-la" "hello"
+        metaAfter <- readSessionMeta tmpDir "sess-la"
+        -- createdAt is untouched; lastActive advances past it.
+        _sm_createdAt metaAfter `shouldBe` _sm_createdAt metaBefore
+        (_sm_lastActive metaAfter > _sm_createdAt metaAfter) `shouldBe` True
+
   -- -----------------------------------------------------------------------
   -- WU4: frozen system prompt + per-session agent rendering (§9.1)
   -- -----------------------------------------------------------------------
