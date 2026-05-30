@@ -529,6 +529,17 @@ runOneTurn env idx state provider model ctx = do
       let assistantText = responseText response
       unless (T.null (T.strip assistantText)) $
         appendTranscript env assistantText
+      -- Background-tab completion push (WU2 — /bg). A tab spawned by
+      -- @/bg@ runs without stealing focus; when its turn finishes while
+      -- the tab is NOT focused we surface the final response to the
+      -- channel as a @[bg /N done]@ banner. A focused bg tab streams
+      -- live above, so we skip the push to avoid duplicate output. Only
+      -- @/bg@ tabs push — ordinary non-focused tabs do not.
+      when (_ats_background state && not focusedNow) $ do
+        let body = if T.null (T.strip assistantText)
+                     then "(no response)"
+                     else assistantText
+        emitBgCompletion env idx body
       -- Tool-call continuation: full tool-call cycling is part of
       -- the WU10 refactor that ports Agent.Loop's logic wholesale.
       -- For WU6 we log the presence of tool calls so the gap is
@@ -619,6 +630,15 @@ emitBanner :: AgentEnv -> Text -> IO ()
 emitBanner env txt =
   atomically $ writeTBQueue (_env_channelOutQ env)
                  (SrcDispatcher, BannerLine txt)
+
+-- | Push a background-tab completion banner to the channel (WU2 — @\/bg@).
+-- Emitted via 'SrcDispatcher' so it bypasses focus gating and always
+-- reaches the current channel. The leading @[bg \/N done] @ text is the
+-- confirmed user-facing wording.
+emitBgCompletion :: AgentEnv -> TabIndex -> Text -> IO ()
+emitBgCompletion env idx body =
+  emitBanner env
+    ("[bg /" <> T.pack (show (unTabIndex idx)) <> " done] " <> body)
 
 -- | The error banner shown when a provider call fails.
 errorBanner :: TabIndex -> Text
