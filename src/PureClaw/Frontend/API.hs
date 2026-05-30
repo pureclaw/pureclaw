@@ -873,6 +873,7 @@ createTab env tabKind mSeed respond = do
             , _sm_archived          = False
             , _sm_description       = Nothing
             , _sm_autoSummary       = Nothing
+            , _sm_source            = Nothing
             }
       sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
       _sh_save sh

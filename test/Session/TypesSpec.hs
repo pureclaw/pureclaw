@@ -105,6 +105,7 @@ spec = do
           , _sm_archived          = False
           , _sm_description       = Nothing
           , _sm_autoSummary       = Nothing
+          , _sm_source            = Nothing
           }
 
     it "round-trips a fully-populated SessionMeta" $
@@ -126,6 +127,45 @@ spec = do
     it "round-trips bootstrap_consumed = True" $ do
       let s = sample { _sm_bootstrapConsumed = True }
       Aeson.decode (Aeson.encode s) `shouldBe` Just s
+
+    it "round-trips a SessionMeta with a Just _sm_source" $ do
+      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+          s   = sample { _sm_source = Just src }
+      Aeson.decode (Aeson.encode s) `shouldBe` Just s
+
+    it "round-trips a SessionMeta with a CkOther source channel" $ do
+      let src = mkMessageSource (CkOther "matrix") (Just (UserId "@bob:matrix.org")) mempty
+          s   = sample { _sm_source = Just src }
+      Aeson.decode (Aeson.encode s) `shouldBe` Just s
+
+    it "decodes legacy JSON without a \"source\" key as _sm_source == Nothing" $ do
+      -- Encode a sample that HAS no source, decode it back, and confirm the
+      -- field is Nothing — i.e. omission round-trips to Nothing, the same
+      -- shape a legacy session.json (written before _sm_source existed)
+      -- produces.
+      let s = sample { _sm_source = Nothing }
+      case Aeson.decode (Aeson.encode s) :: Maybe SessionMeta of
+        Just m  -> _sm_source m `shouldBe` Nothing
+        Nothing -> expectationFailure "decode of source-less SessionMeta failed"
+
+    it "ToJSON OMITS the \"source\" key when _sm_source is Nothing" $ do
+      let s = sample { _sm_source = Nothing }
+          obj = Aeson.decode (Aeson.encode s) :: Maybe Aeson.Object
+      case obj of
+        Just o -> case Aeson.parseMaybe (Aeson..: "source") o :: Maybe Aeson.Value of
+          Nothing -> pure ()
+          Just _  -> expectationFailure "'source' key should be absent when _sm_source is Nothing"
+        Nothing -> expectationFailure "Failed to decode SessionMeta as Object"
+
+    it "ToJSON EMITS the \"source\" key when _sm_source is Just" $ do
+      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+          s   = sample { _sm_source = Just src }
+          obj = Aeson.decode (Aeson.encode s) :: Maybe Aeson.Object
+      case obj of
+        Just o -> case Aeson.parseMaybe (Aeson..: "source") o :: Maybe Aeson.Value of
+          Just _  -> pure ()
+          Nothing -> expectationFailure "'source' key should be present when _sm_source is Just"
+        Nothing -> expectationFailure "Failed to decode SessionMeta as Object"
 
     it "defaultTarget SkProvider == TargetProvider" $
       defaultTarget (SkProvider (ProviderSpec (ProviderId "anthropic") (ModelId "m") Nothing)) `shouldBe` TargetProvider
@@ -215,6 +255,7 @@ spec = do
             , _sm_archived          = False
             , _sm_description       = Nothing
             , _sm_autoSummary       = Nothing
+            , _sm_source            = Nothing
             }
       case Aeson.decode (Aeson.encode meta) :: Maybe SessionMeta of
         Nothing -> expectationFailure "round-trip decode failed"
@@ -237,6 +278,7 @@ spec = do
             , _sm_archived          = False
             , _sm_description       = Nothing
             , _sm_autoSummary       = Nothing
+            , _sm_source            = Nothing
             }
           encoded = Aeson.encode meta
           obj = Aeson.decode encoded :: Maybe Aeson.Object

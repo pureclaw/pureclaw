@@ -104,86 +104,99 @@ runAgentLoopWith env initialMessages = do
       receiveResult <- try @IOException (_ch_receive channel)
       case receiveResult of
         Left _ -> _lh_logInfo logger "Session ended"
-        Right msg
-          | T.null stripped -> go ctx
-          -- INVARIANT: any message beginning with '/' is handled locally and
-          -- NEVER forwarded to the provider. Unknown slash commands get an
-          -- error response rather than silently routing to the LLM.
-          | "/" `T.isPrefixOf` stripped ->
-              case parseSlashCommand stripped of
-                Just (CmdTab tabCmd) -> do
-                  -- Tab commands need callbacks (SpawnIO, PromptRenderer,
-                  -- BannerEmit, etc.) that 'executeSlashCommand' can't wire
-                  -- without a dependency cycle. Dispatch via the legacy
-                  -- bridge instead. The bridge invokes the canonical
-                  -- 'Routing.AutoSpawn' handlers so /tab* commands behave
-                  -- the same way they would under the new dispatcher.
-                  _lh_logInfo logger $ "Slash command (tab): " <> stripped
-                  dispatchLegacyTabCmd env tabCmd
-                  go ctx
-                Just (CmdBg prompt) -> do
-                  -- /bg runs the prompt in a fresh background session
-                  -- (issue #52). The single-tab loop has no tabbed-chat
-                  -- dispatcher, so we fork a self-contained background
-                  -- turn that emits its result directly to the channel
-                  -- (the ChannelOut writer is not running in this path).
-                  -- The foreground loop continues uninterrupted.
-                  _lh_logInfo logger $ "Slash command (bg): " <> stripped
-                  _ch_send channel (OutgoingMessage
-                    "\x1F504 /bg: running in the background \x2014 the result will appear here when ready.")
-                  _ <- _env_fork env (runBackgroundTurn env prompt)
-                  go ctx
-                Just cmd -> do
-                  _lh_logInfo logger $ "Slash command: " <> stripped
-                  ctx' <- executeSlashCommand env cmd ctx
-                  go ctx'
-                Nothing -> do
-                  _lh_logWarn logger $ "Unrecognized slash command: " <> stripped
-                  _ch_send channel
-                    (OutgoingMessage ("Unknown command: " <> stripped
-                      <> "\nType /status for session info, /help for available commands."))
-                  go ctx
-          | otherwise -> do
-              target <- readIORef (_env_target env)
-              case target of
-                TargetHarness name -> do
-                  harnesses <- readIORef (_env_harnesses env)
-                  case Map.lookup name harnesses of
-                    Nothing -> do
+        Right msg -> do
+          -- Capture the session origin (set-once) BEFORE any slash/harness/
+          -- /bg/provider branching, covering the empty-message branch too:
+          -- origin is about the SENDER, not the content. This is the
+          -- single-tab loop's sole inbound entry; the tabbed dispatcher
+          -- runtime is a separate path (out of scope, see design WU3).
+          --
+          -- SECURITY: _sm_source is attacker-asserted provenance and MUST
+          -- NOT feed any access-control decision.
+          sh <- readIORef (_env_session env)
+          Session.setSourceIfAbsent sh (_im_source msg)
+          dispatchMsg
+          where
+            stripped = T.strip (_im_content msg)
+            dispatchMsg
+              | T.null stripped = go ctx
+              -- INVARIANT: any message beginning with '/' is handled locally
+              -- and NEVER forwarded to the provider. Unknown slash commands
+              -- get an error response rather than silently routing to the LLM.
+              | "/" `T.isPrefixOf` stripped =
+                  case parseSlashCommand stripped of
+                    Just (CmdTab tabCmd) -> do
+                      -- Tab commands need callbacks (SpawnIO, PromptRenderer,
+                      -- BannerEmit, etc.) that 'executeSlashCommand' can't wire
+                      -- without a dependency cycle. Dispatch via the legacy
+                      -- bridge instead. The bridge invokes the canonical
+                      -- 'Routing.AutoSpawn' handlers so /tab* commands behave
+                      -- the same way they would under the new dispatcher.
+                      _lh_logInfo logger $ "Slash command (tab): " <> stripped
+                      dispatchLegacyTabCmd env tabCmd
+                      go ctx
+                    Just (CmdBg prompt) -> do
+                      -- /bg runs the prompt in a fresh background session
+                      -- (issue #52). The single-tab loop has no tabbed-chat
+                      -- dispatcher, so we fork a self-contained background
+                      -- turn that emits its result directly to the channel
+                      -- (the ChannelOut writer is not running in this path).
+                      -- The foreground loop continues uninterrupted.
+                      _lh_logInfo logger $ "Slash command (bg): " <> stripped
                       _ch_send channel (OutgoingMessage
-                        ("Harness \"" <> name <> "\" is not running. Use /harness start "
-                          <> name <> " or /target to switch targets."))
+                        "\x1F504 /bg: running in the background \x2014 the result will appear here when ready.")
+                      _ <- _env_fork env (runBackgroundTurn env prompt)
                       go ctx
-                    Just hh -> do
-                      _lh_logInfo logger $ "Routing to harness: " <> name
-                      _hh_send hh (TE.encodeUtf8 stripped)
-                      output <- _hh_receive hh
-                      let response = sanitizeHarnessOutput (TE.decodeUtf8 output)
-                      unless (T.null (T.strip response)) $
-                        _ch_send channel (OutgoingMessage (prefixHarnessOutput name response))
-                      go ctx
-                TargetProvider -> do
-                  mProvider <- readIORef (_env_provider env)
-                  case mProvider of
+                    Just cmd -> do
+                      _lh_logInfo logger $ "Slash command: " <> stripped
+                      ctx' <- executeSlashCommand env cmd ctx
+                      go ctx'
                     Nothing -> do
-                      _ch_send channel (OutgoingMessage noProviderMessage)
+                      _lh_logWarn logger $ "Unrecognized slash command: " <> stripped
+                      _ch_send channel
+                        (OutgoingMessage ("Unknown command: " <> stripped
+                          <> "\nType /status for session info, /help for available commands."))
                       go ctx
-                    Just provider -> do
-                      mModel <- readIORef (_env_model env)
-                      case mModel of
+              | otherwise = do
+                  target <- readIORef (_env_target env)
+                  case target of
+                    TargetHarness name -> do
+                      harnesses <- readIORef (_env_harnesses env)
+                      case Map.lookup name harnesses of
                         Nothing -> do
-                          _ch_send channel (OutgoingMessage noModelMessage)
+                          _ch_send channel (OutgoingMessage
+                            ("Harness \"" <> name <> "\" is not running. Use /harness start "
+                              <> name <> " or /target to switch targets."))
                           go ctx
-                        Just model -> do
-                          let userMsg = textMessage User stripped
-                              ctx' = addMessage userMsg ctx
-                          _lh_logDebug logger $
-                            "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-                          -- Wrap provider with transcript logging (session owns the transcript)
-                          th <- envTranscript env
-                          let provider' = mkTranscriptProvider th (unModelId model) provider
-                          handleCompletion provider' ctx'
-          where stripped = T.strip (_im_content msg)
+                        Just hh -> do
+                          _lh_logInfo logger $ "Routing to harness: " <> name
+                          _hh_send hh (TE.encodeUtf8 stripped)
+                          output <- _hh_receive hh
+                          let response = sanitizeHarnessOutput (TE.decodeUtf8 output)
+                          unless (T.null (T.strip response)) $
+                            _ch_send channel (OutgoingMessage (prefixHarnessOutput name response))
+                          go ctx
+                    TargetProvider -> do
+                      mProvider <- readIORef (_env_provider env)
+                      case mProvider of
+                        Nothing -> do
+                          _ch_send channel (OutgoingMessage noProviderMessage)
+                          go ctx
+                        Just provider -> do
+                          mModel <- readIORef (_env_model env)
+                          case mModel of
+                            Nothing -> do
+                              _ch_send channel (OutgoingMessage noModelMessage)
+                              go ctx
+                            Just model -> do
+                              let userMsg = textMessage User stripped
+                                  ctx' = addMessage userMsg ctx
+                              _lh_logDebug logger $
+                                "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
+                              -- Wrap provider with transcript logging (session owns the transcript)
+                              th <- envTranscript env
+                              let provider' = mkTranscriptProvider th (unModelId model) provider
+                              handleCompletion provider' ctx'
 
     handleCompletion provider ctx = do
       mModel <- readIORef (_env_model env)
@@ -364,6 +377,7 @@ mkBackgroundSession env model prompt = do
         , SessionTypes._sm_archived = False
         , SessionTypes._sm_description = Just (backgroundDescription prompt)
         , SessionTypes._sm_autoSummary = Nothing
+        , SessionTypes._sm_source = Nothing
         }
   Session.mkSessionHandle (_env_broker env) (_env_logger env) sessionsDir meta
 

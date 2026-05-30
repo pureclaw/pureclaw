@@ -23,6 +23,7 @@ module PureClaw.Session.Handle
   , resolveResumedTarget
     -- * Bootstrap consumption
   , markBootstrapConsumed
+  , setSourceIfAbsent
     -- * Archive flag (disk-only)
   , setArchived
   , SetArchivedError (..)
@@ -40,7 +41,7 @@ module PureClaw.Session.Handle
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (guard)
+import Control.Monad (guard, when)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
@@ -75,7 +76,8 @@ import System.Posix.Files (setFileMode)
 import PureClaw.Agent.AgentDef (AgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
-  ( MessageTarget (..)
+  ( MessageSource
+  , MessageTarget (..)
   , ModelId (..)
   , SessionId (..)
   , parseSessionId
@@ -275,6 +277,7 @@ noOpMeta = SessionMeta
   , _sm_archived          = False
   , _sm_description       = Nothing
   , _sm_autoSummary       = Nothing
+  , _sm_source            = Nothing
   }
   where
     epoch = UTCTime (fromGregorian 1970 1 1) (secondsToDiffTime 0)
@@ -604,6 +607,25 @@ markBootstrapConsumed sh = do
   atomicModifyIORef' (_sh_meta sh) $ \m ->
     (m { _sm_bootstrapConsumed = True }, ())
   _sh_save sh
+
+-- | Record the session origin ('MessageSource') set-once: write '_sm_source'
+-- only if it is currently 'Nothing', and persist via '_sh_save' IFF the
+-- value actually changed. A second call with a different source is a no-op
+-- (the first sender wins and no redundant save occurs).
+--
+-- Same atomicity pattern as 'markBootstrapConsumed' / 'touchSessionLastActive'
+-- ('atomicModifyIORef'' on '_sh_meta'); the changed-flag avoids a wasteful
+-- re-save on the already-set path.
+--
+-- SECURITY: '_sm_source' is attacker-asserted provenance — it MUST NOT feed
+-- any access-control decision.
+setSourceIfAbsent :: SessionHandle -> MessageSource -> IO ()
+setSourceIfAbsent sh src = do
+  changed <- atomicModifyIORef' (_sh_meta sh) $ \m ->
+    case _sm_source m of
+      Just _  -> (m, False)
+      Nothing -> (m { _sm_source = Just src }, True)
+  when changed (_sh_save sh)
 
 -- ----------------------------------------------------------------------------
 -- Archive flag

@@ -36,7 +36,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import GHC.Generics (Generic)
 
 import PureClaw.Agent.AgentDef (AgentName, unAgentName)
-import PureClaw.Core.Types (MessageTarget (..), ModelId (..), SessionId (..))
+import PureClaw.Core.Types (MessageSource, MessageTarget (..), ModelId (..), SessionId (..))
 import PureClaw.Session.Kind
 
 -- | Validated session prefix. Used as the human-readable leading segment
@@ -163,6 +163,16 @@ data SessionMeta = SessionMeta
     -- summarization path (not yet wired up). Defaults to 'Nothing'
     -- on new sessions and after disk loads of older session.json
     -- files.
+  , _sm_source            :: Maybe MessageSource
+    -- ^ Session origin: the 'MessageSource' of the FIRST inbound
+    -- message of this session (set-once). 'Nothing' for legacy
+    -- sessions written before this field existed, and for sessions
+    -- that have not yet received an inbound message.
+    --
+    -- SECURITY: this is attacker-asserted provenance — the sender id
+    -- is unauthenticated. It MUST NOT feed any access-control or
+    -- trust decision. Routing/authz key on the dispatcher's
+    -- allow-list, never on this value.
   } deriving stock (Show, Eq, Generic)
 
 -- Hand-written JSON so we don't depend on a 'ToJSON' instance for
@@ -182,9 +192,12 @@ instance Aeson.ToJSON SessionMeta where
     , "archived"           .= _sm_archived s
     , "description"        .= _sm_description s
     , "auto_summary"       .= _sm_autoSummary s
-    ] <> case _sm_agent s of
+    ] <> (case _sm_agent s of
       Just n  -> ["agent" .= unAgentName n]
-      Nothing -> []
+      Nothing -> [])
+      <> (case _sm_source s of
+      Just src -> ["source" .= src]
+      Nothing  -> [])
 
 instance Aeson.FromJSON SessionMeta where
   parseJSON = Aeson.withObject "SessionMeta" $ \o -> do
@@ -198,6 +211,7 @@ instance Aeson.FromJSON SessionMeta where
     arch    <- o .:? "archived"     .!= False
     desc    <- o .:? "description"
     summ    <- o .:? "auto_summary"
+    src     <- o .:? "source"
     -- Parse session kind: accept both new and legacy format.
     kind    <- parseSessionKind o model agent
     pure SessionMeta
@@ -212,6 +226,7 @@ instance Aeson.FromJSON SessionMeta where
       , _sm_archived          = arch
       , _sm_description       = desc
       , _sm_autoSummary       = summ
+      , _sm_source            = src
       }
 
 -- | Parse the session kind from the JSON object. Accepts three formats:

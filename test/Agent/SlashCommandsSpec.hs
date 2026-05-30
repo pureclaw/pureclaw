@@ -400,6 +400,43 @@ spec = do
           T.unpack t `shouldContain` "Target:"
         Nothing -> expectationFailure "Expected status message"
 
+    it "/status renders 'unknown' Source for a legacy (Nothing) session" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let ctx = emptyContext Nothing
+      env <- mkEnv sentRef
+      _ <- executeSlashCommand env CmdStatus ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "  Source:    unknown"
+        Nothing -> expectationFailure "Expected status message"
+
+    it "/status renders Source as '<userId> (<channel>)' for a Just source with a userId" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let ctx = emptyContext Nothing
+          src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+      env <- mkEnv sentRef
+      -- Inject a source into the active session's metadata.
+      sh <- readIORef (_env_session env)
+      modifyIORef' (_sh_meta sh) (\m -> m { _sm_source = Just src })
+      _ <- executeSlashCommand env CmdStatus ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "  Source:    +15551234567 (signal)"
+        Nothing -> expectationFailure "Expected status message"
+
+    it "/status renders a CkOther channel label for a Just source" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let ctx = emptyContext Nothing
+          src = mkMessageSource (CkOther "matrix") Nothing mempty
+      env <- mkEnv sentRef
+      sh <- readIORef (_env_session env)
+      modifyIORef' (_sh_meta sh) (\m -> m { _sm_source = Just src })
+      _ <- executeSlashCommand env CmdStatus ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "  Source:    (matrix)"
+        Nothing -> expectationFailure "Expected status message"
+
     it "/compact with few messages returns NotNeeded" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let ctx = addMessage (textMessage User "hello") (emptyContext Nothing)

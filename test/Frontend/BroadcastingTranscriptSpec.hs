@@ -102,6 +102,7 @@ mkMeta sid = SessionMeta
   , _sm_archived          = False
   , _sm_description       = Nothing
   , _sm_autoSummary       = Nothing
+  , _sm_source            = Nothing
   }
 
 -- | LogHandle that captures warn messages into an IORef so D34 can assert
