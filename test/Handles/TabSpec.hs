@@ -223,7 +223,8 @@ spec = do
       r <- TabAi.mkTabAi env (case Tab.mkTabIndex 0 of
                                 Just i -> i
                                 Nothing -> error "0 is valid")
-             Tab.AiSpawnArgs { Tab._ai_requestedName = "h4" }
+             Tab.AiSpawnArgs { Tab._ai_requestedName = "h4"
+                             , Tab._ai_background = False }
       case r of
         Right h -> do
           -- The bound is _rc_inputQueueBound (default 64); burst
@@ -263,7 +264,8 @@ spec = do
       Right h <- TabAi.mkTabAi env (case Tab.mkTabIndex 0 of
                                       Just i -> i
                                       Nothing -> error "0 is valid")
-                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h6" }
+                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h6"
+                                   , Tab._ai_background = False }
       Tab._tabHandle_close h Tab.CloseGraceful
       Tab._tabHandle_close h Tab.CloseGraceful  -- repeat — no throw
       Tab._tabHandle_close h Tab.CloseForce     -- still no throw
@@ -275,7 +277,8 @@ spec = do
       Right h <- TabAi.mkTabAi env (case Tab.mkTabIndex 0 of
                                       Just i -> i
                                       Nothing -> error "0 is valid")
-                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h7" }
+                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h7"
+                                   , Tab._ai_background = False }
       -- shouldReturn confirms close completed without raising.
       Tab._tabHandle_close h Tab.CloseGraceful `shouldReturn` ()
       Tab._tabHandle_close h Tab.CloseForce    `shouldReturn` ()
@@ -290,7 +293,8 @@ spec = do
       Right h <- TabAi.mkTabAi env (case Tab.mkTabIndex 0 of
                                       Just i -> i
                                       Nothing -> error "0 is valid")
-                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h8" }
+                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h8"
+                                   , Tab._ai_background = False }
       Tab._tabHandle_close h Tab.CloseGraceful
       pure ()
 
@@ -301,7 +305,8 @@ spec = do
       Right h <- TabAi.mkTabAi env (case Tab.mkTabIndex 0 of
                                       Just i -> i
                                       Nothing -> error "0 is valid")
-                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h9" }
+                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h9"
+                                   , Tab._ai_background = False }
       -- Force close: same as Graceful but the no-op session would
       -- have its _sh_save skipped. With the no-op session we cannot
       -- observe the skip from outside; the assertion is no-throw +
@@ -321,7 +326,8 @@ spec = do
       Right h <- TabAi.mkTabAi env (case Tab.mkTabIndex 0 of
                                       Just i -> i
                                       Nothing -> error "0 is valid")
-                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h10" }
+                   Tab.AiSpawnArgs { Tab._ai_requestedName = "h10"
+                                   , Tab._ai_background = False }
       Tab._tabHandle_close h Tab.CloseGraceful
       pure ()
     -- H11: every code path that constructs a TabHandle's @_tabHandle_name@
@@ -409,7 +415,8 @@ spec = do
         notImpl (ErrorCall msg) = "not implemented" `List.isInfixOf` msg
 
     it "mkTabAi stub: throws ErrorCall containing 'not implemented'" $ do
-      let args = Tab.AiSpawnArgs { Tab._ai_requestedName = "ai" }
+      let args = Tab.AiSpawnArgs { Tab._ai_requestedName = "ai"
+                                 , Tab._ai_background = False }
       Tab.mkTabAi idx args `shouldThrow` notImpl
 
     it "mkTabHarness stub: throws ErrorCall containing 'not implemented'" $ do

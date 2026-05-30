@@ -190,7 +190,8 @@ defaultTabFactory env kind idx args =
 -- (WU1-stubbed) factory bottoms.
 parseArgsForKind :: TabKind -> [Text] -> Either AiSpawnArgs (Either HarnessSpawnArgs BackendSpawnArgs)
 parseArgsForKind kind xs = case kind of
-  TkSession (SkProvider _) -> Left  AiSpawnArgs      { _ai_requestedName      = T.unwords xs }
+  TkSession (SkProvider _) -> Left  AiSpawnArgs      { _ai_requestedName      = T.unwords xs
+                                                     , _ai_background         = False }
   TkSession (SkHarness _)  -> Right (Left HarnessSpawnArgs { _harness_requestedName = T.unwords xs })
   TkRawShell _             -> Right (Right BackendSpawnArgs
                                 { _backend_requestedName = T.unwords xs
@@ -682,6 +683,48 @@ ratelimitedSpawn env ds uid kind args = do
     else spawnTabWith env (_ds_factory ds) kind args
 
 
+-- | The @\/bg@ spawn callback (issue #52). Like 'ratelimitedSpawn' it
+-- consumes one S7 token first, but it INTENTIONALLY bypasses
+-- '_ds_factory' (the synthetic test factory): @\/bg@ must inject
+-- @'_ai_background' = True@ into the spawned AI tab so the tab loop's
+-- completion-push fires (see 'PureClaw.Tab.Ai'). It therefore wires a
+-- bg-aware factory that calls the real 'PureClaw.Tab.Ai.mkTabAi'
+-- directly — which is why WU3's tests exercise the real factory (the
+-- integration test) rather than a synthetic one.
+--
+-- The @kind@ \/ @args@ handed in by 'AutoSpawn.handleBg' are ignored:
+-- the spawned tab kind is the fixed AI kind below and the prompt is
+-- enqueued separately by 'AutoSpawn.handleBg' after the spawn.
+ratelimitedSpawnBg
+  :: AgentEnv
+  -> DispatcherState
+  -> UserId
+  -> TabKind
+  -> [Text]
+  -> IO (Either TabError TabIndex)
+ratelimitedSpawnBg env ds uid _kind _args = do
+  now <- getCurrentTime
+  ok  <- tryConsumeSpawnToken (_ds_rateLimiter ds) uid now
+  if not ok
+    then pure (Left (TabConcurrencyLimit 0))
+    else spawnTabWith env bgFactory aiKind []
+  where
+    aiKind = TkSession (SkProvider ProviderSpec
+      { _ps_provider = ProviderId "anthropic"
+      , _ps_model    = ModelId "placeholder"
+      , _ps_agent    = Nothing
+      })
+    -- NB: the requested name must be NON-empty — 'mkTabAi' runs it
+    -- through 'sanitizeTabName', which rejects an empty/blank name with
+    -- 'NameRedactedToEmpty' (the spawn would otherwise fail with no tab
+    -- created). "bg" is the user-facing label for background tabs.
+    bgFactory _k idx _a =
+      TabAi.mkTabAi env idx AiSpawnArgs
+        { _ai_requestedName = "bg"
+        , _ai_background    = True
+        }
+
+
 -- | Dispatch a slash command. The @\/tab*@ family is routed to the
 -- AutoSpawn handlers; every other slash command is delivered to the
 -- focused AI tab via '_tabHandle_enqueueSlash' (WU10 — I5 wiring).
@@ -711,6 +754,13 @@ dispatchSlash env ds uid cmd = case cmd of
   -- be wrong-channel-of-output for a UX greeting). Delegated to
   -- 'Onboarding.handleStart' which emits via @_ch_send@ directly.
   CmdStart      -> Onboarding.handleStart env
+  -- /bg (issue #52): spawn a fresh background AI tab and enqueue the
+  -- prompt without stealing focus. EXPLICIT arm — the catch-all below
+  -- would otherwise silently route /bg to the focused tab, and the
+  -- build will NOT warn (-Wincomplete-patterns is off project-wide).
+  CmdBg prompt  ->
+    AutoSpawn.handleBg env (ratelimitedSpawnBg env ds uid)
+      (emitDispatcherBanner env) (_ds_spawnArgs ds) prompt
   _             -> routeToFocused env ds uid cmd
 
 -- | Route a non-@\/tab*@ slash command to the focused tab via

@@ -1,6 +1,8 @@
 module PureClaw.Tools.Delegate
   ( -- * Tool registration
     delegateTaskTool
+    -- * Reusable sub-agent engine
+  , runSubAgent
   ) where
 
 import Control.Exception

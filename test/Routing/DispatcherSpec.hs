@@ -24,6 +24,7 @@
 -- throw-from-factory test-local factory.
 module Routing.DispatcherSpec (spec) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
   ( TBQueue
   , atomically
@@ -75,7 +76,12 @@ import PureClaw.Handles.Tab
   , pattern KindTmux
   )
 import PureClaw.MCP (McpServer)
-import PureClaw.Providers.Class (SomeProvider)
+import PureClaw.Providers.Class
+  ( CompletionResponse (..)
+  , ContentBlock (..)
+  , SomeProvider (MkProvider)
+  )
+import PureClaw.Routing.ChannelOut (startChannelOut)
 import PureClaw.Routing.Config (defaultRoutingConfig)
 import PureClaw.Routing.Dispatcher
   ( TabFactory
@@ -115,6 +121,10 @@ import Test.Fake.ChannelHandle
   , fakeChannelHandle
   , feedIncoming
   , newFakeChannel
+  )
+import Test.Fake.Provider
+  ( newFakeProvider
+  , queueResponse
   )
 
 
@@ -237,7 +247,8 @@ aiFactoryAdapter :: AgentEnv -> TabFactory
 aiFactoryAdapter env kind idx args =
   case kind of
     KindAi -> TabAi.mkTabAi env idx
-                AiSpawnArgs { _ai_requestedName = T.unwords args }
+                AiSpawnArgs { _ai_requestedName = T.unwords args
+                            , _ai_background = False }
     _      -> error
         ("aiFactoryAdapter: this test adapter only supports KindAi; \
          \got " <> show kind)
@@ -1122,6 +1133,114 @@ spec = do
       let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
       banners `shouldSatisfy`
         any (\t -> "nonexistent-session" `T.isInfixOf` t)
+
+  describe "/bg — dispatcher + AutoSpawn wiring (WU3)" $ do
+
+    it ("dispatchOne '/bg do a thing' spawns exactly one tab, leaves "
+        <> "_env_focus UNCHANGED, and emits '/bg: running in tab /N'") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      -- Pre-set a known focus; /bg must not steal it.
+      writeIORef (_env_focus env) (Just (ti 3))
+      -- The bg path bypasses _ds_factory and uses the real TabAi.mkTabAi,
+      -- so the synthetic factory here is never consulted for /bg.
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      dispatchOne env ds (UserId "u") "/bg do a thing"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 1
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Just (ti 3)
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy` any ("/bg: running in tab /0" `T.isInfixOf`)
+      closeAllTabs env
+
+    it ("S7: /bg with the spawn-rate bucket exhausted emits a redacted "
+        <> "'/bg: ...' banner and spawns NO tab") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      -- Burn the whole bucket (_rc_spawnRateLimit = 10) with /help
+      -- dispatches (each consumes one S7 token via routeToFocused).
+      mapM_ (\_ -> dispatchOne env ds (UserId "u") "/help")
+            [(1 :: Int) .. 10]
+      _ <- drainQueue (_env_channelOutQ env)
+      dispatchOne env ds (UserId "u") "/bg over the limit"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 0
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy` any ("/bg: " `T.isInfixOf`)
+      closeAllTabs env
+
+    it ("S6: /bg with the registry at _rc_maxTabs emits a redacted "
+        <> "'/bg: ...' banner (TabLimitExceeded) and spawns NO new tab") $ do
+      fch <- newFakeChannel
+      env0 <- mkDispatcherEnv (fakeChannelHandle fch)
+      let env = env0
+            { _env_routingConfig = (_env_routingConfig env0)
+                { _rc_maxTabs = 1 }
+            }
+      st0 <- mkSyntheticTab (ti 0) KindAi (Idle t0)
+      _   <- insertTab (_env_tabs env) (ti 0) (_st_handle st0)
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      dispatchOne env ds (UserId "u") "/bg cannot fit"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 1  -- only the pre-existing tab
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy` any ("/bg: " `T.isInfixOf`)
+      closeAllTabs env
+
+    it ("INTEGRATION: a /bg through the REAL TabAi.mkTabAi factory + a "
+        <> "MockProvider ultimately delivers the '[bg /N done] <text>' "
+        <> "banner across _env_channelOutQ -> ChannelOut -> _ch_send") $ do
+      fp <- newFakeProvider
+      queueResponse fp CompletionResponse
+        { _crsp_content = [TextBlock "integration bg text"]
+        , _crsp_model   = ModelId "test-model"
+        , _crsp_usage   = Nothing
+        }
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      writeIORef (_env_provider env) (Just (MkProvider fp))
+      writeIORef (_env_model env) (Just (ModelId "test-model"))
+      -- Boot the channel-out writer so SrcDispatcher banners cross to
+      -- the underlying ChannelHandle (_ch_send).
+      coRunner <- startChannelOut env
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      dispatchOne env ds (UserId "u") "/bg summarize"
+      -- The bg tab runs the provider turn asynchronously; poll the fake
+      -- channel's send sink until the [bg ...] banner arrives.
+      let pollFor :: Int -> IO [Text]
+          pollFor 0 = pure []
+          pollFor n = do
+            evs <- drainEvents fch
+            let sends = [t | (_, FceSend (OutgoingMessage t)) <- evs]
+                bgs   = filter ("[bg " `T.isPrefixOf`) sends
+            if null bgs
+              then threadDelay 20000 >> pollFor (n - 1)
+              else pure bgs
+      bgBanners <- pollFor 25  -- up to ~500ms
+      bgBanners `shouldBe` ["[bg /0 done] integration bg text"]
+      _trun_cancel coRunner
+      closeAllTabs env
+
+    it ("/bg with a slash-command prompt ('/bg /new') spawns + enqueues "
+        <> "without crashing and still emits '/bg: running in tab /N'") $ do
+      fch <- newFakeChannel
+      env <- mkDispatcherEnv (fakeChannelHandle fch)
+      ds <- newDispatcherState env defaultTabFactoryNoop
+      dispatchOne env ds (UserId "u") "/bg /new"
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 1
+      drained <- drainQueue (_env_channelOutQ env)
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+      banners `shouldSatisfy` any ("/bg: running in tab /0" `T.isInfixOf`)
+      -- No [bg /N done] push: the prompt runs as a slash command in the
+      -- bg tab, so no provider turn fires.
+      banners `shouldSatisfy` not . any ("[bg " `T.isPrefixOf`)
+      closeAllTabs env
 
 
 -- | A factory that intentionally errors when invoked — used as a

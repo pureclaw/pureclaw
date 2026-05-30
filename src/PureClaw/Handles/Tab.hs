@@ -467,6 +467,9 @@ toPublicTabError e = PublicTabError $ case e of
 data AiSpawnArgs = AiSpawnArgs
   { _ai_requestedName :: !Text
     -- ^ Caller-supplied friendly label before 'sanitizeTabName' (H11).
+  , _ai_background    :: !Bool
+    -- ^ True when spawned by @\/bg@; its completed turn is pushed to the
+    -- channel.
   }
   deriving stock (Eq, Show)
 
