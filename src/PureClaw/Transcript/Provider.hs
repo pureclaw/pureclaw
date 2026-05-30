@@ -20,12 +20,15 @@ import PureClaw.Handles.Transcript
 import PureClaw.Providers.Class
 import PureClaw.Transcript.Types
 
--- | Internal newtype wrapping a provider with transcript logging.
+-- | Internal newtype wrapping a provider with transcript logging. The tuple
+-- carries the transcript handle, the model name (recorded as @_te_model@),
+-- the optional per-message sender (recorded into Request @_te_metadata@
+-- under @"source"@), and the wrapped provider.
 newtype TranscriptProvider = TranscriptProvider
-  { _tp_inner :: (TranscriptHandle, Text, SomeProvider) }
+  { _tp_inner :: (TranscriptHandle, Text, Maybe MessageSource, SomeProvider) }
 
 instance Provider TranscriptProvider where
-  complete (TranscriptProvider (th, source, inner)) req = do
+  complete (TranscriptProvider (th, source, msgSource, inner)) req = do
     corrId <- generateId
     reqId <- generateId
     now <- getCurrentTime
@@ -41,7 +44,7 @@ instance Provider TranscriptProvider where
           , _te_payload       = encodePayload (encodeUtf8Strict redacted)
           , _te_durationMs    = Nothing
           , _te_correlationId = corrId
-          , _te_metadata      = Map.empty
+          , _te_metadata      = sourceMeta msgSource
           }
     _th_record th reqEntry
     -- Call the inner provider
@@ -65,7 +68,7 @@ instance Provider TranscriptProvider where
     _th_record th respEntry
     pure resp
 
-  completeStream (TranscriptProvider (th, source, inner)) req callback = do
+  completeStream (TranscriptProvider (th, source, msgSource, inner)) req callback = do
     corrId <- generateId
     reqId <- generateId
     now <- getCurrentTime
@@ -81,7 +84,7 @@ instance Provider TranscriptProvider where
           , _te_payload       = encodePayload (encodeUtf8Strict redacted)
           , _te_durationMs    = Nothing
           , _te_correlationId = corrId
-          , _te_metadata      = Map.empty
+          , _te_metadata      = sourceMeta msgSource
           }
     _th_record th reqEntry
     -- Wrap the callback to capture StreamDone
@@ -112,14 +115,28 @@ instance Provider TranscriptProvider where
             _th_record th respEntry
         _ -> pure ()
 
-  listModels (TranscriptProvider (_th, _source, inner)) = listModels inner
+  listModels (TranscriptProvider (_th, _source, _msgSource, inner)) = listModels inner
+
+-- | Build the Request metadata map from an optional per-message sender.
+-- When 'Just', the sender is encoded under the @"source"@ key using the
+-- shared 'MessageSource' codec; when 'Nothing', no key is written. This is
+-- applied to Request entries ONLY — Response entries describe the reply,
+-- not the inbound sender.
+sourceMeta :: Maybe MessageSource -> Map.Map Text Aeson.Value
+sourceMeta = maybe Map.empty (Map.singleton "source" . Aeson.toJSON)
 
 -- | Wrap a 'SomeProvider' with transcript logging. Every @complete@ and
 -- @completeStream@ call records a Request entry (with redacted headers)
 -- and a Response entry (with token usage metadata).
-mkTranscriptProvider :: TranscriptHandle -> Text -> SomeProvider -> SomeProvider
-mkTranscriptProvider th source inner =
-  MkProvider (TranscriptProvider (th, source, inner))
+--
+-- The 'Maybe MessageSource' argument is the per-message sender: when 'Just',
+-- it is written into the Request entry's @_te_metadata@ under the @"source"@
+-- key (Response entries are never tagged). Pass 'Nothing' for turns with no
+-- inbound message (e.g. @\/bg@ and web completions). The sender id lives in
+-- the on-disk metadata only and is never broadcast.
+mkTranscriptProvider :: TranscriptHandle -> Text -> Maybe MessageSource -> SomeProvider -> SomeProvider
+mkTranscriptProvider th source msgSource inner =
+  MkProvider (TranscriptProvider (th, source, msgSource, inner))
 
 -- | Build metadata map from a 'CompletionResponse'.
 -- Includes model name and token usage when available.

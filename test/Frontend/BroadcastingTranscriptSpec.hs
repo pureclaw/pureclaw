@@ -25,7 +25,21 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import PureClaw.Core.Types (ModelId (..), ProviderId (..), SessionId (..), parseSessionId)
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as LBS
+import Data.Text.Encoding qualified as TE
+import PureClaw.Core.Types
+  ( ChannelKind (..)
+  , MessageSource
+  , ModelId (..)
+  , ProviderId (..)
+  , SessionId (..)
+  , UserId (..)
+  , mkMessageSource
+  , parseSessionId
+  )
+import PureClaw.Frontend.API (toTranscriptEntryInfo)
+import PureClaw.Frontend.Stream (toEntryInfo)
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript
   ( TranscriptHandle (..)
@@ -296,7 +310,7 @@ spec = do
         let path = tmp </> "transcript.jsonl"
         th <- mkBroadcastingFileTranscriptHandle (Just broker) sid1 mkNoOpLogHandle path
         let inner = MkProvider (LeakyProvider leakyResp) :: SomeProvider
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped leakyReq
         _th_flush th
         _th_close th
@@ -359,7 +373,7 @@ spec = do
         let path = tmp </> "transcript.jsonl"
         th <- mkBroadcastingFileTranscriptHandle (Just broker) sid1 mkNoOpLogHandle path
         let inner = MkProvider (LeakyProvider leakyResp) :: SomeProvider
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped leakyReq
         _th_flush th
         _th_close th
@@ -395,7 +409,7 @@ spec = do
         let path = tmp </> "transcript.jsonl"
         th <- mkBroadcastingFileTranscriptHandle (Just broker) sid1 mkNoOpLogHandle path
         let inner = MkProvider (LeakyProvider leakyResp) :: SomeProvider
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped leakyReq
         _th_flush th
         _th_close th
@@ -412,6 +426,39 @@ spec = do
         -- redactor pipeline). The decorator is /not/ a path that
         -- bypasses redaction.
         all (`elem` diskSet) brokerSet `shouldBe` True
+
+  -- -------------------------------------------------------------------------
+  -- WU4 — the per-message sender id lives in _te_metadata only and is
+  -- DROPPED by both broadcast projections. These tests pin the privacy
+  -- invariant: the sender id must not appear in the WS @entry@ event
+  -- (toEntryInfo) nor the HTTP GET /transcript response
+  -- (toTranscriptEntryInfo / its ToJSON).
+  -- -------------------------------------------------------------------------
+  describe "WU4 source omitted from broadcast projections" $ do
+    let senderId = "+15551234567" :: Text
+        taggedEntry =
+          (mkEntry "src")
+            { _te_metadata =
+                Map.singleton "source"
+                  (Aeson.toJSON (sourceWith senderId))
+            }
+
+    it "WS projection (toEntryInfo) omits the sender id" $ do
+      let info = toEntryInfo taggedEntry
+          encoded = TE.decodeUtf8Lenient
+                      (LBS.toStrict (Aeson.encode info))
+      (senderId `T.isInfixOf` encoded) `shouldBe` False
+
+    it "HTTP projection (toTranscriptEntryInfo) omits the sender id" $ do
+      let info = toTranscriptEntryInfo taggedEntry
+          encoded = TE.decodeUtf8Lenient
+                      (LBS.toStrict (Aeson.encode info))
+      (senderId `T.isInfixOf` encoded) `shouldBe` False
+
+-- | A 'MessageSource' carrying the given user id, used to plant a
+-- recognizable sender id inside @_te_metadata@.
+sourceWith :: Text -> MessageSource
+sourceWith uid = mkMessageSource CkSignal (Just (UserId uid)) mempty
 
 -- ---------------------------------------------------------------------------
 -- Local helpers

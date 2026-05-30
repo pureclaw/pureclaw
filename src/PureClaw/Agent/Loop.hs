@@ -195,7 +195,7 @@ runAgentLoopWith env initialMessages = do
                                 "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
                               -- Wrap provider with transcript logging (session owns the transcript)
                               th <- envTranscript env
-                              let provider' = mkTranscriptProvider th (unModelId model) provider
+                              let provider' = mkTranscriptProvider th (unModelId model) (Just (_im_source msg)) provider
                               handleCompletion provider' ctx'
 
     handleCompletion provider ctx = do
@@ -345,7 +345,7 @@ runBackgroundSession env provider model prompt = do
   let transcript = Session._sh_transcript bgSession
       -- Recording wrapper: each provider call writes a request/response
       -- pair to the session transcript (and fans out to the broker).
-      provider'  = mkTranscriptProvider transcript (unModelId model) provider
+      provider'  = mkTranscriptProvider transcript (unModelId model) Nothing provider
   runSubAgent provider' model registry (_env_systemPrompt env)
               prompt backgroundMaxTurns
     `finally` do
