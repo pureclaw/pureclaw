@@ -1,6 +1,7 @@
 module PureClaw.Handles.Channel
   ( -- * Message types
     IncomingMessage (..)
+  , imUserId
   , OutgoingMessage (..)
     -- * Streaming
   , StreamChunk (..)
@@ -10,17 +11,29 @@ module PureClaw.Handles.Channel
   , mkNoOpChannelHandle
   ) where
 
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 
 import PureClaw.Core.Errors
 import PureClaw.Core.Types
 
--- | A message received from a channel user.
+-- | A message received from a channel user, tagged with the source that
+-- describes where it came from (channel + optional user id + extensible
+-- fields). The source is captured at the channel boundary via
+-- 'mkMessageSource'.
 data IncomingMessage = IncomingMessage
-  { _im_userId  :: UserId
+  { _im_source  :: MessageSource
   , _im_content :: Text
   }
   deriving stock (Show, Eq)
+
+-- | Derive the channel user id from a message's source, preserving the
+-- legacy '_im_userId' behavior. A source with no user id (@Nothing@)
+-- yields the @UserId ""@ sentinel — the same value the no-op channel
+-- produced before the 'MessageSource' migration — so dispatcher routing
+-- against the allow-list is unchanged.
+imUserId :: IncomingMessage -> UserId
+imUserId m = fromMaybe (UserId "") (_ms_userId (_im_source m))
 
 -- | A message to send to a channel user.
 newtype OutgoingMessage = OutgoingMessage
@@ -64,7 +77,7 @@ data ChannelHandle = ChannelHandle
 -- sendError are silent. readSecret returns empty text.
 mkNoOpChannelHandle :: ChannelHandle
 mkNoOpChannelHandle = ChannelHandle
-  { _ch_receive      = pure (IncomingMessage (UserId "") "")
+  { _ch_receive      = pure (IncomingMessage (mkMessageSource (CkOther "noop") Nothing mempty) "")
   , _ch_send         = \_ -> pure ()
   , _ch_sendError    = \_ -> pure ()
   , _ch_sendChunk    = \_ -> pure ()

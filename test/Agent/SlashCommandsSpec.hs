@@ -116,7 +116,7 @@ mkMockChannel sentRef msgsRef = mkNoOpChannelHandle
   { _ch_send         = writeIORef sentRef . Just . _om_content
   , _ch_receive      = do
       m <- popMsg msgsRef
-      pure (IncomingMessage (UserId "test") m)
+      pure (IncomingMessage (mkMessageSource CkCli (Just (UserId "test")) mempty) m)
   , _ch_prompt       = \_ -> popMsg msgsRef
   , _ch_promptSecret = \_ -> popMsg msgsRef
   }
@@ -127,7 +127,7 @@ mkMockChannelAll allSentRef msgsRef = mkNoOpChannelHandle
   { _ch_send         = \msg -> modifyIORef allSentRef (_om_content msg :)
   , _ch_receive      = do
       m <- popMsg msgsRef
-      pure (IncomingMessage (UserId "test") m)
+      pure (IncomingMessage (mkMessageSource CkCli (Just (UserId "test")) mempty) m)
   , _ch_prompt       = \_ -> popMsg msgsRef
   , _ch_promptSecret = \_ -> popMsg msgsRef
   }

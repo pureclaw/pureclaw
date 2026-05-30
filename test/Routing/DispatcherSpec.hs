@@ -44,6 +44,7 @@ import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromJust)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), addUTCTime, fromGregorian, secondsToDiffTime)
@@ -388,7 +389,8 @@ spec = do
                   then do
                     -- inject one valid message
                     feedIncoming fch
-                      (IncomingMessage (UserId "u") "hello")
+                      (IncomingMessage
+                        (mkMessageSource CkCli (Just (UserId "u")) mempty) "hello")
                     -- read it through the underlying queue
                     _ch_receive (fakeChannelHandle fch)
                   else throwIO (ErrorCall "EOF")
@@ -638,7 +640,8 @@ spec = do
                 if n == 0
                   then do
                     feedIncoming fch
-                      (IncomingMessage (UserId "allowed") "/0")
+                      (IncomingMessage
+                        (mkMessageSource CkCli (Just (UserId "allowed")) mempty) "/0")
                     _ch_receive (fakeChannelHandle fch)
                   else throwIO (ErrorCall "EOF")
             }
@@ -661,6 +664,21 @@ spec = do
       -- perspective because the dispatcher only consumes _ch_receive.
       _ <- pure env
       pure ()
+
+    it ("an IncomingMessage whose source carries no userId (imUserId == "
+        <> "UserId \"\") is NOT authorized against a populated allow-list") $ do
+      -- Behavioral-equivalence guard for the MessageSource migration: the
+      -- noOp / sourceless path derives the empty UserId "" sentinel via
+      -- imUserId, and that sentinel must never match a non-empty allow-list.
+      let sourceless = IncomingMessage
+            (mkMessageSource (CkOther "noop") Nothing mempty) "hello"
+          populated  = AllowList (Set.fromList [UserId "alice", UserId "bob"])
+      -- The derived sender is the empty sentinel...
+      imUserId sourceless `shouldBe` UserId ""
+      -- ...and the empty sentinel is rejected by a populated allow-list.
+      isAllowed populated (imUserId sourceless) `shouldBe` False
+      -- Sanity: a real member IS allowed (so the list isn't vacuously empty).
+      isAllowed populated (UserId "alice") `shouldBe` True
 
 
   describe "P18 — LLM-free invariant property (dispatcher-side)" $ do

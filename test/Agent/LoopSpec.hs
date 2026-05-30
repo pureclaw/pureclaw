@@ -527,7 +527,7 @@ mkMockChannel messages = do
               (m:rest) -> do
                 writeIORef msgsRef rest
                 pure IncomingMessage
-                  { _im_userId = UserId "test"
+                  { _im_source = mkMessageSource CkCli (Just (UserId "test")) mempty
                   , _im_content = m
                   }
         , _ch_send = \msg ->

@@ -5,6 +5,7 @@ import Control.Concurrent.STM
 import Control.Exception
 import Data.Aeson
 import Data.Either (isLeft)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Test.Hspec
@@ -40,7 +41,19 @@ spec = do
       let env = mkTestEnvelope "+9876543210" 2000 "Hi"
       atomically $ writeTQueue (_sch_inbox sc) env
       msg <- _ch_receive (toHandle sc)
-      _im_userId msg `shouldBe` UserId "+9876543210"
+      imUserId msg `shouldBe` UserId "+9876543210"
+      _ms_channel (_im_source msg) `shouldBe` CkSignal
+
+    it "records the uuid in the source fields when present" $ do
+      sc <- mkTestSignalChannel
+      let env = SignalEnvelope "+5550001111" (Just "abc-uuid") (Just 4000)
+                  (Just (SignalDataMessage "Yo" 4000))
+      atomically $ writeTQueue (_sch_inbox sc) env
+      msg <- _ch_receive (toHandle sc)
+      imUserId msg `shouldBe` UserId "+5550001111"
+      _ms_channel (_im_source msg) `shouldBe` CkSignal
+      Map.lookup "uuid" (_ms_fields (_im_source msg))
+        `shouldBe` Just (String "abc-uuid")
 
     it "handles envelope with no dataMessage" $ do
       sc <- mkTestSignalChannel

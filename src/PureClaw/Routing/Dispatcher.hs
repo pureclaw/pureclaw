@@ -1074,7 +1074,7 @@ runDispatcherWith env factory =
   where
     loop e (ds, _outR) = do
       msg <- _ch_receive (_env_channel e)
-      dispatchOne e ds (_im_userId msg) (_im_content msg)
+      dispatchOne e ds (imUserId msg) (_im_content msg)
       loop e (ds, _outR)
 
 -- | The 'bracket' acquire: starts the channel-out writer, builds the
