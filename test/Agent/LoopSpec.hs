@@ -14,7 +14,6 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import PureClaw.Session.Handle (mkSessionHandle)
 import PureClaw.Session.Types qualified as SessionTypes
 
 import PureClaw.Agent.Env
@@ -30,7 +29,7 @@ import PureClaw.Routing.Types (RoutingConfig (..))
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle (mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
+import PureClaw.Session.Handle (mkSessionHandle, mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
