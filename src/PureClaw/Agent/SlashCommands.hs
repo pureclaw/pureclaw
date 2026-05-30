@@ -294,6 +294,7 @@ data SlashCommand
   | CmdMsg Text Text                  -- ^ Send a message to a specific target (name, message)
   | CmdMcp McpSubCommand              -- ^ MCP server management commands
   | CmdTab TabSlashCommand            -- ^ Tabbed Chat @\/tab*@ / @\/tabs@ family (WU2; handlers in WU9)
+  | CmdBg !Text                       -- ^ Run a prompt in a fresh background session (issue #52)
   deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -306,7 +307,7 @@ data SlashCommand
 -- To add a command, add a 'CommandSpec' here — parsing and help update
 -- automatically.
 allCommandSpecs :: [CommandSpec]
-allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ mcpCommandSpecs ++ msgCommandSpecs ++ tabFamilyCommandSpecs
+allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs ++ transcriptCommandSpecs ++ harnessCommandSpecs ++ agentCommandSpecs ++ mcpCommandSpecs ++ msgCommandSpecs ++ bgCommandSpecs ++ tabFamilyCommandSpecs
 
 -- | The @\/tab@ command family + @\/tabs@ alias (Tabbed Chat #51).
 --
@@ -577,6 +578,25 @@ msgArgP t =
           in if T.null target || T.null (T.strip body)
              then Nothing
              else Just (CmdMsg target (T.strip body))
+     else Nothing
+
+bgCommandSpecs :: [CommandSpec]
+bgCommandSpecs =
+  [ CommandSpec "/bg <prompt>" "Run a prompt in a fresh background session" GroupSession bgArgP
+  ]
+
+-- | Parse "/bg <prompt>". The remainder after @\/bg @ is the prompt,
+-- stripped of surrounding whitespace; an empty prompt is rejected.
+-- Mirrors 'msgArgP' for the keyword/whitespace handling.
+bgArgP :: Text -> Maybe SlashCommand
+bgArgP t =
+  let pfx   = "/bg"
+      lower = T.toLower t
+  in if (pfx <> " ") `T.isPrefixOf` lower
+     then let rest = T.strip (T.drop (T.length pfx) t)
+          in if T.null rest
+             then Nothing
+             else Just (CmdBg rest)
      else Nothing
 
 -- ---------------------------------------------------------------------------
@@ -1203,6 +1223,20 @@ executeSlashCommand env (CmdTab _) ctx = do
   _ch_send (_env_channel env)
     (OutgoingMessage
        "Tab commands require the tabbed-chat dispatcher \
+       \(PureClaw.Routing.Dispatcher.runDispatcher).")
+  pure ctx
+
+-- | Legacy single-tab fallback for @\/bg@. The real background-session
+-- handling lives in the tabbed-chat dispatcher (issue #52, WU3); under
+-- the single-tab 'PureClaw.Agent.Loop.runAgentLoop' path there is no
+-- dispatcher to spawn a fresh session, so we emit an explanatory
+-- message and leave the context unchanged. This arm is
+-- correctness-mandatory: @-Wincomplete-patterns@ is off in this
+-- project, so omitting it compiles clean and then crashes at runtime.
+executeSlashCommand env (CmdBg _) ctx = do
+  _ch_send (_env_channel env)
+    (OutgoingMessage
+       "Background tasks (/bg) require the tabbed-chat dispatcher \
        \(PureClaw.Routing.Dispatcher.runDispatcher).")
   pure ctx
 
