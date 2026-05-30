@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PatternSynonyms #-}
 -- |
 -- Module      : Routing.AutoSpawnSpec
@@ -770,9 +771,9 @@ spec = do
       saAfter <- readIORef argsRf
       case Map.lookup 2 saAfter of
         Just sa -> PureClaw.Routing.AutoSpawn._sa_kind sa `shouldSatisfy`
-                     (\k -> case k of
-                              KindAi -> True
-                              _      -> False)
+                     (\case
+                        KindAi -> True
+                        _      -> False)
         Nothing -> expectationFailure "expected spawn args recorded at /2"
 
     it ("handleBg (Left): emits a redacted '/bg: ...' banner, enqueues "

@@ -65,6 +65,7 @@ module PureClaw.Routing.AutoSpawn
   , handleSwitch
   , handleDefault
   , handleNew
+  , handleBg
   , handleClose
   , handleFocus
   , handleRename
@@ -226,6 +227,47 @@ handleDefault env spawnIO emit argsRef text = do
       rememberArgs argsRef newIdx kind []
       writeIORef (_env_focus env) (Just newIdx)
       enqueuePayloadOn env emit newIdx text
+
+
+-- ---------------------------------------------------------------------------
+-- handleBg — /bg <prompt> (issue #52)
+-- ---------------------------------------------------------------------------
+
+-- | Handle @\/bg \<prompt\>@: spawn a fresh AI tab that runs the prompt
+-- in the background and pushes its final response to the channel on
+-- completion (the completion push itself lives in 'PureClaw.Tab.Ai',
+-- gated on the tab's '_ats_background' flag — see issue #52 WU2).
+--
+-- Unlike 'handleDefault' \/ 'handleNew', @\/bg@:
+--
+--   * uses a FIXED AI 'TabKind' ('TkSession' ('SkProvider'
+--     'placeholderProviderSpec')) rather than '_rc_defaultKind' — @\/bg@
+--     is AI-prompt semantics by design, and the recorded kind makes the
+--     X1 crash-retry path (which respins via the normal factory) replay
+--     a valid AI tab; and
+--   * deliberately does NOT write '_env_focus' — a background spawn must
+--     never steal the user's focus.
+--
+-- The background flag itself is injected by the dispatcher's bg-aware
+-- 'SpawnIO' (see 'PureClaw.Routing.Dispatcher.ratelimitedSpawnBg'); this
+-- handler stays decoupled from 'PureClaw.Tab.Ai'.
+handleBg
+  :: AgentEnv
+  -> SpawnIO
+  -> BannerEmit
+  -> IORef (Map Int SpawnArgs)
+  -> Text
+  -> IO ()
+handleBg env spawnIO emit argsRef prompt = do
+  let kind = TkSession (SkProvider placeholderProviderSpec)
+  r <- spawnIO kind []
+  case r of
+    Left e ->
+      emit ("/bg: " <> unPublicTabError (toPublicTabError e))
+    Right newIdx -> do
+      rememberArgs argsRef newIdx kind []
+      enqueuePayloadOn env emit newIdx prompt
+      emit ("/bg: running in tab /" <> tShowIdx newIdx)
 
 
 -- ---------------------------------------------------------------------------
