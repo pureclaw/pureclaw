@@ -2,12 +2,20 @@ module Agent.LoopSpec (spec) where
 
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception
+import Control.Monad (forM)
 import Data.Aeson (object, (.=))
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (getCurrentTime)
+import System.Directory (doesFileExist, listDirectory)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
+
+import PureClaw.Session.Handle (mkSessionHandle)
+import PureClaw.Session.Types qualified as SessionTypes
 
 import PureClaw.Agent.Env
 import PureClaw.Agent.Loop
@@ -142,6 +150,33 @@ mkTestEnv p ch = do
     , _env_broker          = Nothing
     }
 
+-- | Like 'mkTestEnv' but with a REAL foreground session rooted under the
+-- given sessions directory, so a @\/bg@ background turn (which derives the
+-- sessions dir from the foreground session) writes its transcript under
+-- @tmp@ rather than the real @~/.pureclaw/sessions@.
+mkBgTestEnv :: Provider p => FilePath -> p -> ChannelHandle -> IO AgentEnv
+mkBgTestEnv sessionsDir p ch = do
+  base <- mkTestEnv p ch
+  now  <- getCurrentTime
+  let meta = SessionTypes.SessionMeta
+        { SessionTypes._sm_id    = SessionTypes.newSessionId Nothing now
+        , SessionTypes._sm_agent = Nothing
+        , SessionTypes._sm_kind  = SessionTypes.SkProvider
+            (SessionTypes.ProviderSpec
+              (SessionTypes.inferProviderId "mock") (ModelId "mock") Nothing)
+        , SessionTypes._sm_model  = "mock"
+        , SessionTypes._sm_channel = "cli"
+        , SessionTypes._sm_createdAt = now
+        , SessionTypes._sm_lastActive = now
+        , SessionTypes._sm_bootstrapConsumed = False
+        , SessionTypes._sm_archived = False
+        , SessionTypes._sm_description = Nothing
+        , SessionTypes._sm_autoSummary = Nothing
+        }
+  sh    <- mkSessionHandle Nothing mkNoOpLogHandle sessionsDir meta
+  shRef <- newIORef sh
+  pure base { _env_session = shRef }
+
 spec :: Spec
 spec = do
   describe "runAgentLoop" $ do
@@ -220,42 +255,63 @@ spec = do
         _ -> expectationFailure "expected two messages"
 
     -- /bg — run a prompt in a fresh background session (issue #52)
-    it "/bg runs a background turn and pushes the result to the channel" $ do
-      (channel, sentRef) <- mkMockChannel []
-      env <- mkTestEnv (MockProvider "bg result") channel
-      runBackgroundTurn env "summarize the repo"
-      sent <- readIORef sentRef
-      sent `shouldBe` ["[bg done] bg result"]
+    it "/bg runs a background turn and pushes the result to the channel" $
+      withSystemTempDirectory "pc-bg" $ \tmp -> do
+        (channel, sentRef) <- mkMockChannel []
+        env <- mkBgTestEnv tmp (MockProvider "bg result") channel
+        runBackgroundTurn env "summarize the repo"
+        sent <- readIORef sentRef
+        sent `shouldBe` ["[bg done] bg result"]
 
-    it "/bg background turn maps a blank response to (no response)" $ do
-      (channel, sentRef) <- mkMockChannel []
-      env <- mkTestEnv (MockProvider "") channel
-      runBackgroundTurn env "do nothing"
-      sent <- readIORef sentRef
-      sent `shouldBe` ["[bg done] (no response)"]
+    it "/bg records the conversation to its own session transcript (frontend-visible)" $
+      withSystemTempDirectory "pc-bg" $ \tmp -> do
+        (channel, _sentRef) <- mkMockChannel []
+        env <- mkBgTestEnv tmp (MockProvider "bg result") channel
+        runBackgroundTurn env "summarize the repo"
+        -- A fresh session directory with a NON-EMPTY transcript.jsonl must
+        -- exist under the sessions dir (this is what the frontend scans).
+        -- The foreground test session has no turns, so its transcript is
+        -- empty; exactly one non-empty transcript (the /bg session) is added.
+        dirs <- listDirectory tmp
+        contents <- forM dirs $ \d -> do
+          let f = tmp </> d </> "transcript.jsonl"
+          ex <- doesFileExist f
+          if ex then readFile f else pure ""
+        length (filter (not . null) contents) `shouldBe` 1
 
-    it "/bg background turn with no provider reports it cannot run" $ do
-      (channel, sentRef) <- mkMockChannel []
-      env <- mkTestEnv (MockProvider "ignored") channel
-      writeIORef (_env_provider env) Nothing
-      runBackgroundTurn env "do thing"
-      sent <- readIORef sentRef
-      sent `shouldBe` ["[bg] Cannot run: no provider configured."]
+    it "/bg background turn maps a blank response to (no response)" $
+      withSystemTempDirectory "pc-bg" $ \tmp -> do
+        (channel, sentRef) <- mkMockChannel []
+        env <- mkBgTestEnv tmp (MockProvider "") channel
+        runBackgroundTurn env "do nothing"
+        sent <- readIORef sentRef
+        sent `shouldBe` ["[bg done] (no response)"]
 
-    it "/bg background turn surfaces provider failure without leaking details" $ do
-      (channel, sentRef) <- mkMockChannel []
-      env <- mkTestEnv FailingProvider channel
-      runBackgroundTurn env "do thing"
-      sent <- readIORef sentRef
-      sent `shouldBe` ["[bg] Something went wrong running the background task."]
+    it "/bg background turn with no provider reports it cannot run" $
+      withSystemTempDirectory "pc-bg" $ \tmp -> do
+        (channel, sentRef) <- mkMockChannel []
+        env <- mkBgTestEnv tmp (MockProvider "ignored") channel
+        writeIORef (_env_provider env) Nothing
+        runBackgroundTurn env "do thing"
+        sent <- readIORef sentRef
+        sent `shouldBe` ["[bg] Cannot run: no provider configured."]
 
-    it "/bg in the loop acknowledges in the foreground (not the dispatcher fallback)" $ do
-      (channel, sentRef) <- mkMockChannel ["/bg do a thing"]
-      env <- mkTestEnv (MockProvider "bg result") channel
-      runAgentLoop env
-      sent <- readIORef sentRef
-      any (T.isInfixOf "/bg: running") sent `shouldBe` True
-      any (T.isInfixOf "tabbed-chat dispatcher") sent `shouldBe` False
+    it "/bg background turn surfaces provider failure without leaking details" $
+      withSystemTempDirectory "pc-bg" $ \tmp -> do
+        (channel, sentRef) <- mkMockChannel []
+        env <- mkBgTestEnv tmp FailingProvider channel
+        runBackgroundTurn env "do thing"
+        sent <- readIORef sentRef
+        sent `shouldBe` ["[bg] Something went wrong running the background task."]
+
+    it "/bg in the loop acknowledges in the foreground (not the dispatcher fallback)" $
+      withSystemTempDirectory "pc-bg" $ \tmp -> do
+        (channel, sentRef) <- mkMockChannel ["/bg do a thing"]
+        env <- mkBgTestEnv tmp (MockProvider "bg result") channel
+        runAgentLoop env
+        sent <- readIORef sentRef
+        any (T.isInfixOf "/bg: running") sent `shouldBe` True
+        any (T.isInfixOf "tabbed-chat dispatcher") sent `shouldBe` False
 
     -- Invariant: slash-prefixed messages NEVER reach the provider
     it "unknown slash command never calls provider" $ do
