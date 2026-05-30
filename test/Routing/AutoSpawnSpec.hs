@@ -739,3 +739,56 @@ spec = do
       drained <- drainQueue (_env_channelOutQ env)
       banners drained `shouldSatisfy`
         any ("/0:" `T.isInfixOf`)
+
+  describe "handleBg — /bg background spawn (WU3)" $ do
+
+    it ("handleBg (Right idx): records the AI spawn kind, enqueues the "
+        <> "prompt on the new tab, emits '/bg: running in tab /N', and "
+        <> "leaves _env_focus UNCHANGED") $ do
+      env <- mkAutoSpawnEnv
+      -- Pre-set focus to a known value; it must survive untouched.
+      writeIORef (_env_focus env) (Just (ti 3))
+      -- A synthetic bg tab the SpawnIO will register at index 2.
+      st <- mkSyntheticTab (ti 2) KindAi "bg-2" (Idle t0)
+      bannersRf <- newIORef ([] :: [Text])
+      argsRf    <- newIORef (Map.empty :: Map Int PureClaw.Routing.AutoSpawn.SpawnArgs)
+      let emit t = atomicModifyIORef' bannersRf (\xs -> (xs <> [t], ()))
+          spawnIO _kind _args = do
+            _ <- insertTab (_env_tabs env) (ti 2) (_st_handle st)
+            pure (Right (ti 2))
+      PureClaw.Routing.AutoSpawn.handleBg env spawnIO emit argsRf "summarize the repo"
+      -- Focus unchanged.
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Just (ti 3)
+      -- Prompt enqueued on the new tab.
+      sent <- readIORef (_st_sentRf st)
+      sent `shouldBe` ["summarize the repo"]
+      -- Banner emitted.
+      bs <- readIORef bannersRf
+      bs `shouldSatisfy` any ("/bg: running in tab /2" `T.isInfixOf`)
+      -- Spawn args recorded with the AI kind (so X1 retry respins an AI tab).
+      saAfter <- readIORef argsRf
+      case Map.lookup 2 saAfter of
+        Just sa -> PureClaw.Routing.AutoSpawn._sa_kind sa `shouldSatisfy`
+                     (\k -> case k of
+                              KindAi -> True
+                              _      -> False)
+        Nothing -> expectationFailure "expected spawn args recorded at /2"
+
+    it ("handleBg (Left): emits a redacted '/bg: ...' banner, enqueues "
+        <> "nothing, and leaves _env_focus UNCHANGED") $ do
+      env <- mkAutoSpawnEnv
+      writeIORef (_env_focus env) (Nothing :: Maybe TabIndex)
+      bannersRf <- newIORef ([] :: [Text])
+      argsRf    <- newIORef (Map.empty :: Map Int PureClaw.Routing.AutoSpawn.SpawnArgs)
+      let emit t = atomicModifyIORef' bannersRf (\xs -> (xs <> [t], ()))
+          spawnIO _kind _args = pure (Left (TabLimitExceeded 9))
+      PureClaw.Routing.AutoSpawn.handleBg env spawnIO emit argsRf "do a thing"
+      f <- readIORef (_env_focus env)
+      f `shouldBe` Nothing
+      tabs <- readIORef (_env_tabs env)
+      IntMap.size tabs `shouldBe` 0
+      saAfter <- readIORef argsRf
+      Map.keys saAfter `shouldBe` []
+      bs <- readIORef bannersRf
+      bs `shouldSatisfy` any ("/bg: " `T.isInfixOf`)
