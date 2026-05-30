@@ -2,6 +2,8 @@ module PureClaw.Agent.Loop
   ( -- * Agent loop
     runAgentLoop
   , runAgentLoopWith
+    -- * Background tasks (/bg, issue #52)
+  , runBackgroundTurn
     -- * Re-exports from Handles.Harness (for backward compatibility)
   , sanitizeHarnessOutput
   ) where
@@ -28,6 +30,7 @@ import PureClaw.Handles.Log
 import PureClaw.MCP (mcpRegistry)
 import PureClaw.Providers.Class
 import PureClaw.Routing.LegacyDispatch (dispatchLegacyTabCmd)
+import PureClaw.Tools.Delegate (runSubAgent)
 import PureClaw.Tools.Registry
 import PureClaw.Transcript.Provider
 
@@ -110,6 +113,18 @@ runAgentLoopWith env initialMessages = do
                   -- the same way they would under the new dispatcher.
                   _lh_logInfo logger $ "Slash command (tab): " <> stripped
                   dispatchLegacyTabCmd env tabCmd
+                  go ctx
+                Just (CmdBg prompt) -> do
+                  -- /bg runs the prompt in a fresh background session
+                  -- (issue #52). The single-tab loop has no tabbed-chat
+                  -- dispatcher, so we fork a self-contained background
+                  -- turn that emits its result directly to the channel
+                  -- (the ChannelOut writer is not running in this path).
+                  -- The foreground loop continues uninterrupted.
+                  _lh_logInfo logger $ "Slash command (bg): " <> stripped
+                  _ch_send channel (OutgoingMessage
+                    "\x1F504 /bg: running in the background \x2014 the result will appear here when ready.")
+                  _ <- _env_fork env (runBackgroundTurn env prompt)
                   go ctx
                 Just cmd -> do
                   _lh_logInfo logger $ "Slash command: " <> stripped
@@ -246,6 +261,64 @@ runAgentLoopWith env initialMessages = do
 
     partsToText :: [ToolResultPart] -> Text
     partsToText parts = T.intercalate "\n" [t | TRPText t <- parts]
+
+-- | Maximum turns for a @\/bg@ background task (provider + tool-call cycles).
+backgroundMaxTurns :: Int
+backgroundMaxTurns = 20
+
+-- | Run a @\/bg@ prompt in a fresh background session and push the result
+-- directly to the channel (issue #52).
+--
+-- Self-contained by design: it builds a brand-new 'Context' (no
+-- foreground-history leakage), uses the process default provider/model
+-- and the effective tool registry (built-ins + connected MCP servers),
+-- runs the prompt to completion via 'runSubAgent' (non-streaming, so it
+-- does not interleave with the foreground), and emits a single
+-- @[bg done] …@ message via '_ch_send'. This intentionally does NOT go
+-- through '_env_channelOutQ' — the single-tab CLI loop does not run the
+-- 'PureClaw.Routing.ChannelOut' writer, so a queued event would never be
+-- delivered.
+--
+-- Provider/model-absent and provider-failure cases each emit a short,
+-- redacted @[bg] …@ message rather than throwing (the caller forks this
+-- with '_env_fork' and does not observe its result).
+runBackgroundTurn :: AgentEnv -> Text -> IO ()
+runBackgroundTurn env prompt = do
+  let channel = _env_channel env
+  mProvider <- readIORef (_env_provider env)
+  case mProvider of
+    Nothing ->
+      _ch_send channel (OutgoingMessage "[bg] Cannot run: no provider configured.")
+    Just provider -> do
+      mModel <- readIORef (_env_model env)
+      case mModel of
+        Nothing ->
+          _ch_send channel (OutgoingMessage "[bg] Cannot run: no model configured.")
+        Just model -> do
+          registry <- backgroundRegistry env
+          result <- try @SomeException $
+            runSubAgent provider model registry (_env_systemPrompt env)
+                        prompt backgroundMaxTurns
+          case result of
+            Left e -> do
+              _lh_logError (_env_logger env) $
+                "Background task error: " <> T.pack (show e)
+              _ch_send channel (OutgoingMessage
+                "[bg] Something went wrong running the background task.")
+            Right text ->
+              let body = if T.null (T.strip text) then "(no response)" else text
+              in _ch_send channel (OutgoingMessage ("[bg done] " <> body))
+
+-- | The effective tool registry for a background turn: built-in tools
+-- merged with any connected MCP server tools. Mirrors the @effectiveRegistry@
+-- helper inside 'runAgentLoopWith'.
+backgroundRegistry :: AgentEnv -> IO ToolRegistry
+backgroundRegistry env = do
+  servers <- readIORef (_env_mcpServers env)
+  let base = _env_registry env
+  pure $ if Map.null servers
+           then base
+           else mergeRegistries base (mcpRegistry (Map.elems servers))
 
 -- | Message shown when user sends a chat message but no provider is configured.
 noProviderMessage :: Text
