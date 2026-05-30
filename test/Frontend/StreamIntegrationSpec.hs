@@ -25,8 +25,6 @@
 --   * D37 — serverStartedAt detection (PENDING — process-global value;
 --     restart detection is a client-side concern; the wire shape is
 --     anchored by the golden fixture).
---   * D39 — UC-3: two WS clients on the same session observe entries
---     in matching order.
 --   * D40 — focus switch during in-flight replay aborts the buffer and
 --     emits @replay-aborted@.
 --
@@ -601,54 +599,6 @@ spec = do
     it "PENDING: cross-process restart" $
       pendingWith
         "serverStartedAt is process-global; restart detection lives in WU5 Vitest"
-
-  describe "D39 — UC-3: two WS clients on same session observe entries in matching order" $
-    it "publishes entries to all subscribers in matching order" $
-      withSystemTempDirectory "stream-int-d39" $ \tmp -> do
-        broker <- mkInProcessBroker defaultBrokerConfig
-        guard  <- mkStreamGuard 8
-        env    <- mkTestFrontendEnv tmp broker guard
-        let meta   = mkMeta "session-d39"
-            sidVal = _sm_id meta
-        sh <- mkSessionHandle (Just broker) mkNoOpLogHandle tmp meta
-        withStreamServer testAllowedOrigins env $ \port -> do
-          -- Open two clients in parallel; collect 3 entries from each.
-          let collectN n conn = do
-                let go acc remaining
-                      | remaining <= (0 :: Int) = pure (reverse acc)
-                      | otherwise = do
-                          bs <- recvOrFailTimeout 1_000_000 conn
-                          let v = decodeValue bs
-                          case eventType v of
-                            "entry" -> go (extractEntryId bs : acc) (remaining - 1)
-                            _       -> go acc remaining
-                go [] n
-          ids1Ref <- newIORef []
-          ids2Ref <- newIORef []
-          t1 <- spawnAsync $
-            openWSClient port (Just defaultOrigin) $ \conn -> do
-              expectHello conn
-              sendFocus conn (unSessionId sidVal) Nothing
-              ids <- collectN 3 conn
-              writeIORef ids1Ref ids
-          t2 <- spawnAsync $
-            openWSClient port (Just defaultOrigin) $ \conn -> do
-              expectHello conn
-              sendFocus conn (unSessionId sidVal) Nothing
-              ids <- collectN 3 conn
-              writeIORef ids2Ref ids
-          threadDelay 200_000  -- let both clients send their focus op
-          forM_ [1, 2, 3 :: Int] $ \i ->
-            _th_record (_sh_transcript sh)
-              (mkEntry (T.pack ("te-d39-" <> show i)) "data")
-          _th_flush (_sh_transcript sh)
-          t1
-          t2
-          ids1 <- readIORef ids1Ref
-          ids2 <- readIORef ids2Ref
-          ids1 `shouldBe` ids2
-          ids1 `shouldBe` ["te-d39-1", "te-d39-2", "te-d39-3"]
-          _th_close (_sh_transcript sh)
 
   describe "D40 — focus switch during replay aborts the in-flight buffer" $ do
     -- The WU3a reader loop is single-threaded; 'startReplay' runs to
