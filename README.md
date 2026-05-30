@@ -1,6 +1,6 @@
 <p align="center">
   <strong>PureClaw</strong><br>
-  <em>Haskell-native AI agent runtime with security-by-construction</em>
+  <em>Context engineering platform and AI agent runtime with security-by-construction</em>
 </p>
 
 <p align="center">
