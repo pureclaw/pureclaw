@@ -182,6 +182,11 @@ data AiTabState = AiTabState
     -- ^ Per-tab monotonically-increasing counter for 'StreamId'
     -- allocation. Wrap-around is not a practical concern (2^64 ≈
     -- 18 quintillion streams).
+  , _ats_background :: !Bool
+    -- ^ True when this tab was spawned by @\/bg@. When set, a completed
+    -- turn run while the tab is NOT focused pushes its final response to
+    -- the channel as a @[bg \/N done]@ banner. Sourced from
+    -- 'PureClaw.Handles.Tab._ai_background' at spawn; never mutated.
   }
 
 
@@ -203,7 +208,7 @@ mkTabAi env idx args =
     Left nameErr -> pure (Left (TabInvalidName nameErr))
     Right nameTxt -> do
       let rc = _env_routingConfig env
-      state <- allocState env rc
+      state <- allocState env rc (_ai_background args)
       now <- getCurrentTime
       writeIORef (_ats_statusRef state) (Idle now)
       -- Fork the loop. The fork seam returns a 'TabRunner' that the
@@ -217,8 +222,8 @@ mkTabAi env idx args =
 -- 'AgentEnv' so the per-tab provider\/model\/target track the
 -- process-level defaults at spawn time and can drift independently
 -- afterwards.
-allocState :: AgentEnv -> RoutingConfig -> IO AiTabState
-allocState env rc = do
+allocState :: AgentEnv -> RoutingConfig -> Bool -> IO AiTabState
+allocState env rc background = do
   inputQ       <- newTBQueueIO (fromIntegral (_rc_inputQueueBound rc))
   curProv      <- readIORef (_env_provider env)
   provRef      <- newIORef curProv
@@ -243,6 +248,7 @@ allocState env rc = do
     , _ats_closed    = closedRef
     , _ats_statusRef = statRef
     , _ats_streamCtr = streamCtrRef
+    , _ats_background = background
     }
 
 -- | Build the public 'TabHandle' record from the per-tab state.

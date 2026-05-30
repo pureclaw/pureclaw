@@ -34,6 +34,7 @@ import Data.IORef
   , readIORef
   , writeIORef
   )
+import Data.Aeson qualified as Aeson
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -160,7 +161,20 @@ yieldAwhile = threadDelay 30000  -- 30ms
 -- | Spawn an AI tab and return its handle (Right) or fail the test.
 spawnAiTab :: AgentEnv -> Int -> Text -> IO TabHandle
 spawnAiTab env n name = do
-  r <- mkTabAi env (ti n) AiSpawnArgs { _ai_requestedName = name }
+  r <- mkTabAi env (ti n)
+         AiSpawnArgs { _ai_requestedName = name, _ai_background = False }
+  case r of
+    Right h -> pure h
+    Left e  -> do
+      expectationFailure ("expected Right TabHandle; got Left " <> show e)
+      error "unreachable"
+
+-- | Spawn a /bg-style AI tab (the '_ai_background' flag set) and return
+-- its handle (Right) or fail the test.
+spawnBgAiTab :: AgentEnv -> Int -> Text -> IO TabHandle
+spawnBgAiTab env n name = do
+  r <- mkTabAi env (ti n)
+         AiSpawnArgs { _ai_requestedName = name, _ai_background = True }
   case r of
     Right h -> pure h
     Left e  -> do
@@ -598,7 +612,8 @@ spec = do
         <> " (e.g. ANSI escapes) is surfaced as Left TabInvalidName") $ do
       env <- mkAiTestEnv Nothing
       r <- mkTabAi env (ti 0)
-             AiSpawnArgs { _ai_requestedName = "\ESC[31mboom" }
+             AiSpawnArgs { _ai_requestedName = "\ESC[31mboom"
+                         , _ai_background = False }
       case r of
         Left _ -> pure ()  -- Left TabInvalidName branch reached
         Right h -> do
@@ -650,6 +665,141 @@ spec = do
       _ <- _tabHandle_send h "hi"
       yieldAwhile
       _ <- drainOut env
+      _tabHandle_close h CloseGraceful
+
+  describe "WU2 — /bg background-tab completion push" $ do
+
+    it ("BG1: a background tab whose turn completes while NOT focused"
+        <> " pushes exactly one SrcDispatcher BannerLine equal to"
+        <> " \"[bg /N done] \" <> responseText") $ do
+      fp <- newFakeProvider
+      queueResponse fp CompletionResponse
+        { _crsp_content = [TextBlock "bg result text"]
+        , _crsp_model   = ModelId "test-model"
+        , _crsp_usage   = Nothing
+        }
+      env <- mkAiTestEnv (Just fp)
+      -- Focus is Nothing by default → the bg tab (index 2) is not focused.
+      h <- spawnBgAiTab env 2 "bg"
+      _ <- _tabHandle_send h "summarize"
+      yieldAwhile
+      drained <- drainOut env
+      let bgBanners = [t | (SrcDispatcher, BannerLine t) <- drained
+                         , "[bg " `T.isPrefixOf` t]
+      bgBanners `shouldBe` ["[bg /2 done] bg result text"]
+      _tabHandle_close h CloseGraceful
+
+    it ("BG2: a background tab that IS focused streams normally"
+        <> " (StreamStart/ChunkOf/StreamEnd present) and pushes NO bg"
+        <> " banner") $ do
+      fp <- newFakeProvider
+      queueResponse fp CompletionResponse
+        { _crsp_content = [TextBlock "focused stream"]
+        , _crsp_model   = ModelId "test-model"
+        , _crsp_usage   = Nothing
+        }
+      env <- mkAiTestEnv (Just fp)
+      h <- spawnBgAiTab env 0 "bg-focused"
+      writeIORef (_env_focus env) (Just (ti 0))
+      _ <- _tabHandle_send h "go"
+      yieldAwhile
+      drained <- drainOut env
+      let streamStarts = [() | (SrcTab _, StreamStart{}) <- drained]
+          streamEnds   = [() | (SrcTab _, StreamEnd{})   <- drained]
+          bgBanners    = [t | (SrcDispatcher, BannerLine t) <- drained
+                            , "[bg " `T.isPrefixOf` t]
+      length streamStarts `shouldSatisfy` (>= 1)
+      length streamEnds   `shouldSatisfy` (>= 1)
+      bgBanners `shouldBe` []
+      _tabHandle_close h CloseGraceful
+
+    it ("BG3: a non-background tab (not focused) never pushes a bg"
+        <> " banner") $ do
+      fp <- newFakeProvider
+      queueResponse fp CompletionResponse
+        { _crsp_content = [TextBlock "ordinary"]
+        , _crsp_model   = ModelId "test-model"
+        , _crsp_usage   = Nothing
+        }
+      env <- mkAiTestEnv (Just fp)
+      h <- spawnAiTab env 1 "ordinary"
+      -- Focus stays Nothing.
+      _ <- _tabHandle_send h "hi"
+      yieldAwhile
+      drained <- drainOut env
+      let bgBanners = [t | (SrcDispatcher, BannerLine t) <- drained
+                         , "[bg " `T.isPrefixOf` t]
+      bgBanners `shouldBe` []
+      _tabHandle_close h CloseGraceful
+
+    it ("BG4: a background, not-focused tab whose provider returns a"
+        <> " blank response pushes banner body \"(no response)\"") $ do
+      fp <- newFakeProvider
+      queueResponse fp CompletionResponse
+        { _crsp_content = [TextBlock "   "]
+        , _crsp_model   = ModelId "test-model"
+        , _crsp_usage   = Nothing
+        }
+      env <- mkAiTestEnv (Just fp)
+      h <- spawnBgAiTab env 5 "bg-blank"
+      _ <- _tabHandle_send h "go"
+      yieldAwhile
+      drained <- drainOut env
+      let bgBanners = [t | (SrcDispatcher, BannerLine t) <- drained
+                         , "[bg " `T.isPrefixOf` t]
+      bgBanners `shouldBe` ["[bg /5 done] (no response)"]
+      _tabHandle_close h CloseGraceful
+
+    it ("BG5: a background, not-focused tab whose provider returns a"
+        <> " tool-call-only response pushes banner body \"(no"
+        <> " response)\" (responseText is empty for tool-only content)") $ do
+      fp <- newFakeProvider
+      queueResponse fp CompletionResponse
+        { _crsp_content =
+            [ ToolUseBlock
+                { _tub_id    = ToolCallId "call-1"
+                , _tub_name  = "do_thing"
+                , _tub_input = Aeson.Null
+                }
+            ]
+        , _crsp_model   = ModelId "test-model"
+        , _crsp_usage   = Nothing
+        }
+      env <- mkAiTestEnv (Just fp)
+      h <- spawnBgAiTab env 7 "bg-tool"
+      _ <- _tabHandle_send h "go"
+      yieldAwhile
+      drained <- drainOut env
+      let bgBanners = [t | (SrcDispatcher, BannerLine t) <- drained
+                         , "[bg " `T.isPrefixOf` t]
+      bgBanners `shouldBe` ["[bg /7 done] (no response)"]
+      _tabHandle_close h CloseGraceful
+
+    it ("BG6: a background, not-focused tab whose provider errors emits"
+        <> " the existing errorBanner and NO bg banner") $ do
+      env <- mkBrokenProviderEnv
+      h <- spawnBgAiTab env 4 "bg-broken"
+      _ <- _tabHandle_send h "go"
+      yieldAwhile
+      drained <- drainOut env
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+          bgBanners = filter ("[bg " `T.isPrefixOf`) banners
+      banners `shouldSatisfy`
+        any (\t -> "/4" `T.isInfixOf` t && "provider error" `T.isInfixOf` t)
+      bgBanners `shouldBe` []
+      _tabHandle_close h CloseGraceful
+
+    it ("BG7: a background, not-focused tab with no provider configured"
+        <> " emits the existing no-provider banner and NO bg banner") $ do
+      env <- mkAiTestEnv Nothing
+      h <- spawnBgAiTab env 6 "bg-noprov"
+      _ <- _tabHandle_send h "go"
+      yieldAwhile
+      drained <- drainOut env
+      let banners = [t | (SrcDispatcher, BannerLine t) <- drained]
+          bgBanners = filter ("[bg " `T.isPrefixOf`) banners
+      banners `shouldSatisfy` any ("no provider" `T.isInfixOf`)
+      bgBanners `shouldBe` []
       _tabHandle_close h CloseGraceful
 
 

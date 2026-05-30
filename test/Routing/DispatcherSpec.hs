@@ -237,7 +237,8 @@ aiFactoryAdapter :: AgentEnv -> TabFactory
 aiFactoryAdapter env kind idx args =
   case kind of
     KindAi -> TabAi.mkTabAi env idx
-                AiSpawnArgs { _ai_requestedName = T.unwords args }
+                AiSpawnArgs { _ai_requestedName = T.unwords args
+                            , _ai_background = False }
     _      -> error
         ("aiFactoryAdapter: this test adapter only supports KindAi; \
          \got " <> show kind)

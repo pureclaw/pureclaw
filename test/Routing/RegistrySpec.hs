@@ -303,7 +303,8 @@ spec = do
         <> "per-tab TBQueue; the loop is the sole context writer.") $ do
       env <- mkE3TestEnv
       r <- TabAi.mkTabAi env idx0
-             Tab.AiSpawnArgs { Tab._ai_requestedName = "e5" }
+             Tab.AiSpawnArgs { Tab._ai_requestedName = "e5"
+                             , Tab._ai_background = False }
       case r of
         Right h -> do
           -- The handle's enqueueSlash returns Right () — the dispatcher's

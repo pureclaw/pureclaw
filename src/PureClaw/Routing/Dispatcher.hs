@@ -190,7 +190,8 @@ defaultTabFactory env kind idx args =
 -- (WU1-stubbed) factory bottoms.
 parseArgsForKind :: TabKind -> [Text] -> Either AiSpawnArgs (Either HarnessSpawnArgs BackendSpawnArgs)
 parseArgsForKind kind xs = case kind of
-  TkSession (SkProvider _) -> Left  AiSpawnArgs      { _ai_requestedName      = T.unwords xs }
+  TkSession (SkProvider _) -> Left  AiSpawnArgs      { _ai_requestedName      = T.unwords xs
+                                                     , _ai_background         = False }
   TkSession (SkHarness _)  -> Right (Left HarnessSpawnArgs { _harness_requestedName = T.unwords xs })
   TkRawShell _             -> Right (Right BackendSpawnArgs
                                 { _backend_requestedName = T.unwords xs
