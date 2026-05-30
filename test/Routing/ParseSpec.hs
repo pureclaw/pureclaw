@@ -268,6 +268,20 @@ spec = do
       parse "/agent list" `shouldBe`
         Right (RT.ParsedSlashCmd (Slash.CmdAgent Slash.AgentList))
 
+    it "BG1: parseInput \"/bg summarize the repo\" yields ParsedSlashCmd (CmdBg \"summarize the repo\")" $
+      parse "/bg summarize the repo" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdBg "summarize the repo"))
+
+    it "BG2: parseInput \"/bg\" (bare) is malformed (prompt required)" $
+      parse "/bg" `shouldBe` Left RT.ParseErrorMalformed
+
+    it "BG3: parseInput \"/bg   \" (whitespace-only prompt) is malformed" $
+      parse "/bg   " `shouldBe` Left RT.ParseErrorMalformed
+
+    it "BG4: parseInput \"/bg   do thing  \" strips surrounding whitespace from the prompt" $
+      parse "/bg   do thing  " `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdBg "do thing"))
+
     it "P18: LLM-free invariant — property test: switch | inject | slash-cmd inputs never invoke Provider.complete (uses T1 fake provider)" $
       withMaxSuccess 200 prop_P18_llm_free
 

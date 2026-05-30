@@ -300,6 +300,28 @@ spec = do
       parseSlashCommand "/msg cc-0 List All TODO Items"
         `shouldBe` Just (CmdMsg "cc-0" "List All TODO Items")
 
+    -- ---------------------------------------------------------------
+    -- /bg <prompt> — run a prompt in a fresh background session
+    -- (issue #52). The legacy parser must recognise it so it reaches
+    -- the CmdBg arm of executeSlashCommand; the real handling lives in
+    -- the tabbed-chat dispatcher (WU3).
+    -- ---------------------------------------------------------------
+
+    it "parses /bg with a prompt" $ do
+      parseSlashCommand "/bg x" `shouldBe` Just (CmdBg "x")
+
+    it "parses /bg case-insensitively for the command keyword" $ do
+      parseSlashCommand "/BG x" `shouldBe` Just (CmdBg "x")
+
+    it "returns Nothing for bare /bg (prompt required)" $ do
+      parseSlashCommand "/bg" `shouldBe` Nothing
+
+    it "returns Nothing for /bg with only whitespace" $ do
+      parseSlashCommand "/bg   " `shouldBe` Nothing
+
+    it "strips surrounding whitespace from the /bg prompt" $ do
+      parseSlashCommand "/bg   do thing  " `shouldBe` Just (CmdBg "do thing")
+
   describe "executeSlashCommand" $ do
     let mkEnv sentRef = do
           vaultRef    <- newIORef Nothing
@@ -1692,6 +1714,9 @@ spec = do
           -- (see CmdHelp in executeSlashCommand for why).
           let nonTab = filter ((/= GroupTab) . _cs_group) allCommandSpecs
           mapM_ (\s -> T.unpack t `shouldContain` T.unpack (_cs_syntax s)) nonTab
+          -- Pin /bg explicitly (issue #52) so a future regrouping of the
+          -- help auto-render can't silently drop it.
+          T.unpack t `shouldContain` "/bg"
 
     it "/help output contains group headings" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
@@ -1779,6 +1804,52 @@ spec = do
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
+      ctx' `shouldBe` ctx
+
+  describe "executeSlashCommand — /bg fallback" $ do
+    it "emits the dispatcher-requirement message and leaves context unchanged" $ do
+      sentRef     <- newIORef (Nothing :: Maybe Text)
+      vaultRef    <- newIORef Nothing
+      providerRef <- newIORef (Just (MkProvider (MockProvider "summary")))
+      modelRef    <- newIORef (Just (ModelId "test"))
+      harnessRef    <- newIORef Map.empty
+      targetRef     <- newIORef TargetProvider
+      windowIdxRef  <- newIORef 0
+      sessionRef <- newIORef =<< mkNoOpSessionHandle
+      mcpRef     <- newIORef Map.empty
+      let env = AgentEnv
+            { _env_provider     = providerRef
+            , _env_model        = modelRef
+            , _env_channel      = mkNoOpChannelHandle
+                { _ch_send = writeIORef sentRef . Just . _om_content }
+            , _env_logger       = mkNoOpLogHandle
+            , _env_systemPrompt = Nothing
+            , _env_registry     = emptyRegistry
+            , _env_vault        = vaultRef
+            , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
+            , _env_policy       = defaultPolicy
+            , _env_harnesses    = harnessRef
+            , _env_target       = targetRef
+            , _env_nextWindowIdx = windowIdxRef
+            , _env_agentDef      = Nothing
+            , _env_session       = sessionRef
+            , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
+            , _env_mcpServers   = mcpRef
+            , _env_tabs          = error "WU3 stub: _env_tabs not exercised in this test"
+            , _env_focus         = error "WU3 stub: _env_focus not exercised in this test"
+            , _env_activeCount   = error "WU3 stub: _env_activeCount not exercised in this test"
+            , _env_runners       = error "WU3 stub: _env_runners not exercised in this test"
+            , _env_channelOutQ   = error "WU3 stub: _env_channelOutQ not exercised in this test"
+            , _env_routingConfig = defaultRoutingConfig
+            , _env_fork          = defaultEnvFork
+            , _env_broker          = Nothing
+            }
+          ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
+      ctx' <- executeSlashCommand env (CmdBg "x") ctx
+      sent <- readIORef sentRef
+      case sent of
+        Nothing -> expectationFailure "Expected /bg fallback output"
+        Just t  -> T.unpack t `shouldContain` "dispatcher"
       ctx' `shouldBe` ctx
 
   describe "SlashCommand" $ do
