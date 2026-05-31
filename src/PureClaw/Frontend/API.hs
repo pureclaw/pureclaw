@@ -15,6 +15,7 @@ module PureClaw.Frontend.API
   , HarnessInfo (..)
   , HarnessActivity (..)
   , SessionInfo (..)
+  , toSessionInfo
   , TranscriptEntryInfo (..)
   , toTranscriptEntryInfo
   , AgentInfo (..)
@@ -59,7 +60,7 @@ import PureClaw.Agent.AgentDef
   , unAgentName
   )
 import PureClaw.Agent.Context
-import PureClaw.Core.Types (ModelId (..), SessionId (..), ToolCallId, unModelId, unSessionId)
+import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
 import PureClaw.Frontend.StreamBroker
@@ -281,6 +282,13 @@ data SessionInfo = SessionInfo
   , _si_firstMessageSnippet  :: Maybe Text
     -- ^ Cheap fallback: a trimmed prefix of the first user message
     -- in the transcript. Computed on demand in 'handleRecentSessions'.
+  , _si_channel              :: Maybe Text
+    -- ^ Communications channel name of the session origin (e.g. "signal",
+    -- "telegram", "cli"), derived from the first inbound message's
+    -- 'MessageSource'. 'Nothing' when the session has no recorded source.
+  , _si_channelUserId        :: Maybe Text
+    -- ^ Channel user id of the session origin (phone / UUID / Telegram id).
+    -- 'Nothing' when the channel carries no user id (e.g. @pureclaw tui@).
   }
   deriving stock (Show, Eq)
 
@@ -295,6 +303,8 @@ instance ToJSON SessionInfo where
     , "description"         .= _si_description si
     , "autoSummary"         .= _si_autoSummary si
     , "firstMessageSnippet" .= _si_firstMessageSnippet si
+    , "channel"             .= _si_channel si
+    , "channelUserId"       .= _si_channelUserId si
     ]
 
 -- | WAI application handling @\/api\/*@ routes.
@@ -551,6 +561,8 @@ toSessionInfo m snippet = SessionInfo
   , _si_description         = _sm_description m
   , _si_autoSummary         = _sm_autoSummary m
   , _si_firstMessageSnippet = snippet
+  , _si_channel             = channelKindToText . _ms_channel <$> _sm_source m
+  , _si_channelUserId       = _sm_source m >>= fmap unUserId . _ms_userId
   }
 
 -- | Cheap fallback for display: read just the first line of the

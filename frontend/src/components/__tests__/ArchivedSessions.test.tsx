@@ -14,6 +14,8 @@ function makeSessions(...overrides: Partial<SessionInfo>[]): SessionInfo[] {
     description: o.description ?? null,
     autoSummary: o.autoSummary ?? null,
     firstMessageSnippet: o.firstMessageSnippet ?? null,
+    channel: o.channel ?? null,
+    channelUserId: o.channelUserId ?? null,
   }))
 }
 

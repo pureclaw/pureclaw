@@ -129,6 +129,8 @@ function providerSession(id: string): SessionInfo {
     description: null,
     autoSummary: null,
     firstMessageSnippet: null,
+    channel: null,
+    channelUserId: null,
   }
 }
 
