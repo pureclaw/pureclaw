@@ -13,6 +13,7 @@ module PureClaw.CLI.Commands
     -- * Channel config resolution (exported for testing)
   , resolveSignalConfig
   , resolveTelegramConfig
+  , signalAllowListContext
   ) where
 
 import Control.Concurrent.Async qualified as Async

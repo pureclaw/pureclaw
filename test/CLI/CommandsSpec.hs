@@ -1,15 +1,32 @@
 module CLI.CommandsSpec (spec) where
 
+import Data.IORef
 import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Text qualified as T
 import Options.Applicative
+import System.IO (hClose)
+import System.IO.Temp (withSystemTempFile)
 import Test.Hspec
 
+import PureClaw.Channels.AllowList (emitAllowListWarning)
 import PureClaw.Channels.Signal (SignalConfig (..))
 import PureClaw.Channels.Telegram (TelegramConfig (..))
 import PureClaw.CLI.Commands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
+import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Security.Policy
+
+-- A LogHandle that records warnings into an IORef for assertions.
+recordingLogHandle :: IORef [Text] -> LogHandle
+recordingLogHandle ref =
+  LogHandle
+    { _lh_logInfo  = \_ -> pure ()
+    , _lh_logWarn  = \msg -> modifyIORef' ref (<> [msg])
+    , _lh_logError = \_ -> pure ()
+    , _lh_logDebug = \_ -> pure ()
+    }
 
 -- Helper to parse CLI args.
 parseArgs :: [String] -> Maybe ChatOptions
@@ -331,3 +348,20 @@ spec = do
             { _fsc_allowFrom = Just ["+15551234567", "uuid-abc"] }
       _sc_allowFrom (resolveSignalConfig cfg)
         `shouldBe` AllowList (Set.fromList [UserId "+15551234567", UserId "uuid-abc"])
+
+  describe "signalAllowListContext" $ do
+    it "names the Signal channel, its TOML table, and a phone-number example" $ do
+      ref <- newIORef []
+      withSystemTempFile "signal-banner.txt" $ \path h -> do
+        -- emitAllowListWarning is the exact rendering path the live signal
+        -- branch uses via warnIfOpenAllowList; an open list must surface the
+        -- Signal-specific banner + WARN.
+        emitAllowListWarning h (recordingLogHandle ref) signalAllowListContext
+          (AllowAll :: AllowList UserId)
+        hClose h
+        contents <- readFile path
+        warns <- T.unpack . mconcat <$> readIORef ref
+        contents `shouldContain` "Signal"
+        contents `shouldContain` "[signal]"
+        contents `shouldContain` "+15551234567"
+        warns `shouldContain` "no allow-list configured"
