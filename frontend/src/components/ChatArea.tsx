@@ -1058,13 +1058,20 @@ export function ChatArea({
             ? sessionSubtitle(selectedSession)
             : selectedAgent.description ?? ''
           if (!subtitle) return null
+          // Keep the separator and subtitle in a SINGLE flex child so the
+          // header's gap applies once between the title and the subtitle
+          // (not twice, around a standalone separator). The middot is
+          // followed by a normal space, matching the spacing of the dots
+          // inside the subtitle itself.
           return (
-            <>
-              <span style={{ color: 'var(--border)' }}>&middot;</span>
-              <span className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
-                {subtitle}
-              </span>
-            </>
+            <span
+              data-testid="header-subtitle"
+              className="text-xs truncate min-w-0"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              <span style={{ color: 'var(--border)' }}>&middot;</span>{' '}
+              {subtitle}
+            </span>
           )
         })()}
         {messages.length > 0 && (
