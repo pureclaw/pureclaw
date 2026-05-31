@@ -7,6 +7,7 @@ import Data.ByteString (ByteString)
 import Data.Either (isLeft)
 import Data.IORef
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -24,7 +25,7 @@ spec :: Spec
 spec = do
   describe "TelegramConfig" $ do
     it "has Show and Eq instances" $ do
-      let cfg = TelegramConfig "tok" "https://api.telegram.org"
+      let cfg = TelegramConfig "tok" "https://api.telegram.org" AllowAll
       show cfg `shouldContain` "TelegramConfig"
       cfg `shouldBe` cfg
 
@@ -99,7 +100,7 @@ spec = do
                 writeIORef postRef (Just (getAllowedUrl url, body))
                 pure HttpResponse { _hr_statusCode = 200, _hr_body = "{}" }
             }
-      tc <- mkTelegramChannel (TelegramConfig "test-token" "https://api.telegram.org") nh mkNoOpLogHandle
+      tc <- mkTelegramChannel (TelegramConfig "test-token" "https://api.telegram.org" AllowAll) nh mkNoOpLogHandle
       let update = mkTestUpdate 1 42 "Alice" 100 "private" "Hello"
       atomically $ writeTQueue (_tch_inbox tc) update
       let h = toHandle tc
@@ -122,7 +123,7 @@ spec = do
                 writeIORef postRef (Just (getAllowedUrl url, body))
                 pure HttpResponse { _hr_statusCode = 200, _hr_body = "{}" }
             }
-      tc <- mkTelegramChannel (TelegramConfig "tok" "https://api.telegram.org") nh mkNoOpLogHandle
+      tc <- mkTelegramChannel (TelegramConfig "tok" "https://api.telegram.org" AllowAll) nh mkNoOpLogHandle
       let update = mkTestUpdate 1 42 "Bob" 200 "private" "hi"
       atomically $ writeTQueue (_tch_inbox tc) update
       let h = toHandle tc
@@ -161,7 +162,7 @@ spec = do
                 pure HttpResponse { _hr_statusCode = 200, _hr_body = "{}" }
             }
       tc <- mkTelegramChannel
-              (TelegramConfig "tok" "https://api.telegram.org")
+              (TelegramConfig "tok" "https://api.telegram.org" AllowAll)
               nh mkNoOpLogHandle
       registerBotFatherCommands tc
       posted <- readIORef postRef
@@ -177,7 +178,7 @@ spec = do
     it "registerBotFatherCommands tolerates a non-200 response \
        \(BotFather autocomplete is best-effort, not a boot blocker)" $ do
       tc <- mkTelegramChannel
-              (TelegramConfig "tok" "https://api.telegram.org")
+              (TelegramConfig "tok" "https://api.telegram.org" AllowAll)
               ( mkNoOpNetworkHandle
                   { _nh_httpPost = \_ _ ->
                       pure HttpResponse
@@ -192,7 +193,7 @@ spec = do
     it "registerBotFatherCommands tolerates a network exception \
        \(handler does not propagate)" $ do
       tc <- mkTelegramChannel
-              (TelegramConfig "tok" "https://api.telegram.org")
+              (TelegramConfig "tok" "https://api.telegram.org" AllowAll)
               ( mkNoOpNetworkHandle
                   { _nh_httpPost = \_ _ ->
                       throwIO (userError "network down")
@@ -201,12 +202,98 @@ spec = do
               mkNoOpLogHandle
       registerBotFatherCommands tc `shouldReturn` ()
 
+  describe "receiveUpdate allow-list enforcement" $ do
+    it "returns the message when the sender's user id is allowed" $ do
+      tc <- mkAllowListChannel (AllowList (Set.fromList [UserId "42"])) mkNoOpLogHandle
+      enqueueUpdate tc (mkTestUpdate 1 42 "Alice" 100 "private" "Hello")
+      msg <- receiveUpdate tc
+      _im_content msg `shouldBe` "Hello"
+      imUserId msg `shouldBe` UserId "42"
+
+    it "returns the message when the chat id is allowed (user id is not)" $ do
+      tc <- mkAllowListChannel (AllowList (Set.fromList [UserId "100"])) mkNoOpLogHandle
+      enqueueUpdate tc (mkTestUpdate 1 999 "Stranger" 100 "private" "Hello")
+      msg <- receiveUpdate tc
+      _im_content msg `shouldBe` "Hello"
+      imUserId msg `shouldBe` UserId "999"
+
+    it "drops+logs an unauthorized update then returns the next authorized one" $ do
+      logRef <- newIORef []
+      tc <- mkAllowListChannel (AllowList (Set.fromList [UserId "42"]))
+                               (mkRecordingLogHandle logRef)
+      enqueueUpdate tc (mkTestUpdate 1 7 "Mallory" 7 "private" "blocked")
+      enqueueUpdate tc (mkTestUpdate 2 42 "Alice" 100 "private" "allowed")
+      msg <- receiveUpdate tc
+      _im_content msg `shouldBe` "allowed"
+      imUserId msg `shouldBe` UserId "42"
+      logged <- readIORef logRef
+      T.unlines logged `shouldSatisfy` T.isInfixOf "unauthorized sender"
+
+    it "does not update lastChat when an update is blocked" $ do
+      tc <- mkAllowListChannel (AllowList (Set.fromList [UserId "42"])) mkNoOpLogHandle
+      enqueueUpdate tc (mkTestUpdate 1 7 "Mallory" 7 "private" "blocked")
+      enqueueUpdate tc (mkTestUpdate 2 42 "Alice" 42 "private" "allowed")
+      _ <- receiveUpdate tc
+      lastChat <- readIORef (_tch_lastChat tc)
+      lastChat `shouldBe` Just 42
+
+    it "passes everyone through when the policy is AllowAll" $ do
+      tc <- mkAllowListChannel AllowAll mkNoOpLogHandle
+      enqueueUpdate tc (mkTestUpdate 1 12345 "Anyone" 6789 "private" "hi")
+      msg <- receiveUpdate tc
+      _im_content msg `shouldBe` "hi"
+
+  describe "withTelegramChannel open-allow-list warning" $ do
+    it "warns (WARN log) when the allow-list is open" $ do
+      logRef <- newIORef []
+      withTelegramChannel
+        (TelegramConfig "tok" "https://api.telegram.org" AllowAll)
+        mkNoOpNetworkHandle
+        (mkRecordingLogHandle logRef)
+        (\_ -> pure ())
+      logged <- readIORef logRef
+      T.unlines logged `shouldSatisfy` T.isInfixOf "no allow-list configured"
+
+    it "is silent (no WARN log) when the allow-list is closed" $ do
+      logRef <- newIORef []
+      withTelegramChannel
+        (TelegramConfig "tok" "https://api.telegram.org"
+          (AllowList (Set.fromList [UserId "1"])))
+        mkNoOpNetworkHandle
+        (mkRecordingLogHandle logRef)
+        (\_ -> pure ())
+      logged <- readIORef logRef
+      logged `shouldBe` []
+
 -- Helpers
 
 mkTestTelegramChannel :: IO TelegramChannel
 mkTestTelegramChannel =
-  mkTelegramChannel (TelegramConfig "test-token" "https://api.telegram.org") mkNoOpNetworkHandle mkNoOpLogHandle
+  mkTelegramChannel (TelegramConfig "test-token" "https://api.telegram.org" AllowAll) mkNoOpNetworkHandle mkNoOpLogHandle
 
 mkTestUpdate :: Int -> Int -> Text -> Int -> Text -> Text -> TelegramUpdate
 mkTestUpdate updId userId firstName chatId chatType txt =
   TelegramUpdate updId (TelegramMessage 1 (TelegramUser userId firstName) (TelegramChat chatId chatType) txt)
+
+-- | Build a Telegram channel with a given allow-list policy and log handle.
+mkAllowListChannel :: AllowList UserId -> LogHandle -> IO TelegramChannel
+mkAllowListChannel policy lh =
+  mkTelegramChannel
+    (TelegramConfig "test-token" "https://api.telegram.org" policy)
+    mkNoOpNetworkHandle
+    lh
+
+-- | Enqueue an update directly into a channel's inbox.
+enqueueUpdate :: TelegramChannel -> TelegramUpdate -> IO ()
+enqueueUpdate tc update = atomically $ writeTQueue (_tch_inbox tc) update
+
+-- | A 'LogHandle' that records WARN messages into an 'IORef'; other levels
+-- are no-ops.
+mkRecordingLogHandle :: IORef [Text] -> LogHandle
+mkRecordingLogHandle ref =
+  LogHandle
+    { _lh_logInfo  = \_ -> pure ()
+    , _lh_logWarn  = \msg -> modifyIORef' ref (++ [msg])
+    , _lh_logError = \_ -> pure ()
+    , _lh_logDebug = \_ -> pure ()
+    }
