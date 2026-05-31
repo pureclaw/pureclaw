@@ -97,8 +97,9 @@ instance Aeson.FromJSON SessionPrefix where
 
 -- | Pure session ID generator. Encodes a 'UTCTime' as
 -- @YYYYMMDD-HHMMSS-mmm@ (milliseconds zero-padded to three digits)
--- and prefixes it with the optional 'SessionPrefix' separated by a
--- hyphen.
+-- and appends the optional 'SessionPrefix' after it, separated by a
+-- hyphen. The timestamp leads so that lexicographic sorting of session
+-- IDs (and their on-disk directory names) is also chronological.
 newSessionId :: Maybe SessionPrefix -> UTCTime -> SessionId
 newSessionId mPrefix time =
   let hms     = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" time
@@ -108,7 +109,7 @@ newSessionId mPrefix time =
       timeStr = T.pack hms <> "-" <> T.justifyRight 3 '0' (T.pack (show millis))
       full    = case mPrefix of
         Nothing -> timeStr
-        Just p  -> unSessionPrefix p <> "-" <> timeStr
+        Just p  -> timeStr <> "-" <> unSessionPrefix p
   in SessionId full
 
 -- | Map a 'SessionKind' to its corresponding 'MessageTarget'. Pure helper
