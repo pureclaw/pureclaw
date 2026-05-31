@@ -106,14 +106,19 @@ function SessionRow({
         {onUnarchive && <UnarchiveButton onUnarchive={() => onUnarchive(session.id)} />}
         <span className="pill token-count">{age}</span>
       </div>
-      {(session.agent || session.model) && (
-        <div
-          className="text-xs ml-0 mt-0.5"
-          style={{ color: 'var(--text-faint)', lineHeight: 'var(--leading-tight)' }}
-        >
-          {sessionSubtitle(session)}
-        </div>
-      )}
+      {(() => {
+        const subtitle = sessionSubtitle(session)
+        if (!subtitle) return null
+        return (
+          <div
+            className="text-xs ml-0 mt-0.5 truncate"
+            style={{ color: 'var(--text-faint)', lineHeight: 'var(--leading-tight)' }}
+            title={subtitle}
+          >
+            {subtitle}
+          </div>
+        )
+      })()}
     </div>
   )
 }
