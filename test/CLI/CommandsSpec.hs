@@ -1,9 +1,13 @@
 module CLI.CommandsSpec (spec) where
 
+import Data.Set qualified as Set
 import Options.Applicative
 import Test.Hspec
 
+import PureClaw.Channels.Signal (SignalConfig (..))
+import PureClaw.Channels.Telegram (TelegramConfig (..))
 import PureClaw.CLI.Commands
+import PureClaw.CLI.Config
 import PureClaw.Core.Types
 import PureClaw.Security.Policy
 
@@ -264,3 +268,66 @@ spec = do
           _co_model opts `shouldBe` Just "test"
           _co_depth opts `shouldBe` 2
         Nothing -> expectationFailure "parse failed"
+
+  describe "resolveTelegramConfig" $ do
+    let telegramCfg fields =
+          emptyFileConfig { _fc_telegram = Just fields }
+
+    it "dm_policy=\"open\" yields AllowAll regardless of allow_from" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig
+            { _ftc_dmPolicy  = Just "open"
+            , _ftc_allowFrom = Just ["123"]
+            }
+      _tc_allowFrom (resolveTelegramConfig cfg) `shouldBe` AllowAll
+
+    it "no [telegram] table yields AllowAll" $
+      _tc_allowFrom (resolveTelegramConfig emptyFileConfig) `shouldBe` AllowAll
+
+    it "table present but allow_from = Nothing yields AllowAll" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_allowFrom = Nothing }
+      _tc_allowFrom (resolveTelegramConfig cfg) `shouldBe` AllowAll
+
+    it "allow_from = Just [] yields AllowAll" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_allowFrom = Just [] }
+      _tc_allowFrom (resolveTelegramConfig cfg) `shouldBe` AllowAll
+
+    it "populated allow_from yields AllowList of UserIds" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_allowFrom = Just ["1", "2"] }
+      _tc_allowFrom (resolveTelegramConfig cfg)
+        `shouldBe` AllowList (Set.fromList [UserId "1", UserId "2"])
+
+    it "uses the fixed Telegram API base" $
+      _tc_apiBase (resolveTelegramConfig emptyFileConfig)
+        `shouldBe` "https://api.telegram.org"
+
+    it "reflects bot_token from the file config" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_botToken = Just "tok-123" }
+      _tc_botToken (resolveTelegramConfig cfg) `shouldBe` "tok-123"
+
+    it "defaults bot_token to empty when absent" $
+      _tc_botToken (resolveTelegramConfig emptyFileConfig) `shouldBe` ""
+
+  describe "resolveSignalConfig" $ do
+    let signalCfg fields =
+          emptyFileConfig { _fc_signal = Just fields }
+
+    it "dm_policy=\"open\" yields AllowAll regardless of allow_from" $ do
+      let cfg = signalCfg emptyFileSignalConfig
+            { _fsc_dmPolicy  = Just "open"
+            , _fsc_allowFrom = Just ["+15551234567"]
+            }
+      _sc_allowFrom (resolveSignalConfig cfg) `shouldBe` AllowAll
+
+    it "missing allow_from yields AllowAll" $ do
+      let cfg = signalCfg emptyFileSignalConfig { _fsc_allowFrom = Nothing }
+      _sc_allowFrom (resolveSignalConfig cfg) `shouldBe` AllowAll
+
+    it "allow_from = Just [] yields AllowAll" $ do
+      let cfg = signalCfg emptyFileSignalConfig { _fsc_allowFrom = Just [] }
+      _sc_allowFrom (resolveSignalConfig cfg) `shouldBe` AllowAll
+
+    it "populated allow_from yields AllowList of UserIds" $ do
+      let cfg = signalCfg emptyFileSignalConfig
+            { _fsc_allowFrom = Just ["+15551234567", "uuid-abc"] }
+      _sc_allowFrom (resolveSignalConfig cfg)
+        `shouldBe` AllowList (Set.fromList [UserId "+15551234567", UserId "uuid-abc"])

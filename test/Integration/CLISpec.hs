@@ -164,6 +164,31 @@ spec = do
       -- Should still start and show the banner
       out `shouldContain` "PureClaw"
 
+    it "prints the open-allow-list security warning when Signal has no allow_from" $ do
+      bin <- findPureclaw
+      -- A [signal] table without allow_from (and no dm_policy) resolves to an
+      -- open allow-list (AllowAll). The startup wiring must emit the prominent
+      -- banner on stdout and a WARN line on stderr. signal-cli is absent in CI,
+      -- so the branch warns-then-falls-back-to-CLI, but the allow-list warning
+      -- fires first.
+      (exitCode, out, err) <- runPureclawWithSetup
+        bin ["gateway", "run", "--no-vault"] "" 5000000
+        (\tmp -> do
+           let cfgDir = tmp </> ".pureclaw"
+           createDirectoryIfMissing True cfgDir
+           writeFile (cfgDir </> "config.toml") $ unlines
+             [ "default_channel = \"signal\""
+             , ""
+             , "[signal]"
+             , "account = \"+15551234567\""
+             ])
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      -- Banner lines land on stdout.
+      out `shouldContain` "SECURITY WARNING"
+      out `shouldContain` "allow_from"
+      -- The WARN log line lands on stderr.
+      err `shouldContain` "no allow-list configured"
+
     it "writes transcripts under ~/.pureclaw/sessions/<id>/transcript.jsonl, not ~/.pureclaw/transcripts/" $ do
       bin <- findPureclaw
       -- We need to inspect HOME after the run, so we run the binary inside
