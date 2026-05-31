@@ -3,6 +3,7 @@ module Integration.CLISpec (spec) where
 
 import Control.Concurrent
 import Data.ByteString.Lazy qualified as LBS
+import Data.List qualified as List
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Control.Monad (forM_, when)
@@ -275,7 +276,7 @@ spec = do
       err `shouldContain` "Default agent: (none)"
 
   describe "--prefix CLI flag" $ do
-    it "creates a session whose dir starts with the given prefix" $ do
+    it "creates a session whose dir ends with the given prefix" $ do
       bin <- findPureclaw
       withSystemTempDirectory "pureclaw-prefix-test" $ \tmpDir -> do
         let pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "")))
@@ -297,7 +298,7 @@ spec = do
               `shouldBe` annotate (T.unpack (TE.decodeUtf8 (LBS.toStrict err))) ExitSuccess
             let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
             dirs <- listDirectory sessionsDir
-            any (\d -> take 6 d == "myrun-") dirs `shouldBe` True
+            any ("-myrun" `List.isSuffixOf`) dirs `shouldBe` True
 
     it "defaults --prefix to the agent name when --agent is set and --prefix is omitted" $ do
       bin <- findPureclaw
@@ -308,11 +309,12 @@ spec = do
            createDirectoryIfMissing True agentDir
            writeFile (agentDir </> "SOUL.md") "hi")
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      -- The new session dir name must start with the agent prefix.
+      -- The new session dir name must end with the agent prefix.
       -- We can't easily inspect tmpDir here because runPureclawWithSetup
       -- destroys it, so assert indirectly via a stderr log line we emit
-      -- at startup listing the session id.
-      err `shouldContain` "Session: zoe-"
+      -- at startup listing the session id (now timestamp-first, e.g.
+      -- "Session: 20250325-143045-678-zoe").
+      err `shouldContain` "-zoe"
 
     it "rejects --prefix ../evil with an error exit" $ do
       bin <- findPureclaw
@@ -347,7 +349,7 @@ spec = do
         ec1 `shouldBe` ExitSuccess
         let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
         dirs <- listDirectory sessionsDir
-        let mResumeId = case filter (\d -> take 5 d == "seed-") dirs of
+        let mResumeId = case filter ("-seed" `List.isSuffixOf`) dirs of
                           (d:_) -> Just d
                           _     -> Nothing
         resumeId <- maybe (fail "no seed session directory found") pure mResumeId
@@ -515,11 +517,11 @@ spec = do
         ec2 `shouldBe` ExitSuccess
         let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
         dirs <- listDirectory sessionsDir
-        let hasPrefix p d = take (length p) d == p
-        length (filter (hasPrefix "one-") dirs) `shouldBe` 1
-        length (filter (hasPrefix "two-") dirs) `shouldBe` 1
+        let hasSuffix s d = s `List.isSuffixOf` d
+        length (filter (hasSuffix "-one") dirs) `shouldBe` 1
+        length (filter (hasSuffix "-two") dirs) `shouldBe` 1
         -- Each session dir has its own transcript file (not shared)
-        case (filter (hasPrefix "one-") dirs, filter (hasPrefix "two-") dirs) of
+        case (filter (hasSuffix "-one") dirs, filter (hasSuffix "-two") dirs) of
           (oneDir:_, twoDir:_) -> do
             doesFileExist (sessionsDir </> oneDir </> "transcript.jsonl")
               `shouldReturn` True

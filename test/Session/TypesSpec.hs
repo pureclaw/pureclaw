@@ -79,11 +79,11 @@ spec = do
           Right p -> p
           Left e  -> error ("test fixture: " ++ show e)
 
-    it "produces \"<prefix>-YYYYMMDD-HHMMSS-mmm\" when a prefix is supplied" $
+    it "produces \"YYYYMMDD-HHMMSS-mmm-<prefix>\" when a prefix is supplied" $
       newSessionId (Just zoePrefix) fixedTime
-        `shouldBe` parseSessionId "zoe-20250325-143045-678"
+        `shouldBe` parseSessionId "20250325-143045-678-zoe"
 
-    it "omits the prefix and leading hyphen when Nothing is supplied" $
+    it "omits the prefix and trailing hyphen when Nothing is supplied" $
       newSessionId Nothing fixedTime
         `shouldBe` parseSessionId "20250325-143045-678"
 
