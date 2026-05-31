@@ -242,7 +242,7 @@ allowListOpen (AllowList _) = False
 data AllowListContext = AllowListContext
   { _alc_channelName :: Text  -- ^ Human-readable channel name, e.g. "Signal"
   , _alc_configTable :: Text  -- ^ TOML table key, e.g. "signal"
-  , _alc_exampleId   :: Text  -- ^ Example allow_from entry, e.g. "+15551234567"
+  , _alc_exampleId   :: Text  -- ^ Example allow_from entry, e.g. a Signal user UUID or a numeric Telegram id
   }
   deriving stock (Show, Eq)
 

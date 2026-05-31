@@ -464,7 +464,7 @@ Configure each channel's allow-list in `~/.pureclaw/config.toml`:
 
 ```toml
 [signal]
-allow_from = ["+15551234567"]   # E.164 phone numbers or UUIDs
+allow_from = ["edf52444-6e27-4a42-a9ad-9f4f4aca9b26"]   # Signal user UUIDs
 
 [telegram]
 allow_from = ["123456789"]      # numeric user IDs or chat IDs
@@ -472,6 +472,7 @@ allow_from = ["123456789"]      # numeric user IDs or chat IDs
 
 Notes:
 
+- **Signal uses user UUIDs.** Entries should be the sender's Signal user UUID (e.g. `edf52444-6e27-4a42-a9ad-9f4f4aca9b26`), not a phone number — modern Signal hides phone numbers, so a phone-number entry often won't match.
 - **Telegram is numeric-only.** Entries are matched against the sender's numeric user ID *and* chat ID — usernames are not supported.
 - **The CLI channel has no allow-list.** It is local to the trusted operator running the binary, so there is no remote sender to restrict.
 - Omitting `allow_from` does **not** disable the channel — it opens it to all senders and triggers the warning. List one ID per allowed sender to lock it down.

@@ -1156,7 +1156,7 @@ resolveSignalConfig fileCfg =
 -- | Allow-list warning context for the Signal channel: display name, lowercase
 --   TOML table key, and a concrete example @allow_from@ entry.
 signalAllowListContext :: AllowListContext
-signalAllowListContext = AllowListContext "Signal" "signal" "+15551234567"
+signalAllowListContext = AllowListContext "Signal" "signal" "edf52444-6e27-4a42-a9ad-9f4f4aca9b26"
 
 -- | Resolve Telegram channel config from the file config. Mirrors
 --   'resolveSignalConfig': @dm_policy = "open"@ or a missing/empty @allow_from@

@@ -62,7 +62,7 @@ data FileConfig = FileConfig
 data FileSignalConfig = FileSignalConfig
   { _fsc_account        :: Maybe Text    -- ^ E.164 phone number
   , _fsc_dmPolicy       :: Maybe Text    -- ^ "pairing", "allowlist", "open", "disabled"
-  , _fsc_allowFrom      :: Maybe [Text]  -- ^ E.164 numbers or UUIDs
+  , _fsc_allowFrom      :: Maybe [Text]  -- ^ Signal user UUIDs (phone numbers may not match on modern Signal)
   , _fsc_textChunkLimit :: Maybe Int     -- ^ Max chars per message (default: 6000)
   } deriving stock (Show, Eq)
 

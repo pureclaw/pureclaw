@@ -36,7 +36,7 @@ signalCtx =
   AllowListContext
     { _alc_channelName = "Signal"
     , _alc_configTable = "signal"
-    , _alc_exampleId   = "+15551234567"
+    , _alc_exampleId   = "edf52444-6e27-4a42-a9ad-9f4f4aca9b26"
     }
 
 spec :: Spec
@@ -60,7 +60,7 @@ spec = do
           -- Copy-pasteable, actionable instructions:
           joined `shouldSatisfy` T.isInfixOf "config.toml"
           joined `shouldSatisfy` T.isInfixOf "allow_from"
-          joined `shouldSatisfy` T.isInfixOf "+15551234567"
+          joined `shouldSatisfy` T.isInfixOf "edf52444-6e27-4a42-a9ad-9f4f4aca9b26"
           -- The config table must be the lowercase key, NOT the display name.
           joined `shouldSatisfy` T.isInfixOf "[signal]"
           joined `shouldNotSatisfy` T.isInfixOf "[Signal]"
@@ -83,7 +83,7 @@ spec = do
       contents `shouldSatisfy` T.isInfixOf "Signal"
       contents `shouldSatisfy` T.isInfixOf "[signal]"
       contents `shouldSatisfy` T.isInfixOf "allow_from"
-      contents `shouldSatisfy` T.isInfixOf "+15551234567"
+      contents `shouldSatisfy` T.isInfixOf "edf52444-6e27-4a42-a9ad-9f4f4aca9b26"
       logged <- readIORef logRef
       logged `shouldSatisfy` (not . null)
       T.unlines logged `shouldSatisfy` T.isInfixOf "no allow-list configured"

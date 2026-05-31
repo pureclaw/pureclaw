@@ -350,7 +350,7 @@ spec = do
         `shouldBe` AllowList (Set.fromList [UserId "+15551234567", UserId "uuid-abc"])
 
   describe "signalAllowListContext" $ do
-    it "names the Signal channel, its TOML table, and a phone-number example" $ do
+    it "names the Signal channel, its TOML table, and a user-UUID example" $ do
       ref <- newIORef []
       withSystemTempFile "signal-banner.txt" $ \path h -> do
         -- emitAllowListWarning is the exact rendering path the live signal
@@ -363,5 +363,5 @@ spec = do
         warns <- T.unpack . mconcat <$> readIORef ref
         contents `shouldContain` "Signal"
         contents `shouldContain` "[signal]"
-        contents `shouldContain` "+15551234567"
+        contents `shouldContain` "edf52444-6e27-4a42-a9ad-9f4f4aca9b26"
         warns `shouldContain` "no allow-list configured"
