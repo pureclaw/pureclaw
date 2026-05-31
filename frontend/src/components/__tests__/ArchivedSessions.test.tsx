@@ -63,6 +63,20 @@ describe('ArchivedSessions', () => {
     expect(screen.getByText('old session')).toBeInTheDocument()
   })
 
+  it('collapsed section is pinned to the bottom-bar height so its top border aligns with the status line (#67)', () => {
+    const archivedSessions = makeSessions({ description: 'old session' })
+    render(
+      <Sidebar {...defaultProps} archivedSessions={archivedSessions} />,
+    )
+    const section = screen.getByTestId('archived-section')
+    // Collapsed: fixed to --bottombar-height (border-box) so its 1px top
+    // border lines up exactly with the status line's top border.
+    expect(section.style.height).toBe('var(--bottombar-height)')
+    // Expanded: the height constraint is released so the list can grow.
+    fireEvent.click(screen.getByText(/Archived/))
+    expect(section.style.height).toBe('')
+  })
+
   it('shows expand/collapse icons', () => {
     const archivedSessions = makeSessions({ description: 'test' })
     const { container } = render(
