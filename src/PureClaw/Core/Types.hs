@@ -231,9 +231,25 @@ isAllowed (AllowList s) x = Set.member x s
 
 -- | True when the list permits every sender (no restriction configured).
 allowListOpen :: AllowList a -> Bool
-allowListOpen _ = False -- RED stub
+allowListOpen AllowAll      = True
+allowListOpen (AllowList _) = False
 
 -- | Banner lines plus a WARN log line describing an OPEN allow-list on the
 --   named channel, or Nothing when senders are restricted. Pure.
 allowListWarning :: Text -> AllowList a -> Maybe ([Text], Text)
-allowListWarning _ _ = Nothing -- RED stub
+allowListWarning name al
+  | not (allowListOpen al) = Nothing
+  | otherwise = Just (banner, logLine)
+  where
+    rule = T.replicate 64 "="
+    banner =
+      [ rule
+      , "  SECURITY WARNING: channel \"" <> name <> "\" has NO allow-list configured."
+      , "  It will accept messages from ANY sender."
+      , "  Set `allow_from` under the [" <> name <> "] config table to restrict"
+      , "  which sender IDs may message this agent."
+      , rule
+      ]
+    logLine =
+      "channel \"" <> name <> "\" has no allow-list configured; "
+        <> "accepting messages from any sender"
