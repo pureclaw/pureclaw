@@ -27,6 +27,12 @@ export interface SessionInfo {
   description: string | null
   autoSummary: string | null
   firstMessageSnippet: string | null
+  /** Communications channel name of the session origin (e.g. "signal",
+   *  "telegram", "cli"), or null when no source was recorded. */
+  channel: string | null
+  /** Channel user id of the session origin, or null when the channel
+   *  carries no user id (e.g. `pureclaw tui`). */
+  channelUserId: string | null
 }
 
 /** Cascade used to pick the display title for a session.
@@ -49,12 +55,15 @@ export function shortenModel(model: string): string {
   return m ? m[1]! : model
 }
 
-/** Agent + short model formatted as "agent · sonnet-4" (with the
- *  middle dot). Skips either piece if it's missing. */
-export function sessionSubtitle(s: { agent?: string | null; model?: string | null }): string {
+/** Agent + communications channel formatted as "agent · channel:userId"
+ *  (with the middle dot). The model is deliberately omitted — it can change
+ *  over a session's lifetime. The channel piece is shown only when the
+ *  origin carries a channel user id; sessions with no channel user id
+ *  (e.g. `pureclaw tui`) show just the agent. Skips either piece if missing. */
+export function sessionSubtitle(s: { agent?: string | null; channel?: string | null; channelUserId?: string | null }): string {
   const parts: string[] = []
   if (s.agent) parts.push(s.agent)
-  if (s.model) parts.push(shortenModel(s.model))
+  if (s.channelUserId) parts.push(`${s.channel ?? ''}:${s.channelUserId}`)
   return parts.join(' · ')
 }
 

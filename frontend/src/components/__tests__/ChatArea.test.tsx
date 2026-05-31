@@ -574,6 +574,23 @@ describe('ChatArea branch button (D9, D10)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Header subtitle spacing (#67): the separator + subtitle form a single flex
+// child so the title↔subtitle gap is one standard gap, not two.
+// ---------------------------------------------------------------------------
+describe('ChatArea header subtitle spacing', () => {
+  it('groups the middot separator and subtitle into one element', () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn() as unknown as HTMLElement['scrollIntoView']
+    const agent = { ...makeAgent(), description: 'signal:+15551234567' }
+    const { getByTestId } = render(<ChatArea selectedAgent={agent} messages={[]} />)
+    const subtitle = getByTestId('header-subtitle')
+    // Separator and subtitle text live in the SAME element (one flex child →
+    // one gap between the title and the subtitle), with the middot followed by
+    // a normal space — matching the spacing of the dots inside the subtitle.
+    expect(subtitle.textContent).toBe('· signal:+15551234567')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // D12a / D12b — read-only branch prefix above the composer
 // ---------------------------------------------------------------------------
 describe('ChatArea branch-draft prefix (D12a, D12b)', () => {

@@ -106,14 +106,19 @@ function SessionRow({
         {onUnarchive && <UnarchiveButton onUnarchive={() => onUnarchive(session.id)} />}
         <span className="pill token-count">{age}</span>
       </div>
-      {(session.agent || session.model) && (
-        <div
-          className="text-xs ml-0 mt-0.5"
-          style={{ color: 'var(--text-faint)', lineHeight: 'var(--leading-tight)' }}
-        >
-          {sessionSubtitle(session)}
-        </div>
-      )}
+      {(() => {
+        const subtitle = sessionSubtitle(session)
+        if (!subtitle) return null
+        return (
+          <div
+            className="text-xs ml-0 mt-0.5 truncate"
+            style={{ color: 'var(--text-faint)', lineHeight: 'var(--leading-tight)' }}
+            title={subtitle}
+          >
+            {subtitle}
+          </div>
+        )
+      })()}
     </div>
   )
 }
@@ -134,7 +139,19 @@ function ArchivedSection({
   if (sessions.length === 0) return null
 
   return (
-    <div className="shrink-0 flex flex-col" style={{ borderTop: '1px solid var(--border)', maxHeight: '50%' }}>
+    <div
+      data-testid="archived-section"
+      className="shrink-0 flex flex-col"
+      style={{
+        borderTop: '1px solid var(--border)',
+        maxHeight: '50%',
+        // When collapsed, pin the section to the status-line height so its
+        // 1px top border lines up exactly with the status line's top border
+        // (border-box includes the border). Released when expanded so the
+        // session list can grow.
+        ...(expanded ? {} : { height: 'var(--bottombar-height)', justifyContent: 'center' }),
+      }}
+    >
       <div
         className="px-3 py-1.5 flex items-center justify-between cursor-pointer shrink-0"
         style={{ color: 'var(--text-muted)' }}

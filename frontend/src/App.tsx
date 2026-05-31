@@ -104,6 +104,16 @@ function formatToolResultContent(content: unknown): string {
   return JSON.stringify(content, null, 2)
 }
 
+/** Format an ISO-8601 timestamp as `YYYY-MM-DD HH:MM:SS` in local time.
+ *  Shows the date alongside the time (issue #67) so transcripts spanning
+ *  multiple days are unambiguous. Local time matches the prior
+ *  `toLocaleTimeString` behavior. */
+export function formatTimestamp(iso: string): string {
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 /** Convert transcript entries to the Message format ChatArea expects. */
 export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
   const messages: Message[] = []
@@ -111,7 +121,7 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
   const toolResults = buildToolResultIndex(entries)
 
   for (const e of entries) {
-    const ts = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const ts = formatTimestamp(e.timestamp)
     const rawJson = e.payload
 
     if (e.direction === 'request') {
@@ -520,7 +530,7 @@ export default function App() {
   })()
 
   const messages = useMemo(() => {
-    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const now = formatTimestamp(new Date().toISOString())
     if (pendingMessage) {
       return [
         ...transcriptMessages,

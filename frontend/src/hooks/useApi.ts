@@ -352,5 +352,7 @@ export async function createSession(agent?: string, customPrompt?: string): Prom
     description: null,
     autoSummary: null,
     firstMessageSnippet: null,
+    channel: null,
+    channelUserId: null,
   }
 }

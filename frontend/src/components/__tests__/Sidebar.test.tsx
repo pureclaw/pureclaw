@@ -24,6 +24,8 @@ function makeSessions(...overrides: Partial<SessionInfo>[]): SessionInfo[] {
     description: o.description ?? null,
     autoSummary: o.autoSummary ?? null,
     firstMessageSnippet: o.firstMessageSnippet ?? null,
+    channel: o.channel ?? null,
+    channelUserId: o.channelUserId ?? null,
   }))
 }
 
@@ -68,6 +70,42 @@ describe('Sidebar lifecycle transitions', () => {
     const archiveBtn = screen.getByRole('button', { name: /archive tab/i })
     fireEvent.click(archiveBtn)
     expect(onArchiveTab).toHaveBeenCalledWith(0)
+  })
+
+  it('truncates the channel:userId subtitle to one line and shows the full text on hover', () => {
+    const subtitle = 'assistant · signal:+15551234567890'
+    render(
+      <Sidebar
+        {...defaultProps}
+        sessions={makeSessions({
+          id: 'sess-sig',
+          agent: 'assistant',
+          channel: 'signal',
+          channelUserId: '+15551234567890',
+        })}
+      />,
+    )
+    const el = screen.getByText(subtitle)
+    // Single-line clipping (Tailwind `truncate` = overflow-hidden + nowrap + ellipsis)
+    expect(el.className).toContain('truncate')
+    // Full, untruncated value available on hover
+    expect(el.getAttribute('title')).toBe(subtitle)
+  })
+
+  it('shows the subtitle for a session that has only a channel user id (no agent/model)', () => {
+    render(
+      <Sidebar
+        {...defaultProps}
+        sessions={makeSessions({
+          id: 'sess-tui',
+          agent: null,
+          model: '',
+          channel: 'telegram',
+          channelUserId: '42',
+        })}
+      />,
+    )
+    expect(screen.getByText('telegram:42')).toBeTruthy()
   })
 
   it('clicking an archived session selects it without unarchiving', () => {

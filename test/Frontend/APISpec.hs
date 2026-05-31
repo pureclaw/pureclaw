@@ -24,7 +24,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
-import PureClaw.Core.Types (ModelId (..), SessionId (..), ToolCallId (..))
+import PureClaw.Core.Types (ChannelKind (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Providers.Class
@@ -645,6 +645,47 @@ spec = do
         (st, respBody) <- getJSON env ["api", "sessions", "archived"]
         st `shouldBe` HTTP.status200
         respBody `shouldBe` Aeson.encode ([] :: [Aeson.Value])
+
+  -- -----------------------------------------------------------------------
+  -- #67 follow-up: SessionInfo exposes channel name + channel user id
+  -- (so the transcript header can show channel:userId instead of the model)
+  -- -----------------------------------------------------------------------
+
+  describe "toSessionInfo (channel + user id — #67)" $ do
+    let epoch = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+        baseMeta src = SessionMeta
+          { _sm_id                = SessionId "s1"
+          , _sm_agent             = Nothing
+          , _sm_kind              = SkProvider (ProviderSpec (inferProviderId "claude-sonnet-4-20250514") (ModelId "claude-sonnet-4-20250514") Nothing)
+          , _sm_model             = "claude-sonnet-4-20250514"
+          , _sm_channel           = "web"
+          , _sm_createdAt         = epoch
+          , _sm_lastActive        = epoch
+          , _sm_bootstrapConsumed = True
+          , _sm_archived          = False
+          , _sm_description       = Nothing
+          , _sm_autoSummary       = Nothing
+          , _sm_source            = src
+          }
+    it "exposes channel name and user id from the session source" $ do
+      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+          si  = toSessionInfo (baseMeta (Just src)) Nothing
+      _si_channel si `shouldBe` Just "signal"
+      _si_channelUserId si `shouldBe` Just "+15551234567"
+    it "yields no channel user id when the source has no user id (e.g. tui/cli)" $ do
+      let src = mkMessageSource CkCli Nothing mempty
+          si  = toSessionInfo (baseMeta (Just src)) Nothing
+      _si_channel si `shouldBe` Just "cli"
+      _si_channelUserId si `shouldBe` Nothing
+    it "yields no channel or user id when there is no source" $ do
+      let si = toSessionInfo (baseMeta Nothing) Nothing
+      _si_channel si `shouldBe` Nothing
+      _si_channelUserId si `shouldBe` Nothing
+    it "serializes channel and channelUserId into the SessionInfo JSON" $ do
+      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+          v   = Aeson.toJSON (toSessionInfo (baseMeta (Just src)) Nothing)
+      lookupKey v "channel" `shouldBe` Just (Aeson.String "signal")
+      lookupKey v "channelUserId" `shouldBe` Just (Aeson.String "+15551234567")
 
   -- -----------------------------------------------------------------------
   -- WU-8: POST /api/sessions/{id}/archive and /unarchive idempotence
