@@ -29,7 +29,7 @@ import PureClaw.Routing.Types (RoutingConfig (..))
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle (mkSessionHandle, mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
+import PureClaw.Session.Handle (SessionHandle (..), mkSessionHandle, mkNoOpSessionHandle, noOpOnFirstStreamDoneRef)
 import PureClaw.Tools.Registry
 
 import Data.Map.Strict qualified as Map
@@ -171,6 +171,7 @@ mkBgTestEnv sessionsDir p ch = do
         , SessionTypes._sm_archived = False
         , SessionTypes._sm_description = Nothing
         , SessionTypes._sm_autoSummary = Nothing
+        , SessionTypes._sm_source = Nothing
         }
   sh    <- mkSessionHandle Nothing mkNoOpLogHandle sessionsDir meta
   shRef <- newIORef sh
@@ -252,6 +253,42 @@ spec = do
           T.unpack statusMsg `shouldContain` "Messages"
           replyMsg `shouldBe` "mock> reply"
         _ -> expectationFailure "expected two messages"
+
+    -- Session origin capture (WU3): set-once provenance recorded from the
+    -- first inbound message, before slash/provider branching.
+    it "captures _sm_source on the first inbound message" $
+      withSystemTempDirectory "pc-src" $ \tmp -> do
+        let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+        channel <- mkSourcedChannel [(src, "hello")]
+        env <- mkSourceCaptureEnv tmp (MockProvider "reply") channel
+        runAgentLoop env
+        sh <- readIORef (_env_session env)
+        meta <- readIORef (_sh_meta sh)
+        SessionTypes._sm_source meta `shouldBe` Just src
+
+    it "captures _sm_source even when the inbound message content is empty" $
+      withSystemTempDirectory "pc-src" $ \tmp -> do
+        -- An empty-content message still has a sender; origin is about the
+        -- sender, not the content, so the empty-message branch must capture.
+        let src = mkMessageSource CkTelegram (Just (UserId "99999")) mempty
+        channel <- mkSourcedChannel [(src, "")]
+        env <- mkSourceCaptureEnv tmp (MockProvider "reply") channel
+        runAgentLoop env
+        sh <- readIORef (_env_session env)
+        meta <- readIORef (_sh_meta sh)
+        SessionTypes._sm_source meta `shouldBe` Just src
+
+    it "does not overwrite _sm_source when a later message has a different sender" $
+      withSystemTempDirectory "pc-src" $ \tmp -> do
+        let first  = mkMessageSource CkSignal (Just (UserId "+15550000001")) mempty
+            second = mkMessageSource CkTelegram (Just (UserId "99999")) mempty
+        channel <- mkSourcedChannel [(first, "hello"), (second, "world")]
+        env <- mkSourceCaptureEnv tmp (MockProvider "reply") channel
+        runAgentLoop env
+        sh <- readIORef (_env_session env)
+        meta <- readIORef (_sh_meta sh)
+        -- Set-once: the session origin stays the FIRST sender.
+        SessionTypes._sm_source meta `shouldBe` Just first
 
     -- /bg — run a prompt in a fresh background session (issue #52)
     it "/bg runs a background turn and pushes the result to the channel" $
@@ -527,7 +564,7 @@ mkMockChannel messages = do
               (m:rest) -> do
                 writeIORef msgsRef rest
                 pure IncomingMessage
-                  { _im_userId = UserId "test"
+                  { _im_source = mkMessageSource CkCli (Just (UserId "test")) mempty
                   , _im_content = m
                   }
         , _ch_send = \msg ->
@@ -540,4 +577,54 @@ mkMockChannel messages = do
         , _ch_promptSecret = \_ -> pure ""
         }
   pure (channel, sentRef)
+
+-- | Like 'mkMockChannel' but each queued message carries its own
+-- 'MessageSource', so tests can drive the loop with messages from
+-- different senders (and with empty content). Throws EOF when drained.
+mkSourcedChannel :: [(MessageSource, Text)] -> IO ChannelHandle
+mkSourcedChannel messages = do
+  msgsRef <- newIORef messages
+  pure ChannelHandle
+    { _ch_receive = do
+        msgs <- readIORef msgsRef
+        case msgs of
+          [] -> throwIO (userError "EOF" :: IOError)
+          ((src, m):rest) -> do
+            writeIORef msgsRef rest
+            pure IncomingMessage { _im_source = src, _im_content = m }
+    , _ch_send         = \_ -> pure ()
+    , _ch_sendError    = \_ -> pure ()
+    , _ch_sendChunk    = \_ -> pure ()
+    , _ch_streaming    = True
+    , _ch_readSecret   = pure ""
+    , _ch_prompt       = \_ -> pure ""
+    , _ch_promptSecret = \_ -> pure ""
+    }
+
+-- | Build a test env backed by a REAL on-disk session handle (rooted under
+-- the given sessions dir) so origin capture via 'setSourceIfAbsent' can
+-- persist. Returns the env so tests can read '_sh_meta' afterward.
+mkSourceCaptureEnv :: Provider p => FilePath -> p -> ChannelHandle -> IO AgentEnv
+mkSourceCaptureEnv sessionsDir p ch = do
+  base <- mkTestEnv p ch
+  now  <- getCurrentTime
+  let meta = SessionTypes.SessionMeta
+        { SessionTypes._sm_id    = SessionTypes.newSessionId Nothing now
+        , SessionTypes._sm_agent = Nothing
+        , SessionTypes._sm_kind  = SessionTypes.SkProvider
+            (SessionTypes.ProviderSpec
+              (SessionTypes.inferProviderId "mock") (ModelId "mock") Nothing)
+        , SessionTypes._sm_model  = "mock"
+        , SessionTypes._sm_channel = "cli"
+        , SessionTypes._sm_createdAt = now
+        , SessionTypes._sm_lastActive = now
+        , SessionTypes._sm_bootstrapConsumed = False
+        , SessionTypes._sm_archived = False
+        , SessionTypes._sm_description = Nothing
+        , SessionTypes._sm_autoSummary = Nothing
+        , SessionTypes._sm_source = Nothing
+        }
+  sh    <- mkSessionHandle Nothing mkNoOpLogHandle sessionsDir meta
+  shRef <- newIORef sh
+  pure base { _env_session = shRef }
 

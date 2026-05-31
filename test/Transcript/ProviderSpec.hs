@@ -60,6 +60,12 @@ testRespNoUsage = CompletionResponse
   , _crsp_usage   = Nothing
   }
 
+-- | A concrete message source used by the source-tagging tests. The user
+-- id is a recognizable phone number so omit-broadcast assertions elsewhere
+-- can grep for it.
+testSource :: MessageSource
+testSource = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+
 -- | Safe access to list elements by index, failing with a clear message.
 entryAt :: [TranscriptEntry] -> Int -> IO TranscriptEntry
 entryAt entries i
@@ -81,7 +87,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testResp)
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         resp <- complete wrapped testReq
         resp `shouldBe` testResp
         _th_close th
@@ -95,7 +101,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testResp)
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -111,7 +117,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testResp)
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -126,7 +132,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testResp)
-            wrapped = mkTranscriptProvider th "my-source" inner
+            wrapped = mkTranscriptProvider th "my-source" Nothing inner
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -177,7 +183,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testResp)
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -203,7 +209,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testResp)
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -218,7 +224,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testRespNoUsage)
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -236,7 +242,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (CannedProvider testResp)
-            wrapped = mkTranscriptProvider th "test-source" inner
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
         _ <- complete wrapped testReq
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -254,7 +260,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (StreamingMockProvider testResp)
-            wrapped = mkTranscriptProvider th "stream-source" inner
+            wrapped = mkTranscriptProvider th "stream-source" Nothing inner
         eventsRef <- newIORef ([] :: [StreamEvent])
         completeStream wrapped testReq (\ev -> modifyIORef' eventsRef (++ [ev]))
         _th_flush th
@@ -271,7 +277,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (StreamingMockProvider testResp)
-            wrapped = mkTranscriptProvider th "stream-source" inner
+            wrapped = mkTranscriptProvider th "stream-source" Nothing inner
         eventsRef <- newIORef ([] :: [StreamEvent])
         completeStream wrapped testReq (\ev -> modifyIORef' eventsRef (++ [ev]))
         events <- readIORef eventsRef
@@ -284,7 +290,7 @@ spec = do
         let path = tmpDir </> "transcript.jsonl"
         th <- mkFileTranscriptHandle mkNoOpLogHandle path
         let inner = MkProvider (StreamingMockProvider testResp)
-            wrapped = mkTranscriptProvider th "stream-source" inner
+            wrapped = mkTranscriptProvider th "stream-source" Nothing inner
         completeStream wrapped testReq (\_ -> pure ())
         _th_flush th
         entries <- _th_query th emptyFilter
@@ -292,6 +298,93 @@ spec = do
         let meta = _te_metadata respEntry
         Map.lookup "input_tokens" meta `shouldBe` Just (Aeson.Number 42)
         Map.lookup "output_tokens" meta `shouldBe` Just (Aeson.Number 17)
+        _th_close th
+
+  ---------------------------------------------------------------------------
+  -- WU4: per-message sender written to Request metadata under "source".
+  --   - present on Request via complete AND completeStream
+  --   - Nothing ⇒ no "source" key
+  --   - Response entries are NEVER tagged
+  ---------------------------------------------------------------------------
+  describe "WU4 source metadata" $ do
+    it "tags the Request entry with source via complete" $ do
+      withSystemTempDirectory "transcript-provider-test" $ \tmpDir -> do
+        let path = tmpDir </> "transcript.jsonl"
+        th <- mkFileTranscriptHandle mkNoOpLogHandle path
+        let inner = MkProvider (CannedProvider testResp)
+            wrapped = mkTranscriptProvider th "test-source" (Just testSource) inner
+        _ <- complete wrapped testReq
+        _th_flush th
+        entries <- _th_query th emptyFilter
+        reqEntry <- entryAt entries 0
+        Map.lookup "source" (_te_metadata reqEntry)
+          `shouldBe` Just (Aeson.toJSON testSource)
+        _th_close th
+
+    it "tags the Request entry with source via completeStream" $ do
+      withSystemTempDirectory "transcript-provider-test" $ \tmpDir -> do
+        let path = tmpDir </> "transcript.jsonl"
+        th <- mkFileTranscriptHandle mkNoOpLogHandle path
+        let inner = MkProvider (StreamingMockProvider testResp)
+            wrapped = mkTranscriptProvider th "stream-source" (Just testSource) inner
+        completeStream wrapped testReq (\_ -> pure ())
+        _th_flush th
+        entries <- _th_query th emptyFilter
+        reqEntry <- entryAt entries 0
+        Map.lookup "source" (_te_metadata reqEntry)
+          `shouldBe` Just (Aeson.toJSON testSource)
+        _th_close th
+
+    it "omits the source key on Request when Nothing (complete)" $ do
+      withSystemTempDirectory "transcript-provider-test" $ \tmpDir -> do
+        let path = tmpDir </> "transcript.jsonl"
+        th <- mkFileTranscriptHandle mkNoOpLogHandle path
+        let inner = MkProvider (CannedProvider testResp)
+            wrapped = mkTranscriptProvider th "test-source" Nothing inner
+        _ <- complete wrapped testReq
+        _th_flush th
+        entries <- _th_query th emptyFilter
+        reqEntry <- entryAt entries 0
+        Map.lookup "source" (_te_metadata reqEntry) `shouldBe` Nothing
+        _th_close th
+
+    it "omits the source key on Request when Nothing (completeStream)" $ do
+      withSystemTempDirectory "transcript-provider-test" $ \tmpDir -> do
+        let path = tmpDir </> "transcript.jsonl"
+        th <- mkFileTranscriptHandle mkNoOpLogHandle path
+        let inner = MkProvider (StreamingMockProvider testResp)
+            wrapped = mkTranscriptProvider th "stream-source" Nothing inner
+        completeStream wrapped testReq (\_ -> pure ())
+        _th_flush th
+        entries <- _th_query th emptyFilter
+        reqEntry <- entryAt entries 0
+        Map.lookup "source" (_te_metadata reqEntry) `shouldBe` Nothing
+        _th_close th
+
+    it "never tags the Response entry with source (complete)" $ do
+      withSystemTempDirectory "transcript-provider-test" $ \tmpDir -> do
+        let path = tmpDir </> "transcript.jsonl"
+        th <- mkFileTranscriptHandle mkNoOpLogHandle path
+        let inner = MkProvider (CannedProvider testResp)
+            wrapped = mkTranscriptProvider th "test-source" (Just testSource) inner
+        _ <- complete wrapped testReq
+        _th_flush th
+        entries <- _th_query th emptyFilter
+        respEntry <- entryAt entries 1
+        Map.lookup "source" (_te_metadata respEntry) `shouldBe` Nothing
+        _th_close th
+
+    it "never tags the Response entry with source (completeStream)" $ do
+      withSystemTempDirectory "transcript-provider-test" $ \tmpDir -> do
+        let path = tmpDir </> "transcript.jsonl"
+        th <- mkFileTranscriptHandle mkNoOpLogHandle path
+        let inner = MkProvider (StreamingMockProvider testResp)
+            wrapped = mkTranscriptProvider th "stream-source" (Just testSource) inner
+        completeStream wrapped testReq (\_ -> pure ())
+        _th_flush th
+        entries <- _th_query th emptyFilter
+        respEntry <- entryAt entries 1
+        Map.lookup "source" (_te_metadata respEntry) `shouldBe` Nothing
         _th_close th
 
 -- Helper to convert strict ByteString to lazy

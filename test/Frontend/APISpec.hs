@@ -1422,6 +1422,7 @@ writeTestSession baseDir sid archived = do
         , _sm_archived          = archived
         , _sm_description       = Nothing
         , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
         }
       epoch = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
@@ -1544,6 +1545,7 @@ writeBranchSource baseDir sid mAgentText mPrompt entries = do
         , _sm_archived          = False
         , _sm_description       = Nothing
         , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
         }
       epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
@@ -1570,6 +1572,7 @@ writeHarnessBranchSource baseDir sid = do
         , _sm_archived          = False
         , _sm_description       = Nothing
         , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
         }
       epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
@@ -1657,6 +1660,7 @@ writeSessionBootstrap baseDir sid mAgentText boot = do
         , _sm_archived          = False
         , _sm_description       = Nothing
         , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
         }
       epochT = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)

@@ -599,6 +599,7 @@ runChat opts = do
                   , SessionTypes._sm_archived          = False
                   , SessionTypes._sm_description       = Nothing
                   , SessionTypes._sm_autoSummary       = Nothing
+                  , SessionTypes._sm_source            = Nothing
                   }
             -- WU3: see broker construction at the top of startWithChannel.
             mkSessionHandle (Just broker) logger sessionsDir initialMeta

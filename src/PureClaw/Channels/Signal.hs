@@ -16,6 +16,7 @@ import Control.Concurrent.STM
 import Control.Exception
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.IORef
 import Data.Text (Text)
@@ -127,9 +128,12 @@ receiveEnvelope sc = do
   envelope <- atomically $ readTQueue (_sch_inbox sc)
   let sender = _se_source envelope
       content = maybe "" _sdm_message (_se_dataMessage envelope)
+      flds = case _se_sourceUuid envelope of
+        Just uuid -> Map.singleton "uuid" (String uuid)
+        Nothing   -> Map.empty
   writeIORef (_sch_lastSender sc) sender
   pure IncomingMessage
-    { _im_userId  = UserId sender
+    { _im_source  = mkMessageSource CkSignal (Just (UserId sender)) flds
     , _im_content = content
     }
 

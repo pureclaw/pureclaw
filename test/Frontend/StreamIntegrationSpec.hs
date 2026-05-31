@@ -168,6 +168,7 @@ mkMeta sidText = SessionMeta
   , _sm_archived          = False
   , _sm_description       = Nothing
   , _sm_autoSummary       = Nothing
+  , _sm_source            = Nothing
   }
 
 -- | Drain the hello + initial lists snapshot from a freshly opened

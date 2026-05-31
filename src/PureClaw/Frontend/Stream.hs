@@ -38,6 +38,8 @@ module PureClaw.Frontend.Stream
   , errorCodeText
   , encodeServerEvent
   , decodeClientOp
+    -- * Transcript projection (exported for testing)
+  , toEntryInfo
   ) where
 
 import Control.Concurrent.Async (AsyncCancelled (..))

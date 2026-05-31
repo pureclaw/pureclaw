@@ -991,6 +991,14 @@ executeSlashCommand env CmdStatus ctx = do
   th <- envTranscript env
   transcriptPath <- _th_getPath th
   harnesses <- readIORef (_env_harnesses env)
+  -- Session origin (set-once provenance). 'Nothing' for legacy sessions or
+  -- sessions that have not yet received an inbound message — render those as
+  -- "unknown" so the absence reads as intentional.
+  --
+  -- SECURITY: _sm_source is attacker-asserted; it is DISPLAY ONLY and never
+  -- used for any access-control decision.
+  activeSession <- readIORef (_env_session env)
+  meta <- readIORef (Session._sh_meta activeSession)
   let modelText = maybe "(not set)" unModelId mModel
       targetLine = case target of
         TargetProvider    -> "  Target:    model: " <> modelText
@@ -1009,11 +1017,18 @@ executeSlashCommand env CmdStatus ctx = do
         else "  Harnesses: " <> T.intercalate ", "
                [n <> " (" <> _hh_name h <> ")" | (n, h) <- Map.toList harnesses]
       policyLine = "  Policy:    " <> T.pack (show (_sp_autonomy (_env_policy env)))
+      sourceLine = case SessionTypes._sm_source meta of
+        Nothing  -> "  Source:    unknown"
+        Just src -> "  Source:    " <> sourceLabel src
+      sourceLabel src = case _ms_userId src of
+        Just u  -> unUserId u <> " (" <> channelKindToText (_ms_channel src) <> ")"
+        Nothing -> "(" <> channelKindToText (_ms_channel src) <> ")"
       status = T.intercalate "\n"
         [ "Session status:"
         , targetLine
         , providerLine
         , policyLine
+        , sourceLine
         , vaultLine
         , transcriptLine
         , harnessLine
@@ -2332,6 +2347,7 @@ executeSessionCommand env sub ctx = do
                 , SessionTypes._sm_archived          = False
                 , SessionTypes._sm_description       = Nothing
                 , SessionTypes._sm_autoSummary       = Nothing
+                , SessionTypes._sm_source            = Nothing
                 }
           newHandle <- Session.mkSessionHandle
                          (_env_broker envS) (_env_logger envS) sessionsDir meta

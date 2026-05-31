@@ -97,7 +97,9 @@ feedIncoming fch im = atomically (writeTQueue (_fch_incoming fch) im)
 -- | Convenience: inject an incoming message from a given user with the
 -- supplied text.
 feedIncomingFromUser :: FakeChannel -> UserId -> Text -> IO ()
-feedIncomingFromUser fch uid t = feedIncoming fch (IncomingMessage uid t)
+feedIncomingFromUser fch uid t =
+  feedIncoming fch
+    (IncomingMessage (mkMessageSource (CkOther "test") (Just uid) mempty) t)
 
 -- | Atomically drain all recorded events (oldest-first) and clear the log.
 drainEvents :: FakeChannel -> IO [(UTCTime, FakeChannelEvent)]

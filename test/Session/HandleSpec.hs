@@ -27,9 +27,12 @@ import Test.Hspec
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
-  ( MessageTarget (..)
+  ( ChannelKind (..)
+  , MessageTarget (..)
   , ModelId (..)
   , SessionId (..)
+  , UserId (..)
+  , mkMessageSource
   , parseSessionId
   )
 import PureClaw.Handles.Harness (HarnessHandle, mkNoOpHarnessHandle)
@@ -58,6 +61,7 @@ import PureClaw.Session.Handle
   , resolveSessionRef
   , resumeSession
   , setArchived
+  , setSourceIfAbsent
   , touchSessionLastActive
   , setDescription
   , validateRuntime
@@ -95,6 +99,7 @@ mkMeta sid t = SessionMeta
   , _sm_archived          = False
   , _sm_description       = Nothing
   , _sm_autoSummary       = Nothing
+  , _sm_source            = Nothing
   }
 
 -- Convenience: get the low 9 perm bits of a path.
@@ -368,6 +373,46 @@ spec = do
       loaded <- readIORef (_sh_meta sh')
       _sm_bootstrapConsumed loaded `shouldBe` True
       _th_close (_sh_transcript sh')
+
+  describe "setSourceIfAbsent" $ do
+    it "sets _sm_source when currently Nothing and persists to session.json" $ withTmp $ \base -> do
+      let meta = mkMeta "src-1" t0
+          src  = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _sm_source <$> readIORef (_sh_meta sh) `shouldReturn` Nothing
+      setSourceIfAbsent sh src
+      -- IORef reflects the change.
+      updated <- readIORef (_sh_meta sh)
+      _sm_source updated `shouldBe` Just src
+      -- Persisted to disk.
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (_sh_dir sh </> "session.json")
+        :: IO (Either String SessionMeta)
+      _sm_source onDisk `shouldBe` Just src
+      _th_close (_sh_transcript sh)
+
+    it "leaves _sm_source unchanged and does NOT save when already Just" $ do
+      -- Build a SessionHandle whose _sh_save increments a counter, so we can
+      -- assert the "iff changed" optimization: the second call must not save.
+      saveCount <- newIORef (0 :: Int)
+      let firstSrc  = mkMessageSource CkSignal (Just (UserId "+15550000001")) mempty
+          secondSrc = mkMessageSource CkTelegram (Just (UserId "99999")) mempty
+      metaRef <- newIORef ((mkMeta "src-2" t0) { _sm_source = Nothing })
+      noOp <- mkNoOpSessionHandle
+      let sh = SessionHandle
+            { _sh_meta       = metaRef
+            , _sh_transcript = _sh_transcript noOp
+            , _sh_dir        = ""
+            , _sh_save       = modifyIORef' saveCount (+ 1)
+            }
+      -- First set: Nothing -> Just, must save once.
+      setSourceIfAbsent sh firstSrc
+      readIORef saveCount `shouldReturn` 1
+      _sm_source <$> readIORef metaRef `shouldReturn` Just firstSrc
+      -- Second set with a DIFFERENT source: already Just, must NOT save and
+      -- must NOT overwrite.
+      setSourceIfAbsent sh secondSrc
+      readIORef saveCount `shouldReturn` 1
+      _sm_source <$> readIORef metaRef `shouldReturn` Just firstSrc
 
   describe "setArchived" $ do
     it "writes the archive flag back to session.json without touching anything else" $ withTmp $ \base -> do

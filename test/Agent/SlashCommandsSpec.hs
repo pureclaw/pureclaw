@@ -116,7 +116,7 @@ mkMockChannel sentRef msgsRef = mkNoOpChannelHandle
   { _ch_send         = writeIORef sentRef . Just . _om_content
   , _ch_receive      = do
       m <- popMsg msgsRef
-      pure (IncomingMessage (UserId "test") m)
+      pure (IncomingMessage (mkMessageSource CkCli (Just (UserId "test")) mempty) m)
   , _ch_prompt       = \_ -> popMsg msgsRef
   , _ch_promptSecret = \_ -> popMsg msgsRef
   }
@@ -127,7 +127,7 @@ mkMockChannelAll allSentRef msgsRef = mkNoOpChannelHandle
   { _ch_send         = \msg -> modifyIORef allSentRef (_om_content msg :)
   , _ch_receive      = do
       m <- popMsg msgsRef
-      pure (IncomingMessage (UserId "test") m)
+      pure (IncomingMessage (mkMessageSource CkCli (Just (UserId "test")) mempty) m)
   , _ch_prompt       = \_ -> popMsg msgsRef
   , _ch_promptSecret = \_ -> popMsg msgsRef
   }
@@ -398,6 +398,43 @@ spec = do
           T.unpack t `shouldContain` "100"
           T.unpack t `shouldContain` "50"
           T.unpack t `shouldContain` "Target:"
+        Nothing -> expectationFailure "Expected status message"
+
+    it "/status renders 'unknown' Source for a legacy (Nothing) session" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let ctx = emptyContext Nothing
+      env <- mkEnv sentRef
+      _ <- executeSlashCommand env CmdStatus ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "  Source:    unknown"
+        Nothing -> expectationFailure "Expected status message"
+
+    it "/status renders Source as '<userId> (<channel>)' for a Just source with a userId" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let ctx = emptyContext Nothing
+          src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+      env <- mkEnv sentRef
+      -- Inject a source into the active session's metadata.
+      sh <- readIORef (_env_session env)
+      modifyIORef' (_sh_meta sh) (\m -> m { _sm_source = Just src })
+      _ <- executeSlashCommand env CmdStatus ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "  Source:    +15551234567 (signal)"
+        Nothing -> expectationFailure "Expected status message"
+
+    it "/status renders a CkOther channel label for a Just source" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      let ctx = emptyContext Nothing
+          src = mkMessageSource (CkOther "matrix") Nothing mempty
+      env <- mkEnv sentRef
+      sh <- readIORef (_env_session env)
+      modifyIORef' (_sh_meta sh) (\m -> m { _sm_source = Just src })
+      _ <- executeSlashCommand env CmdStatus ctx
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "  Source:    (matrix)"
         Nothing -> expectationFailure "Expected status message"
 
     it "/compact with few messages returns NotNeeded" $ do

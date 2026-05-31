@@ -111,6 +111,7 @@ sampleSessionMeta = SessionMeta
   , _sm_archived          = False
   , _sm_description       = Nothing
   , _sm_autoSummary       = Nothing
+  , _sm_source            = Nothing
   }
 
 -- | Client→server focus op (no since).

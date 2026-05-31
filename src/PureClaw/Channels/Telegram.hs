@@ -21,6 +21,7 @@ import Data.Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.IORef
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -89,9 +90,10 @@ receiveUpdate tc = do
       userId = T.pack (show (_tu_id (_tm_from msg)))
       chatId = _tcht_id (_tm_chat msg)
       content = _tm_text msg
+      flds = Map.singleton "chat_id" (toJSON chatId)
   writeIORef (_tch_lastChat tc) (Just chatId)
   pure IncomingMessage
-    { _im_userId  = UserId userId
+    { _im_source  = mkMessageSource CkTelegram (Just (UserId userId)) flds
     , _im_content = content
     }
 

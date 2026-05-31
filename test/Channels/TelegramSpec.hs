@@ -6,6 +6,7 @@ import Data.Aeson
 import Data.ByteString (ByteString)
 import Data.Either (isLeft)
 import Data.IORef
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -41,7 +42,10 @@ spec = do
       let update = mkTestUpdate 1 99 "Bob" 100 "private" "Hi"
       atomically $ writeTQueue (_tch_inbox tc) update
       msg <- _ch_receive (toHandle tc)
-      _im_userId msg `shouldBe` UserId "99"
+      imUserId msg `shouldBe` UserId "99"
+      _ms_channel (_im_source msg) `shouldBe` CkTelegram
+      Map.lookup "chat_id" (_ms_fields (_im_source msg))
+        `shouldBe` Just (toJSON (100 :: Int))
 
   describe "parseTelegramUpdate" $ do
     it "parses a valid update JSON" $ do

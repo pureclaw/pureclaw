@@ -31,7 +31,7 @@ mkCLIChannelHandle mCompleter = do
         case mLine of
           Nothing   -> ioError (userError "EOF")  -- Ctrl-D: agent loop catches this
           Just line -> pure IncomingMessage
-            { _im_userId  = UserId "cli-user"
+            { _im_source  = mkMessageSource CkCli (Just (UserId "cli-user")) mempty
             , _im_content = T.pack line
             }
     , _ch_send = \msg -> do

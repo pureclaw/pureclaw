@@ -16,6 +16,7 @@ module PureClaw.Frontend.API
   , HarnessActivity (..)
   , SessionInfo (..)
   , TranscriptEntryInfo (..)
+  , toTranscriptEntryInfo
   , AgentInfo (..)
   , ProviderInfo (..)
   , TabSnapshot (..)
@@ -873,6 +874,7 @@ createTab env tabKind mSeed respond = do
             , _sm_archived          = False
             , _sm_description       = Nothing
             , _sm_autoSummary       = Nothing
+            , _sm_source            = Nothing
             }
       sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
       _sh_save sh
@@ -1101,7 +1103,7 @@ doCompletion env sid provider reqModel fallbackModel userText transcriptPath = d
       userMsg = textMessage User userText
       ctx = addMessage userMsg ctx0
       -- Wrap provider with transcript logging
-      provider' = mkTranscriptProvider th (unModelId model) provider
+      provider' = mkTranscriptProvider th (unModelId model) Nothing provider
       reg = _fe_registry env
       tools = registryDefinitions reg
       cap = _fe_maxToolIterations env
