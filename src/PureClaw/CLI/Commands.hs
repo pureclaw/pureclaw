@@ -10,6 +10,9 @@ module PureClaw.CLI.Commands
   , MemoryBackend (..)
     -- * Policy (exported for testing)
   , buildPolicy
+    -- * Channel config resolution (exported for testing)
+  , resolveSignalConfig
+  , resolveTelegramConfig
   ) where
 
 import Control.Concurrent.Async qualified as Async
@@ -65,8 +68,10 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   )
 import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
+import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
+import PureClaw.Channels.Telegram
 import PureClaw.CLI.Import
   ( ImportOptions (..)
   , DirImportResult (..)
@@ -754,6 +759,8 @@ runChat opts = do
   case effectiveChannel of
     "signal" -> do
       let sigCfg = resolveSignalConfig fileCfg
+      -- Warn loudly if Signal accepts messages from any sender (no allow-list).
+      warnIfOpenAllowList logger signalAllowListContext (_sc_allowFrom sigCfg)
       -- Check that signal-cli is installed
       signalCliResult <- try @IOException $
         P.readProcess (P.proc "signal-cli" ["--version"])
@@ -1143,4 +1150,29 @@ resolveSignalConfig fileCfg =
     { _sc_account        = fromMaybe "+0000000000" (sigCfg >>= _fsc_account)
     , _sc_textChunkLimit = fromMaybe 6000 (sigCfg >>= _fsc_textChunkLimit)
     , _sc_allowFrom      = allowFrom
+    }
+
+-- | Allow-list warning context for the Signal channel: display name, lowercase
+--   TOML table key, and a concrete example @allow_from@ entry.
+signalAllowListContext :: AllowListContext
+signalAllowListContext = AllowListContext "Signal" "signal" "+15551234567"
+
+-- | Resolve Telegram channel config from the file config. Mirrors
+--   'resolveSignalConfig': @dm_policy = "open"@ or a missing/empty @allow_from@
+--   yields an open allow-list (AllowAll); otherwise the listed numeric IDs are
+--   wrapped as 'UserId's. The API base is fixed; the bot token defaults to "".
+resolveTelegramConfig :: FileConfig -> TelegramConfig
+resolveTelegramConfig fileCfg =
+  let tgCfg = _fc_telegram fileCfg
+      dmPolicy = tgCfg >>= _ftc_dmPolicy
+      allowFrom = case dmPolicy of
+        Just "open" -> AllowAll
+        _ -> case tgCfg >>= _ftc_allowFrom of
+          Nothing    -> AllowAll
+          Just []    -> AllowAll
+          Just users -> AllowList (Set.fromList (map UserId users))
+  in TelegramConfig
+    { _tc_botToken = fromMaybe "" (tgCfg >>= _ftc_botToken)
+    , _tc_apiBase  = "https://api.telegram.org"
+    , _tc_allowFrom = allowFrom
     }
