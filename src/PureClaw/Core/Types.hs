@@ -29,6 +29,8 @@ module PureClaw.Core.Types
     -- * Allow-lists
   , AllowList (..)
   , isAllowed
+  , allowListOpen
+  , allowListWarning
   ) where
 
 import Data.Aeson ((.!=), (.:), (.:?), (.=))
@@ -226,3 +228,12 @@ data AllowList a
 isAllowed :: Ord a => AllowList a -> a -> Bool
 isAllowed AllowAll      _ = True
 isAllowed (AllowList s) x = Set.member x s
+
+-- | True when the list permits every sender (no restriction configured).
+allowListOpen :: AllowList a -> Bool
+allowListOpen _ = False -- RED stub
+
+-- | Banner lines plus a WARN log line describing an OPEN allow-list on the
+--   named channel, or Nothing when senders are restricted. Pure.
+allowListWarning :: Text -> AllowList a -> Maybe ([Text], Text)
+allowListWarning _ _ = Nothing -- RED stub

@@ -73,6 +73,7 @@ import qualified Security.VaultSpec
 import qualified Gateway.AuthSpec
 import qualified Gateway.RoutesSpec
 import qualified Gateway.ServerSpec
+import qualified Channels.AllowListSpec
 import qualified Channels.ClassSpec
 import qualified Channels.TelegramSpec
 import qualified Channels.SignalSpec
@@ -209,6 +210,7 @@ main = hspec $ do
   describe "Gateway.Auth" Gateway.AuthSpec.spec
   describe "Gateway.Routes" Gateway.RoutesSpec.spec
   describe "Gateway.Server" Gateway.ServerSpec.spec
+  describe "Channels.AllowList" Channels.AllowListSpec.spec
   describe "Channels.Class" Channels.ClassSpec.spec
   describe "Channels.Telegram" Channels.TelegramSpec.spec
   describe "Channels.Signal" Channels.SignalSpec.spec
