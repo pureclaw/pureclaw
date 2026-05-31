@@ -1,11 +1,32 @@
 module CLI.CommandsSpec (spec) where
 
+import Data.IORef
+import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Text qualified as T
 import Options.Applicative
+import System.IO (hClose)
+import System.IO.Temp (withSystemTempFile)
 import Test.Hspec
 
+import PureClaw.Channels.AllowList (emitAllowListWarning)
+import PureClaw.Channels.Signal (SignalConfig (..))
+import PureClaw.Channels.Telegram (TelegramConfig (..))
 import PureClaw.CLI.Commands
+import PureClaw.CLI.Config
 import PureClaw.Core.Types
+import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Security.Policy
+
+-- A LogHandle that records warnings into an IORef for assertions.
+recordingLogHandle :: IORef [Text] -> LogHandle
+recordingLogHandle ref =
+  LogHandle
+    { _lh_logInfo  = \_ -> pure ()
+    , _lh_logWarn  = \msg -> modifyIORef' ref (<> [msg])
+    , _lh_logError = \_ -> pure ()
+    , _lh_logDebug = \_ -> pure ()
+    }
 
 -- Helper to parse CLI args.
 parseArgs :: [String] -> Maybe ChatOptions
@@ -264,3 +285,83 @@ spec = do
           _co_model opts `shouldBe` Just "test"
           _co_depth opts `shouldBe` 2
         Nothing -> expectationFailure "parse failed"
+
+  describe "resolveTelegramConfig" $ do
+    let telegramCfg fields =
+          emptyFileConfig { _fc_telegram = Just fields }
+
+    it "dm_policy=\"open\" yields AllowAll regardless of allow_from" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig
+            { _ftc_dmPolicy  = Just "open"
+            , _ftc_allowFrom = Just ["123"]
+            }
+      _tc_allowFrom (resolveTelegramConfig cfg) `shouldBe` AllowAll
+
+    it "no [telegram] table yields AllowAll" $
+      _tc_allowFrom (resolveTelegramConfig emptyFileConfig) `shouldBe` AllowAll
+
+    it "table present but allow_from = Nothing yields AllowAll" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_allowFrom = Nothing }
+      _tc_allowFrom (resolveTelegramConfig cfg) `shouldBe` AllowAll
+
+    it "allow_from = Just [] yields AllowAll" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_allowFrom = Just [] }
+      _tc_allowFrom (resolveTelegramConfig cfg) `shouldBe` AllowAll
+
+    it "populated allow_from yields AllowList of UserIds" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_allowFrom = Just ["1", "2"] }
+      _tc_allowFrom (resolveTelegramConfig cfg)
+        `shouldBe` AllowList (Set.fromList [UserId "1", UserId "2"])
+
+    it "uses the fixed Telegram API base" $
+      _tc_apiBase (resolveTelegramConfig emptyFileConfig)
+        `shouldBe` "https://api.telegram.org"
+
+    it "reflects bot_token from the file config" $ do
+      let cfg = telegramCfg emptyFileTelegramConfig { _ftc_botToken = Just "tok-123" }
+      _tc_botToken (resolveTelegramConfig cfg) `shouldBe` "tok-123"
+
+    it "defaults bot_token to empty when absent" $
+      _tc_botToken (resolveTelegramConfig emptyFileConfig) `shouldBe` ""
+
+  describe "resolveSignalConfig" $ do
+    let signalCfg fields =
+          emptyFileConfig { _fc_signal = Just fields }
+
+    it "dm_policy=\"open\" yields AllowAll regardless of allow_from" $ do
+      let cfg = signalCfg emptyFileSignalConfig
+            { _fsc_dmPolicy  = Just "open"
+            , _fsc_allowFrom = Just ["+15551234567"]
+            }
+      _sc_allowFrom (resolveSignalConfig cfg) `shouldBe` AllowAll
+
+    it "missing allow_from yields AllowAll" $ do
+      let cfg = signalCfg emptyFileSignalConfig { _fsc_allowFrom = Nothing }
+      _sc_allowFrom (resolveSignalConfig cfg) `shouldBe` AllowAll
+
+    it "allow_from = Just [] yields AllowAll" $ do
+      let cfg = signalCfg emptyFileSignalConfig { _fsc_allowFrom = Just [] }
+      _sc_allowFrom (resolveSignalConfig cfg) `shouldBe` AllowAll
+
+    it "populated allow_from yields AllowList of UserIds" $ do
+      let cfg = signalCfg emptyFileSignalConfig
+            { _fsc_allowFrom = Just ["+15551234567", "uuid-abc"] }
+      _sc_allowFrom (resolveSignalConfig cfg)
+        `shouldBe` AllowList (Set.fromList [UserId "+15551234567", UserId "uuid-abc"])
+
+  describe "signalAllowListContext" $ do
+    it "names the Signal channel, its TOML table, and a user-UUID example" $ do
+      ref <- newIORef []
+      withSystemTempFile "signal-banner.txt" $ \path h -> do
+        -- emitAllowListWarning is the exact rendering path the live signal
+        -- branch uses via warnIfOpenAllowList; an open list must surface the
+        -- Signal-specific banner + WARN.
+        emitAllowListWarning h (recordingLogHandle ref) signalAllowListContext
+          (AllowAll :: AllowList UserId)
+        hClose h
+        contents <- readFile path
+        warns <- T.unpack . mconcat <$> readIORef ref
+        contents `shouldContain` "Signal"
+        contents `shouldContain` "[signal]"
+        contents `shouldContain` "edf52444-6e27-4a42-a9ad-9f4f4aca9b26"
+        warns `shouldContain` "no allow-list configured"

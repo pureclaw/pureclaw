@@ -139,6 +139,7 @@ library
     PureClaw.Providers.OpenRouter
     PureClaw.Providers.Ollama
     -- Channels
+    PureClaw.Channels.AllowList
     PureClaw.Channels.Class
     PureClaw.Channels.CLI
     PureClaw.Channels.Telegram
@@ -311,6 +312,7 @@ test-suite pureclaw-test
     Gateway.AuthSpec
     Gateway.RoutesSpec
     Gateway.ServerSpec
+    Channels.AllowListSpec
     Channels.ClassSpec
     Channels.TelegramSpec
     Channels.SignalSpec

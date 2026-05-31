@@ -454,6 +454,31 @@ routeOutput (AgentError e)       = sendError e
 
 **Why it matters:** ZeroClaw leaked raw tool call JSON to Telegram ([#1071](https://github.com/zeroclaw-labs/zeroclaw/issues/1071)) and tool execution commentary to users ([#1152](https://github.com/zeroclaw-labs/zeroclaw/issues/1152)).
 
+### 6.3 Remote channels must restrict who may message the agent
+
+Every remote communications channel (Signal, Telegram) accepts an `allow_from` list of permitted sender IDs. Only listed senders may message the agent; everyone else is silently dropped and logged.
+
+If `allow_from` is **omitted or empty** — or `dm_policy = "open"` is set — the channel accepts messages from **anyone**. This is a security risk, so PureClaw does not fail silently: at startup it prints a prominent multi-line banner to the console (stdout) **and** emits a WARN-level log line (stderr) naming the channel and showing exactly which `allow_from` list to add.
+
+Configure each channel's allow-list in `~/.pureclaw/config.toml`:
+
+```toml
+[signal]
+allow_from = ["edf52444-6e27-4a42-a9ad-9f4f4aca9b26"]   # Signal user UUIDs
+
+[telegram]
+allow_from = ["123456789"]      # numeric user IDs or chat IDs
+```
+
+Notes:
+
+- **Signal uses user UUIDs.** Entries should be the sender's Signal user UUID (e.g. `edf52444-6e27-4a42-a9ad-9f4f4aca9b26`), not a phone number — modern Signal hides phone numbers, so a phone-number entry often won't match.
+- **Telegram is numeric-only.** Entries are matched against the sender's numeric user ID *and* chat ID — usernames are not supported.
+- **The CLI channel has no allow-list.** It is local to the trusted operator running the binary, so there is no remote sender to restrict.
+- Omitting `allow_from` does **not** disable the channel — it opens it to all senders and triggers the warning. List one ID per allowed sender to lock it down.
+
+**Why it matters:** ZeroClaw's wildcard allow-list behavior was underdocumented and surprised users into accidentally opening channels to all senders ([#14](https://github.com/zeroclaw-labs/zeroclaw/issues/14)). A channel that silently accepts anyone is an open door; the loud startup warning makes the open state impossible to miss.
+
 ---
 
 ## 7. Gateway Security
