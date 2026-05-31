@@ -28,6 +28,7 @@ module PureClaw.Core.Types
   , AutonomyLevel (..)
     -- * Allow-lists
   , AllowList (..)
+  , AllowListContext (..)
   , isAllowed
   , allowListOpen
   , allowListWarning
@@ -234,22 +235,50 @@ allowListOpen :: AllowList a -> Bool
 allowListOpen AllowAll      = True
 allowListOpen (AllowList _) = False
 
+-- | Context needed to render an actionable open-allow-list warning. Carries
+--   both the human-readable channel name (for prose) and the lowercase TOML
+--   table key (for the copy-pasteable config example) so the two never get
+--   conflated.
+data AllowListContext = AllowListContext
+  { _alc_channelName :: Text  -- ^ Human-readable channel name, e.g. "Signal"
+  , _alc_configTable :: Text  -- ^ TOML table key, e.g. "signal"
+  , _alc_exampleId   :: Text  -- ^ Example allow_from entry, e.g. "+15551234567"
+  }
+  deriving stock (Show, Eq)
+
 -- | Banner lines plus a WARN log line describing an OPEN allow-list on the
 --   named channel, or Nothing when senders are restricted. Pure.
-allowListWarning :: Text -> AllowList a -> Maybe ([Text], Text)
-allowListWarning name al
+--
+--   When open, the banner is prominent AND actionable: it tells the operator
+--   exactly which config file to edit, which (lowercase) TOML table to add an
+--   @allow_from@ list under, and shows a concrete copy-pasteable example. The
+--   config table key (never the display name) is used everywhere a TOML table
+--   is shown.
+allowListWarning :: AllowListContext -> AllowList a -> Maybe ([Text], Text)
+allowListWarning ctx al
   | not (allowListOpen al) = Nothing
   | otherwise = Just (banner, logLine)
   where
-    rule = T.replicate 64 "="
+    name  = _alc_channelName ctx
+    table = _alc_configTable ctx
+    exId  = _alc_exampleId ctx
+    rule  = T.replicate 64 "="
     banner =
       [ rule
       , "  SECURITY WARNING: channel \"" <> name <> "\" has NO allow-list configured."
-      , "  It will accept messages from ANY sender."
-      , "  Set `allow_from` under the [" <> name <> "] config table to restrict"
-      , "  which sender IDs may message this agent."
+      , "  It will accept messages from ANY sender, which is a security risk."
+      , ""
+      , "  To restrict who may message this agent, edit your config file:"
+      , "      ~/.pureclaw/config.toml"
+      , "  and add an `allow_from` list under the [" <> table <> "] section, e.g.:"
+      , ""
+      , "      [" <> table <> "]"
+      , "      allow_from = [\"" <> exId <> "\"]"
+      , ""
+      , "  List one ID per allowed sender, then restart PureClaw."
       , rule
       ]
     logLine =
       "channel \"" <> name <> "\" has no allow-list configured; "
-        <> "accepting messages from any sender"
+        <> "accepting messages from any sender "
+        <> "(set allow_from under [" <> table <> "] in config.toml to restrict)"
