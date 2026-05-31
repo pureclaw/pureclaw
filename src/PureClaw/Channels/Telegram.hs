@@ -3,6 +3,8 @@ module PureClaw.Channels.Telegram
     TelegramChannel (..)
   , TelegramConfig (..)
   , mkTelegramChannel
+  , withTelegramChannel
+  , receiveUpdate
     -- * Message parsing
   , parseTelegramUpdate
   , TelegramUpdate (..)
@@ -27,6 +29,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Network.HTTP.Types.URI qualified as URI
 
+import PureClaw.Channels.AllowList
 import PureClaw.Channels.Class
 import PureClaw.Core.Errors
 import PureClaw.Core.Types
@@ -37,8 +40,9 @@ import PureClaw.Routing.Onboarding (botFatherCommandList)
 
 -- | Configuration for Telegram channel.
 data TelegramConfig = TelegramConfig
-  { _tc_botToken :: Text
-  , _tc_apiBase  :: Text
+  { _tc_botToken  :: Text
+  , _tc_apiBase   :: Text
+  , _tc_allowFrom :: AllowList UserId
   }
   deriving stock (Show, Eq)
 
@@ -67,6 +71,24 @@ mkTelegramChannel config nh lh = do
     , _tch_lastChat = chatRef
     }
 
+-- | The 'AllowListContext' used for the Telegram open-allow-list warning.
+-- The example id is a sample numeric Telegram user/chat id.
+telegramAllowListContext :: AllowListContext
+telegramAllowListContext = AllowListContext "Telegram" "telegram" "123456789"
+
+-- | Activate a Telegram channel with allow-list-warning handling.
+--
+-- Unlike Signal there is no reader thread and no transport to close: Telegram
+-- updates are pushed into the inbox by an external webhook. This wrapper is
+-- the SINGLE home for the Telegram open-allow-list warning — it fires whenever
+-- Telegram is activated; a future gateway boot path routes through it.
+-- 'mkTelegramChannel' itself stays warning-free (no test-construction noise).
+withTelegramChannel :: TelegramConfig -> NetworkHandle -> LogHandle -> (ChannelHandle -> IO a) -> IO a
+withTelegramChannel config nh lh action = do
+  warnIfOpenAllowList lh telegramAllowListContext (_tc_allowFrom config)
+  tc <- mkTelegramChannel config nh lh
+  action (toHandle tc)
+
 instance Channel TelegramChannel where
   toHandle tc = ChannelHandle
     { _ch_receive      = receiveUpdate tc
@@ -82,7 +104,19 @@ instance Channel TelegramChannel where
         ioError (userError "Vault management requires the CLI interface")
     }
 
--- | Block until a Telegram update arrives in the queue.
+-- | Block until an *authorized* Telegram update arrives in the queue.
+--
+-- Reads one update at a time (consuming it from the inbox). An update passes
+-- when its allow-list policy permits either the sender's user id or the
+-- conversation's chat id.
+--
+-- Note: the chat id is matched by wrapping it in the 'UserId' newtype, the same
+-- way Signal wraps both phone numbers and UUIDs. This is an intentional
+-- conflation for access-control matching — the allow-list gates "may this
+-- message in?" against any sender-or-conversation identifier; it is not
+-- identity disambiguation. Numeric IDs only (usernames are not parsed or
+-- supported). Unauthorized updates are consumed, logged at WARN, and discarded
+-- (mirroring Signal's drop-and-log), then we recurse to read the next update.
 receiveUpdate :: TelegramChannel -> IO IncomingMessage
 receiveUpdate tc = do
   update <- atomically $ readTQueue (_tch_inbox tc)
@@ -91,11 +125,21 @@ receiveUpdate tc = do
       chatId = _tcht_id (_tm_chat msg)
       content = _tm_text msg
       flds = Map.singleton "chat_id" (toJSON chatId)
-  writeIORef (_tch_lastChat tc) (Just chatId)
-  pure IncomingMessage
-    { _im_source  = mkMessageSource CkTelegram (Just (UserId userId)) flds
-    , _im_content = content
-    }
+      policy = _tc_allowFrom (_tch_config tc)
+      allowed = isAllowed policy (UserId userId)
+             || isAllowed policy (UserId (T.pack (show chatId)))
+  if allowed
+    then do
+      writeIORef (_tch_lastChat tc) (Just chatId)
+      pure IncomingMessage
+        { _im_source  = mkMessageSource CkTelegram (Just (UserId userId)) flds
+        , _im_content = content
+        }
+    else do
+      _lh_logWarn (_tch_log tc) $
+        "Blocked Telegram message from unauthorized sender (user "
+          <> userId <> ", chat " <> T.pack (show chatId) <> ")"
+      receiveUpdate tc
 
 -- | Send a message to the last active chat via the Telegram Bot API.
 sendMessage :: TelegramChannel -> OutgoingMessage -> IO ()

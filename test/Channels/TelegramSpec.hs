@@ -277,11 +277,10 @@ mkTestUpdate updId userId firstName chatId chatType txt =
 
 -- | Build a Telegram channel with a given allow-list policy and log handle.
 mkAllowListChannel :: AllowList UserId -> LogHandle -> IO TelegramChannel
-mkAllowListChannel policy lh =
+mkAllowListChannel policy =
   mkTelegramChannel
     (TelegramConfig "test-token" "https://api.telegram.org" policy)
     mkNoOpNetworkHandle
-    lh
 
 -- | Enqueue an update directly into a channel's inbox.
 enqueueUpdate :: TelegramChannel -> TelegramUpdate -> IO ()
