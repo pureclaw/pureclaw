@@ -195,17 +195,44 @@ data StartedHarness = StartedHarness
   , _shh_tmux :: !TmuxConfig  -- ^ coordinates to persist in the session's _sm_kind HarnessSpec._h_backend
   }
 
--- | The harness map key for a session kind, if it is a tmux-backed harness.
--- @Just k@  => route this session to harness handle @k@; @Nothing@ => provider session.
+-- | The durable routing key for a session kind, if it is a tmux-backed
+-- harness. @Just k@ => route this session to a harness; @Nothing@ => provider
+-- session.
+--
+-- WU6 makes this /id-primary with a name fallback/: when the persisted
+-- 'HarnessSpec' carries a 'Registry.HarnessId' (the durable anchor), the key
+-- is that id's canonical text; otherwise it is the (dual-written) tmux window
+-- name — the legacy PR #74 routing key. 'sendToHarness' interprets the key:
+-- an id-shaped key resolves through the registry first, falling back to the
+-- window name; a name-shaped key goes straight to the legacy name-keyed map.
+-- The registry is EMPTY until later work units populate it, so until then this
+-- yields the window name and routing stays on the PR #74 path unchanged.
 harnessKeyFromKind :: SessionKind -> Maybe Text
 harnessKeyFromKind (SkHarness hs) = case _h_backend hs of
-  TbTmux tc -> Just (_tc_window tc)
+  TbTmux tc -> Just (maybe (_tc_window tc) Registry.harnessIdToText (_h_harnessId hs))
   _         -> Nothing
 harnessKeyFromKind _ = Nothing
+
+-- | The dual-written tmux window name for a tmux-backed harness session, used
+-- as the legacy name-fallback routing key when an id lookup misses (WU6).
+-- @Nothing@ for any non-tmux / non-harness kind.
+harnessWindowFromKind :: SessionKind -> Maybe Text
+harnessWindowFromKind (SkHarness hs) = case _h_backend hs of
+  TbTmux tc -> Just (_tc_window tc)
+  _         -> Nothing
+harnessWindowFromKind _ = Nothing
 
 -- | Routing decision: does this session route to a harness (vs the LLM provider)?
 shouldRouteToHarness :: SessionKind -> Bool
 shouldRouteToHarness = Maybe.isJust . harnessKeyFromKind
+
+-- | Is a registry entry PID-corroborated? A recorded shell or harness PID is
+-- evidence the entry is genuinely ours and not a bare, attacker-writable
+-- @\@pcl_id@ marker (design §8 C4 / K2). Routing trust requires this: an
+-- uncorroborated entry never receives keystrokes (D6.6).
+isPidCorroborated :: Registry.HarnessEntry -> Bool
+isPidCorroborated e =
+  Maybe.isJust (Registry._he_harnessPid e) || Maybe.isJust (Registry._he_shellPid e)
 
 -- | Per-origin WS subscriber counter. Lives at the same lifetime as the
 -- broker (constructed once in @startWithChannel@). The WS handler calls
@@ -1186,9 +1213,14 @@ handleSend env sid req respond = do
               -- load the meta (missing/malformed) falls through to the
               -- provider path, preserving prior behaviour.
               mMeta <- tryLoad (_fe_sessionsDir env) (T.unpack sid)
-              case mMeta >>= (harnessKeyFromKind . _sm_kind) of
-                Just key ->
-                  sendToHarness env sid key userText transcriptPath respond
+              let mKind = _sm_kind <$> mMeta
+              case mKind >>= harnessKeyFromKind of
+                Just key -> do
+                  -- The dual-written tmux window name is the legacy name-fallback
+                  -- key; an id-shaped @key@ resolves via the registry first and
+                  -- falls back to this name (WU6).
+                  let fallbackName = mKind >>= harnessWindowFromKind
+                  sendToHarness env sid key fallbackName userText transcriptPath respond
                 Nothing -> do
                   mProvider <- readIORef (_fe_provider env)
                   mModel <- readIORef (_fe_model env)
@@ -1218,53 +1250,197 @@ handleSend env sid req respond = do
 -- If no live handle is registered under @key@ (e.g. the harness crashed or
 -- was never reconnected after a restart) it returns a clear 503 — never a
 -- silent provider completion and never a 500.
+--
+-- WU6 makes routing /id-primary with a name fallback/. Resolution order:
+--
+--   1. If @key@ parses as a 'Registry.HarnessId', look it up in the registry:
+--
+--        * Found AND PID-corroborated AND it has a live handle -> route to that
+--          handle (the durable, rename-proof path).
+--        * Found AND corroborated but with NO handle (e.g. boot-discovered, not
+--          yet attached) -> fall through to the name path.
+--        * Found but NOT PID-corroborated -> REFUSE (respond 503, log a
+--          refusal, send NO keystrokes). A spoofable @\@pcl_id@ marker on a
+--          window with no recorded PID is treated as "not ours" (§8 C4 / D6.6).
+--          This case does NOT fall back to the name path.
+--        * Not found in the registry -> fall back to the name path (the registry
+--          is empty until later work units populate it).
+--
+--   2. Name path (legacy, PR #74): look the @fallbackName@ (the dual-written
+--      tmux window name) up in '_fe_harnesses'. On a match, route; on a miss,
+--      respond 503 "not running". When a corroborated registry entry matches
+--      this name by label, lazily back-fill its 'Registry.HarnessId' into
+--      @session.json@ (D6.5) so subsequent sends route by id.
 sendToHarness
   :: FrontendEnv
-  -> Text       -- ^ session id
-  -> Text       -- ^ harness map key (= persisted tmux window name)
-  -> Text       -- ^ user message text
-  -> FilePath   -- ^ session transcript path
+  -> Text         -- ^ session id
+  -> Text         -- ^ routing key (a 'Registry.HarnessId' text, or a window name)
+  -> Maybe Text   -- ^ fallback tmux window name (the dual-written legacy key)
+  -> Text         -- ^ user message text
+  -> FilePath     -- ^ session transcript path
   -> (Response -> IO ResponseReceived)
   -> IO ResponseReceived
-sendToHarness env sid key userText transcriptPath respond = do
+sendToHarness env sid key fallbackName userText transcriptPath respond =
+  case Registry.parseHarnessId key of
+    Just hid -> do
+      mEntry <- Registry.lookupById (_fe_harnessRegistry env) hid
+      case mEntry of
+        Just entry
+          | not (isPidCorroborated entry) -> do
+              -- D6.6 (§8 C4): a spoofable marker without recorded PID provenance
+              -- is NOT ours. Refuse outright — never send keystrokes, never fall
+              -- back to the name map for this case.
+              _lh_logError (_fe_logger env) $
+                "Refusing to route session '" <> sid <> "' to harness id '"
+                <> key <> "': registry entry is not PID-corroborated (possible "
+                <> "spoofed @pcl_id marker — §8 C4)."
+              respond $ jsonResponse status503 (object
+                [ "error" .= ("harness id is not PID-corroborated; refusing to route" :: Text) ])
+          | Just hh <- Registry._he_handle entry ->
+              -- Corroborated, with a live handle: the durable id path. The id
+              -- is already durable here, so no back-fill is needed.
+              routeViaHandle env sid hh userText transcriptPath (pure ()) respond
+          | otherwise ->
+              -- Corroborated but no attached handle yet: fall through to name.
+              routeViaName env sid fallbackName userText transcriptPath respond
+        -- Unknown id: the registry has no entry yet -> legacy name fallback.
+        Nothing -> routeViaName env sid fallbackName userText transcriptPath respond
+    -- Key is not id-shaped: a legacy window-name key. Route by name directly.
+    Nothing -> routeViaName env sid (Just key) userText transcriptPath respond
+
+-- | The legacy name-keyed routing path (PR #74). Looks @mName@ up in
+-- '_fe_harnesses'; on a match, routes via that handle (and lazily back-fills a
+-- 'Registry.HarnessId' if a corroborated entry matches by label — D6.5); on a
+-- miss (or no name available), responds 503 "not running".
+routeViaName
+  :: FrontendEnv
+  -> Text
+  -> Maybe Text
+  -> Text
+  -> FilePath
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+routeViaName env sid mName userText transcriptPath respond = do
   handles <- readIORef (_fe_harnesses env)
-  case Map.lookup key handles of
+  case mName >>= (`Map.lookup` handles) of
     Nothing ->
       respond $ jsonResponse status503
-        (object ["error" .= ("harness '" <> key <> "' is not running" :: Text)])
-    Just hh -> do
-      -- 'handleSend' is the sole writer of THIS session's transcript: on the
-      -- fresh-create path the harness handle was given a no-op transcript
-      -- ('createHarnessTab'), and a restart-discovered handle records to the
-      -- CLI's own session transcript (a different file), so 'sendToHarness'
-      -- recording here never duplicates an entry in this session transcript.
-      -- 'bracket' guarantees the transcript fd is flushed + closed even if
-      -- '_hh_send'/'_hh_receive' throws (tmux IO), so a failed send cannot
-      -- leak a file descriptor.
-      result <- try @SomeException $
-        bracket
-          (mkBroadcastingFileTranscriptHandle
-             (_fe_broker env) (SessionId sid) (_fe_logger env) transcriptPath)
-          (\th -> _th_flush th >> _th_close th)
-          (\th -> do
-            -- Record the user message as a Request entry (mirrors 'harnesseSend').
-            recordHarnessEntry th Request userText
-            _hh_send hh (TE.encodeUtf8 userText)
-            raw <- _hh_receive hh
-            let resp = sanitizeHarnessOutput (TE.decodeUtf8 raw)
-            -- Only record a Response entry when the harness produced output;
-            -- a blank reply must not leave an empty/duplicate entry.
-            unless (T.null (T.strip resp)) $
-              recordHarnessEntry th Response resp
-            pure resp)
-      case result of
-        Left e -> do
-          _lh_logError (_fe_logger env) $ "Harness send error: " <> T.pack (show e)
-          respond $ jsonResponse status500 (object ["error" .= ("Harness send failed" :: Text)])
-        Right resp -> do
-          touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
-          broadcastLists env
-          respond $ jsonResponse status200 (object ["response" .= resp])
+        (object ["error" .= ("harness '" <> Maybe.fromMaybe "?" mName
+                              <> "' is not running" :: Text)])
+    Just hh ->
+      -- D6.5: lazily back-fill the durable id when a corroborated registry
+      -- entry matches this window name by label. Best-effort; runs only AFTER
+      -- a successful send (fire-and-forget, post-send) and is itself
+      -- exception-proof (D6.5c), so it can neither delay, block, nor fail the
+      -- send the user already received.
+      routeViaHandle env sid hh userText transcriptPath
+        (maybe (pure ()) (backfillHarnessId env sid) mName)
+        respond
+
+-- | Route a user message to a resolved 'HarnessHandle': record the
+-- Request\/Response transcript entries (sole writer of this session's
+-- transcript), broadcast, bump @_sm_lastActive@, and respond. Shared by the
+-- id and name resolution paths.
+--
+-- @postSend@ is a fire-and-forget action run ONLY after a successful send (the
+-- name path uses it for the D6.5 id back-fill). It runs before @respond@ on the
+-- success branch, so it never delays a failed send; callers MUST make it
+-- exception-proof (see 'backfillHarnessId') so it cannot fail the send.
+routeViaHandle
+  :: FrontendEnv
+  -> Text
+  -> HarnessHandle
+  -> Text
+  -> FilePath
+  -> IO ()        -- ^ post-send hook (run only on success; must not throw)
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+routeViaHandle env sid hh userText transcriptPath postSend respond = do
+  -- 'handleSend' is the sole writer of THIS session's transcript: on the
+  -- fresh-create path the harness handle was given a no-op transcript
+  -- ('createHarnessTab'), and a restart-discovered handle records to the
+  -- CLI's own session transcript (a different file), so recording here never
+  -- duplicates an entry in this session transcript. 'bracket' guarantees the
+  -- transcript fd is flushed + closed even if '_hh_send'/'_hh_receive' throws
+  -- (tmux IO), so a failed send cannot leak a file descriptor.
+  result <- try @SomeException $
+    bracket
+      (mkBroadcastingFileTranscriptHandle
+         (_fe_broker env) (SessionId sid) (_fe_logger env) transcriptPath)
+      (\th -> _th_flush th >> _th_close th)
+      (\th -> do
+        -- Record the user message as a Request entry (mirrors 'harnesseSend').
+        recordHarnessEntry th Request userText
+        _hh_send hh (TE.encodeUtf8 userText)
+        raw <- _hh_receive hh
+        let resp = sanitizeHarnessOutput (TE.decodeUtf8 raw)
+        -- Only record a Response entry when the harness produced output;
+        -- a blank reply must not leave an empty/duplicate entry.
+        unless (T.null (T.strip resp)) $
+          recordHarnessEntry th Response resp
+        pure resp)
+  case result of
+    Left e -> do
+      _lh_logError (_fe_logger env) $ "Harness send error: " <> T.pack (show e)
+      respond $ jsonResponse status500 (object ["error" .= ("Harness send failed" :: Text)])
+    Right resp -> do
+      touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
+      broadcastLists env
+      -- Fire-and-forget post-send hook (e.g. the D6.5 id back-fill). It is
+      -- exception-proof at the source, so it cannot fail the send the user is
+      -- about to receive.
+      postSend
+      respond $ jsonResponse status200 (object ["response" .= resp])
+
+-- | Lazy migration (D6.5): if a corroborated registry entry's label matches
+-- @windowName@, persist its 'Registry.HarnessId' onto the session's
+-- 'HarnessSpec' in @session.json@ so subsequent sends route by id. Operates
+-- directly on the on-disk meta (read-modify-write with a tmp-file + atomic
+-- rename), mirroring the disk-only meta mutators in "PureClaw.Session.Handle".
+--
+-- Best-effort and exception-proof (D6.5c): a missing\/corrupt @session.json@,
+-- an absent\/uncorroborated entry, or an already-id-bearing spec are all silent
+-- no-ops, and ANY IO fault in the read-modify-write (a TOCTOU between
+-- 'doesFileExist' and 'LBS.readFile', a permission error, a disk-full or
+-- cross-device error on write\/'renameFile', or a lazy-read fault surfacing in
+-- 'Aeson.decode') is caught, logged, and swallowed. Keeping routing fast must
+-- never fail a send the user already received, so this function NEVER throws.
+backfillHarnessId :: FrontendEnv -> Text -> Text -> IO ()
+backfillHarnessId env sid windowName = do
+  result <- try @SomeException go
+  case result of
+    Left e ->
+      _lh_logError (_fe_logger env) $
+        "harnessId back-fill failed (non-fatal): " <> T.pack (show e)
+    Right () -> pure ()
+  where
+    go :: IO ()
+    go = do
+      mEntry <- Registry.lookupByLabel (_fe_harnessRegistry env) windowName
+      case mEntry of
+        Just entry | isPidCorroborated entry -> do
+          let p = _fe_sessionsDir env </> T.unpack sid </> "session.json"
+          ok <- doesFileExist p
+          when ok $ do
+            raw <- LBS.readFile p
+            case Aeson.decode raw of
+              Just meta -> case _sm_kind meta of
+                SkHarness hs
+                  | Maybe.isNothing (_h_harnessId hs) -> do
+                      let hs'   = hs { _h_harnessId = Just (Registry._he_id entry) }
+                          meta' = meta { _sm_kind = SkHarness hs' }
+                          -- A back-fill-specific tmp suffix, distinct from the
+                          -- @session.json.tmp@ used by 'touchSessionLastActive'
+                          -- /'updateSessionMeta', so the post-send back-fill can
+                          -- never race that mutator's tmp file on the same dir.
+                          tmpP  = p <> ".backfill.tmp"
+                      -- tmp-file + rename: a crash mid-write leaves the prior
+                      -- session.json intact (same atomicity as 'saveMeta').
+                      LBS.writeFile tmpP (Aeson.encode meta')
+                      renameFile tmpP p
+                _ -> pure ()
+              Nothing -> pure ()
+        _ -> pure ()
 
 -- | Record a single harness transcript entry, mirroring the field shape of
 -- 'harnesseSend'\/'harnessReceive' in "PureClaw.Harness.ClaudeCode".

@@ -47,7 +47,7 @@ import PureClaw.Handles.Harness
 import PureClaw.Harness.Registry qualified as Registry
 import Data.ByteString (ByteString)
 import PureClaw.Security.Command (CommandError (..))
-import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
@@ -1288,6 +1288,208 @@ spec = do
         sent `shouldBe` ["will throw"]
 
   -- -----------------------------------------------------------------------
+  -- WU6: id-primary routing with name fallback + PID-corroboration refusal
+  -- -----------------------------------------------------------------------
+  describe "POST /api/sessions/{sid}/send (id-primary routing — WU6)" $ do
+    -- D6.3: a session persisting a HarnessId routes by id to a corroborated
+    -- registry entry's handle (not via the name-keyed map).
+    it "routes by HarnessId to a corroborated registry entry's handle (D6.3)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d63" $ \tmpDir -> do
+        let sid    = "sess-id-route"
+            hidTxt = "66666666-6666-4666-8666-666666666666"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-0"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- A corroborated entry (recorded harness PID) with a live handle, keyed
+        -- by the id. The legacy name map is EMPTY so a pass means id-routing.
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "id-routed reply")))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("ping" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "id-routed reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["ping"]
+
+    -- D6.4: id not in the registry -> falls back to the legacy name-keyed
+    -- _fe_harnesses map (the PR #74 path). Proves the name fallback survives.
+    it "falls back to the name-keyed map when the id is unregistered (D6.4)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d64" $ \tmpDir -> do
+        let sid    = "sess-id-fallback"
+            hidTxt = "77777777-7777-4777-8777-777777777777"
+            window = "claude-code-1"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Registry is EMPTY for this id; register a live handle under the
+        -- window NAME (the legacy PR #74 wiring).
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "name-fallback reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hi" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "name-fallback reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["hi"]
+
+    -- D6.4b: a fully-legacy session (no harnessId at all) routes via the name
+    -- map exactly as in PR #74. This is the dominant case until WU4/5/7 land.
+    it "routes a legacy (no-id) session via the name map unchanged (D6.4)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d64b" $ \tmpDir -> do
+        let sid    = "sess-legacy"
+            window = "claude-code-2"
+        writeHarnessSessionWithId tmpDir sid window Nothing
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "legacy reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("legacy hi" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "legacy reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["legacy hi"]
+
+    -- D6.6 (§8 C4): the id resolves to a registry entry that is NOT
+    -- PID-corroborated (a spoofed/uncorroborated marker). sendToHarness must
+    -- REFUSE — respond 503, log a refusal, and NEVER send keystrokes. It must
+    -- NOT silently fall back to the name map for this spoof case.
+    it "refuses to route to an uncorroborated registry entry (D6.6)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d66" $ \tmpDir -> do
+        let sid    = "sess-spoof"
+            hidTxt = "88888888-8888-4888-8888-888888888888"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-3"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        logRef  <- newIORef ([] :: [Text])
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Uncorroborated entry: NO recorded PIDs, but it DOES carry a (would-be
+        -- spoofed) live handle. A registered handle under the NAME must NOT
+        -- rescue it — the spoof path refuses outright.
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (uncorroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "SHOULD NOT SEND")))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "SHOULD NOT NAME-FALLBACK"))
+        let env = env0 { _fe_logger = captureErrorLogger logRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("spoofed" :: Text)]))
+        st `shouldBe` HTTP.status503
+        -- No keystrokes reached any handle.
+        sent <- readIORef logRef >> readIORef sentRef
+        sent `shouldBe` []
+        -- A refusal was logged.
+        logs <- readIORef logRef
+        any (T.isInfixOf "corroborat") logs `shouldBe` True
+        -- The error body mentions a refusal, not "not running".
+        case lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "error" of
+          Just (Aeson.String msg) ->
+            (T.isInfixOf "corroborat" msg || T.isInfixOf "refus" msg) `shouldBe` True
+          _ -> expectationFailure "expected a string 'error' field"
+
+    -- D6.6b: a corroborated entry whose handle is Nothing (e.g. boot-discovered
+    -- but not yet attached) falls through to the name path rather than refusing.
+    it "falls through to name path when a corroborated entry has no handle (D6.5/D6.6)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d66b" $ \tmpDir -> do
+        let sid    = "sess-nohandle"
+            hidTxt = "99999999-9999-4999-8999-999999999999"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-4"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window Nothing)  -- corroborated, no handle
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "name-path reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("fallthrough" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "name-path reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["fallthrough"]
+
+    -- D6.5: lazy back-fill. A legacy (no-id) session whose window name matches
+    -- a corroborated registry entry by label persists that entry's HarnessId
+    -- into session.json on first matched send.
+    it "back-fills the HarnessId into session.json on first legacy match (D6.5)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d65" $ \tmpDir -> do
+        let sid    = "sess-backfill"
+            hidTxt = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-5"
+        writeHarnessSessionWithId tmpDir sid window Nothing  -- legacy, no id
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- A corroborated entry whose LABEL matches the window name.
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "matched")))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "matched"))
+        (st, _) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("first" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- session.json now carries the back-filled HarnessId.
+        reloaded <- tryLoadMetaJson tmpDir sid
+        harnessIdOfMeta reloaded `shouldBe` Just hidTxt
+
+    -- D6.5(c): the lazy back-fill is best-effort and must NEVER fail a send.
+    -- Here the back-fill's atomic write is forced to throw: we pre-create the
+    -- back-fill's tmp target (@session.json.backfill.tmp@) as a DIRECTORY, so
+    -- the back-fill's @LBS.writeFile@ into it fails with an IO error. The
+    -- harness send itself still succeeds, so the request MUST return 200 with
+    -- the harness reply and the keystrokes MUST have been delivered. Against
+    -- the unguarded implementation the back-fill exception propagates out of
+    -- 'handleSend' and aborts the send before any assertion can hold.
+    --
+    -- Note the tmp target is deliberately distinct from the
+    -- @session.json.tmp@ used by 'touchSessionLastActive', so this fault
+    -- isolates the back-fill and does not perturb the unrelated last-active
+    -- mutator (which runs in the same success branch).
+    it "never fails the send when the back-fill write throws (D6.5c)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d65c" $ \tmpDir -> do
+        let sid    = "sess-backfill-fail"
+            hidTxt = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-6"
+            sessDir = tmpDir </> T.unpack sid
+        writeHarnessSessionWithId tmpDir sid window Nothing  -- legacy, no id
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- A corroborated entry whose LABEL matches the window name, so the
+        -- back-fill is attempted (read succeeds; the subsequent write throws).
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "matched")))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "matched"))
+        -- Occupy the back-fill's tmp target with a DIRECTORY so its
+        -- @LBS.writeFile session.json.backfill.tmp@ throws.
+        createDirectoryIfMissing True (sessDir </> "session.json.backfill.tmp")
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("first" :: Text)]))
+        -- The send succeeded despite the throwing back-fill.
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "matched")
+        -- The keystrokes were delivered.
+        sent <- readIORef sentRef
+        sent `shouldBe` ["first"]
+        -- The id was NOT back-filled (the write threw), but the session.json
+        -- is intact (the failing tmp write left the original in place).
+        reloaded <- tryLoadMetaJson tmpDir sid
+        harnessIdOfMeta reloaded `shouldBe` Nothing
+
+  -- -----------------------------------------------------------------------
   -- WU4: frozen system prompt + per-session agent rendering (§9.1)
   -- -----------------------------------------------------------------------
 
@@ -1747,17 +1949,26 @@ spec = do
           (Aeson.encode (object ["notprompt" .= ("X" :: Text)]))
         st `shouldBe` HTTP.status400
 
-  describe "harnessKeyFromKind (WU1)" $ do
-    it "returns Just the tmux window for a tmux-backed harness" $
+  describe "harnessKeyFromKind (WU1/WU6)" $ do
+    it "returns Just the tmux window for a legacy tmux harness (no id)" $
       harnessKeyFromKind
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] Nothing))
         `shouldBe` Just "claude-code-2"
+
+    -- WU6: when a HarnessId is present, harnessKeyFromKind returns the durable
+    -- id text (not the window name) — the id-primary routing key.
+    it "returns the HarnessId text when present (id-primary, WU6)" $ do
+      let hid = Registry.parseHarnessId "44444444-4444-4444-8444-444444444444"
+      harnessKeyFromKind
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] hid))
+        `shouldBe` (Registry.harnessIdToText <$> hid)
 
     it "returns Nothing for a non-tmux harness backend" $
       harnessKeyFromKind
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          TbLocal Nothing []))
+          TbLocal Nothing [] Nothing))
         `shouldBe` Nothing
 
     it "returns Nothing for a provider session" $
@@ -1769,13 +1980,20 @@ spec = do
     it "is True for a tmux-backed harness" $
       shouldRouteToHarness
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] Nothing))
+        `shouldBe` True
+
+    it "is True for a tmux-backed harness that carries a HarnessId (WU6)" $ do
+      let hid = Registry.parseHarnessId "55555555-5555-4555-8555-555555555555"
+      shouldRouteToHarness
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] hid))
         `shouldBe` True
 
     it "is False for a non-tmux harness backend" $
       shouldRouteToHarness
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          TbLocal Nothing []))
+          TbLocal Nothing [] Nothing))
         `shouldBe` False
 
     it "is False for a provider session" $
@@ -1786,7 +2004,7 @@ spec = do
   describe "_fe_startHarness default stub (WU1)" $
     it "returns Left for the unwired test FrontendEnv" $ do
       env <- mkTestFrontendEnv
-      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") TbLocal Nothing []
+      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") TbLocal Nothing [] Nothing
       result <- _fe_startHarness env spec' mkNoOpTranscriptHandle
       case result of
         Left _  -> pure ()
@@ -1998,8 +2216,9 @@ writeHarnessSession baseDir sid windowKey = do
             , _tc_window  = windowKey
             , _tc_pane    = Nothing
             })
-        , _h_cwd  = Nothing
-        , _h_args = []
+        , _h_cwd       = Nothing
+        , _h_args      = []
+        , _h_harnessId = Nothing
         }
       meta = SessionMeta
         { _sm_id                = SessionId sid
@@ -2018,6 +2237,97 @@ writeHarnessSession baseDir sid windowKey = do
       epochH = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
   LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Like 'writeHarnessSession', but also persists an optional 'HarnessId' on
+-- the 'HarnessSpec' (WU6). When @Just hid@, the spec carries BOTH the id and
+-- the dual-written tmux window name.
+writeHarnessSessionWithId :: FilePath -> Text -> Text -> Maybe Text -> IO ()
+writeHarnessSessionWithId baseDir sid windowKey mHidTxt = do
+  let dir = baseDir </> T.unpack sid
+  createDirectoryIfMissing True dir
+  let hSpecRec = HarnessSpec
+        { _h_flavour = HClaudeCode
+        , _h_backend = TbTmux (TmuxConfig
+            { _tc_session = "pureclaw"
+            , _tc_window  = windowKey
+            , _tc_pane    = Nothing
+            })
+        , _h_cwd       = Nothing
+        , _h_args      = []
+        , _h_harnessId = mHidTxt >>= Registry.parseHarnessId
+        }
+      meta = SessionMeta
+        { _sm_id                = SessionId sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = SkHarness hSpecRec
+        , _sm_model             = ""
+        , _sm_channel           = "web"
+        , _sm_createdAt         = epochH
+        , _sm_lastActive        = epochH
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
+        }
+      epochH = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+  LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
+  LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Force-parse a 'Registry.HarnessId' from canonical UUID text (test-only).
+mustParseHid :: Text -> Registry.HarnessId
+mustParseHid t = case Registry.parseHarnessId t of
+  Just h  -> h
+  Nothing -> error ("mustParseHid: not a UUID: " <> T.unpack t)
+
+-- | A PID-corroborated registry entry (a recorded harness PID is evidence the
+-- entry is ours) with the given id, label (= window name) and optional handle.
+corroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+corroboratedEntry hid window mHandle = (baseEntry hid window mHandle)
+  { Registry._he_harnessPid = Just 4242 }
+
+-- | An UNcorroborated entry: a bare (spoofable) marker with NO recorded PIDs.
+uncorroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+uncorroboratedEntry = baseEntry
+
+-- | Shared 'HarnessEntry' skeleton for the routing tests.
+baseEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+baseEntry hid window mHandle = Registry.HarnessEntry
+  { Registry._he_id          = hid
+  , Registry._he_session     = "pureclaw"
+  , Registry._he_windowName  = window
+  , Registry._he_shellPid    = Nothing
+  , Registry._he_harnessPid  = Nothing
+  , Registry._he_origin      = Registry.OriginSpawned
+  , Registry._he_liveness    = Registry.LivenessIdle
+  , Registry._he_extModified = False
+  , Registry._he_stale       = False
+  , Registry._he_sessionId   = Nothing
+  , Registry._he_label       = window
+  , Registry._he_handle      = mHandle
+  }
+
+-- | A 'LogHandle' that captures every error-level message into the 'IORef'.
+captureErrorLogger :: IORef [Text] -> LogHandle
+captureErrorLogger ref = mkNoOpLogHandle
+  { _lh_logError = \msg -> modifyIORef' ref (++ [msg]) }
+
+-- | Reload a session's @session.json@ as raw JSON (test-only).
+tryLoadMetaJson :: FilePath -> Text -> IO (Maybe Aeson.Value)
+tryLoadMetaJson baseDir sid = do
+  let p = baseDir </> T.unpack sid </> "session.json"
+  ok <- doesFileExist p
+  if not ok then pure Nothing else Aeson.decode <$> LBS.readFile p
+
+-- | Extract @kind.harnessId@ from a decoded @session.json@ value (test-only).
+harnessIdOfMeta :: Maybe Aeson.Value -> Maybe Text
+harnessIdOfMeta mv = do
+  v <- mv
+  kind <- lookupKey v "kind"
+  hid  <- lookupKey kind "harnessId"
+  case hid of
+    Aeson.String s -> Just s
+    _              -> Nothing
 
 -- | Read and decode a session's @transcript.jsonl@ into entries (oldest
 -- first), tolerating a missing or empty file (returns @[]@).
@@ -2151,7 +2461,7 @@ writeHarnessBranchSource baseDir sid = do
   let dir = baseDir </> T.unpack sid
   createDirectoryIfMissing True dir
   let hSpec = HarnessSpec (fixedFlavourLookup "claude-code")
-        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing [] Nothing
       meta = SessionMeta
         { _sm_id                = SessionId sid
         , _sm_agent             = Nothing

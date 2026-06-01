@@ -256,7 +256,8 @@ parseSessionKind o model agent = do
           (fixedFlavourLookup name)
           (TbTmux (TmuxConfig name name Nothing))
           Nothing
-          []))
+          []
+          Nothing))
       Just _ ->
         -- Unknown runtime text: default to provider
         pure (SkProvider (ProviderSpec (inferProviderId model) (ModelId model) agent))

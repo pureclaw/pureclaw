@@ -270,13 +270,13 @@ spec = do
     it "SkHarness present in map returns RuntimeOk (TargetHarness name)" $ do
       let h = noOpHarness
           m = Map.singleton "cc" h
-          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing [] Nothing
       case validateRuntime m (SkHarness hSpec) of
         RuntimeOk (TargetHarness n) -> n `shouldBe` "cc"
         other -> expectationFailure ("expected RuntimeOk TargetHarness, got: " <> show other)
 
     it "SkHarness absent returns RuntimeFallback TargetProvider with warning" $
-      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing []
+      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing [] Nothing
       in case validateRuntime Map.empty (SkHarness hSpec) of
         RuntimeFallback TargetProvider msg ->
           ("dead" `T.isInfixOf` msg && "falling back" `T.isInfixOf` msg)
@@ -757,14 +757,14 @@ spec = do
     it "SkHarness present resolves to TargetHarness without a warning" $ do
       (logger, warnRef) <- mkCaptureLogger
       let harnesses = Map.singleton "cc" noOpHarness
-          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+          hSpec = HarnessSpec (fixedFlavourLookup "cc") (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing [] Nothing
       tgt <- resolveResumedTarget logger harnesses (SkHarness hSpec)
       tgt `shouldBe` TargetHarness "cc"
       readIORef warnRef `shouldReturn` []
 
     it "SkHarness missing logs a warning and falls back to TargetProvider" $ do
       (logger, warnRef) <- mkCaptureLogger
-      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing []
+      let hSpec = HarnessSpec (fixedFlavourLookup "dead") (TbTmux (TmuxConfig "dead" "dead" Nothing)) Nothing [] Nothing
       tgt <- resolveResumedTarget logger Map.empty (SkHarness hSpec)
       tgt `shouldBe` TargetProvider
       warnings <- readIORef warnRef
@@ -916,7 +916,7 @@ writeSourceSession base sid mAgentText entries = do
 writeHarnessSession :: FilePath -> Text -> IO ()
 writeHarnessSession base sid = do
   let hSpec = HarnessSpec (fixedFlavourLookup "claude-code")
-        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing [] Nothing
       meta = (mkMeta sid t0) { _sm_kind = SkHarness hSpec }
   sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
   _sh_save sh

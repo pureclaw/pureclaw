@@ -277,10 +277,11 @@ allocState env hh = do
 mkHandle :: AgentEnv -> TabIndex -> TabName -> HarnessTabState -> TabHandle
 mkHandle env idx name state =
   let harnSpec = HarnessSpec
-        { _h_flavour = HClaudeCode
-        , _h_backend = TbLocal
-        , _h_cwd     = Nothing
-        , _h_args    = []
+        { _h_flavour   = HClaudeCode
+        , _h_backend   = TbLocal
+        , _h_cwd       = Nothing
+        , _h_args      = []
+        , _h_harnessId = Nothing
         }
   in TabHandle
   { _tabHandle_index        = idx

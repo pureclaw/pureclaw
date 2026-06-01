@@ -41,6 +41,7 @@ import Data.Text qualified as T
 
 import PureClaw.Agent.AgentDef (AgentName, unAgentName)
 import PureClaw.Core.Types (ModelId (..), ProviderId (..))
+import PureClaw.Harness.Registry (HarnessId)
 
 -- ---------------------------------------------------------------------------
 -- Session kind
@@ -63,10 +64,20 @@ data ProviderSpec = ProviderSpec
 -- | Configuration for a harness-backed session (an external CLI tool managed
 -- via a terminal backend).
 data HarnessSpec = HarnessSpec
-  { _h_flavour :: !HarnessFlavour
-  , _h_backend :: !TerminalBackend
-  , _h_cwd     :: !(Maybe Text)
-  , _h_args    :: ![Text]
+  { _h_flavour   :: !HarnessFlavour
+  , _h_backend   :: !TerminalBackend
+  , _h_cwd       :: !(Maybe Text)
+  , _h_args      :: ![Text]
+  , _h_harnessId :: !(Maybe HarnessId)
+    -- ^ The durable, UUID-backed harness identity (Harness Registry Phase 1).
+    --
+    -- ADDITIVE and OPTIONAL (design @docs\/harness-registry.md@ K4): existing
+    -- @session.json@ files written before this field decode with
+    -- @_h_harnessId == Nothing@ (tolerant @.:? "harnessId"@), and the key is
+    -- emitted ONLY when 'Just' (emit-when-Just, like '_h_cwd'). The tmux
+    -- window name in '_h_backend' is /dual-written/ alongside it for one
+    -- release so a back-out path and the legacy name-keyed routing fallback
+    -- both keep working until the registry is the sole key.
   } deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -329,7 +340,8 @@ instance Aeson.FromJSON ProviderSpec where
       <*> o .:? "agent"
 
 -- HarnessSpec — flat object; cwd optional (omitted when Nothing),
--- args defaults to []
+-- args defaults to [], harnessId optional (emitted ONLY when Just; absent on
+-- decode -> Nothing — the back-compat guarantee for legacy session.json, K4).
 
 instance Aeson.ToJSON HarnessSpec where
   toJSON hs = Aeson.object $
@@ -337,6 +349,7 @@ instance Aeson.ToJSON HarnessSpec where
     , "backend" .= _h_backend hs
     ] ++ maybe [] (\c -> ["cwd" .= c]) (_h_cwd hs)
       ++ ["args" .= _h_args hs | not (null (_h_args hs))]
+      ++ maybe [] (\hid -> ["harnessId" .= hid]) (_h_harnessId hs)
 
 instance Aeson.FromJSON HarnessSpec where
   parseJSON = Aeson.withObject "HarnessSpec" $ \o ->
@@ -345,6 +358,7 @@ instance Aeson.FromJSON HarnessSpec where
       <*> o .: "backend"
       <*> o .:? "cwd"
       <*> o .:? "args" .!= []
+      <*> o .:? "harnessId"
 
 -- SessionKind — tag-discriminated: "provider" or "harness"
 

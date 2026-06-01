@@ -669,10 +669,11 @@ placeholderProviderSpec = ProviderSpec
 -- a 'TkSession (SkHarness _)'. The factory ignores this payload.
 placeholderHarnessSpec :: HarnessSpec
 placeholderHarnessSpec = HarnessSpec
-  { _h_flavour = HClaudeCode
-  , _h_backend = TbLocal
-  , _h_cwd     = Nothing
-  , _h_args    = []
+  { _h_flavour   = HClaudeCode
+  , _h_backend   = TbLocal
+  , _h_cwd       = Nothing
+  , _h_args      = []
+  , _h_harnessId = Nothing
   }
 
 -- | Placeholder 'SshConfig' used when 'tabKindArgToKind' produces
