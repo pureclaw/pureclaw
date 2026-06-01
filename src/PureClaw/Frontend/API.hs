@@ -3,6 +3,10 @@ module PureClaw.Frontend.API
     apiApp
     -- * Environment
   , FrontendEnv (..)
+  , StartedHarness (..)
+    -- * Harness routing helpers
+  , harnessKeyFromKind
+  , shouldRouteToHarness
     -- * Stream connection guard (per-origin cap)
   , StreamGuard (..)
   , mkStreamGuard
@@ -28,8 +32,8 @@ module PureClaw.Frontend.API
   ) where
 
 import Control.Concurrent.STM (TVar, newTVarIO)
-import Control.Exception (IOException, SomeException, bracket_, try)
-import Control.Monad (filterM, when)
+import Control.Exception (IOException, SomeException, bracket, bracket_, try)
+import Control.Monad (filterM, unless, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
 import Data.Aeson.Types qualified as AesonTypes
@@ -42,14 +46,17 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
 import Network.HTTP.Types
 import Network.Wai
-import System.Directory (doesFileExist, getFileSize, renameFile)
+import System.Directory (doesFileExist, getFileSize, removeDirectoryRecursive, renameFile)
 import System.FilePath ((</>), takeDirectory)
 
 import PureClaw.Agent.AgentDef
@@ -90,6 +97,7 @@ import PureClaw.Session.Handle
   , setArchived
   , setDescription
   , touchSessionLastActive
+  , tryLoad
   )
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
@@ -140,6 +148,13 @@ data FrontendEnv = FrontendEnv
     -- On success, the tab is removed from the registry and its resources
     -- are cleaned up (session saved for session-backed tabs, process
     -- killed for raw shells).
+  , _fe_startHarness :: HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness)
+    -- ^ Start a tmux-backed harness process for a frontend-created
+    -- AI-Harness session. The dispatcher provides the real implementation
+    -- (allocates a tmux window, spawns the harness, registers the handle);
+    -- the default stub returns @Left@ to signal "not wired". On success it
+    -- returns the harness map key and the tmux coordinates to persist in the
+    -- session's @_sm_kind@.
   , _fe_listModels   :: Text -> IO [Text]
     -- ^ List model IDs for the named provider. Runs the live
     -- @\/v1\/models@ call on the provider using the currently
@@ -164,6 +179,24 @@ data FrontendEnv = FrontendEnv
     -- without ever returning final text. Reaching the cap returns a
     -- placeholder response; it does not throw.
   }
+
+-- | Result of successfully starting a harness via '_fe_startHarness'.
+data StartedHarness = StartedHarness
+  { _shh_key  :: !Text        -- ^ harness map key = canonical <> "-" <> show windowIdx (also the tmux window name)
+  , _shh_tmux :: !TmuxConfig  -- ^ coordinates to persist in the session's _sm_kind HarnessSpec._h_backend
+  }
+
+-- | The harness map key for a session kind, if it is a tmux-backed harness.
+-- @Just k@  => route this session to harness handle @k@; @Nothing@ => provider session.
+harnessKeyFromKind :: SessionKind -> Maybe Text
+harnessKeyFromKind (SkHarness hs) = case _h_backend hs of
+  TbTmux tc -> Just (_tc_window tc)
+  _         -> Nothing
+harnessKeyFromKind _ = Nothing
+
+-- | Routing decision: does this session route to a harness (vs the LLM provider)?
+shouldRouteToHarness :: SessionKind -> Bool
+shouldRouteToHarness = Maybe.isJust . harnessKeyFromKind
 
 -- | Per-origin WS subscriber counter. Lives at the same lifetime as the
 -- broker (constructed once in @startWithChannel@). The WS handler calls
@@ -847,11 +880,21 @@ branchErrorResponse err = case err of
 -- with 'Nothing' the behaviour is identical to a fresh New-tab session.
 createTab :: FrontendEnv -> TabKind -> Maybe BranchSeed -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 createTab env tabKind mSeed respond = do
+  -- Read the slot index for the response; the actual bump is deferred for
+  -- the harness path so a failed tmux spawn never consumes a slot (the
+  -- count has no decrement). Provider / raw-shell paths bump immediately,
+  -- preserving their existing behaviour byte-for-byte.
   curCount <- readIORef (_fe_tabCount env)
-  -- Bump tab count
-  writeIORef (_fe_tabCount env) (curCount + 1)
   case tabKind of
+    -- Harness sessions must actually spawn the tmux harness before the tab
+    -- is considered created. A branch seed only ever targets a provider
+    -- session (handleNewTab rejects non-provider branch targets), so a
+    -- seeded harness cannot occur here.
+    TkSession sk@(SkHarness spec) ->
+      createHarnessTab env tabKind spec sk curCount respond
     TkSession sk -> do
+      -- Bump tab count
+      writeIORef (_fe_tabCount env) (curCount + 1)
       -- Create a session for session-backed tabs
       now <- getCurrentTime
       mModel <- readIORef (_fe_model env)
@@ -862,10 +905,11 @@ createTab env tabKind mSeed respond = do
           -- (e.g. the chat input placeholder), and the agent's
           -- definition was already used to build the system prompt.
           -- Without this, the metadata loses the association and
-          -- recent-sessions UI falls back to the session id.
+          -- recent-sessions UI falls back to the session id. Harness
+          -- kinds are handled by 'createHarnessTab' above, so 'sk' here
+          -- is always a provider spec.
           agentName = case sk of
             SkProvider ps -> _ps_agent ps
-            SkHarness  _  -> Nothing
           -- For a branch, inherit _sm_kind / _sm_model / _sm_agent from
           -- the source meta so the branch's sidebar row matches its
           -- parent; otherwise use the request kind + global model.
@@ -916,11 +960,93 @@ createTab env tabKind mSeed respond = do
         , _ntresp_kind      = tabKindLabel tabKind
         }
     TkRawShell _backend -> do
+      -- Bump tab count
+      writeIORef (_fe_tabCount env) (curCount + 1)
       respond $ jsonResponse status200 NewTabResponse
         { _ntresp_tabIndex  = curCount
         , _ntresp_sessionId = Nothing
         , _ntresp_kind      = tabKindLabel tabKind
         }
+
+-- | Create a harness-backed tab: persist the session, spawn the tmux
+-- harness via '_fe_startHarness', and only on success persist the real
+-- tmux coordinates into '_sm_kind' and bump the tab count. A failed spawn
+-- removes the just-created session directory and leaves the tab count
+-- untouched (it has no decrement), so a fallible spawn never strands a
+-- session dir or burns a tab slot.
+createHarnessTab
+  :: FrontendEnv
+  -> TabKind        -- ^ original request kind (for the response label)
+  -> HarnessSpec    -- ^ requested harness spec (backend replaced on success)
+  -> SessionKind    -- ^ the SkHarness kind to seed _sm_kind with
+  -> Int            -- ^ current tab count = response slot index
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+createHarnessTab env tabKind spec sk curCount respond = do
+  now <- getCurrentTime
+  let sid  = newSessionId Nothing now
+      meta = SessionMeta
+        { _sm_id                = sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = sk
+        , _sm_model             = ""
+        , _sm_channel           = "web"
+        , _sm_createdAt         = now
+        , _sm_lastActive        = now
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
+        }
+  sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
+  _sh_save sh
+  -- Pass a NON-recording transcript to the harness so it does not
+  -- double-record entries: 'handleSend' is the SOLE recorder of harness
+  -- Request/Response entries to the session transcript (WU3). Recording
+  -- here too would duplicate every fresh-session entry.
+  started <- _fe_startHarness env spec mkNoOpTranscriptHandle
+  case started of
+    Left err -> do
+      -- Roll back the session dir created above. A missing dir must not
+      -- throw, so swallow IO errors from the cleanup.
+      _ <- try @IOException (removeDirectoryRecursive (_sh_dir sh))
+      respond $ harnessErrorResponse err
+    Right st -> do
+      -- Persist the real tmux coordinates returned by the spawn so the
+      -- session routes to the live harness handle on subsequent sends.
+      modifyIORef' (_sh_meta sh) $ \m ->
+        m { _sm_kind = SkHarness (spec { _h_backend = TbTmux (_shh_tmux st) }) }
+      _sh_save sh
+      -- Read back the post-spawn meta so the live broadcast carries the real
+      -- TbTmux backend (the persisted session.json above is already correct;
+      -- the original 'meta' still holds the placeholder backend).
+      updatedMeta <- readIORef (_sh_meta sh)
+      -- Only a successful spawn consumes a tab slot.
+      writeIORef (_fe_tabCount env) (curCount + 1)
+      case _fe_broker env of
+        Just broker ->
+          _streamBroker_publish broker
+            (ActivityChanged (_sm_id updatedMeta) (SaSessionCreated updatedMeta))
+        Nothing -> pure ()
+      broadcastLists env
+      respond $ jsonResponse status200 NewTabResponse
+        { _ntresp_tabIndex  = curCount
+        , _ntresp_sessionId = Just (unSessionId sid)
+        , _ntresp_kind      = tabKindLabel tabKind
+        }
+
+-- | Map a 'HarnessError' to its HTTP response. An authorization failure is
+-- a client-side 403; a missing harness binary or unavailable tmux is a
+-- 503 (the dependency the server needs is not available right now).
+harnessErrorResponse :: HarnessError -> Response
+harnessErrorResponse err = case err of
+  HarnessNotAuthorized ce -> jsonResponse status403
+    (object ["error" .= ("harness not authorized: " <> T.pack (show ce))])
+  HarnessBinaryNotFound detail -> jsonResponse status503
+    (object ["error" .= ("harness binary not found: " <> detail)])
+  HarnessTmuxNotAvailable detail -> jsonResponse status503
+    (object ["error" .= ("tmux not available: " <> detail)])
 
 -- | User-facing kind label for the response JSON.
 tabKindLabel :: TabKind -> Text
@@ -1045,22 +1171,109 @@ handleSend env sid req respond = do
             Left _ ->
               respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"message\": \"...\"}" :: Text)])
             Right (SendRequest userText reqModel) -> do
-              mProvider <- readIORef (_fe_provider env)
-              mModel <- readIORef (_fe_model env)
-              case (mProvider, mModel) of
-                (Nothing, _) ->
-                  respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
-                (_, Nothing) ->
-                  respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
-                (Just provider, Just model) -> do
-                  result <- try @SomeException $
-                    doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
-                  case result of
-                    Left e -> do
-                      _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
-                      respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
-                    Right respText ->
-                      respond $ jsonResponse status200 (object ["response" .= respText])
+              -- Branch on the session's kind BEFORE the provider/model guard:
+              -- an AI-Harness session must route to its live tmux harness even
+              -- on an instance with no LLM provider configured. A failure to
+              -- load the meta (missing/malformed) falls through to the
+              -- provider path, preserving prior behaviour.
+              mMeta <- tryLoad (_fe_sessionsDir env) (T.unpack sid)
+              case mMeta >>= (harnessKeyFromKind . _sm_kind) of
+                Just key ->
+                  sendToHarness env sid key userText transcriptPath respond
+                Nothing -> do
+                  mProvider <- readIORef (_fe_provider env)
+                  mModel <- readIORef (_fe_model env)
+                  case (mProvider, mModel) of
+                    (Nothing, _) ->
+                      respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
+                    (_, Nothing) ->
+                      respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
+                    (Just provider, Just model) -> do
+                      result <- try @SomeException $
+                        doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
+                      case result of
+                        Left e -> do
+                          _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
+                          respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
+                        Right respText ->
+                          respond $ jsonResponse status200 (object ["response" .= respText])
+
+-- | Route a user message to a live tmux harness handle (WU3, defect #2).
+-- This is the harness analogue of 'doCompletion': it is the SOLE recorder
+-- of the harness Request\/Response transcript entries (the harness handle
+-- itself is given a no-op transcript so it does not double-record), it
+-- broadcasts through the same broadcasting transcript handle 'doCompletion'
+-- uses, and it bumps @_sm_lastActive@ and re-broadcasts the lists snapshot
+-- on success.
+--
+-- If no live handle is registered under @key@ (e.g. the harness crashed or
+-- was never reconnected after a restart) it returns a clear 503 — never a
+-- silent provider completion and never a 500.
+sendToHarness
+  :: FrontendEnv
+  -> Text       -- ^ session id
+  -> Text       -- ^ harness map key (= persisted tmux window name)
+  -> Text       -- ^ user message text
+  -> FilePath   -- ^ session transcript path
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+sendToHarness env sid key userText transcriptPath respond = do
+  handles <- readIORef (_fe_harnesses env)
+  case Map.lookup key handles of
+    Nothing ->
+      respond $ jsonResponse status503
+        (object ["error" .= ("harness '" <> key <> "' is not running" :: Text)])
+    Just hh -> do
+      -- 'handleSend' is the sole writer of THIS session's transcript: on the
+      -- fresh-create path the harness handle was given a no-op transcript
+      -- ('createHarnessTab'), and a restart-discovered handle records to the
+      -- CLI's own session transcript (a different file), so 'sendToHarness'
+      -- recording here never duplicates an entry in this session transcript.
+      -- 'bracket' guarantees the transcript fd is flushed + closed even if
+      -- '_hh_send'/'_hh_receive' throws (tmux IO), so a failed send cannot
+      -- leak a file descriptor.
+      result <- try @SomeException $
+        bracket
+          (mkBroadcastingFileTranscriptHandle
+             (_fe_broker env) (SessionId sid) (_fe_logger env) transcriptPath)
+          (\th -> _th_flush th >> _th_close th)
+          (\th -> do
+            -- Record the user message as a Request entry (mirrors 'harnesseSend').
+            recordHarnessEntry th Request userText
+            _hh_send hh (TE.encodeUtf8 userText)
+            raw <- _hh_receive hh
+            let resp = sanitizeHarnessOutput (TE.decodeUtf8 raw)
+            -- Only record a Response entry when the harness produced output;
+            -- a blank reply must not leave an empty/duplicate entry.
+            unless (T.null (T.strip resp)) $
+              recordHarnessEntry th Response resp
+            pure resp)
+      case result of
+        Left e -> do
+          _lh_logError (_fe_logger env) $ "Harness send error: " <> T.pack (show e)
+          respond $ jsonResponse status500 (object ["error" .= ("Harness send failed" :: Text)])
+        Right resp -> do
+          touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
+          broadcastLists env
+          respond $ jsonResponse status200 (object ["response" .= resp])
+
+-- | Record a single harness transcript entry, mirroring the field shape of
+-- 'harnesseSend'\/'harnessReceive' in "PureClaw.Harness.ClaudeCode".
+recordHarnessEntry :: TranscriptHandle -> Direction -> Text -> IO ()
+recordHarnessEntry th dir payload = do
+  entryId <- UUID.toText <$> UUID.nextRandom
+  now <- getCurrentTime
+  _th_record th TranscriptEntry
+    { _te_id            = entryId
+    , _te_timestamp     = now
+    , _te_harness       = Just "harness"
+    , _te_model         = Nothing
+    , _te_direction     = dir
+    , _te_payload       = encodePayload (TE.encodeUtf8 payload)
+    , _te_durationMs    = Nothing
+    , _te_correlationId = entryId
+    , _te_metadata      = Map.empty
+    }
 
 -- | Run a completion: load context, send to provider, execute any tool
 -- calls the model emits, and loop until the model produces a turn with

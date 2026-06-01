@@ -23,6 +23,7 @@ module PureClaw.Session.Types
   , SessionMeta (..)
     -- * Conversion helpers
   , sessionKindToText
+  , flavourToText
   ) where
 
 import Data.Aeson ((.=), (.:), (.:?), (.!=))

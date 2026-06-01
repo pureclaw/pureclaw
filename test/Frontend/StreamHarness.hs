@@ -48,6 +48,7 @@ import System.Timeout (timeout)
 
 import PureClaw.Frontend.API
 import PureClaw.Frontend.Stream (streamApp)
+import PureClaw.Handles.Harness (HarnessError (..))
 import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Tools.Registry (emptyRegistry)
@@ -91,6 +92,7 @@ mkTestFrontendEnv sessionsDir broker guard = do
     , _fe_tabCount     = tabCountRef
     , _fe_listTabs     = pure []
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
+    , _fe_startHarness = \_ _ -> pure (Left (HarnessBinaryNotFound "harness start not wired"))
     , _fe_listModels   = \_ -> pure []
     , _fe_listProviders = pure []
     , _fe_registry    = emptyRegistry

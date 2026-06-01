@@ -14,6 +14,8 @@ module PureClaw.Agent.SlashCommands
   , ForceMode (..)
     -- * Known harnesses
   , knownHarnesses
+  , startHarnessByName
+  , resolveHarnessName
     -- * Agent name tab completion helper
   , agentNameMatches
     -- * Session id tab completion helper

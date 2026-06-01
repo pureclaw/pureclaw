@@ -69,6 +69,7 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   )
 import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
+import PureClaw.Harness.Tmux (renameWindow)
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -746,6 +747,27 @@ runChat opts = do
               , _fe_tabCount     = feTabCountRef
               , _fe_listTabs     = pure []
               , _fe_closeTab     = \_ -> pure (Left "not wired")
+              , _fe_startHarness = \spec transcript -> do
+                  windowIdx <- readIORef windowIdxRef
+                  let name      = SessionTypes.flavourToText (SessionTypes._h_flavour spec)
+                      skipPerms = "--unsafe" `elem` SessionTypes._h_args spec
+                                    || "--dangerously-skip-permissions" `elem` SessionTypes._h_args spec
+                      cwd       = fmap T.unpack (SessionTypes._h_cwd spec)
+                      canonical = fromMaybe name (resolveHarnessName name)
+                      harnessKey = canonical <> "-" <> T.pack (show windowIdx)
+                  result <- startHarnessByName policy transcript windowIdx name cwd skipPerms
+                  case result of
+                    Left err -> pure (Left err)
+                    Right hh -> do
+                      renameWindow "pureclaw" windowIdx harnessKey
+                      modifyIORef' harnessRef (Map.insert harnessKey hh)
+                      modifyIORef' windowIdxRef (+ 1)
+                      pure (Right (StartedHarness harnessKey
+                        (SessionTypes.TmuxConfig
+                          { SessionTypes._tc_session = "pureclaw"
+                          , SessionTypes._tc_window  = harnessKey
+                          , SessionTypes._tc_pane    = Nothing
+                          })))
               , _fe_listModels   = listModelsForProvider
               , _fe_listProviders = listConfiguredProviders
               , _fe_registry     = fullRegistry

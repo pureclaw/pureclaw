@@ -2,6 +2,9 @@
 {- HLINT ignore "Use head" -}
 module Frontend.APISpec (spec) where
 
+import Control.Concurrent.STM (atomically, readTBQueue)
+import Control.Exception (throwIO)
+import System.Timeout (timeout)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (object, (.=))
 import Data.Aeson.Key qualified as AesonKey
@@ -10,6 +13,7 @@ import Data.ByteString.Builder qualified
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -18,7 +22,7 @@ import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Network.HTTP.Types qualified as HTTP
 import Network.Wai qualified as Wai
 import Network.Wai.Internal (ResponseReceived (..))
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -26,7 +30,24 @@ import Test.Hspec
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Core.Types (ChannelKind (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
+import PureClaw.Frontend.StreamBroker
+  ( BrokerEvent (..)
+  , SessionActivity (..)
+  , Subscription (..)
+  , defaultBrokerConfig
+  , mkInProcessBroker
+  , _streamBroker_subscribe
+  )
+import PureClaw.Handles.Harness
+  ( HarnessError (..)
+  , HarnessHandle (..)
+  , HarnessStatus (..)
+  , mkNoOpHarnessHandle
+  )
+import Data.ByteString (ByteString)
+import PureClaw.Security.Command (CommandError (..))
 import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
   , CompletionResponse (..)
@@ -40,6 +61,7 @@ import PureClaw.Session.Types
   , SessionKind (..)
   , ProviderSpec (..)
   , HarnessSpec (..)
+  , HarnessFlavour (..)
   , TerminalBackend (..)
   , TmuxConfig (..)
   , fixedFlavourLookup
@@ -146,6 +168,137 @@ spec = do
           hasKey val "tab_index" `shouldBe` True
           hasKey val "session_id" `shouldBe` True
           hasKey val "kind" `shouldBe` True
+
+  -- -----------------------------------------------------------------------
+  -- WU2 — POST /api/tabs/new spawns the harness (createTab SkHarness path)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/tabs/new (harness spawn — WU2)" $ do
+    -- D2.1: a harness POST actually calls _fe_startHarness, which registers
+    -- the live handle in _fe_harnesses under the returned key.
+    it "spawns the harness and registers its handle (D2.1)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d21" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0 { _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        harnesses <- readIORef (_fe_harnesses env)
+        Map.member "claude-code-0" harnesses `shouldBe` True
+
+    -- D2.2: the persisted session.json carries the real tmux coordinates
+    -- from the StartedHarness, not the placeholder backend in the request.
+    it "persists the tmux coordinates into _sm_kind (D2.2)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d22" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0 { _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> case _h_backend hs of
+            TbTmux tc -> do
+              _tc_session tc `shouldBe` "pureclaw"
+              _tc_window tc  `shouldBe` "claude-code-0"
+            other -> expectationFailure ("expected TbTmux backend, got " <> show other)
+          other -> expectationFailure ("expected SkHarness kind, got " <> show other)
+
+    -- D2.3: a failing spawn must not consume a tab slot and must remove the
+    -- just-created session dir. 503 for tmux/binary errors; 403 for authz.
+    it "maps HarnessTmuxNotAvailable to 503, keeps tab count, removes dir (D2.3)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d23a" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  \_ _ -> pure (Left (HarnessTmuxNotAvailable "tmux not found")) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status503
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+        -- No leftover session directory survives a failed spawn.
+        entries <- listSessionDirs tmpDir
+        entries `shouldBe` []
+
+    it "maps HarnessBinaryNotFound to 503 (D2.3)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d23b" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  \_ _ -> pure (Left (HarnessBinaryNotFound "claude not on PATH")) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status503
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    it "maps HarnessNotAuthorized to 403, keeps tab count (D2.3)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d23c" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  \_ _ -> pure (Left (HarnessNotAuthorized (CommandNotAllowed "claude"))) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status403
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    -- D2.4: a successful harness spawn bumps the tab count exactly once.
+    it "bumps _fe_tabCount on a successful harness spawn (D2.4)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d24" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0 { _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        readIORef (_fe_tabCount env) `shouldReturn` 1
+
+    -- D2.4 (regression): a provider POST behaves exactly as before — 200,
+    -- session.json on disk, tab count bumped — without ever calling
+    -- _fe_startHarness (which would Left-fail if it did).
+    it "provider POST is unchanged and never spawns a harness (D2.4)" $ do
+      withSystemTempDirectory "pureclaw-wu2-prov" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] providerNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        doesFileExist (tmpDir </> T.unpack newSid </> "session.json")
+          `shouldReturn` True
+        readIORef (_fe_tabCount env) `shouldReturn` 1
+        -- The provider path leaves the harness map empty.
+        harnesses <- readIORef (_fe_harnesses env)
+        Map.null harnesses `shouldBe` True
+
+  -- -----------------------------------------------------------------------
+  -- WU4 — POST /api/tabs/new publishes the POST-spawn meta to the broker
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/tabs/new (harness spawn — WU4 broker publish)" $
+    -- D4: a successful harness spawn publishes exactly one
+    -- ActivityChanged (SaSessionCreated meta) event whose meta carries the
+    -- REAL spawned backend (TbTmux with the spawn's window), not the
+    -- placeholder 'local' backend in the request. This covers the
+    -- @Just broker -> _streamBroker_publish ...@ arm of createHarnessTab
+    -- and validates the post-spawn-meta fix.
+    it "publishes the post-spawn meta carrying the real TbTmux backend (D4)" $ do
+      withSystemTempDirectory "pureclaw-wu4-d4" $ \tmpDir -> do
+        broker <- mkInProcessBroker defaultBrokerConfig
+        eSub   <- _streamBroker_subscribe broker
+        sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_broker       = Just broker
+              , _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0"
+              }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        evs <- drainBrokerQueue 500000 sub
+        let created = [ m | ActivityChanged _ (SaSessionCreated m) <- evs ]
+        case created of
+          [m] -> case _sm_kind m of
+            SkHarness hs -> case _h_backend hs of
+              TbTmux tc -> _tc_window tc `shouldBe` "claude-code-0"
+              other -> expectationFailure
+                ("expected TbTmux backend in published meta, got " <> show other)
+            other -> expectationFailure
+              ("expected SkHarness kind in published meta, got " <> show other)
+          other -> expectationFailure
+            ("expected exactly one SaSessionCreated event, got "
+              <> show (length other))
 
   -- -----------------------------------------------------------------------
   -- WU1 — POST /api/tabs/new with branch_from (session branching)
@@ -936,6 +1089,204 @@ spec = do
         (_sm_lastActive metaAfter > _sm_createdAt metaAfter) `shouldBe` True
 
   -- -----------------------------------------------------------------------
+  -- POST /api/sessions/{sid}/send — harness routing (WU3, defect #2)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/sessions/{sid}/send (harness routing — WU3)" $ do
+    -- D3.1: an SkHarness session with a live handle registered under its
+    -- key routes the message to the handle (not the provider) and returns
+    -- the handle's sanitized output as the response.
+    it "routes a harness session to its live tmux handle, not the provider" $ do
+      withSystemTempDirectory "pureclaw-hsend-d31" $ \tmpDir -> do
+        let sid = "sess-harness-1"
+            key = "claude-code-0"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "should-not-be-used"))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "harness says hi"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("ping" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "harness says hi")
+        -- The harness handle received the bytes …
+        sent <- readIORef sentRef
+        sent `shouldBe` ["ping"]
+        -- … and the provider was NOT invoked.
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+
+    -- D3.2: regression — a provider session still hits the provider/model
+    -- guard and runs doCompletion.
+    it "still routes a provider session through doCompletion" $ do
+      withSystemTempDirectory "pureclaw-hsend-d32" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeSessionBootstrap tmpDir "sess-prov" Nothing True
+        se <- mkSendEnv tmpDir agentsDir Nothing
+        recorded <- sendOnce se "sess-prov" "hello"
+        length recorded `shouldBe` 1
+
+    -- D3.3: an SkHarness session with NO handle registered returns a clear
+    -- 503 "not running" — not a provider completion, not a 500.
+    it "returns a clear 503 when the harness is not running" $ do
+      withSystemTempDirectory "pureclaw-hsend-d33" $ \tmpDir -> do
+        let sid = "sess-harness-down"
+            key = "claude-code-7"
+        writeHarnessSession tmpDir sid key
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "m"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("ping" :: Text)]))
+        st `shouldBe` HTTP.status503
+        case lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "error" of
+          Just (Aeson.String msg) ->
+            msg `shouldSatisfy` T.isInfixOf "not running"
+          _ -> expectationFailure "expected a string 'error' field"
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+
+    -- D3.4: restart simulation — the persisted _tc_window key is recomputed
+    -- and used to find the rediscovered handle.
+    it "routes by the persisted tmux window key after a restart" $ do
+      withSystemTempDirectory "pureclaw-hsend-d34" $ \tmpDir -> do
+        let sid = "sess-harness-restart"
+            key = "claude-code-3"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Simulate discoverHarnesses re-registering under the persisted key.
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "reconnected"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("after restart" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "reconnected")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["after restart"]
+
+    -- D3.5: a successful harness send records exactly one Request and one
+    -- Response entry to the SESSION transcript (no duplicates).
+    it "records exactly one Request and one Response entry per send" $ do
+      withSystemTempDirectory "pureclaw-hsend-d35" $ \tmpDir -> do
+        let sid = "sess-harness-tx"
+            key = "claude-code-1"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "the reply"))
+        (st, _) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hi there" :: Text)]))
+        st `shouldBe` HTTP.status200
+        entries <- readSessionTranscript tmpDir sid
+        let reqs  = [ e | e <- entries, _te_direction e == Request ]
+            resps = [ e | e <- entries, _te_direction e == Response ]
+        length reqs  `shouldBe` 1
+        length resps `shouldBe` 1
+        _te_payload (head reqs)  `shouldBe` "hi there"
+        _te_payload (head resps) `shouldBe` "the reply"
+
+    -- D3.5b (restart hardening): a restart-discovered handle records to its
+    -- OWN (CLI) transcript — a different file. Prove the SESSION transcript
+    -- still gets exactly one Request + one Response (handleSend is the sole
+    -- writer of the session transcript; no cross-file duplication).
+    it "keeps the session transcript at 1+1 when the handle records elsewhere" $ do
+      withSystemTempDirectory "pureclaw-hsend-d35b" $ \tmpDir -> do
+        let sid = "sess-harness-restart"
+            key = "claude-code-7"
+            cliTranscript = tmpDir </> "cli-transcript.jsonl"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkRecordingFakeHarnessHandle cliTranscript sentRef "restart reply"))
+        (st, _) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("after restart" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- Session transcript: exactly one Request + one Response.
+        entries <- readSessionTranscript tmpDir sid
+        length [ e | e <- entries, _te_direction e == Request ]  `shouldBe` 1
+        length [ e | e <- entries, _te_direction e == Response ] `shouldBe` 1
+        -- The handle's own (separate) transcript received its 2 lines —
+        -- proving the second recorder writes to a DIFFERENT file, not the
+        -- session transcript.
+        cliRaw <- LBS.readFile cliTranscript
+        length (filter (not . LBS.null) (LBS.split 0x0a cliRaw)) `shouldBe` 2
+
+    -- D3.6: harness routing must work even when no provider/model are
+    -- configured (the provider guard must not pre-empt the kind branch).
+    it "routes a harness session with no provider/model configured" $ do
+      withSystemTempDirectory "pureclaw-hsend-d36" $ \tmpDir -> do
+        let sid = "sess-harness-noprov"
+            key = "claude-code-2"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- _fe_provider and _fe_model are Nothing by default in the test env.
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "no-provider reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hello" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "no-provider reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["hello"]
+
+    -- D3.7: a blank/whitespace harness reply yields 200 {"response":""}
+    -- with NO Response entry written (only the Request entry).
+    it "writes no Response entry when the harness reply is blank" $ do
+      withSystemTempDirectory "pureclaw-hsend-d37" $ \tmpDir -> do
+        let sid = "sess-harness-blank"
+            key = "claude-code-4"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "   \n  "))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("anyone there?" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "")
+        entries <- readSessionTranscript tmpDir sid
+        let reqs  = [ e | e <- entries, _te_direction e == Request ]
+            resps = [ e | e <- entries, _te_direction e == Response ]
+        length reqs  `shouldBe` 1
+        resps `shouldBe` []
+
+    -- D3.8 (WU4 coverage): when the harness handle throws during
+    -- send/receive (e.g. tmux IO failure), 'sendToHarness' catches it,
+    -- logs, and responds 500 {"error":"Harness send failed"} — never a
+    -- crash, never a silent provider fallback.
+    it "responds 500 when the harness handle throws during send/receive" $ do
+      withSystemTempDirectory "pureclaw-hsend-d38" $ \tmpDir -> do
+        let sid = "sess-harness-throw"
+            key = "claude-code-9"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkThrowingHarnessHandle sentRef))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("will throw" :: Text)]))
+        st `shouldBe` HTTP.status500
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "error"
+          `shouldBe` Just (Aeson.String "Harness send failed")
+        -- The send was attempted (bytes reached the handle) before the throw.
+        sent <- readIORef sentRef
+        sent `shouldBe` ["will throw"]
+
+  -- -----------------------------------------------------------------------
   -- WU4: frozen system prompt + per-session agent rendering (§9.1)
   -- -----------------------------------------------------------------------
 
@@ -1395,6 +1746,51 @@ spec = do
           (Aeson.encode (object ["notprompt" .= ("X" :: Text)]))
         st `shouldBe` HTTP.status400
 
+  describe "harnessKeyFromKind (WU1)" $ do
+    it "returns Just the tmux window for a tmux-backed harness" $
+      harnessKeyFromKind
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+        `shouldBe` Just "claude-code-2"
+
+    it "returns Nothing for a non-tmux harness backend" $
+      harnessKeyFromKind
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          TbLocal Nothing []))
+        `shouldBe` Nothing
+
+    it "returns Nothing for a provider session" $
+      harnessKeyFromKind
+        (SkProvider (ProviderSpec (inferProviderId "claude-3-5") (ModelId "claude-3-5") Nothing))
+        `shouldBe` Nothing
+
+  describe "shouldRouteToHarness (WU1)" $ do
+    it "is True for a tmux-backed harness" $
+      shouldRouteToHarness
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+        `shouldBe` True
+
+    it "is False for a non-tmux harness backend" $
+      shouldRouteToHarness
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          TbLocal Nothing []))
+        `shouldBe` False
+
+    it "is False for a provider session" $
+      shouldRouteToHarness
+        (SkProvider (ProviderSpec (inferProviderId "claude-3-5") (ModelId "claude-3-5") Nothing))
+        `shouldBe` False
+
+  describe "_fe_startHarness default stub (WU1)" $
+    it "returns Left for the unwired test FrontendEnv" $ do
+      env <- mkTestFrontendEnv
+      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") TbLocal Nothing []
+      result <- _fe_startHarness env spec' mkNoOpTranscriptHandle
+      case result of
+        Left _  -> pure ()
+        Right _ -> expectationFailure "expected default stub to return Left"
+
 
 -- ---------------------------------------------------------------------------
 -- Test helpers
@@ -1425,6 +1821,7 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_tabCount     = tabCountRef
     , _fe_listTabs     = pure []
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
+    , _fe_startHarness = \_ _ -> pure (Left (HarnessBinaryNotFound "harness start not wired"))
     , _fe_listModels   = \_ -> pure []
     , _fe_listProviders = pure ([] :: [ProviderInfo])
     , _fe_broker       = Nothing
@@ -1486,6 +1883,157 @@ providerNewTabBody = Aeson.encode $ object
           ]
       ]
   ]
+
+-- | A harness New-tab request body. The request carries a placeholder
+-- @local@ backend (the frontend has no tmux coordinates yet); the spawn
+-- replaces it with the real 'TmuxConfig' from the 'StartedHarness'.
+harnessNewTabBody :: LBS.ByteString
+harnessNewTabBody = Aeson.encode $ object
+  [ "kind" .= object
+      [ "tag" .= ("session" :: Text)
+      , "session_kind" .= object
+          [ "tag"     .= ("harness" :: Text)
+          , "flavour" .= ("claude-code" :: Text)
+          , "backend" .= object [ "tag" .= ("local" :: Text) ]
+          ]
+      ]
+  ]
+
+-- | A fake '_fe_startHarness' that registers a no-op 'HarnessHandle' under
+-- the given key and returns a 'StartedHarness' whose tmux window matches
+-- that key. Mirrors the dispatcher's real contract closely enough for the
+-- API layer's behaviour (registration + coordinate persistence) to be
+-- exercised without spawning a real process. The harness map ref is the
+-- same '_fe_harnesses' the env carries, so registration is observable.
+fakeStartHarness
+  :: IORef (Map.Map Text HarnessHandle)
+  -> Text
+  -> (HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness))
+fakeStartHarness harnessRef key _ _ = do
+  modifyIORef' harnessRef (Map.insert key mkNoOpHarnessHandle)
+  pure $ Right $ StartedHarness key
+    (TmuxConfig { _tc_session = "pureclaw", _tc_window = key, _tc_pane = Nothing })
+
+-- | A fake 'HarnessHandle' for the WU3 send-routing tests. It captures the
+-- bytes written via '_hh_send' into the supplied 'IORef' (newest last) and
+-- returns the canned bytes from '_hh_receive'. Lets a test assert both that
+-- the send was routed to the harness and that the route's response was
+-- surfaced — without spawning a real tmux process.
+mkFakeHarnessHandle :: IORef [ByteString] -> ByteString -> HarnessHandle
+mkFakeHarnessHandle sentRef canned = HarnessHandle
+  { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
+  , _hh_receive = pure canned
+  , _hh_name    = "fake-harness"
+  , _hh_session = "pureclaw"
+  , _hh_status  = pure HarnessRunning
+  , _hh_stop    = pure ()
+  }
+
+-- | Read every event currently in a broker 'Subscription' queue, waiting up
+-- to @budgetMicros@ for the first arrival. Returns the accumulated list in
+-- publish order. Mirrors the drain helper in "Frontend.ActivityProbeSpec".
+drainBrokerQueue :: Int -> Subscription -> IO [BrokerEvent]
+drainBrokerQueue budgetMicros sub = do
+  first <- timeout budgetMicros $ atomically (readTBQueue (_sub_queue sub))
+  case first of
+    Nothing  -> pure []
+    Just ev0 -> (ev0 :) <$> drainNonBlocking
+  where
+    drainNonBlocking :: IO [BrokerEvent]
+    drainNonBlocking = do
+      mEv <- timeout 10000 $ atomically (readTBQueue (_sub_queue sub))
+      case mEv of
+        Nothing -> pure []
+        Just ev -> (ev :) <$> drainNonBlocking
+
+-- | A fake 'HarnessHandle' whose '_hh_receive' throws, exercising the
+-- exception path in 'sendToHarness' (the @try \@SomeException@ around the
+-- '_hh_send'\/'_hh_receive' interaction). It records the send like
+-- 'mkFakeHarnessHandle' so the test can confirm the send happened before
+-- the throw, then surfaces a 500.
+mkThrowingHarnessHandle :: IORef [ByteString] -> HarnessHandle
+mkThrowingHarnessHandle sentRef = HarnessHandle
+  { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
+  , _hh_receive = throwIO (userError "boom")
+  , _hh_name    = "fake-throwing-harness"
+  , _hh_session = "pureclaw"
+  , _hh_status  = pure HarnessRunning
+  , _hh_stop    = pure ()
+  }
+
+-- | A fake handle that, like a restart-discovered REAL handle, ALSO records
+-- to its OWN (separate) transcript file — simulating how
+-- 'discoverHarnesses' wires the CLI's own session transcript into the
+-- rediscovered handle. Used to prove 'sendToHarness' does not duplicate
+-- entries in the *session* transcript when the handle records elsewhere.
+mkRecordingFakeHarnessHandle :: FilePath -> IORef [ByteString] -> ByteString -> HarnessHandle
+mkRecordingFakeHarnessHandle ownTranscript sentRef canned = HarnessHandle
+  { _hh_send    = \bs -> do
+      modifyIORef' sentRef (++ [bs])
+      LBS.appendFile ownTranscript (LBS.fromStrict bs <> "\n")
+  , _hh_receive = do
+      LBS.appendFile ownTranscript (LBS.fromStrict canned <> "\n")
+      pure canned
+  , _hh_name    = "fake-recording-harness"
+  , _hh_session = "pureclaw"
+  , _hh_status  = pure HarnessRunning
+  , _hh_stop    = pure ()
+  }
+
+-- | Write a harness-backed session to disk: @session.json@ whose
+-- @_sm_kind@ is 'SkHarness' over a 'TbTmux' backend with the given window
+-- name (the harness map key), plus an empty (but present) transcript so
+-- the @/send@ handler's 404 existence check passes.
+writeHarnessSession :: FilePath -> Text -> Text -> IO ()
+writeHarnessSession baseDir sid windowKey = do
+  let dir = baseDir </> T.unpack sid
+  createDirectoryIfMissing True dir
+  let hSpecRec = HarnessSpec
+        { _h_flavour = HClaudeCode
+        , _h_backend = TbTmux (TmuxConfig
+            { _tc_session = "pureclaw"
+            , _tc_window  = windowKey
+            , _tc_pane    = Nothing
+            })
+        , _h_cwd  = Nothing
+        , _h_args = []
+        }
+      meta = SessionMeta
+        { _sm_id                = SessionId sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = SkHarness hSpecRec
+        , _sm_model             = ""
+        , _sm_channel           = "web"
+        , _sm_createdAt         = epochH
+        , _sm_lastActive        = epochH
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
+        }
+      epochH = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+  LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
+  LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Read and decode a session's @transcript.jsonl@ into entries (oldest
+-- first), tolerating a missing or empty file (returns @[]@).
+readSessionTranscript :: FilePath -> Text -> IO [TranscriptEntry]
+readSessionTranscript baseDir sid = do
+  let p = baseDir </> T.unpack sid </> "transcript.jsonl"
+  ok <- doesFileExist p
+  if not ok then pure [] else do
+    raw <- LBS.readFile p
+    let ls = filter (not . LBS.null) (LBS.split 0x0a raw)
+    pure (foldr (\x acc -> maybe acc (: acc) (Aeson.decode' x)) [] ls)
+
+-- | List the entries under a sessions base dir, ignoring a missing base
+-- dir. Used to assert a failed harness spawn left no session directory
+-- behind.
+listSessionDirs :: FilePath -> IO [FilePath]
+listSessionDirs baseDir = do
+  exists <- doesDirectoryExist baseDir
+  if not exists then pure [] else listDirectory baseDir
 
 -- | A provider New-tab request body carrying a @branch_from@ spec.
 branchBody :: Text -> Text -> LBS.ByteString

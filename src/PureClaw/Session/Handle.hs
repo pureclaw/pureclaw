@@ -15,6 +15,7 @@ module PureClaw.Session.Handle
   , resolveBranchSeed
     -- * Enumeration and lookup
   , listSessions
+  , tryLoad
   , ResolveError (..)
   , resolveSessionRef
     -- * Runtime validation
