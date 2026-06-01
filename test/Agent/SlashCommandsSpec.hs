@@ -26,6 +26,7 @@ import PureClaw.Session.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
+import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux
 import PureClaw.Handles.Transcript
 import PureClaw.Providers.Class
@@ -382,6 +383,28 @@ spec = do
       env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdNew ctx
       contextTotalInputTokens ctx' `shouldBe` 100
+
+    -- D4.4 — /harness start wiring regression. With the default Deny policy the
+    -- spawn path short-circuits at pre-authorization (no tmux IO), exercising
+    -- the new session/windowName/registry-threaded signature end-to-end and
+    -- confirming the failure surfaces a status message without mutating the
+    -- legacy map or the registry.
+    it "/harness start surfaces a failure status and leaves the maps untouched" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env0 <- mkEnv sentRef
+      reg <- Reg.newRegistry
+      let env = env0 { _env_harnessRegistry = reg }
+      _ <- executeSlashCommand env
+             (CmdHarness (HarnessStart "claude" Nothing False)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "Failed to start harness 'claude'"
+        Nothing -> expectationFailure "Expected a harness-start failure message"
+      -- Legacy name-keyed map and the registry both stay empty on failure.
+      harnesses <- readIORef (_env_harnesses env)
+      Map.null harnesses `shouldBe` True
+      entries <- Reg.snapshot reg
+      length entries `shouldBe` 0
 
     it "/status shows session info" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)

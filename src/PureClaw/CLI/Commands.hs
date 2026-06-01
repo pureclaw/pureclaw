@@ -70,7 +70,6 @@ import PureClaw.Frontend.StreamBroker
   )
 import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
 import PureClaw.Harness.Registry qualified as Registry
-import PureClaw.Harness.Tmux (renameWindow)
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -763,11 +762,11 @@ runChat opts = do
                       cwd       = fmap T.unpack (SessionTypes._h_cwd spec)
                       canonical = fromMaybe name (resolveHarnessName name)
                       harnessKey = canonical <> "-" <> T.pack (show windowIdx)
-                  result <- startHarnessByName policy transcript windowIdx name cwd skipPerms
+                  result <- startHarnessByName policy transcript "pureclaw" name
+                              harnessKey windowIdx cwd skipPerms harnessReg
                   case result of
                     Left err -> pure (Left err)
-                    Right hh -> do
-                      renameWindow "pureclaw" windowIdx harnessKey
+                    Right (_hid, hh) -> do
                       modifyIORef' harnessRef (Map.insert harnessKey hh)
                       modifyIORef' windowIdxRef (+ 1)
                       pure (Right (StartedHarness harnessKey
