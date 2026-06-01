@@ -159,6 +159,20 @@ Working reference (CLI): `/harness start` → `startHarnessByName` (`SlashComman
   - D4.3 No `-Wall -Werror`/hlint regressions.
 - **Depends on:** WU1–WU3.
 
+## WU4 coverage assessment (measured 2026-06-01)
+
+Full suite: **2277 examples, 0 failures, 9 pending**. Build clean under `-Wall -Werror`; hlint clean on changed files.
+
+`PureClaw.Frontend.API` HPC (full test tix): **69% expressions (1500/2165), 68% alternatives, 52% top-level decls.** This module-level figure is BELOW the global 95% target, but:
+- It is dominated by **pre-existing integration-only surfaces** unchanged by this epic: the provider `doCompletion`/`runCompletionLoop` tool loop, the WebSocket/stream handlers, and `probeHarness`/`captureWindow` tmux IO. The adjacent `PureClaw.Frontend.ActivityProbe` is already staged-waived for exactly this reason (`probeHarness` needs real tmux). The 52% top-level figure is further deflated by HPC's per-derived-instance accounting (each `ToJSON`/`Show` method counts as a decl), the documented project-wide artifact.
+- This epic did NOT regress coverage: the new logic is unit-tested — `harnessKeyFromKind`/`shouldRouteToHarness` (both arms), `createHarnessTab` (success + all 3 failure arms via `harnessErrorResponse` 403/503), `handleSend` kind-branch, `sendToHarness` (success, no-handle 503, blank-output, restart routing, AND the exception→500 arm via D3.8), `recordHarnessEntry`. Verified by the three per-WU adversarial reviews + the D3.8 tick check.
+
+Coverage of the two formerly-uncovered NEW expressions:
+1. `createHarnessTab` `Just broker -> _streamBroker_publish (SaSessionCreated updatedMeta)` — **NOW COVERED** by a dedicated test in `APISpec` ("POST /api/tabs/new (harness spawn — WU4 broker publish)"). The earlier claim that this arm was "consistent with the pre-existing, also-untested provider-create publish arm" was **incorrect**: the provider-create publish arm IS tested (`ActivityProbeSpec` D18) and the broker-capture infra already exists. The new test builds a `Just`-broker env, subscribes, POSTs the harness new-tab body, drains the subscriber queue, and asserts exactly one `ActivityChanged _ (SaSessionCreated m)` whose `_sm_kind` is `SkHarness hs` with `_h_backend hs == TbTmux tc` and `_tc_window tc == "claude-code-0"`. This both exercises the publish arm AND validates the post-spawn-meta correctness fix (the PUBLISHED meta carries the real spawned `TbTmux` backend, not the request placeholder).
+2. `PureClaw.CLI.Commands._fe_startHarness` real implementation — spawns a live tmux session + `claude` binary; **integration-only**, same class as the waived `ActivityProbe.runActivityProbeLoop`. Not unit-testable; the seam is exercised in tests via an injected fake.
+
+No `stagedWaivers` entry added: per policy point 1, waivers are for deferred/stubbed module bodies, not integration-only IO. Gap #1 is now unit-tested; the remaining gap #2 is integration-only and documented here; `Frontend.API`/`CLI.Commands` were already non-waived and below the per-module target prior to this epic.
+
 ## Risks / resolved questions
 - **R1 (RESOLVED — Completeness).** The four `FrontendEnv` construction sites that `-Werror` will
   force: `CLI/Commands.hs:733` (production), `test/Frontend/APISpec.hs:1414`,

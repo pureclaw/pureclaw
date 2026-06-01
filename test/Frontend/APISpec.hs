@@ -2,6 +2,9 @@
 {- HLINT ignore "Use head" -}
 module Frontend.APISpec (spec) where
 
+import Control.Concurrent.STM (atomically, readTBQueue)
+import Control.Exception (throwIO)
+import System.Timeout (timeout)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (object, (.=))
 import Data.Aeson.Key qualified as AesonKey
@@ -27,6 +30,14 @@ import Test.Hspec
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Core.Types (ChannelKind (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
+import PureClaw.Frontend.StreamBroker
+  ( BrokerEvent (..)
+  , SessionActivity (..)
+  , Subscription (..)
+  , defaultBrokerConfig
+  , mkInProcessBroker
+  , _streamBroker_subscribe
+  )
 import PureClaw.Handles.Harness
   ( HarnessError (..)
   , HarnessHandle (..)
@@ -251,6 +262,43 @@ spec = do
         -- The provider path leaves the harness map empty.
         harnesses <- readIORef (_fe_harnesses env)
         Map.null harnesses `shouldBe` True
+
+  -- -----------------------------------------------------------------------
+  -- WU4 — POST /api/tabs/new publishes the POST-spawn meta to the broker
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/tabs/new (harness spawn — WU4 broker publish)" $
+    -- D4: a successful harness spawn publishes exactly one
+    -- ActivityChanged (SaSessionCreated meta) event whose meta carries the
+    -- REAL spawned backend (TbTmux with the spawn's window), not the
+    -- placeholder 'local' backend in the request. This covers the
+    -- @Just broker -> _streamBroker_publish ...@ arm of createHarnessTab
+    -- and validates the post-spawn-meta fix.
+    it "publishes the post-spawn meta carrying the real TbTmux backend (D4)" $ do
+      withSystemTempDirectory "pureclaw-wu4-d4" $ \tmpDir -> do
+        broker <- mkInProcessBroker defaultBrokerConfig
+        eSub   <- _streamBroker_subscribe broker
+        sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_broker       = Just broker
+              , _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0"
+              }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        evs <- drainBrokerQueue 500000 sub
+        let created = [ m | ActivityChanged _ (SaSessionCreated m) <- evs ]
+        case created of
+          [m] -> case _sm_kind m of
+            SkHarness hs -> case _h_backend hs of
+              TbTmux tc -> _tc_window tc `shouldBe` "claude-code-0"
+              other -> expectationFailure
+                ("expected TbTmux backend in published meta, got " <> show other)
+            other -> expectationFailure
+              ("expected SkHarness kind in published meta, got " <> show other)
+          other -> expectationFailure
+            ("expected exactly one SaSessionCreated event, got "
+              <> show (length other))
 
   -- -----------------------------------------------------------------------
   -- WU1 — POST /api/tabs/new with branch_from (session branching)
@@ -1216,6 +1264,28 @@ spec = do
         length reqs  `shouldBe` 1
         resps `shouldBe` []
 
+    -- D3.8 (WU4 coverage): when the harness handle throws during
+    -- send/receive (e.g. tmux IO failure), 'sendToHarness' catches it,
+    -- logs, and responds 500 {"error":"Harness send failed"} — never a
+    -- crash, never a silent provider fallback.
+    it "responds 500 when the harness handle throws during send/receive" $ do
+      withSystemTempDirectory "pureclaw-hsend-d38" $ \tmpDir -> do
+        let sid = "sess-harness-throw"
+            key = "claude-code-9"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkThrowingHarnessHandle sentRef))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("will throw" :: Text)]))
+        st `shouldBe` HTTP.status500
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "error"
+          `shouldBe` Just (Aeson.String "Harness send failed")
+        -- The send was attempted (bytes reached the handle) before the throw.
+        sent <- readIORef sentRef
+        sent `shouldBe` ["will throw"]
+
   -- -----------------------------------------------------------------------
   -- WU4: frozen system prompt + per-session agent rendering (§9.1)
   -- -----------------------------------------------------------------------
@@ -1854,6 +1924,38 @@ mkFakeHarnessHandle sentRef canned = HarnessHandle
   { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
   , _hh_receive = pure canned
   , _hh_name    = "fake-harness"
+  , _hh_session = "pureclaw"
+  , _hh_status  = pure HarnessRunning
+  , _hh_stop    = pure ()
+  }
+
+-- | Read every event currently in a broker 'Subscription' queue, waiting up
+-- to @budgetMicros@ for the first arrival. Returns the accumulated list in
+-- publish order. Mirrors the drain helper in "Frontend.ActivityProbeSpec".
+drainBrokerQueue :: Int -> Subscription -> IO [BrokerEvent]
+drainBrokerQueue budgetMicros sub = do
+  first <- timeout budgetMicros $ atomically (readTBQueue (_sub_queue sub))
+  case first of
+    Nothing  -> pure []
+    Just ev0 -> (ev0 :) <$> drainNonBlocking
+  where
+    drainNonBlocking :: IO [BrokerEvent]
+    drainNonBlocking = do
+      mEv <- timeout 10000 $ atomically (readTBQueue (_sub_queue sub))
+      case mEv of
+        Nothing -> pure []
+        Just ev -> (ev :) <$> drainNonBlocking
+
+-- | A fake 'HarnessHandle' whose '_hh_receive' throws, exercising the
+-- exception path in 'sendToHarness' (the @try \@SomeException@ around the
+-- '_hh_send'\/'_hh_receive' interaction). It records the send like
+-- 'mkFakeHarnessHandle' so the test can confirm the send happened before
+-- the throw, then surfaces a 500.
+mkThrowingHarnessHandle :: IORef [ByteString] -> HarnessHandle
+mkThrowingHarnessHandle sentRef = HarnessHandle
+  { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
+  , _hh_receive = throwIO (userError "boom")
+  , _hh_name    = "fake-throwing-harness"
   , _hh_session = "pureclaw"
   , _hh_status  = pure HarnessRunning
   , _hh_stop    = pure ()

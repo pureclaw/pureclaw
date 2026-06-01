@@ -1018,12 +1018,16 @@ createHarnessTab env tabKind spec sk curCount respond = do
       modifyIORef' (_sh_meta sh) $ \m ->
         m { _sm_kind = SkHarness (spec { _h_backend = TbTmux (_shh_tmux st) }) }
       _sh_save sh
+      -- Read back the post-spawn meta so the live broadcast carries the real
+      -- TbTmux backend (the persisted session.json above is already correct;
+      -- the original 'meta' still holds the placeholder backend).
+      updatedMeta <- readIORef (_sh_meta sh)
       -- Only a successful spawn consumes a tab slot.
       writeIORef (_fe_tabCount env) (curCount + 1)
       case _fe_broker env of
         Just broker ->
           _streamBroker_publish broker
-            (ActivityChanged (_sm_id meta) (SaSessionCreated meta))
+            (ActivityChanged (_sm_id updatedMeta) (SaSessionCreated updatedMeta))
         Nothing -> pure ()
       broadcastLists env
       respond $ jsonResponse status200 NewTabResponse
