@@ -32,8 +32,8 @@ module PureClaw.Frontend.API
   ) where
 
 import Control.Concurrent.STM (TVar, newTVarIO)
-import Control.Exception (IOException, SomeException, bracket_, try)
-import Control.Monad (filterM, when)
+import Control.Exception (IOException, SomeException, bracket, bracket_, try)
+import Control.Monad (filterM, unless, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
 import Data.Aeson.Types qualified as AesonTypes
@@ -52,6 +52,8 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
 import Network.HTTP.Types
 import Network.Wai
 import System.Directory (doesFileExist, getFileSize, removeDirectoryRecursive, renameFile)
@@ -95,6 +97,7 @@ import PureClaw.Session.Handle
   , setArchived
   , setDescription
   , touchSessionLastActive
+  , tryLoad
   )
 import PureClaw.Session.Types
 import PureClaw.Handles.Transcript
@@ -998,7 +1001,11 @@ createHarnessTab env tabKind spec sk curCount respond = do
         }
   sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
   _sh_save sh
-  started <- _fe_startHarness env spec (_sh_transcript sh)
+  -- Pass a NON-recording transcript to the harness so it does not
+  -- double-record entries: 'handleSend' is the SOLE recorder of harness
+  -- Request/Response entries to the session transcript (WU3). Recording
+  -- here too would duplicate every fresh-session entry.
+  started <- _fe_startHarness env spec mkNoOpTranscriptHandle
   case started of
     Left err -> do
       -- Roll back the session dir created above. A missing dir must not
@@ -1160,22 +1167,109 @@ handleSend env sid req respond = do
             Left _ ->
               respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"message\": \"...\"}" :: Text)])
             Right (SendRequest userText reqModel) -> do
-              mProvider <- readIORef (_fe_provider env)
-              mModel <- readIORef (_fe_model env)
-              case (mProvider, mModel) of
-                (Nothing, _) ->
-                  respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
-                (_, Nothing) ->
-                  respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
-                (Just provider, Just model) -> do
-                  result <- try @SomeException $
-                    doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
-                  case result of
-                    Left e -> do
-                      _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
-                      respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
-                    Right respText ->
-                      respond $ jsonResponse status200 (object ["response" .= respText])
+              -- Branch on the session's kind BEFORE the provider/model guard:
+              -- an AI-Harness session must route to its live tmux harness even
+              -- on an instance with no LLM provider configured. A failure to
+              -- load the meta (missing/malformed) falls through to the
+              -- provider path, preserving prior behaviour.
+              mMeta <- tryLoad (_fe_sessionsDir env) (T.unpack sid)
+              case mMeta >>= (harnessKeyFromKind . _sm_kind) of
+                Just key ->
+                  sendToHarness env sid key userText transcriptPath respond
+                Nothing -> do
+                  mProvider <- readIORef (_fe_provider env)
+                  mModel <- readIORef (_fe_model env)
+                  case (mProvider, mModel) of
+                    (Nothing, _) ->
+                      respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
+                    (_, Nothing) ->
+                      respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
+                    (Just provider, Just model) -> do
+                      result <- try @SomeException $
+                        doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
+                      case result of
+                        Left e -> do
+                          _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
+                          respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
+                        Right respText ->
+                          respond $ jsonResponse status200 (object ["response" .= respText])
+
+-- | Route a user message to a live tmux harness handle (WU3, defect #2).
+-- This is the harness analogue of 'doCompletion': it is the SOLE recorder
+-- of the harness Request\/Response transcript entries (the harness handle
+-- itself is given a no-op transcript so it does not double-record), it
+-- broadcasts through the same broadcasting transcript handle 'doCompletion'
+-- uses, and it bumps @_sm_lastActive@ and re-broadcasts the lists snapshot
+-- on success.
+--
+-- If no live handle is registered under @key@ (e.g. the harness crashed or
+-- was never reconnected after a restart) it returns a clear 503 — never a
+-- silent provider completion and never a 500.
+sendToHarness
+  :: FrontendEnv
+  -> Text       -- ^ session id
+  -> Text       -- ^ harness map key (= persisted tmux window name)
+  -> Text       -- ^ user message text
+  -> FilePath   -- ^ session transcript path
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+sendToHarness env sid key userText transcriptPath respond = do
+  handles <- readIORef (_fe_harnesses env)
+  case Map.lookup key handles of
+    Nothing ->
+      respond $ jsonResponse status503
+        (object ["error" .= ("harness '" <> key <> "' is not running" :: Text)])
+    Just hh -> do
+      -- 'handleSend' is the sole writer of THIS session's transcript: on the
+      -- fresh-create path the harness handle was given a no-op transcript
+      -- ('createHarnessTab'), and a restart-discovered handle records to the
+      -- CLI's own session transcript (a different file), so 'sendToHarness'
+      -- recording here never duplicates an entry in this session transcript.
+      -- 'bracket' guarantees the transcript fd is flushed + closed even if
+      -- '_hh_send'/'_hh_receive' throws (tmux IO), so a failed send cannot
+      -- leak a file descriptor.
+      result <- try @SomeException $
+        bracket
+          (mkBroadcastingFileTranscriptHandle
+             (_fe_broker env) (SessionId sid) (_fe_logger env) transcriptPath)
+          (\th -> _th_flush th >> _th_close th)
+          (\th -> do
+            -- Record the user message as a Request entry (mirrors 'harnesseSend').
+            recordHarnessEntry th Request userText
+            _hh_send hh (TE.encodeUtf8 userText)
+            raw <- _hh_receive hh
+            let resp = sanitizeHarnessOutput (TE.decodeUtf8 raw)
+            -- Only record a Response entry when the harness produced output;
+            -- a blank reply must not leave an empty/duplicate entry.
+            unless (T.null (T.strip resp)) $
+              recordHarnessEntry th Response resp
+            pure resp)
+      case result of
+        Left e -> do
+          _lh_logError (_fe_logger env) $ "Harness send error: " <> T.pack (show e)
+          respond $ jsonResponse status500 (object ["error" .= ("Harness send failed" :: Text)])
+        Right resp -> do
+          touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
+          broadcastLists env
+          respond $ jsonResponse status200 (object ["response" .= resp])
+
+-- | Record a single harness transcript entry, mirroring the field shape of
+-- 'harnesseSend'\/'harnessReceive' in "PureClaw.Harness.ClaudeCode".
+recordHarnessEntry :: TranscriptHandle -> Direction -> Text -> IO ()
+recordHarnessEntry th dir payload = do
+  entryId <- UUID.toText <$> UUID.nextRandom
+  now <- getCurrentTime
+  _th_record th TranscriptEntry
+    { _te_id            = entryId
+    , _te_timestamp     = now
+    , _te_harness       = Just "harness"
+    , _te_model         = Nothing
+    , _te_direction     = dir
+    , _te_payload       = encodePayload (TE.encodeUtf8 payload)
+    , _te_durationMs    = Nothing
+    , _te_correlationId = entryId
+    , _te_metadata      = Map.empty
+    }
 
 -- | Run a completion: load context, send to provider, execute any tool
 -- calls the model emits, and loop until the model produces a turn with

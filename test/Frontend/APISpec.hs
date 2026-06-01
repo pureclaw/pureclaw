@@ -10,6 +10,7 @@ import Data.ByteString.Builder qualified
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -26,7 +27,13 @@ import Test.Hspec
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Core.Types (ChannelKind (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
-import PureClaw.Handles.Harness (HarnessError (..), HarnessHandle, mkNoOpHarnessHandle)
+import PureClaw.Handles.Harness
+  ( HarnessError (..)
+  , HarnessHandle (..)
+  , HarnessStatus (..)
+  , mkNoOpHarnessHandle
+  )
+import Data.ByteString (ByteString)
 import PureClaw.Security.Command (CommandError (..))
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
@@ -43,6 +50,7 @@ import PureClaw.Session.Types
   , SessionKind (..)
   , ProviderSpec (..)
   , HarnessSpec (..)
+  , HarnessFlavour (..)
   , TerminalBackend (..)
   , TmuxConfig (..)
   , fixedFlavourLookup
@@ -1033,6 +1041,182 @@ spec = do
         (_sm_lastActive metaAfter > _sm_createdAt metaAfter) `shouldBe` True
 
   -- -----------------------------------------------------------------------
+  -- POST /api/sessions/{sid}/send — harness routing (WU3, defect #2)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/sessions/{sid}/send (harness routing — WU3)" $ do
+    -- D3.1: an SkHarness session with a live handle registered under its
+    -- key routes the message to the handle (not the provider) and returns
+    -- the handle's sanitized output as the response.
+    it "routes a harness session to its live tmux handle, not the provider" $ do
+      withSystemTempDirectory "pureclaw-hsend-d31" $ \tmpDir -> do
+        let sid = "sess-harness-1"
+            key = "claude-code-0"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "should-not-be-used"))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "harness says hi"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("ping" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "harness says hi")
+        -- The harness handle received the bytes …
+        sent <- readIORef sentRef
+        sent `shouldBe` ["ping"]
+        -- … and the provider was NOT invoked.
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+
+    -- D3.2: regression — a provider session still hits the provider/model
+    -- guard and runs doCompletion.
+    it "still routes a provider session through doCompletion" $ do
+      withSystemTempDirectory "pureclaw-hsend-d32" $ \tmpDir -> do
+        let agentsDir = tmpDir </> "agents"
+        writeSessionBootstrap tmpDir "sess-prov" Nothing True
+        se <- mkSendEnv tmpDir agentsDir Nothing
+        recorded <- sendOnce se "sess-prov" "hello"
+        length recorded `shouldBe` 1
+
+    -- D3.3: an SkHarness session with NO handle registered returns a clear
+    -- 503 "not running" — not a provider completion, not a 500.
+    it "returns a clear 503 when the harness is not running" $ do
+      withSystemTempDirectory "pureclaw-hsend-d33" $ \tmpDir -> do
+        let sid = "sess-harness-down"
+            key = "claude-code-7"
+        writeHarnessSession tmpDir sid key
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "m"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("ping" :: Text)]))
+        st `shouldBe` HTTP.status503
+        case lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "error" of
+          Just (Aeson.String msg) ->
+            msg `shouldSatisfy` T.isInfixOf "not running"
+          _ -> expectationFailure "expected a string 'error' field"
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+
+    -- D3.4: restart simulation — the persisted _tc_window key is recomputed
+    -- and used to find the rediscovered handle.
+    it "routes by the persisted tmux window key after a restart" $ do
+      withSystemTempDirectory "pureclaw-hsend-d34" $ \tmpDir -> do
+        let sid = "sess-harness-restart"
+            key = "claude-code-3"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Simulate discoverHarnesses re-registering under the persisted key.
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "reconnected"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("after restart" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "reconnected")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["after restart"]
+
+    -- D3.5: a successful harness send records exactly one Request and one
+    -- Response entry to the SESSION transcript (no duplicates).
+    it "records exactly one Request and one Response entry per send" $ do
+      withSystemTempDirectory "pureclaw-hsend-d35" $ \tmpDir -> do
+        let sid = "sess-harness-tx"
+            key = "claude-code-1"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "the reply"))
+        (st, _) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hi there" :: Text)]))
+        st `shouldBe` HTTP.status200
+        entries <- readSessionTranscript tmpDir sid
+        let reqs  = [ e | e <- entries, _te_direction e == Request ]
+            resps = [ e | e <- entries, _te_direction e == Response ]
+        length reqs  `shouldBe` 1
+        length resps `shouldBe` 1
+        _te_payload (head reqs)  `shouldBe` "hi there"
+        _te_payload (head resps) `shouldBe` "the reply"
+
+    -- D3.5b (restart hardening): a restart-discovered handle records to its
+    -- OWN (CLI) transcript — a different file. Prove the SESSION transcript
+    -- still gets exactly one Request + one Response (handleSend is the sole
+    -- writer of the session transcript; no cross-file duplication).
+    it "keeps the session transcript at 1+1 when the handle records elsewhere" $ do
+      withSystemTempDirectory "pureclaw-hsend-d35b" $ \tmpDir -> do
+        let sid = "sess-harness-restart"
+            key = "claude-code-7"
+            cliTranscript = tmpDir </> "cli-transcript.jsonl"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkRecordingFakeHarnessHandle cliTranscript sentRef "restart reply"))
+        (st, _) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("after restart" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- Session transcript: exactly one Request + one Response.
+        entries <- readSessionTranscript tmpDir sid
+        length [ e | e <- entries, _te_direction e == Request ]  `shouldBe` 1
+        length [ e | e <- entries, _te_direction e == Response ] `shouldBe` 1
+        -- The handle's own (separate) transcript received its 2 lines —
+        -- proving the second recorder writes to a DIFFERENT file, not the
+        -- session transcript.
+        cliRaw <- LBS.readFile cliTranscript
+        length (filter (not . LBS.null) (LBS.split 0x0a cliRaw)) `shouldBe` 2
+
+    -- D3.6: harness routing must work even when no provider/model are
+    -- configured (the provider guard must not pre-empt the kind branch).
+    it "routes a harness session with no provider/model configured" $ do
+      withSystemTempDirectory "pureclaw-hsend-d36" $ \tmpDir -> do
+        let sid = "sess-harness-noprov"
+            key = "claude-code-2"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- _fe_provider and _fe_model are Nothing by default in the test env.
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "no-provider reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hello" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "no-provider reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["hello"]
+
+    -- D3.7: a blank/whitespace harness reply yields 200 {"response":""}
+    -- with NO Response entry written (only the Request entry).
+    it "writes no Response entry when the harness reply is blank" $ do
+      withSystemTempDirectory "pureclaw-hsend-d37" $ \tmpDir -> do
+        let sid = "sess-harness-blank"
+            key = "claude-code-4"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "   \n  "))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("anyone there?" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "")
+        entries <- readSessionTranscript tmpDir sid
+        let reqs  = [ e | e <- entries, _te_direction e == Request ]
+            resps = [ e | e <- entries, _te_direction e == Response ]
+        length reqs  `shouldBe` 1
+        resps `shouldBe` []
+
+  -- -----------------------------------------------------------------------
   -- WU4: frozen system prompt + per-session agent rendering (§9.1)
   -- -----------------------------------------------------------------------
 
@@ -1659,6 +1843,87 @@ fakeStartHarness harnessRef key _ _ = do
   modifyIORef' harnessRef (Map.insert key mkNoOpHarnessHandle)
   pure $ Right $ StartedHarness key
     (TmuxConfig { _tc_session = "pureclaw", _tc_window = key, _tc_pane = Nothing })
+
+-- | A fake 'HarnessHandle' for the WU3 send-routing tests. It captures the
+-- bytes written via '_hh_send' into the supplied 'IORef' (newest last) and
+-- returns the canned bytes from '_hh_receive'. Lets a test assert both that
+-- the send was routed to the harness and that the route's response was
+-- surfaced — without spawning a real tmux process.
+mkFakeHarnessHandle :: IORef [ByteString] -> ByteString -> HarnessHandle
+mkFakeHarnessHandle sentRef canned = HarnessHandle
+  { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
+  , _hh_receive = pure canned
+  , _hh_name    = "fake-harness"
+  , _hh_session = "pureclaw"
+  , _hh_status  = pure HarnessRunning
+  , _hh_stop    = pure ()
+  }
+
+-- | A fake handle that, like a restart-discovered REAL handle, ALSO records
+-- to its OWN (separate) transcript file — simulating how
+-- 'discoverHarnesses' wires the CLI's own session transcript into the
+-- rediscovered handle. Used to prove 'sendToHarness' does not duplicate
+-- entries in the *session* transcript when the handle records elsewhere.
+mkRecordingFakeHarnessHandle :: FilePath -> IORef [ByteString] -> ByteString -> HarnessHandle
+mkRecordingFakeHarnessHandle ownTranscript sentRef canned = HarnessHandle
+  { _hh_send    = \bs -> do
+      modifyIORef' sentRef (++ [bs])
+      LBS.appendFile ownTranscript (LBS.fromStrict bs <> "\n")
+  , _hh_receive = do
+      LBS.appendFile ownTranscript (LBS.fromStrict canned <> "\n")
+      pure canned
+  , _hh_name    = "fake-recording-harness"
+  , _hh_session = "pureclaw"
+  , _hh_status  = pure HarnessRunning
+  , _hh_stop    = pure ()
+  }
+
+-- | Write a harness-backed session to disk: @session.json@ whose
+-- @_sm_kind@ is 'SkHarness' over a 'TbTmux' backend with the given window
+-- name (the harness map key), plus an empty (but present) transcript so
+-- the @/send@ handler's 404 existence check passes.
+writeHarnessSession :: FilePath -> Text -> Text -> IO ()
+writeHarnessSession baseDir sid windowKey = do
+  let dir = baseDir </> T.unpack sid
+  createDirectoryIfMissing True dir
+  let hSpecRec = HarnessSpec
+        { _h_flavour = HClaudeCode
+        , _h_backend = TbTmux (TmuxConfig
+            { _tc_session = "pureclaw"
+            , _tc_window  = windowKey
+            , _tc_pane    = Nothing
+            })
+        , _h_cwd  = Nothing
+        , _h_args = []
+        }
+      meta = SessionMeta
+        { _sm_id                = SessionId sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = SkHarness hSpecRec
+        , _sm_model             = ""
+        , _sm_channel           = "web"
+        , _sm_createdAt         = epochH
+        , _sm_lastActive        = epochH
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
+        }
+      epochH = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+  LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
+  LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Read and decode a session's @transcript.jsonl@ into entries (oldest
+-- first), tolerating a missing or empty file (returns @[]@).
+readSessionTranscript :: FilePath -> Text -> IO [TranscriptEntry]
+readSessionTranscript baseDir sid = do
+  let p = baseDir </> T.unpack sid </> "transcript.jsonl"
+  ok <- doesFileExist p
+  if not ok then pure [] else do
+    raw <- LBS.readFile p
+    let ls = filter (not . LBS.null) (LBS.split 0x0a raw)
+    pure (foldr (\x acc -> maybe acc (: acc) (Aeson.decode' x)) [] ls)
 
 -- | List the entries under a sessions base dir, ignoring a missing base
 -- dir. Used to assert a failed harness spawn left no session directory
