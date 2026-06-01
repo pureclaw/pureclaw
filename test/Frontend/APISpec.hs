@@ -26,7 +26,9 @@ import Test.Hspec
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Core.Types (ChannelKind (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
+import PureClaw.Handles.Harness (HarnessError (..))
 import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Handles.Transcript (mkNoOpTranscriptHandle)
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
   , CompletionResponse (..)
@@ -1395,6 +1397,51 @@ spec = do
           (Aeson.encode (object ["notprompt" .= ("X" :: Text)]))
         st `shouldBe` HTTP.status400
 
+  describe "harnessKeyFromKind (WU1)" $ do
+    it "returns Just the tmux window for a tmux-backed harness" $
+      harnessKeyFromKind
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+        `shouldBe` Just "claude-code-2"
+
+    it "returns Nothing for a non-tmux harness backend" $
+      harnessKeyFromKind
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          TbLocal Nothing []))
+        `shouldBe` Nothing
+
+    it "returns Nothing for a provider session" $
+      harnessKeyFromKind
+        (SkProvider (ProviderSpec (inferProviderId "claude-3-5") (ModelId "claude-3-5") Nothing))
+        `shouldBe` Nothing
+
+  describe "shouldRouteToHarness (WU1)" $ do
+    it "is True for a tmux-backed harness" $
+      shouldRouteToHarness
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+        `shouldBe` True
+
+    it "is False for a non-tmux harness backend" $
+      shouldRouteToHarness
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          TbLocal Nothing []))
+        `shouldBe` False
+
+    it "is False for a provider session" $
+      shouldRouteToHarness
+        (SkProvider (ProviderSpec (inferProviderId "claude-3-5") (ModelId "claude-3-5") Nothing))
+        `shouldBe` False
+
+  describe "_fe_startHarness default stub (WU1)" $
+    it "returns Left for the unwired test FrontendEnv" $ do
+      env <- mkTestFrontendEnv
+      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") TbLocal Nothing []
+      result <- _fe_startHarness env spec' mkNoOpTranscriptHandle
+      case result of
+        Left _  -> pure ()
+        Right _ -> expectationFailure "expected default stub to return Left"
+
 
 -- ---------------------------------------------------------------------------
 -- Test helpers
@@ -1425,6 +1472,7 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_tabCount     = tabCountRef
     , _fe_listTabs     = pure []
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
+    , _fe_startHarness = \_ _ -> pure (Left (HarnessBinaryNotFound "harness start not wired"))
     , _fe_listModels   = \_ -> pure []
     , _fe_listProviders = pure ([] :: [ProviderInfo])
     , _fe_broker       = Nothing

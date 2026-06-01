@@ -3,6 +3,10 @@ module PureClaw.Frontend.API
     apiApp
     -- * Environment
   , FrontendEnv (..)
+  , StartedHarness (..)
+    -- * Harness routing helpers
+  , harnessKeyFromKind
+  , shouldRouteToHarness
     -- * Stream connection guard (per-origin cap)
   , StreamGuard (..)
   , mkStreamGuard
@@ -42,6 +46,7 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -140,6 +145,13 @@ data FrontendEnv = FrontendEnv
     -- On success, the tab is removed from the registry and its resources
     -- are cleaned up (session saved for session-backed tabs, process
     -- killed for raw shells).
+  , _fe_startHarness :: HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness)
+    -- ^ Start a tmux-backed harness process for a frontend-created
+    -- AI-Harness session. The dispatcher provides the real implementation
+    -- (allocates a tmux window, spawns the harness, registers the handle);
+    -- the default stub returns @Left@ to signal "not wired". On success it
+    -- returns the harness map key and the tmux coordinates to persist in the
+    -- session's @_sm_kind@.
   , _fe_listModels   :: Text -> IO [Text]
     -- ^ List model IDs for the named provider. Runs the live
     -- @\/v1\/models@ call on the provider using the currently
@@ -164,6 +176,24 @@ data FrontendEnv = FrontendEnv
     -- without ever returning final text. Reaching the cap returns a
     -- placeholder response; it does not throw.
   }
+
+-- | Result of successfully starting a harness via '_fe_startHarness'.
+data StartedHarness = StartedHarness
+  { _shh_key  :: !Text        -- ^ harness map key = canonical <> "-" <> show windowIdx (also the tmux window name)
+  , _shh_tmux :: !TmuxConfig  -- ^ coordinates to persist in the session's _sm_kind HarnessSpec._h_backend
+  }
+
+-- | The harness map key for a session kind, if it is a tmux-backed harness.
+-- @Just k@  => route this session to harness handle @k@; @Nothing@ => provider session.
+harnessKeyFromKind :: SessionKind -> Maybe Text
+harnessKeyFromKind (SkHarness hs) = case _h_backend hs of
+  TbTmux tc -> Just (_tc_window tc)
+  _         -> Nothing
+harnessKeyFromKind _ = Nothing
+
+-- | Routing decision: does this session route to a harness (vs the LLM provider)?
+shouldRouteToHarness :: SessionKind -> Bool
+shouldRouteToHarness = Maybe.isJust . harnessKeyFromKind
 
 -- | Per-origin WS subscriber counter. Lives at the same lifetime as the
 -- broker (constructed once in @startWithChannel@). The WS handler calls
