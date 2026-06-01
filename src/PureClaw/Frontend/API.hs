@@ -79,6 +79,7 @@ import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Tab (TabKind (..))
 import PureClaw.Harness.ClaudeCode (isIdle)
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
@@ -109,6 +110,14 @@ import PureClaw.Transcript.Types
 data FrontendEnv = FrontendEnv
   { _fe_harnesses    :: IORef (Map.Map Text HarnessHandle)
     -- ^ Live harness handles from AgentEnv.
+  , _fe_harnessRegistry :: Registry.HarnessRegistry
+    -- ^ The durable 'HarnessId' registry — the source of truth for harness
+    -- identity and health (design @docs\/harness-registry.md@). ADDITIVE
+    -- alongside the legacy '_fe_harnesses' map: the map keys by mutable
+    -- window name, whereas the registry keys by a UUID-backed
+    -- 'Registry.HarnessId' that survives tmux rename\/move and restart. Shares
+    -- the SAME underlying 'TVar' as 'AgentEnv._env_harnessRegistry' so the
+    -- frontend and agent observe the same registry.
   , _fe_sessionsDir  :: FilePath
     -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
   , _fe_recentLimit  :: Int

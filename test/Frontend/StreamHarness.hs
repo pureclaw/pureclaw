@@ -49,6 +49,7 @@ import System.Timeout (timeout)
 import PureClaw.Frontend.API
 import PureClaw.Frontend.Stream (streamApp)
 import PureClaw.Handles.Harness (HarnessError (..))
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Tools.Registry (emptyRegistry)
@@ -73,11 +74,13 @@ mkTestFrontendEnv
   -> IO FrontendEnv
 mkTestFrontendEnv sessionsDir broker guard = do
   harnesses    <- newIORef Map.empty
+  harnessReg   <- Registry.newRegistry
   providerRef  <- newIORef Nothing
   modelRef     <- newIORef Nothing
   tabCountRef  <- newIORef 0
   pure FrontendEnv
     { _fe_harnesses    = harnesses
+    , _fe_harnessRegistry = harnessReg
     , _fe_sessionsDir  = sessionsDir
     , _fe_recentLimit  = 20
     , _fe_provider     = providerRef

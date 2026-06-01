@@ -43,6 +43,7 @@ import PureClaw.Frontend.API
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.ActivityProbe (runActivityProbeLoopWith)
 import PureClaw.Handles.Harness (HarnessError (..))
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Frontend.StreamBroker
   ( BrokerEvent (..)
   , SessionActivity (..)
@@ -279,11 +280,13 @@ spec = do
 mkFrontendEnvForD18 :: StreamBroker -> FilePath -> IO FrontendEnv
 mkFrontendEnvForD18 broker sessionsDir = do
   harnessesRef <- newIORef Map.empty
+  harnessReg   <- Registry.newRegistry
   providerRef  <- newIORef Nothing
   modelRef     <- newIORef Nothing
   tabCountRef  <- newIORef 0
   pure FrontendEnv
     { _fe_harnesses    = harnessesRef
+    , _fe_harnessRegistry = harnessReg
     , _fe_sessionsDir  = sessionsDir
     , _fe_recentLimit  = 20
     , _fe_provider     = providerRef

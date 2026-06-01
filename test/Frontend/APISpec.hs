@@ -44,6 +44,7 @@ import PureClaw.Handles.Harness
   , HarnessStatus (..)
   , mkNoOpHarnessHandle
   )
+import PureClaw.Harness.Registry qualified as Registry
 import Data.ByteString (ByteString)
 import PureClaw.Security.Command (CommandError (..))
 import PureClaw.Handles.Log (mkNoOpLogHandle)
@@ -1803,12 +1804,14 @@ mkTestFrontendEnv = mkTestFrontendEnvWith 36
 mkTestFrontendEnvWith :: Int -> IO FrontendEnv
 mkTestFrontendEnvWith maxTabs = do
   harnessRef  <- newIORef Map.empty
+  harnessReg  <- Registry.newRegistry
   provRef     <- newIORef Nothing
   modelRef    <- newIORef Nothing
   let logger  = mkNoOpLogHandle
   tabCountRef <- newIORef 0
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
+    , _fe_harnessRegistry = harnessReg
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
     , _fe_recentLimit  = 20
     , _fe_provider     = provRef

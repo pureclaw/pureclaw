@@ -39,6 +39,7 @@ import PureClaw.Agent.Env
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness (HarnessHandle)
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Log
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 
@@ -110,6 +111,7 @@ mkDefaultAgentEnv overrides = do
   activeCountTv  <- newTVarIO 0
   runnersRef     <- newIORef IntMap.empty
   channelOutQ    <- newTBQueueIO (fromIntegral (_rc_channelOutQBound routing))
+  harnessReg     <- Registry.newRegistry
   pure AgentEnv
     { _env_provider         = _aeo_provider overrides
     , _env_model            = _aeo_model overrides
@@ -121,6 +123,7 @@ mkDefaultAgentEnv overrides = do
     , _env_pluginHandle     = _aeo_pluginHandle overrides
     , _env_policy           = _aeo_policy overrides
     , _env_harnesses        = _aeo_harnesses overrides
+    , _env_harnessRegistry  = harnessReg
     , _env_target           = _aeo_target overrides
     , _env_nextWindowIdx    = _aeo_nextWindowIdx overrides
     , _env_agentDef         = _aeo_agentDef overrides

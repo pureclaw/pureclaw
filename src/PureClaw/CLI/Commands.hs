@@ -69,6 +69,7 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   )
 import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Harness.Tmux (renameWindow)
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
@@ -628,6 +629,11 @@ runChat opts = do
           _lh_logInfo logger $ "Discovered " <> T.pack (show (Map.size discoveredHarnesses))
             <> " running harness(es) from previous session"
         harnessRef  <- newIORef discoveredHarnesses
+        -- One shared HarnessId registry (TVar) for the whole process: the
+        -- agent ('_env_harnessRegistry') and the frontend
+        -- ('_fe_harnessRegistry') MUST observe the same registry, so both
+        -- fields are set to this single value below.
+        harnessReg  <- Registry.newRegistry
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef (Just model)
@@ -678,6 +684,7 @@ runChat opts = do
               , _env_pluginHandle = mkPluginHandle
               , _env_policy       = policy
               , _env_harnesses    = harnessRef
+              , _env_harnessRegistry = harnessReg
               , _env_target       = targetRef
               , _env_nextWindowIdx = windowIdxRef
               , _env_agentDef     = mAgentDef
@@ -733,6 +740,7 @@ runChat opts = do
                 keepers
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
+              , _fe_harnessRegistry = harnessReg
               , _fe_sessionsDir  = sessionsDir
               , _fe_recentLimit  = 50
               , _fe_provider     = providerRef

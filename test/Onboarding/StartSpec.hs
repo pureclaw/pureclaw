@@ -37,6 +37,7 @@ import Control.Concurrent.STM
 
 import PureClaw.Agent.Context (emptyContext)
 import PureClaw.Agent.Env
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Agent.SlashCommands
   ( SlashCommand (..)
   , executeSlashCommand
@@ -313,6 +314,7 @@ mkOnboardingEnv ch = do
   modelRef       <- newIORef Nothing
   vaultRef       <- newIORef Nothing
   harnessRef     <- newIORef Map.empty
+  harnessReg     <- Registry.newRegistry
   targetRef      <- newIORef TargetProvider
   windowIdxRef   <- newIORef 0
   sessionRef     <- newIORef =<< mkNoOpSessionHandle
@@ -333,6 +335,7 @@ mkOnboardingEnv ch = do
     , _env_pluginHandle      = mkPluginHandle
     , _env_policy            = defaultPolicy
     , _env_harnesses         = harnessRef
+    , _env_harnessRegistry  = harnessReg
     , _env_target            = targetRef
     , _env_nextWindowIdx     = windowIdxRef
     , _env_agentDef          = Nothing
