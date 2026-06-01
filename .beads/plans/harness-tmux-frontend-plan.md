@@ -1,7 +1,7 @@
 ---
 issue: pureclaw-99a
 pr: pending
-status: approved — plan-review-gate PASSED round 2 (Feasibility/Completeness/Scope all PASS)
+status: complete — WU1-WU4 implemented, adversarially reviewed (all PASS), committed; pending push/PR
 date_drafted: 2026-05-31
 beads_epic: pureclaw-99a
 deferred_followup: pureclaw-jlc
