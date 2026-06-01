@@ -54,7 +54,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import Network.HTTP.Types
 import Network.Wai
-import System.Directory (doesFileExist, getFileSize, renameFile)
+import System.Directory (doesFileExist, getFileSize, removeDirectoryRecursive, renameFile)
 import System.FilePath ((</>), takeDirectory)
 
 import PureClaw.Agent.AgentDef
@@ -877,11 +877,21 @@ branchErrorResponse err = case err of
 -- with 'Nothing' the behaviour is identical to a fresh New-tab session.
 createTab :: FrontendEnv -> TabKind -> Maybe BranchSeed -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 createTab env tabKind mSeed respond = do
+  -- Read the slot index for the response; the actual bump is deferred for
+  -- the harness path so a failed tmux spawn never consumes a slot (the
+  -- count has no decrement). Provider / raw-shell paths bump immediately,
+  -- preserving their existing behaviour byte-for-byte.
   curCount <- readIORef (_fe_tabCount env)
-  -- Bump tab count
-  writeIORef (_fe_tabCount env) (curCount + 1)
   case tabKind of
+    -- Harness sessions must actually spawn the tmux harness before the tab
+    -- is considered created. A branch seed only ever targets a provider
+    -- session (handleNewTab rejects non-provider branch targets), so a
+    -- seeded harness cannot occur here.
+    TkSession sk@(SkHarness spec) ->
+      createHarnessTab env tabKind spec sk curCount respond
     TkSession sk -> do
+      -- Bump tab count
+      writeIORef (_fe_tabCount env) (curCount + 1)
       -- Create a session for session-backed tabs
       now <- getCurrentTime
       mModel <- readIORef (_fe_model env)
@@ -892,10 +902,11 @@ createTab env tabKind mSeed respond = do
           -- (e.g. the chat input placeholder), and the agent's
           -- definition was already used to build the system prompt.
           -- Without this, the metadata loses the association and
-          -- recent-sessions UI falls back to the session id.
+          -- recent-sessions UI falls back to the session id. Harness
+          -- kinds are handled by 'createHarnessTab' above, so 'sk' here
+          -- is always a provider spec.
           agentName = case sk of
             SkProvider ps -> _ps_agent ps
-            SkHarness  _  -> Nothing
           -- For a branch, inherit _sm_kind / _sm_model / _sm_agent from
           -- the source meta so the branch's sidebar row matches its
           -- parent; otherwise use the request kind + global model.
@@ -946,11 +957,85 @@ createTab env tabKind mSeed respond = do
         , _ntresp_kind      = tabKindLabel tabKind
         }
     TkRawShell _backend -> do
+      -- Bump tab count
+      writeIORef (_fe_tabCount env) (curCount + 1)
       respond $ jsonResponse status200 NewTabResponse
         { _ntresp_tabIndex  = curCount
         , _ntresp_sessionId = Nothing
         , _ntresp_kind      = tabKindLabel tabKind
         }
+
+-- | Create a harness-backed tab: persist the session, spawn the tmux
+-- harness via '_fe_startHarness', and only on success persist the real
+-- tmux coordinates into '_sm_kind' and bump the tab count. A failed spawn
+-- removes the just-created session directory and leaves the tab count
+-- untouched (it has no decrement), so a fallible spawn never strands a
+-- session dir or burns a tab slot.
+createHarnessTab
+  :: FrontendEnv
+  -> TabKind        -- ^ original request kind (for the response label)
+  -> HarnessSpec    -- ^ requested harness spec (backend replaced on success)
+  -> SessionKind    -- ^ the SkHarness kind to seed _sm_kind with
+  -> Int            -- ^ current tab count = response slot index
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+createHarnessTab env tabKind spec sk curCount respond = do
+  now <- getCurrentTime
+  let sid  = newSessionId Nothing now
+      meta = SessionMeta
+        { _sm_id                = sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = sk
+        , _sm_model             = ""
+        , _sm_channel           = "web"
+        , _sm_createdAt         = now
+        , _sm_lastActive        = now
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
+        }
+  sh <- mkSessionHandle (_fe_broker env) (_fe_logger env) (_fe_sessionsDir env) meta
+  _sh_save sh
+  started <- _fe_startHarness env spec (_sh_transcript sh)
+  case started of
+    Left err -> do
+      -- Roll back the session dir created above. A missing dir must not
+      -- throw, so swallow IO errors from the cleanup.
+      _ <- try @IOException (removeDirectoryRecursive (_sh_dir sh))
+      respond $ harnessErrorResponse err
+    Right st -> do
+      -- Persist the real tmux coordinates returned by the spawn so the
+      -- session routes to the live harness handle on subsequent sends.
+      modifyIORef' (_sh_meta sh) $ \m ->
+        m { _sm_kind = SkHarness (spec { _h_backend = TbTmux (_shh_tmux st) }) }
+      _sh_save sh
+      -- Only a successful spawn consumes a tab slot.
+      writeIORef (_fe_tabCount env) (curCount + 1)
+      case _fe_broker env of
+        Just broker ->
+          _streamBroker_publish broker
+            (ActivityChanged (_sm_id meta) (SaSessionCreated meta))
+        Nothing -> pure ()
+      broadcastLists env
+      respond $ jsonResponse status200 NewTabResponse
+        { _ntresp_tabIndex  = curCount
+        , _ntresp_sessionId = Just (unSessionId sid)
+        , _ntresp_kind      = tabKindLabel tabKind
+        }
+
+-- | Map a 'HarnessError' to its HTTP response. An authorization failure is
+-- a client-side 403; a missing harness binary or unavailable tmux is a
+-- 503 (the dependency the server needs is not available right now).
+harnessErrorResponse :: HarnessError -> Response
+harnessErrorResponse err = case err of
+  HarnessNotAuthorized ce -> jsonResponse status403
+    (object ["error" .= ("harness not authorized: " <> T.pack (show ce))])
+  HarnessBinaryNotFound detail -> jsonResponse status503
+    (object ["error" .= ("harness binary not found: " <> detail)])
+  HarnessTmuxNotAvailable detail -> jsonResponse status503
+    (object ["error" .= ("tmux not available: " <> detail)])
 
 -- | User-facing kind label for the response JSON.
 tabKindLabel :: TabKind -> Text

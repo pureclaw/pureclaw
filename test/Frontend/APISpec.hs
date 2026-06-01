@@ -18,7 +18,7 @@ import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Network.HTTP.Types qualified as HTTP
 import Network.Wai qualified as Wai
 import Network.Wai.Internal (ResponseReceived (..))
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -26,9 +26,10 @@ import Test.Hspec
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Core.Types (ChannelKind (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
-import PureClaw.Handles.Harness (HarnessError (..))
+import PureClaw.Handles.Harness (HarnessError (..), HarnessHandle, mkNoOpHarnessHandle)
+import PureClaw.Security.Command (CommandError (..))
 import PureClaw.Handles.Log (mkNoOpLogHandle)
-import PureClaw.Handles.Transcript (mkNoOpTranscriptHandle)
+import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
   , CompletionResponse (..)
@@ -148,6 +149,100 @@ spec = do
           hasKey val "tab_index" `shouldBe` True
           hasKey val "session_id" `shouldBe` True
           hasKey val "kind" `shouldBe` True
+
+  -- -----------------------------------------------------------------------
+  -- WU2 — POST /api/tabs/new spawns the harness (createTab SkHarness path)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/tabs/new (harness spawn — WU2)" $ do
+    -- D2.1: a harness POST actually calls _fe_startHarness, which registers
+    -- the live handle in _fe_harnesses under the returned key.
+    it "spawns the harness and registers its handle (D2.1)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d21" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0 { _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        harnesses <- readIORef (_fe_harnesses env)
+        Map.member "claude-code-0" harnesses `shouldBe` True
+
+    -- D2.2: the persisted session.json carries the real tmux coordinates
+    -- from the StartedHarness, not the placeholder backend in the request.
+    it "persists the tmux coordinates into _sm_kind (D2.2)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d22" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0 { _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> case _h_backend hs of
+            TbTmux tc -> do
+              _tc_session tc `shouldBe` "pureclaw"
+              _tc_window tc  `shouldBe` "claude-code-0"
+            other -> expectationFailure ("expected TbTmux backend, got " <> show other)
+          other -> expectationFailure ("expected SkHarness kind, got " <> show other)
+
+    -- D2.3: a failing spawn must not consume a tab slot and must remove the
+    -- just-created session dir. 503 for tmux/binary errors; 403 for authz.
+    it "maps HarnessTmuxNotAvailable to 503, keeps tab count, removes dir (D2.3)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d23a" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  \_ _ -> pure (Left (HarnessTmuxNotAvailable "tmux not found")) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status503
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+        -- No leftover session directory survives a failed spawn.
+        entries <- listSessionDirs tmpDir
+        entries `shouldBe` []
+
+    it "maps HarnessBinaryNotFound to 503 (D2.3)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d23b" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  \_ _ -> pure (Left (HarnessBinaryNotFound "claude not on PATH")) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status503
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    it "maps HarnessNotAuthorized to 403, keeps tab count (D2.3)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d23c" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  \_ _ -> pure (Left (HarnessNotAuthorized (CommandNotAllowed "claude"))) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status403
+        readIORef (_fe_tabCount env) `shouldReturn` 0
+
+    -- D2.4: a successful harness spawn bumps the tab count exactly once.
+    it "bumps _fe_tabCount on a successful harness spawn (D2.4)" $ do
+      withSystemTempDirectory "pureclaw-wu2-d24" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0 { _fe_startHarness = fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        readIORef (_fe_tabCount env) `shouldReturn` 1
+
+    -- D2.4 (regression): a provider POST behaves exactly as before — 200,
+    -- session.json on disk, tab count bumped — without ever calling
+    -- _fe_startHarness (which would Left-fail if it did).
+    it "provider POST is unchanged and never spawns a harness (D2.4)" $ do
+      withSystemTempDirectory "pureclaw-wu2-prov" $ \tmpDir -> do
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] providerNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        doesFileExist (tmpDir </> T.unpack newSid </> "session.json")
+          `shouldReturn` True
+        readIORef (_fe_tabCount env) `shouldReturn` 1
+        -- The provider path leaves the harness map empty.
+        harnesses <- readIORef (_fe_harnesses env)
+        Map.null harnesses `shouldBe` True
 
   -- -----------------------------------------------------------------------
   -- WU1 — POST /api/tabs/new with branch_from (session branching)
@@ -1534,6 +1629,44 @@ providerNewTabBody = Aeson.encode $ object
           ]
       ]
   ]
+
+-- | A harness New-tab request body. The request carries a placeholder
+-- @local@ backend (the frontend has no tmux coordinates yet); the spawn
+-- replaces it with the real 'TmuxConfig' from the 'StartedHarness'.
+harnessNewTabBody :: LBS.ByteString
+harnessNewTabBody = Aeson.encode $ object
+  [ "kind" .= object
+      [ "tag" .= ("session" :: Text)
+      , "session_kind" .= object
+          [ "tag"     .= ("harness" :: Text)
+          , "flavour" .= ("claude-code" :: Text)
+          , "backend" .= object [ "tag" .= ("local" :: Text) ]
+          ]
+      ]
+  ]
+
+-- | A fake '_fe_startHarness' that registers a no-op 'HarnessHandle' under
+-- the given key and returns a 'StartedHarness' whose tmux window matches
+-- that key. Mirrors the dispatcher's real contract closely enough for the
+-- API layer's behaviour (registration + coordinate persistence) to be
+-- exercised without spawning a real process. The harness map ref is the
+-- same '_fe_harnesses' the env carries, so registration is observable.
+fakeStartHarness
+  :: IORef (Map.Map Text HarnessHandle)
+  -> Text
+  -> (HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness))
+fakeStartHarness harnessRef key _ _ = do
+  modifyIORef' harnessRef (Map.insert key mkNoOpHarnessHandle)
+  pure $ Right $ StartedHarness key
+    (TmuxConfig { _tc_session = "pureclaw", _tc_window = key, _tc_pane = Nothing })
+
+-- | List the entries under a sessions base dir, ignoring a missing base
+-- dir. Used to assert a failed harness spawn left no session directory
+-- behind.
+listSessionDirs :: FilePath -> IO [FilePath]
+listSessionDirs baseDir = do
+  exists <- doesDirectoryExist baseDir
+  if not exists then pure [] else listDirectory baseDir
 
 -- | A provider New-tab request body carrying a @branch_from@ spec.
 branchBody :: Text -> Text -> LBS.ByteString
