@@ -6,6 +6,8 @@ module PureClaw.Security.Command
     -- * Authorization (pure — no IO)
   , authorize
   , authorizeShell
+    -- * Manager-owned tmux seam (always permitted; see note below)
+  , authorizeTmuxCommand
     -- * Read-only accessors
   , getCommandProgram
   , getCommandArgs
@@ -63,6 +65,30 @@ authorizeShell policy cmd
       Left (CommandNotAllowed "shell")
   | otherwise =
       Right (AuthorizedCommand ("bash", ["-c", cmd]))
+
+-- | Construct an 'AuthorizedCommand' for PureClaw's OWN tmux process
+-- management. This is the controlled internal seam through which EVERY tmux
+-- subprocess invocation flows, so that an unauthorized tmux call is impossible
+-- by construction (the 'AuthorizedCommand' value constructor is not exported,
+-- and this is the sole tmux-specific path to obtain one).
+--
+-- Unlike 'authorize'/'authorizeShell', this performs NO 'SecurityPolicy'
+-- check and ALWAYS succeeds: tmux invocations here are PureClaw's own
+-- harness-lifecycle management (spawn/sweep/capture/kill of windows it owns),
+-- NOT user-issued commands. The user-command policy gate governs commands the
+-- agent is asked to run on the user's behalf; the manager's internal tmux use
+-- is a separate, manager-owned boundary. The in-pane harness command itself
+-- (a deliberately shell-interpreted string) is defended separately by
+-- 'PureClaw.Internal.ShellQuote' / @escapeForShell@, not by this seam.
+--
+-- TODO(harness-registry phase 2): audit-log tmux seam invocations once a
+-- 'LogHandle' is threaded to the call sites. The design (§8 B1) specifies this
+-- seam as "always-permitted-but-logged"; threading a logger through
+-- @Harness/Tmux.hs@ would change exported signatures (out of scope for the
+-- additive Phase-1 refactor), so logging is deferred. The hard, type-enforced
+-- invariant — a single tmux chokepoint — is delivered now.
+authorizeTmuxCommand :: FilePath -> [Text] -> AuthorizedCommand
+authorizeTmuxCommand tmuxBin args = AuthorizedCommand (tmuxBin, args)
 
 -- | Get the program path from an authorized command.
 getCommandProgram :: AuthorizedCommand -> FilePath

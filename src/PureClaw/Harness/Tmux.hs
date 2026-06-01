@@ -63,6 +63,8 @@ module PureClaw.Harness.Tmux
     -- * Shell quoting (delegates to 'PureClaw.Internal.ShellQuote')
   , shellEscape
   , shellEscapeStr
+    -- * tmux authorization seam (WU3 — sole chokepoint for tmux subprocesses)
+  , tmuxProc
   ) where
 
 import Data.ByteString (ByteString)
@@ -80,6 +82,26 @@ import System.Process.Typed qualified as P
 
 import PureClaw.Handles.Harness
 import PureClaw.Internal.ShellQuote qualified as ShellQuote
+import PureClaw.Security.Command qualified as Command
+
+-- | The SOLE chokepoint for constructing a tmux subprocess. Every tmux
+-- invocation in PureClaw builds its 'P.ProcessConfig' from an
+-- 'Command.AuthorizedCommand' obtained via 'Command.authorizeTmuxCommand'
+-- (the manager-owned tmux seam, §8 B1). After this helper has produced the
+-- base config, callers apply the appropriate @setStdin@\/@setStdout@\/
+-- @setStderr@ wrappers.
+--
+-- Because 'Command.AuthorizedCommand' has an un-exported value constructor and
+-- 'Command.authorizeTmuxCommand' is the only tmux path to one, routing every
+-- @tmux@ @P.proc@ through here makes an un-authorized tmux call impossible by
+-- construction. Bare @P.proc tmuxBin@ must appear nowhere else.
+--
+-- TODO(harness-registry phase 2): audit-log tmux seam invocations once a
+-- 'LogHandle' is threaded to the call sites (would change exported signatures,
+-- out of scope for this additive refactor — see 'Command.authorizeTmuxCommand').
+tmuxProc :: Command.AuthorizedCommand -> P.ProcessConfig () () ()
+tmuxProc ac =
+  P.proc (Command.getCommandProgram ac) (map T.unpack (Command.getCommandArgs ac))
 
 -- | Resolve the absolute path to the tmux binary.
 -- First checks PATH via 'findExecutable', then tries common system locations.
@@ -119,7 +141,7 @@ runTmux args = do
       let config = P.setStdin P.closed
                  $ P.setStdout P.nullStream
                  $ P.setStderr P.byteStringOutput
-                 $ P.proc tmuxBin args
+                 $ tmuxProc (Command.authorizeTmuxCommand tmuxBin (map T.pack args))
       (exitCode, _stdout, stderr) <- P.readProcess config
       pure (exitCode, LBS.toStrict stderr)
 
@@ -269,11 +291,11 @@ captureWindow sessionName lineCount = do
           config = P.setStdin P.closed
                  $ P.setStdout P.byteStringOutput
                  $ P.setStderr P.nullStream
-                 $ P.proc tmuxBin
-                     [ "capture-pane", "-t", target
+                 $ tmuxProc (Command.authorizeTmuxCommand tmuxBin
+                     [ "capture-pane", "-t", T.pack target
                      , "-p"
-                     , "-S", "-" <> show lineCount
-                     ]
+                     , "-S", "-" <> T.pack (show lineCount)
+                     ])
       (exitCode, stdout, _stderr) <- P.readProcess config
       case exitCode of
         ExitSuccess   -> pure (stripAnsi (LBS.toStrict stdout))
@@ -341,10 +363,10 @@ listSessionWindows sessionName = do
       let config = P.setStdin P.closed
                  $ P.setStdout P.byteStringOutput
                  $ P.setStderr P.nullStream
-                 $ P.proc tmuxBin
-                     [ "list-windows", "-t", T.unpack sessionName
+                 $ tmuxProc (Command.authorizeTmuxCommand tmuxBin
+                     [ "list-windows", "-t", sessionName
                      , "-F", "#{window_index}\t#{window_name}"
-                     ]
+                     ])
       (exitCode, stdout, _stderr) <- P.readProcess config
       case exitCode of
         ExitFailure _ -> pure []
@@ -481,7 +503,8 @@ captureWindowNamed sessionName windowName lineCount = do
       let config = P.setStdin P.closed
                  $ P.setStdout P.byteStringOutput
                  $ P.setStderr P.nullStream
-                 $ P.proc tmuxBin (captureNamedArgs sessionName windowName lineCount)
+                 $ tmuxProc (Command.authorizeTmuxCommand tmuxBin
+                     (map T.pack (captureNamedArgs sessionName windowName lineCount)))
       (exitCode, stdout, _stderr) <- P.readProcess config
       case exitCode of
         ExitSuccess   -> pure (stripAnsi (LBS.toStrict stdout))
@@ -586,8 +609,8 @@ readMarkers sessionName = do
       let config = P.setStdin P.closed
                  $ P.setStdout P.byteStringOutput
                  $ P.setStderr P.nullStream
-                 $ P.proc tmuxBin
-                     [ "list-windows", "-t", T.unpack sessionName, "-F", markerFormat ]
+                 $ tmuxProc (Command.authorizeTmuxCommand tmuxBin
+                     [ "list-windows", "-t", sessionName, "-F", T.pack markerFormat ])
       (exitCode, stdout, _stderr) <- P.readProcess config
       case exitCode of
         ExitFailure _ -> pure []
@@ -623,11 +646,11 @@ showWindowOption sessionName windowName optName = do
       let config = P.setStdin P.closed
                  $ P.setStdout P.byteStringOutput
                  $ P.setStderr P.nullStream
-                 $ P.proc tmuxBin
+                 $ tmuxProc (Command.authorizeTmuxCommand tmuxBin
                      [ "show-options", "-w", "-v"
-                     , "-t", windowTarget sessionName windowName
-                     , T.unpack optName
-                     ]
+                     , "-t", T.pack (windowTarget sessionName windowName)
+                     , optName
+                     ])
       (exitCode, stdout, _stderr) <- P.readProcess config
       case exitCode of
         ExitSuccess   -> pure (T.strip (TE.decodeUtf8Lenient (LBS.toStrict stdout)))
@@ -648,7 +671,8 @@ listTmuxSessions = do
       let config = P.setStdin P.closed
                  $ P.setStdout P.byteStringOutput
                  $ P.setStderr P.nullStream
-                 $ P.proc tmuxBin ["list-sessions", "-F", "#{session_name}"]
+                 $ tmuxProc (Command.authorizeTmuxCommand tmuxBin
+                     ["list-sessions", "-F", "#{session_name}"])
       (exitCode, stdout, _stderr) <- P.readProcess config
       case exitCode of
         ExitFailure _ -> pure []
@@ -778,8 +802,8 @@ checkTmuxCapabilities = do
           let config = P.setStdin P.closed
                      $ P.setStdout P.byteStringOutput
                      $ P.setStderr P.byteStringOutput
-                     $ P.proc tmuxBin
-                         [ "display-message", "-p", "PCLCAP:#{pane_dead}:#{@pcl_id}:" ]
+                     $ tmuxProc (Command.authorizeTmuxCommand tmuxBin
+                         [ "display-message", "-p", "PCLCAP:#{pane_dead}:#{@pcl_id}:" ])
           (exitCode, stdout, _stderr) <- P.readProcess config
           let out = TE.decodeUtf8Lenient (LBS.toStrict stdout)
           case exitCode of

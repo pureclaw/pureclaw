@@ -211,12 +211,12 @@ captureFullScrollback target = do
       let config = P.setStdin P.closed
                  $ P.setStdout P.byteStringOutput
                  $ P.setStderr P.nullStream
-                 $ P.proc tmuxBin
-                     [ "capture-pane", "-t", T.unpack target
+                 $ tmuxProc (authorizeTmuxCommand tmuxBin
+                     [ "capture-pane", "-t", target
                      , "-p"
                      , "-S", "-"   -- from start of scrollback
                      , "-E", "-"   -- to end of scrollback
-                     ]
+                     ])
       (exitCode, stdout, _stderr) <- P.readProcess config
       case exitCode of
         ExitSuccess   -> pure (LBS.toStrict stdout)
@@ -284,7 +284,8 @@ checkWithTmux tmuxBin th = do
     $ P.setStdin P.closed
     $ P.setStdout P.nullStream
     $ P.setStderr P.nullStream
-    $ P.proc tmuxBin ["list-windows", "-t", "pureclaw", "-F", "#{window_name}"]
+    $ tmuxProc (authorizeTmuxCommand tmuxBin
+        ["list-windows", "-t", "pureclaw", "-F", "#{window_name}"])
   case exitCode of
     ExitSuccess -> pure HarnessRunning
     ExitFailure code -> do
