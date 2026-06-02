@@ -713,27 +713,12 @@ spec = do
 
     it "returns tab list with correct status words" $ do
       let tabs =
-            [ TabSnapshot
-                { _ts_index     = 0
-                , _ts_kind      = "provider"
-                , _ts_name      = "claude-opus"
-                , _ts_status    = "running"
-                , _ts_sessionId = Just "session-001"
-                }
-            , TabSnapshot
-                { _ts_index     = 1
-                , _ts_kind      = "raw_shell"
-                , _ts_name      = "bash"
-                , _ts_status    = "idle"
-                , _ts_sessionId = Nothing
-                }
-            , TabSnapshot
-                { _ts_index     = 2
-                , _ts_kind      = "provider"
-                , _ts_name      = "gpt"
-                , _ts_status    = "crashed"
-                , _ts_sessionId = Just "session-002"
-                }
+            [ (mkTabSnapshot 0 "provider" "claude-opus" "running")
+                { _ts_sessionId = Just "session-001" }
+            , (mkTabSnapshot 1 "raw_shell" "bash" "idle")
+                { _ts_sessionId = Nothing }
+            , (mkTabSnapshot 2 "provider" "gpt" "crashed")
+                { _ts_sessionId = Just "session-002" }
             ]
       env <- mkTestFrontendEnvWithTabs tabs
       (st, respBody) <- getJSON env ["api", "tabs"]
@@ -763,15 +748,30 @@ spec = do
   -- WU8: registry-backed Active-Tabs slice (the reported symptom)
   -- -----------------------------------------------------------------------
 
-  describe "livenessToTabStatus (WU8 — D8.2 minimal mapping)" $ do
+  describe "livenessToTabStatus (WU8 → P2-WU1 — status vocabulary)" $ do
     it "maps LivenessIdle to \"idle\"" $
       livenessToTabStatus Registry.LivenessIdle `shouldBe` "idle"
     it "maps LivenessThinking to \"running\"" $
       livenessToTabStatus Registry.LivenessThinking `shouldBe` "running"
-    it "maps LivenessExited to \"crashed\"" $
-      livenessToTabStatus Registry.LivenessExited `shouldBe` "crashed"
-    it "maps LivenessOrphaned to \"crashed\"" $
-      livenessToTabStatus Registry.LivenessOrphaned `shouldBe` "crashed"
+    -- P2-WU1 D1.1: Exited and Orphaned no longer collapse to "crashed";
+    -- they map to distinct status strings so the frontend can render the
+    -- §7 state→visual split (Exited: ✕ crashed + [Restart] [Dismiss];
+    -- Orphaned: ✕ greyed + [Dismiss]).
+    it "maps LivenessExited to \"exited\"" $
+      livenessToTabStatus Registry.LivenessExited `shouldBe` "exited"
+    it "maps LivenessOrphaned to \"orphaned\"" $
+      livenessToTabStatus Registry.LivenessOrphaned `shouldBe` "orphaned"
+    it "gives Exited and Orphaned distinct status strings (no longer collapsed)" $
+      livenessToTabStatus Registry.LivenessExited
+        `shouldNotBe` livenessToTabStatus Registry.LivenessOrphaned
+
+  describe "harnessOriginToText (P2-WU1 — origin pill mapping)" $ do
+    it "maps OriginSpawned to \"spawned\"" $
+      harnessOriginToText Registry.OriginSpawned `shouldBe` "spawned"
+    it "maps OriginDiscovered to \"discovered\"" $
+      harnessOriginToText Registry.OriginDiscovered `shouldBe` "discovered"
+    it "maps OriginAdopted to \"adopted\"" $
+      harnessOriginToText Registry.OriginAdopted `shouldBe` "adopted"
 
   describe "harnessEntriesToTabs (WU8 — pure mapping)" $ do
     it "returns an empty list for no entries" $
@@ -791,6 +791,23 @@ spec = do
           _ts_status t    `shouldBe` "running"
           _ts_sessionId t `shouldBe` Just "session-xyz"
           _ts_index t     `shouldBe` 0
+        other -> expectationFailure ("expected one tab, got " <> show (length other))
+
+    it "populates extModified, stale, origin, and the attach command (P2-WU1 D1.2)" $ do
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          e   = (baseEntry hid "claude-code-3" Nothing)
+                  { Registry._he_session     = "pureclaw"
+                  , Registry._he_windowName  = "claude-code-3"
+                  , Registry._he_extModified = True
+                  , Registry._he_stale       = True
+                  , Registry._he_origin      = Registry.OriginDiscovered
+                  }
+      case harnessEntriesToTabs [e] of
+        [t] -> do
+          _ts_extModified t   `shouldBe` True
+          _ts_stale t         `shouldBe` True
+          _ts_origin t        `shouldBe` "discovered"
+          _ts_attachCommand t `shouldBe` Just "tmux attach -t pureclaw:claude-code-3"
         other -> expectationFailure ("expected one tab, got " <> show (length other))
 
     it "assigns stable indices by sorting on (label, id) and enumerating from 0" $ do
@@ -861,9 +878,58 @@ spec = do
                 ]
           lookup "a-idle"     pairs `shouldBe` Just "idle"
           lookup "b-thinking" pairs `shouldBe` Just "running"
-          lookup "c-exited"   pairs `shouldBe` Just "crashed"
-          lookup "d-orphaned" pairs `shouldBe` Just "crashed"
+          -- P2-WU1 D1.1: distinct status strings end-to-end through /api/tabs.
+          lookup "c-exited"   pairs `shouldBe` Just "exited"
+          lookup "d-orphaned" pairs `shouldBe` Just "orphaned"
         _ -> expectationFailure "Expected JSON array"
+
+    it "surfaces ext_modified, stale, origin, and attach_command in the JSON (P2-WU1 D1.2)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label      = "claude-code"
+          , Registry._he_session    = "pureclaw"
+          , Registry._he_windowName = "claude-code-0"
+          , Registry._he_liveness   = Registry.LivenessIdle
+          , Registry._he_extModified = True
+          , Registry._he_stale       = True
+          , Registry._he_origin      = Registry.OriginAdopted
+          }
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let t0 = head (toList' arr)
+          lookupKey t0 "ext_modified"   `shouldBe` Just (Aeson.Bool True)
+          lookupKey t0 "stale"          `shouldBe` Just (Aeson.Bool True)
+          lookupKey t0 "origin"         `shouldBe` Just (Aeson.String "adopted")
+          lookupKey t0 "attach_command"
+            `shouldBe` Just (Aeson.String "tmux attach -t pureclaw:claude-code-0")
+        _ -> expectationFailure "Expected JSON array with one harness tab"
+
+    it "keeps the existing keys unchanged for back-compat (P2-WU1 D1.3)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label    = "claude-code"
+          , Registry._he_liveness = Registry.LivenessIdle
+          , Registry._he_sessionId = Just "session-abc"
+          }
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let t0 = head (toList' arr)
+          -- The original Phase-1 keys must remain present and unchanged so
+          -- existing consumers keep working (extend-only JSON).
+          lookupKey t0 "index"      `shouldBe` Just (Aeson.Number 0)
+          lookupKey t0 "kind"       `shouldBe` Just (Aeson.String "harness")
+          lookupKey t0 "name"       `shouldBe` Just (Aeson.String "claude-code")
+          lookupKey t0 "status"     `shouldBe` Just (Aeson.String "idle")
+          lookupKey t0 "session_id" `shouldBe` Just (Aeson.String "session-abc")
+        _ -> expectationFailure "Expected JSON array with one harness tab"
 
   describe "GET /api/sessions/recent (registry-wired exclusion — WU8 D8.3)" $
     it "excludes the session held by a harness tab via the wired list" $
@@ -903,7 +969,8 @@ spec = do
         writeTestSession tmpDir sid1 False
         writeTestSession tmpDir sid2 False
         -- Tab has session sid1 open
-        let tabs = [ TabSnapshot 0 "provider" "tab0" "running" (Just sid1) ]
+        let tabs = [ (mkTabSnapshot 0 "provider" "tab0" "running")
+                       { _ts_sessionId = Just sid1 } ]
         env <- mkTestFrontendEnvWithTabsAndDir tabs tmpDir
         (st, respBody) <- getJSON env ["api", "sessions", "recent"]
         st `shouldBe` HTTP.status200
@@ -2628,6 +2695,22 @@ writeHarnessSessionWithId baseDir sid windowKey mHidTxt = do
       epochH = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
   LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Build a 'TabSnapshot' with the P2-WU1 health fields defaulted (no
+-- session, not externally modified, not stale, spawned origin, no attach
+-- command). Tests override the fields they care about via record update.
+mkTabSnapshot :: Int -> Text -> Text -> Text -> TabSnapshot
+mkTabSnapshot idx kind name status = TabSnapshot
+  { _ts_index         = idx
+  , _ts_kind          = kind
+  , _ts_name          = name
+  , _ts_status        = status
+  , _ts_sessionId     = Nothing
+  , _ts_extModified   = False
+  , _ts_stale         = False
+  , _ts_origin        = "spawned"
+  , _ts_attachCommand = Nothing
+  }
 
 -- | Force-parse a 'Registry.HarnessId' from canonical UUID text (test-only).
 mustParseHid :: Text -> Registry.HarnessId

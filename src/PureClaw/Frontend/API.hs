@@ -28,6 +28,7 @@ module PureClaw.Frontend.API
   , TabSnapshot (..)
     -- * Harness → tab snapshot mapping (WU8, exported for testing)
   , livenessToTabStatus
+  , harnessOriginToText
   , harnessEntriesToTabs
     -- * New tab request/response (exported for testing)
   , NewTabRequest (..)
@@ -349,32 +350,65 @@ data TabSnapshot = TabSnapshot
   , _ts_name      :: !Text
     -- ^ Human-readable tab name.
   , _ts_status    :: !Text
-    -- ^ @\"running\"@, @\"idle\"@, or @\"crashed\"@.
+    -- ^ Liveness word: @\"running\"@, @\"idle\"@, @\"exited\"@, or
+    -- @\"orphaned\"@ (Phase 2 split Exited\/Orphaned; see
+    -- 'livenessToTabStatus').
   , _ts_sessionId :: !(Maybe Text)
     -- ^ Session ID for session-backed tabs; 'Nothing' for raw shells.
+  , _ts_extModified :: !Bool
+    -- ^ The harness window was renamed out-of-band (the §7 ⚠ \"edited\"
+    -- pill). Orthogonal to liveness.
+  , _ts_stale :: !Bool
+    -- ^ Health could not be refreshed this cycle; the frontend holds the
+    -- last-known icon with a dimmed cue (§7).
+  , _ts_origin :: !Text
+    -- ^ How the harness entered the registry: @\"spawned\"@,
+    -- @\"discovered\"@, or @\"adopted\"@ (the §7 origin pill).
+  , _ts_attachCommand :: !(Maybe Text)
+    -- ^ Copyable @tmux attach@ command for live harness rows;
+    -- 'Nothing' for non-harness tabs.
   }
   deriving stock (Show, Eq)
 
+-- | Serialize a 'TabSnapshot'. EXTEND-ONLY: the original Phase-1 keys
+-- (@index@\/@kind@\/@name@\/@status@\/@session_id@) are emitted unchanged;
+-- the Phase-2 health fields are ADDED as new snake_case keys
+-- (@ext_modified@\/@stale@\/@origin@\/@attach_command@). Old consumers that
+-- ignore unknown keys keep working.
 instance ToJSON TabSnapshot where
   toJSON ts = object
-    [ "index"      .= _ts_index ts
-    , "kind"       .= _ts_kind ts
-    , "name"       .= _ts_name ts
-    , "status"     .= _ts_status ts
-    , "session_id" .= _ts_sessionId ts
+    [ "index"          .= _ts_index ts
+    , "kind"           .= _ts_kind ts
+    , "name"           .= _ts_name ts
+    , "status"         .= _ts_status ts
+    , "session_id"     .= _ts_sessionId ts
+    , "ext_modified"   .= _ts_extModified ts
+    , "stale"          .= _ts_stale ts
+    , "origin"         .= _ts_origin ts
+    , "attach_command" .= _ts_attachCommand ts
     ]
 
--- | Map a registry 'Registry.Liveness' to the @TabSnapshot@ status vocabulary
--- (@running|idle|crashed@). This is the MINIMAL Phase-1 mapping: both
--- 'Registry.LivenessExited' and 'Registry.LivenessOrphaned' collapse to
--- @\"crashed\"@ because the tab model has no separate \"exited\"\/\"orphaned\"
--- words yet. The full status vocabulary is Phase 2.
+-- | Map a registry 'Registry.Liveness' to the @TabSnapshot@ status vocabulary.
+-- Phase 2 (§7) SPLITS the former \"crashed\" bucket: 'Registry.LivenessExited'
+-- (the process exited; offer Restart\/Dismiss) and 'Registry.LivenessOrphaned'
+-- (the window vanished out-of-band; greyed, offer Dismiss) now map to distinct
+-- words so the frontend can render the state→visual table.
 livenessToTabStatus :: Registry.Liveness -> Text
 livenessToTabStatus lv = case lv of
   Registry.LivenessIdle     -> "idle"
   Registry.LivenessThinking -> "running"
-  Registry.LivenessExited   -> "crashed"
-  Registry.LivenessOrphaned -> "crashed"
+  Registry.LivenessExited   -> "exited"
+  Registry.LivenessOrphaned -> "orphaned"
+
+-- | Map a registry 'Registry.HarnessOrigin' to the @TabSnapshot@ origin
+-- vocabulary (the §7 origin pill): @\"spawned\"@ (we launched it),
+-- @\"discovered\"@ (boot-reconstructed from a tagged window), or
+-- @\"adopted\"@ (taken over from another controller).
+harnessOriginToText :: Registry.HarnessOrigin -> Text
+harnessOriginToText o = case o of
+  Registry.OriginSpawned    -> "spawned"
+  Registry.OriginDiscovered -> "discovered"
+  Registry.OriginAdopted    -> "adopted"
 
 -- | Project the harness registry's entries onto @TabSnapshot@s for the
 -- Active-Tabs list. Phase-1 minimal slice: only harness entries are surfaced
@@ -394,11 +428,17 @@ harnessEntriesToTabs entries =
         entries
     toTab :: Int -> Registry.HarnessEntry -> TabSnapshot
     toTab idx e = TabSnapshot
-      { _ts_index     = idx
-      , _ts_kind      = "harness"
-      , _ts_name      = Registry._he_label e
-      , _ts_status    = livenessToTabStatus (Registry._he_liveness e)
-      , _ts_sessionId = Registry._he_sessionId e
+      { _ts_index         = idx
+      , _ts_kind          = "harness"
+      , _ts_name          = Registry._he_label e
+      , _ts_status        = livenessToTabStatus (Registry._he_liveness e)
+      , _ts_sessionId     = Registry._he_sessionId e
+      , _ts_extModified   = Registry._he_extModified e
+      , _ts_stale         = Registry._he_stale e
+      , _ts_origin        = harnessOriginToText (Registry._he_origin e)
+      , _ts_attachCommand =
+          Just ("tmux attach -t " <> Registry._he_session e
+                  <> ":" <> Registry._he_windowName e)
       }
 
 -- | JSON-serializable session info for the frontend.
