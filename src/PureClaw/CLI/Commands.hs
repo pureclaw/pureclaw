@@ -61,7 +61,7 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Frontend.API (mkStreamGuard)
+import PureClaw.Frontend.API (mkStreamGuard, harnessEntriesToTabs)
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
@@ -753,7 +753,7 @@ runChat opts = do
               , _fe_streamGuard  = Just streamGuard
               , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
               , _fe_tabCount     = feTabCountRef
-              , _fe_listTabs     = pure []
+              , _fe_listTabs     = harnessEntriesToTabs <$> Registry.snapshot harnessReg
               , _fe_closeTab     = \_ -> pure (Left "not wired")
               , _fe_startHarness = \spec transcript -> do
                   windowIdx <- readIORef windowIdxRef

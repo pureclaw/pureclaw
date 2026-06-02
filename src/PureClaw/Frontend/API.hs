@@ -26,6 +26,9 @@ module PureClaw.Frontend.API
   , AgentInfo (..)
   , ProviderInfo (..)
   , TabSnapshot (..)
+    -- * Harness → tab snapshot mapping (WU8, exported for testing)
+  , livenessToTabStatus
+  , harnessEntriesToTabs
     -- * New tab request/response (exported for testing)
   , NewTabRequest (..)
   , NewTabResponse (..)
@@ -45,6 +48,7 @@ import Data.Vector qualified as V
 import System.IO (IOMode (..), withFile)
 import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
+import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe qualified as Maybe
@@ -359,6 +363,43 @@ instance ToJSON TabSnapshot where
     , "status"     .= _ts_status ts
     , "session_id" .= _ts_sessionId ts
     ]
+
+-- | Map a registry 'Registry.Liveness' to the @TabSnapshot@ status vocabulary
+-- (@running|idle|crashed@). This is the MINIMAL Phase-1 mapping: both
+-- 'Registry.LivenessExited' and 'Registry.LivenessOrphaned' collapse to
+-- @\"crashed\"@ because the tab model has no separate \"exited\"\/\"orphaned\"
+-- words yet. The full status vocabulary is Phase 2.
+livenessToTabStatus :: Registry.Liveness -> Text
+livenessToTabStatus lv = case lv of
+  Registry.LivenessIdle     -> "idle"
+  Registry.LivenessThinking -> "running"
+  Registry.LivenessExited   -> "crashed"
+  Registry.LivenessOrphaned -> "crashed"
+
+-- | Project the harness registry's entries onto @TabSnapshot@s for the
+-- Active-Tabs list. Phase-1 minimal slice: only harness entries are surfaced
+-- (provider\/raw_shell tabs are the Phase-2 full tab model).
+--
+-- 'HarnessEntry' carries no intrinsic tab index in Phase 1, so the index is a
+-- STABLE DISPLAY ORDERING derived by sorting deterministically on
+-- @(label, id-text)@ and enumerating from 0. Full tab-index semantics are
+-- Phase 2.
+harnessEntriesToTabs :: [Registry.HarnessEntry] -> [TabSnapshot]
+harnessEntriesToTabs entries =
+  zipWith toTab [0 ..] sorted
+  where
+    sorted =
+      List.sortOn
+        (\e -> (Registry._he_label e, Registry.harnessIdToText (Registry._he_id e)))
+        entries
+    toTab :: Int -> Registry.HarnessEntry -> TabSnapshot
+    toTab idx e = TabSnapshot
+      { _ts_index     = idx
+      , _ts_kind      = "harness"
+      , _ts_name      = Registry._he_label e
+      , _ts_status    = livenessToTabStatus (Registry._he_liveness e)
+      , _ts_sessionId = Registry._he_sessionId e
+      }
 
 -- | JSON-serializable session info for the frontend.
 data SessionInfo = SessionInfo

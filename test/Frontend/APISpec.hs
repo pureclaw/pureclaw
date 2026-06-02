@@ -760,6 +760,137 @@ spec = do
         Just _ -> expectationFailure "Expected JSON array"
 
   -- -----------------------------------------------------------------------
+  -- WU8: registry-backed Active-Tabs slice (the reported symptom)
+  -- -----------------------------------------------------------------------
+
+  describe "livenessToTabStatus (WU8 — D8.2 minimal mapping)" $ do
+    it "maps LivenessIdle to \"idle\"" $
+      livenessToTabStatus Registry.LivenessIdle `shouldBe` "idle"
+    it "maps LivenessThinking to \"running\"" $
+      livenessToTabStatus Registry.LivenessThinking `shouldBe` "running"
+    it "maps LivenessExited to \"crashed\"" $
+      livenessToTabStatus Registry.LivenessExited `shouldBe` "crashed"
+    it "maps LivenessOrphaned to \"crashed\"" $
+      livenessToTabStatus Registry.LivenessOrphaned `shouldBe` "crashed"
+
+  describe "harnessEntriesToTabs (WU8 — pure mapping)" $ do
+    it "returns an empty list for no entries" $
+      harnessEntriesToTabs [] `shouldBe` []
+
+    it "maps an entry's fields onto a harness TabSnapshot" $ do
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          e   = (baseEntry hid "claude-code-0" Nothing)
+                  { Registry._he_label     = "claude-code"
+                  , Registry._he_liveness  = Registry.LivenessThinking
+                  , Registry._he_sessionId = Just "session-xyz"
+                  }
+      case harnessEntriesToTabs [e] of
+        [t] -> do
+          _ts_kind t      `shouldBe` "harness"
+          _ts_name t      `shouldBe` "claude-code"
+          _ts_status t    `shouldBe` "running"
+          _ts_sessionId t `shouldBe` Just "session-xyz"
+          _ts_index t     `shouldBe` 0
+        other -> expectationFailure ("expected one tab, got " <> show (length other))
+
+    it "assigns stable indices by sorting on (label, id) and enumerating from 0" $ do
+      -- Insert in a non-sorted order; the indices must reflect the
+      -- deterministic (label, id) ordering, not insertion order.
+      let hidA = mustParseHid "33333333-3333-4333-8333-333333333333"
+          hidB = mustParseHid "11111111-1111-4111-8111-111111111111"
+          mk lbl hid = (baseEntry hid "win" Nothing) { Registry._he_label = lbl }
+          -- "bravo" sorts after "alpha"; "alpha" entries tie-break on id text.
+          es = [ mk "bravo" hidA          -- label bravo
+               , mk "alpha" hidA          -- label alpha, id "3333..."
+               , mk "alpha" hidB          -- label alpha, id "1111..." (sorts first)
+               ]
+      let tabs = harnessEntriesToTabs es
+      map _ts_index tabs `shouldBe` [0, 1, 2]
+      -- The first two are the "alpha" entries, id "1111..." before "3333...".
+      map (\t -> (_ts_index t, _ts_name t)) tabs
+        `shouldBe` [(0, "alpha"), (1, "alpha"), (2, "bravo")]
+
+  describe "GET /api/tabs (registry-wired — WU8 D8.1/D8.2)" $ do
+    it "is empty when the registry has no harnesses" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      respBody `shouldBe` Aeson.encode ([] :: [Aeson.Value])
+
+    it "shows a spawned harness as a harness tab (the reported symptom fixed)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label    = "claude-code"
+          , Registry._he_liveness = Registry.LivenessIdle
+          }
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let items = toList' arr
+          length items `shouldBe` 1
+          let t0 = head items
+          lookupKey t0 "kind" `shouldBe` Just (Aeson.String "harness")
+          lookupKey t0 "name" `shouldBe` Just (Aeson.String "claude-code")
+        _ -> expectationFailure "Expected JSON array with one harness tab"
+
+    it "reflects each entry's liveness as the documented status string" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hidI = mustParseHid "11111111-1111-4111-8111-111111111111"
+          hidT = mustParseHid "22222222-2222-4222-8222-222222222222"
+          hidE = mustParseHid "33333333-3333-4333-8333-333333333333"
+          hidO = mustParseHid "44444444-4444-4444-8444-444444444444"
+          seed lbl hid lv = Registry.insertEntry (_fe_harnessRegistry env)
+            (baseEntry hid "win" Nothing)
+              { Registry._he_label = lbl, Registry._he_liveness = lv }
+      seed "a-idle"     hidI Registry.LivenessIdle
+      seed "b-thinking" hidT Registry.LivenessThinking
+      seed "c-exited"   hidE Registry.LivenessExited
+      seed "d-orphaned" hidO Registry.LivenessOrphaned
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let pairs =
+                [ (n, s)
+                | v <- toList' arr
+                , Just (Aeson.String n) <- [lookupKey v "name"]
+                , Just (Aeson.String s) <- [lookupKey v "status"]
+                ]
+          lookup "a-idle"     pairs `shouldBe` Just "idle"
+          lookup "b-thinking" pairs `shouldBe` Just "running"
+          lookup "c-exited"   pairs `shouldBe` Just "crashed"
+          lookup "d-orphaned" pairs `shouldBe` Just "crashed"
+        _ -> expectationFailure "Expected JSON array"
+
+  describe "GET /api/sessions/recent (registry-wired exclusion — WU8 D8.3)" $
+    it "excludes the session held by a harness tab via the wired list" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid1 = "test-20240101-120000-001"
+            sid2 = "test-20240101-120000-002"
+        writeTestSession tmpDir sid1 False
+        writeTestSession tmpDir sid2 False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        let env = env0 { _fe_sessionsDir = tmpDir }
+        -- Seed a harness entry that holds sid1; the wired list must surface
+        -- it in activeTabSids so the recent-sessions filter excludes sid1.
+        let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry hid "claude-code-0" Nothing)
+            { Registry._he_label = "claude-code", Registry._he_sessionId = Just sid1 }
+        (st, respBody) <- getJSON env ["api", "sessions", "recent"]
+        st `shouldBe` HTTP.status200
+        case Aeson.decode respBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr
+                          , Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` notElem sid1
+            ids `shouldSatisfy` elem sid2
+          _ -> expectationFailure "Expected JSON array"
+
+  -- -----------------------------------------------------------------------
   -- WU-8: GET /api/sessions/recent excludes active-tab sessions
   -- -----------------------------------------------------------------------
 
@@ -2209,6 +2340,17 @@ mkTestFrontendEnvWithTabsAndDir :: [TabSnapshot] -> FilePath -> IO FrontendEnv
 mkTestFrontendEnvWithTabsAndDir tabs dir = do
   env <- mkTestFrontendEnvWithTabs tabs
   pure env { _fe_sessionsDir = dir }
+
+-- | Build a FrontendEnv whose '_fe_listTabs' is wired to the shared harness
+-- registry EXACTLY as production wires it in @CLI.Commands@
+-- (@harnessEntriesToTabs \<$\> Registry.snapshot reg@). This lets the
+-- @GET \/api\/tabs@ and recent-sessions exclusion tests exercise the WIRED
+-- list (the reported symptom is the empty list), not just the pure mapper.
+mkTestFrontendEnvWithRegistryTabs :: IO FrontendEnv
+mkTestFrontendEnvWithRegistryTabs = do
+  env <- mkTestFrontendEnv
+  pure env
+    { _fe_listTabs = harnessEntriesToTabs <$> Registry.snapshot (_fe_harnessRegistry env) }
 
 -- | Write a minimal session.json + transcript.jsonl to disk so that
 -- @listSessions@ and @handleRecentSessions@ pick it up.
