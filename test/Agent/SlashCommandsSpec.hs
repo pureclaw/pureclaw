@@ -1982,7 +1982,7 @@ spec = do
           let sName = "pureclaw-test-discover"
           -- Start the session and rename window 0 to look like a harness
           _ <- startTmuxSession sName
-          renameWindow sName 0 "claude-code-0"
+          renameWindowNamed sName "0" "claude-code-0"
           let th = mkNoOpTranscriptHandle
           (harnesses, nextIdx) <- discoverHarnessesIn sName th
           -- Should discover the harness

@@ -294,7 +294,7 @@ spec = do
           -- Clean up
           stopTmuxSession sessionName
 
-    it "captureWindow captures output" $ do
+    it "captureWindowNamed captures output" $ do
       available <- requireTmux
       case available of
         Left _ -> pendingWith "tmux not available on this system"
@@ -302,8 +302,9 @@ spec = do
           let sessionName = "pureclaw-test-capture"
           startResult <- startTmuxSession sessionName
           startResult `shouldSatisfy` isRight
-          -- Capture should return something (even if empty)
-          output <- captureWindow sessionName 300
+          -- Capture should return something (even if empty). The fresh session's
+          -- default window is named "0".
+          output <- captureWindowNamed sessionName "0" 300
           -- Output is a ByteString, may be empty for a fresh session
           output `shouldSatisfy` const True
           -- Clean up
@@ -327,8 +328,8 @@ spec = do
         Right () -> do
           let sName = "pureclaw-test-list-windows"
           _ <- startTmuxSession sName
-          -- Rename the default window
-          renameWindow sName 0 "claude-code-0"
+          -- Rename the default window (named "0" in a fresh session)
+          renameWindowNamed sName "0" "claude-code-0"
           windows <- listSessionWindows sName
           -- Should have at least one window
           length windows `shouldSatisfy` (>= 1)
