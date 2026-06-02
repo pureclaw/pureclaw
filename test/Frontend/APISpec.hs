@@ -931,6 +931,131 @@ spec = do
           lookupKey t0 "session_id" `shouldBe` Just (Aeson.String "session-abc")
         _ -> expectationFailure "Expected JSON array with one harness tab"
 
+  -- -----------------------------------------------------------------------
+  -- P2-WU3: per-row action endpoints (Dismiss / Acknowledge / Restart)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/tabs/{index}/dismiss (P2-WU3 D3.1)" $ do
+    it "removes the entry from BOTH the registry and the legacy map, leaving session.json intact" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-001"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        let env = env0 { _fe_sessionsDir = tmpDir }
+            hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+        -- Seed a registry entry whose label is ALSO present in the legacy map.
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry hid "claude-code-0" Nothing)
+            { Registry._he_label     = "claude-code"
+            , Registry._he_liveness  = Registry.LivenessExited
+            , Registry._he_sessionId = Just sid
+            }
+        modifyIORef' (_fe_harnesses env)
+          (Map.insert "claude-code" mkNoOpHarnessHandle)
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "dismiss"] "{}"
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "dismissed" `shouldBe` Just (Aeson.Bool True)
+        -- Gone from the registry...
+        gone <- Registry.lookupById (_fe_harnessRegistry env) hid
+        (Registry._he_id <$> gone) `shouldBe` Nothing
+        -- ...and gone from the legacy map...
+        legacy <- readIORef (_fe_harnesses env)
+        Map.member "claude-code" legacy `shouldBe` False
+        -- ...but session.json is untouched, so the sid still loads in Recent.
+        (rst, recentBody) <- getJSON env ["api", "sessions", "recent"]
+        rst `shouldBe` HTTP.status200
+        case Aeson.decode recentBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr
+                          , Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+
+    it "returns 404 for an out-of-range index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+      (st, respBody) <- postJSON env ["api", "tabs", "5", "dismiss"] "{}"
+      st `shouldBe` HTTP.status404
+      lookupKey' respBody "dismissed" `shouldBe` Nothing
+      -- The entry was NOT removed by an out-of-range request.
+      still <- Registry.lookupById (_fe_harnessRegistry env) hid
+      (Registry._he_id <$> still) `shouldBe` Just hid
+
+    it "returns 400 for a non-numeric index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, _) <- postJSON env ["api", "tabs", "notanint", "dismiss"] "{}"
+      st `shouldBe` HTTP.status400
+
+  describe "POST /api/tabs/{index}/acknowledge (P2-WU3 D3.2)" $ do
+    it "clears the ext_modified flag (verified via a follow-up /api/tabs)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label       = "claude-code"
+          , Registry._he_extModified = True
+          }
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "acknowledge"] "{}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "acknowledged" `shouldBe` Just (Aeson.Bool True)
+      -- A follow-up /api/tabs snapshot shows ext_modified == false.
+      (tst, tabsBody) <- getJSON env ["api", "tabs"]
+      tst `shouldBe` HTTP.status200
+      case Aeson.decode tabsBody of
+        Just (Aeson.Array arr) -> do
+          let t0 = head (toList' arr)
+          lookupKey t0 "ext_modified" `shouldBe` Just (Aeson.Bool False)
+        _ -> expectationFailure "Expected JSON array with one harness tab"
+
+    it "returns 404 for an out-of-range index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry (mustParseHid "11111111-1111-4111-8111-111111111111")
+                   "claude-code-0" Nothing)
+      (st, _) <- postJSON env ["api", "tabs", "7", "acknowledge"] "{}"
+      st `shouldBe` HTTP.status404
+
+  describe "POST /api/tabs/{index}/restart (P2-WU3 D3.3)" $
+    it "returns 501 with the reserved not-implemented error body" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry (mustParseHid "11111111-1111-4111-8111-111111111111")
+                   "claude-code-0" Nothing)
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "restart"] "{}"
+      st `shouldBe` HTTP.status501
+      lookupKey' respBody "error"
+        `shouldBe` Just (Aeson.String "restart not yet implemented")
+
+  describe "index->entry resolution matches /api/tabs ordering (P2-WU3 D3.4)" $
+    it "dismissing index N removes exactly the row /api/tabs shows at N" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      -- Two entries with labels that sort deterministically: "alpha" < "bravo".
+      let hidA = mustParseHid "11111111-1111-4111-8111-111111111111"
+          hidB = mustParseHid "22222222-2222-4222-8222-222222222222"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidB "bravo" Nothing) { Registry._he_label = "bravo" }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidA "alpha" Nothing) { Registry._he_label = "alpha" }
+      -- Discover which name /api/tabs shows at index 1 BEFORE dismissing.
+      (_, tabsBody) <- getJSON env ["api", "tabs"]
+      let nameAt n = case Aeson.decode tabsBody of
+            Just (Aeson.Array arr) ->
+              listToMaybe' [ nm | v <- toList' arr
+                                , Just (Aeson.Number i) <- [lookupKey v "index"]
+                                , round i == (n :: Int)
+                                , Just (Aeson.String nm) <- [lookupKey v "name"] ]
+            _ -> Nothing
+      nameAt 1 `shouldBe` Just "bravo"  -- "alpha" at 0, "bravo" at 1
+      -- Dismiss index 1; exactly the "bravo" row (hidB) must be removed.
+      (st, _) <- postJSON env ["api", "tabs", "1", "dismiss"] "{}"
+      st `shouldBe` HTTP.status200
+      goneB <- Registry.lookupById (_fe_harnessRegistry env) hidB
+      keptA <- Registry.lookupById (_fe_harnessRegistry env) hidA
+      (Registry._he_id <$> goneB) `shouldBe` Nothing
+      (Registry._he_id <$> keptA) `shouldBe` Just hidA
+
   describe "GET /api/sessions/recent (registry-wired exclusion — WU8 D8.3)" $
     it "excludes the session held by a harness tab via the wired list" $
       withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
@@ -3181,6 +3306,15 @@ extractBody resp = do
 lookupKey :: Aeson.Value -> Text -> Maybe Aeson.Value
 lookupKey (Aeson.Object o) k = KM.lookup (AesonKey.fromText k) o
 lookupKey _ _ = Nothing
+
+-- | Decode a response body to a JSON object and look up a top-level key.
+lookupKey' :: LBS.ByteString -> Text -> Maybe Aeson.Value
+lookupKey' body k = Aeson.decode body >>= (`lookupKey` k)
+
+-- | Safe head for the @D3.4@ ordering assertion.
+listToMaybe' :: [a] -> Maybe a
+listToMaybe' []      = Nothing
+listToMaybe' (x : _) = Just x
 
 -- | Check if a key exists in a JSON Object.
 hasKey :: Aeson.Value -> Text -> Bool

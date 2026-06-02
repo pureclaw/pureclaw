@@ -90,6 +90,33 @@ spec = do
       found <- lookupById reg idA
       (_he_label <$> found) `shouldBe` Just "new"
 
+  -- D3.5 — modifyEntry is an atomic single-STM read-modify-write: it updates
+  -- the NAMED entry's field, leaves every OTHER entry untouched, and is a no-op
+  -- for an absent id. (Used by Acknowledge to clear the extModified flag without
+  -- a lookupById+insertEntry lost-update race against the reconcile loop.)
+  describe "modifyEntry (P2-WU3 D3.5)" $ do
+    it "applies the function to the named entry only" $ do
+      reg <- newRegistry
+      insertEntry reg ((mkEntry idA "a") { _he_extModified = True })
+      insertEntry reg ((mkEntry idB "b") { _he_extModified = True })
+      modifyEntry reg idA (\e -> e { _he_extModified = False })
+      foundA <- lookupById reg idA
+      foundB <- lookupById reg idB
+      -- The named entry's flag is cleared...
+      (_he_extModified <$> foundA) `shouldBe` Just False
+      -- ...while the other entry is left untouched.
+      (_he_extModified <$> foundB) `shouldBe` Just True
+
+    it "is a no-op for an absent id" $ do
+      reg <- newRegistry
+      insertEntry reg ((mkEntry idA "a") { _he_extModified = True })
+      modifyEntry reg idB (\e -> e { _he_extModified = False })
+      foundA <- lookupById reg idA
+      foundB <- lookupById reg idB
+      -- The existing entry is unchanged, and the absent id creates nothing.
+      (_he_extModified <$> foundA) `shouldBe` Just True
+      (_he_id <$> foundB) `shouldBe` Nothing
+
   -- D2.3 — label -> entry resolution.
   describe "lookupByLabel (D2.3)" $ do
     it "resolves an entry by its label" $ do

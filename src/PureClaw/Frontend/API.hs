@@ -418,14 +418,31 @@ harnessOriginToText o = case o of
 -- STABLE DISPLAY ORDERING derived by sorting deterministically on
 -- @(label, id-text)@ and enumerating from 0. Full tab-index semantics are
 -- Phase 2.
+-- | The canonical display ordering of harness entries: sort deterministically
+-- on @(label, id-text)@. This is the SINGLE source of the index→entry mapping —
+-- both 'harnessEntriesToTabs' (which enumerates this list to assign
+-- '_ts_index') and 'tabIndexToEntry' (which resolves an action's display index
+-- back to an entry) consume it, so a @POST \/api\/tabs\/{n}\/...@ action always
+-- targets exactly the row @GET \/api\/tabs@ shows at index @n@.
+sortedHarnessEntries :: [Registry.HarnessEntry] -> [Registry.HarnessEntry]
+sortedHarnessEntries =
+  List.sortOn
+    (\e -> (Registry._he_label e, Registry.harnessIdToText (Registry._he_id e)))
+
+-- | Resolve a display tab index to its 'Registry.HarnessEntry' using the SAME
+-- ordering '/api/tabs' publishes ('sortedHarnessEntries'). 'Nothing' for an
+-- out-of-range index. The caller passes the current registry snapshot.
+tabIndexToEntry :: [Registry.HarnessEntry] -> Int -> Maybe Registry.HarnessEntry
+tabIndexToEntry entries idx
+  | idx < 0   = Nothing
+  | otherwise = case drop idx (sortedHarnessEntries entries) of
+      (e : _) -> Just e
+      []      -> Nothing
+
 harnessEntriesToTabs :: [Registry.HarnessEntry] -> [TabSnapshot]
 harnessEntriesToTabs entries =
-  zipWith toTab [0 ..] sorted
+  zipWith toTab [0 ..] (sortedHarnessEntries entries)
   where
-    sorted =
-      List.sortOn
-        (\e -> (Registry._he_label e, Registry.harnessIdToText (Registry._he_id e)))
-        entries
     toTab :: Int -> Registry.HarnessEntry -> TabSnapshot
     toTab idx e = TabSnapshot
       { _ts_index         = idx
@@ -495,6 +512,12 @@ apiApp env req respond = do
       handleTranscript env sid respond
     ("POST", ["api", "tabs", tidx, "close"]) ->
       handleCloseTab env tidx respond
+    ("POST", ["api", "tabs", tidx, "dismiss"]) ->
+      handleDismissTab env tidx respond
+    ("POST", ["api", "tabs", tidx, "acknowledge"]) ->
+      handleAcknowledgeTab env tidx respond
+    ("POST", ["api", "tabs", _tidx, "restart"]) ->
+      handleRestartTab respond
     ("POST", ["api", "tabs", "new"]) ->
       handleNewTab env req respond
     ("POST", ["api", "sessions", "new"]) ->
@@ -555,6 +578,64 @@ handleCloseTab env tidxText respond =
           respond $ jsonResponse status404 (object ["error" .= errMsg])
     _ ->
       respond $ jsonResponse status400 (object ["error" .= ("Invalid tab index" :: Text)])
+
+-- | Parse a display tab index and resolve it against the CURRENT registry
+-- snapshot using the same ordering '/api/tabs' publishes
+-- ('tabIndexToEntry'\/'sortedHarnessEntries'). On a non-numeric index responds
+-- @400@; on an out-of-range index responds @404@; otherwise runs the action
+-- with the resolved entry. Shared by Dismiss\/Acknowledge so both agree on
+-- which row an index names.
+withResolvedTab
+  :: FrontendEnv
+  -> Text
+  -> (Response -> IO ResponseReceived)
+  -> (Registry.HarnessEntry -> IO ResponseReceived)
+  -> IO ResponseReceived
+withResolvedTab env tidxText respond act =
+  case reads (T.unpack tidxText) :: [(Int, String)] of
+    [(idx, "")] -> do
+      entries <- Registry.snapshot (_fe_harnessRegistry env)
+      case tabIndexToEntry entries idx of
+        Just e  -> act e
+        Nothing ->
+          respond $ jsonResponse status404
+            (object ["error" .= ("No tab at index " <> tidxText)])
+    _ ->
+      respond $ jsonResponse status400 (object ["error" .= ("Invalid tab index" :: Text)])
+
+-- | @POST \/api\/tabs\/{index}\/dismiss@ — user-initiated removal of an
+-- Exited\/Orphaned row. Removes the entry from BOTH the registry and the legacy
+-- '_fe_harnesses' map, but NEVER touches @session.json@ — so the session
+-- reappears in Recent Sessions (design §7 \"appears in exactly one section\").
+-- Acts on both stores directly (the registry and legacy map both live on
+-- 'FrontendEnv'), so no extra callback is needed.
+handleDismissTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleDismissTab env tidxText respond =
+  withResolvedTab env tidxText respond $ \e -> do
+    Registry.deleteEntry (_fe_harnessRegistry env) (Registry._he_id e)
+    modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
+    broadcastLists env
+    respond $ jsonResponse status200 (object ["dismissed" .= True])
+
+-- | @POST \/api\/tabs\/{index}\/acknowledge@ — clear the out-of-band
+-- '_he_extModified' flag (the §7 ⚠ \"edited\" pill). Uses 'Registry.modifyEntry'
+-- (a single-STM read-modify-write) so the clear cannot race the reconcile
+-- loop's 'mergeReconcile'.
+handleAcknowledgeTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleAcknowledgeTab env tidxText respond =
+  withResolvedTab env tidxText respond $ \e -> do
+    Registry.modifyEntry (_fe_harnessRegistry env) (Registry._he_id e)
+      (\x -> x { Registry._he_extModified = False })
+    broadcastLists env
+    respond $ jsonResponse status200 (object ["acknowledged" .= True])
+
+-- | @POST \/api\/tabs\/{index}\/restart@ — RESERVED. The Restart affordance is
+-- a label only in Phase 2 (design §2\/§7: auto-restart is a non-goal here);
+-- the implementation is deferred, so the endpoint exists but returns @501@.
+handleRestartTab :: (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleRestartTab respond =
+  respond $ jsonResponse status501
+    (object ["error" .= ("restart not yet implemented" :: Text)])
 
 handleRecentSessions :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleRecentSessions env respond = do

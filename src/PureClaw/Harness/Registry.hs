@@ -32,6 +32,7 @@ module PureClaw.Harness.Registry
   , lookupById
   , lookupByLabel
   , deleteEntry
+  , modifyEntry
   , snapshot
     -- * Reconciliation
   , ObservedHarness (..)
@@ -201,6 +202,18 @@ lookupByLabel reg lbl = do
 deleteEntry :: HarnessRegistry -> HarnessId -> IO ()
 deleteEntry reg hid =
   atomically (modifyTVar' (unHarnessRegistry reg) (Map.delete hid))
+
+-- | Apply a pure function to the entry with the given id, in-place, as a
+-- SINGLE-STM read-modify-write (no-op if the id is absent). This is the
+-- race-safe way to flip a flag on one entry (e.g. clearing '_he_extModified'
+-- for Acknowledge): unlike a 'lookupById' followed by 'insertEntry' — two
+-- separate transactions — the whole adjust commits atomically, so a concurrent
+-- 'mergeReconcile' tick cannot interleave and clobber the change (a lost
+-- update). 'Map.adjust' touches only the named key, leaving every other entry
+-- intact.
+modifyEntry :: HarnessRegistry -> HarnessId -> (HarnessEntry -> HarnessEntry) -> IO ()
+modifyEntry reg hid f =
+  atomically (modifyTVar' (unHarnessRegistry reg) (Map.adjust f hid))
 
 -- | Snapshot all current entries.
 snapshot :: HarnessRegistry -> IO [HarnessEntry]
