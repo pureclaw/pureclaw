@@ -134,6 +134,30 @@ body {
   background-color: var(--bg-elevated);
 }
 
+/* Orphaned harness (no live tmux window): a greyed/muted row awaiting Dismiss
+   or auto-eviction after the grace window. Mutes the whole row so it reads as
+   "gone but still listed" — distinct from a live row, consistent with the
+   muted-text tokens used elsewhere. */
+.agent-row.tab-orphaned {
+  opacity: 0.55;
+}
+
+.agent-row.tab-orphaned .text-sm {
+  color: var(--text-muted);
+}
+
+/* Stale: last-known liveness is held because a reconcile sweep/capture blipped.
+   A subtle dim cue (no distinct glyph) — distinct-but-subtle vs. orphaned so a
+   transient blip never looks like a hard orphan. Combines with .tab-orphaned
+   (an orphaned row can also be stale) without over-fading. */
+.agent-row.tab-stale {
+  opacity: 0.8;
+}
+
+.agent-row.tab-orphaned.tab-stale {
+  opacity: 0.5;
+}
+
 /* ── Buttons ─────────────────────────────────────────────────────────── */
 
 .btn {

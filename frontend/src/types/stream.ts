@@ -5,7 +5,8 @@
 // frames use `type`; client -> server frames use `op`. Keeping them distinct
 // guards against accidental cross-dispatch during refactors.
 
-import type { HarnessActivity, SessionInfo, TabInfo, TranscriptEntry } from '../types'
+import type { HarnessActivity, SessionInfo, TranscriptEntry } from '../types'
+import type { TabInfoWire } from '../hooks/useApi'
 
 // -- Server -> Client ---------------------------------------------------------
 
@@ -76,7 +77,11 @@ export interface ErrorEvent {
 
 export interface ListsEvent {
   type: 'lists'
-  tabs: TabInfo[]
+  // The WS `lists` frame carries tabs as raw backend JSON (snake_case health
+  // fields), exactly like the REST `/api/tabs` payload — NOT the camelCase
+  // `TabInfo` the UI renders. Typing it as `TabInfoWire[]` lets `useListsStream`
+  // funnel through the single `mapTabInfo` boundary with no `as unknown` cast.
+  tabs: TabInfoWire[]
   recentSessions: SessionInfo[]
   archivedSessions: SessionInfo[]
 }
@@ -106,7 +111,9 @@ export type StreamStatus =
   | 'closed'
 
 export interface ListsSnapshot {
-  tabs: TabInfo[]
+  // Raw wire tabs (snake_case), mapped to `TabInfo` at the `useListsStream`
+  // boundary via `mapTabInfo` — the single mapping point.
+  tabs: TabInfoWire[]
   recentSessions: SessionInfo[]
   archivedSessions: SessionInfo[]
 }

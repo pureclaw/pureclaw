@@ -128,6 +128,23 @@ describe('ActiveTabs', () => {
     expect(indicator!.textContent).toBe('○') // ○
   })
 
+  it('defensive: an UNKNOWN status string renders a fallback glyph instead of crashing', () => {
+    // A malformed/forward-incompatible backend status must not crash the render
+    // (statusIcon[status] would be undefined → reading .char/.color throws).
+    // Cast through unknown to model a wire value outside the TabStatus union.
+    const tabs = makeTabs({ index: 0, name: 'weird-tab' })
+    tabs[0]!.status = 'totally-bogus' as unknown as TabInfo['status']
+    const { container } = render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />,
+    )
+    // The row still renders (no throw) and shows a status indicator with a
+    // sensible fallback glyph rather than blowing up.
+    expect(screen.getByText('weird-tab')).toBeInTheDocument()
+    const indicator = container.querySelector('[data-testid="status-totally-bogus"]')
+    expect(indicator).toBeInTheDocument()
+    expect(indicator!.textContent).toBe('?')
+  })
+
   it('D4.1: maps exited status to a red X icon', () => {
     const tabs = makeTabs({ status: 'exited', name: 'exit-tab' })
     const { container } = render(

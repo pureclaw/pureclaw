@@ -797,12 +797,15 @@ runChat opts = do
         -- seam that, once an entry has been Orphaned for
         -- 'Reconcile.defaultOrphanGraceTicks' consecutive ticks, drops it from
         -- the legacy '_env_harnesses' map (keyed by the window-name label). The
-        -- loop itself deletes the registry entry; here we mirror that into the
-        -- legacy map. Neither path touches 'session.json', so the session
-        -- reappears in Recent Sessions.
+        -- reconcile LOOP owns the registry delete (it calls
+        -- 'Registry.deleteEntry' inside 'reconcileTick'); per the '_rd_evict'
+        -- seam contract this callback is responsible ONLY for the legacy map, so
+        -- it does NOT delete the registry entry again (that would be a redundant
+        -- double-delete — idempotent, but contradicting the seam's contract).
+        -- Neither path touches 'session.json', so the session reappears in
+        -- Recent Sessions.
         let reconcileDeps = Reconcile.defaultReconcileDeps
-              { Reconcile._rd_evict = \hid label -> do
-                  Registry.deleteEntry harnessReg hid
+              { Reconcile._rd_evict = \_hid label ->
                   modifyIORef' harnessRef (Map.delete label)
               }
         Async.withAsync

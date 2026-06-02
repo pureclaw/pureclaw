@@ -17,6 +17,12 @@ const statusLabel: Record<TabStatus, string> = {
   orphaned: 'Orphaned',
 }
 
+/** Fallback glyph for a status string the frontend does not recognize (a
+ *  malformed or forward-incompatible backend status). Defensive against an
+ *  out-of-union value: a lookup miss must render this neutral cue rather than
+ *  crash the row (`statusIcon[unknown].char` would throw on undefined). */
+const FALLBACK_ICON = { char: '?', color: 'var(--text-muted)' }
+
 /** A small inline pill used for the [raw], origin, and "edited" markers. */
 function Pill({
   children,
@@ -62,7 +68,9 @@ function TabRow({
   onAcknowledge: () => void
   activity?: SessionActivityState
 }) {
-  const icon = statusIcon[tab.status]
+  // Defensive lookup: an unknown status string (malformed backend payload)
+  // must not crash the render — fall back to a neutral glyph/label.
+  const icon = statusIcon[tab.status] ?? FALLBACK_ICON
   const isRawShell = tab.kind.startsWith('shell:')
   const isSessionBacked = tab.session_id !== null
   const isThinking = activity?.harness === 'thinking'
@@ -225,7 +233,7 @@ function TabRow({
         className="text-xs ml-6 mt-0.5"
         style={{ color: 'var(--text-muted)', lineHeight: 'var(--leading-tight)' }}
       >
-        {statusLabel[tab.status]}
+        {statusLabel[tab.status] ?? tab.status}
       </div>
     </div>
   )

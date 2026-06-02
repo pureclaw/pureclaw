@@ -6,7 +6,7 @@ const POLL_INTERVAL = 3000
 /** Raw `/api/tabs` (and WS `lists`) wire shape: the backend emits the new
  *  health fields in snake_case. `index`/`kind`/`name`/`status`/`session_id`
  *  are already in their final shape; the rest map to camelCase TabInfo keys. */
-interface TabInfoWire {
+export interface TabInfoWire {
   index: number
   kind: string
   name: string

@@ -12,12 +12,12 @@ export function useListsStream(client?: StreamClient) {
 
   useEffect(() => {
     const unsub = sc.onLists((snapshot: ListsSnapshot) => {
-      // The WS `lists` frame carries tabs as raw backend JSON (the new health
-      // fields are snake_case). Normalize them to the camelCase TabInfo shape
+      // The WS `lists` frame carries tabs as raw backend JSON (`TabInfoWire`,
+      // snake_case health fields). Normalize them to the camelCase TabInfo shape
       // the UI renders, mirroring the REST `/api/tabs` boundary in useTabs.
-      // SAFETY: snapshot.tabs is external wire data; mapTabInfo reads only the
-      // wire keys and tolerates Phase-1 objects missing the new fields.
-      setTabs(snapshot.tabs.map((t) => mapTabInfo(t as unknown as Parameters<typeof mapTabInfo>[0])))
+      // `snapshot.tabs` is already typed `TabInfoWire[]`, so `mapTabInfo` applies
+      // directly — no cast needed (mapTabInfo is the single mapping point).
+      setTabs(snapshot.tabs.map(mapTabInfo))
       setRecentSessions(snapshot.recentSessions)
       setArchivedSessions(snapshot.archivedSessions)
     })

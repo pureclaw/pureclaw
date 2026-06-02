@@ -724,6 +724,51 @@ spec = do
       remainingSessions <- readIORef sessionStore
       remainingSessions `shouldBe` ["pcl-sid-9"]
 
+    -- Anti-flap invariant (WU2 review fold-in): a transient sweep FAILURE while
+    -- an entry is already Orphaned must HOLD the orphaned-tick counter — neither
+    -- advance it (a tmux blip is not evidence the window is gone) nor reset it
+    -- (the window did not return live) — and must NOT evict. This locks the
+    -- held-path behaviour ('mkObservedHeld'/'baseObserved' carry the counter
+    -- through unchanged) against regression: a flaky tmux server can never push
+    -- a still-present-but-temporarily-unsweepable harness over the grace cliff.
+    it "anti-flap: a transient sweep failure holds the orphaned counter (no advance, no reset, no evict)" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      evictRef <- newIORef ([] :: [(Reg.HarnessId, Text)])
+      -- A few empty (orphaning) ticks, then ONE failed sweep (transient tmux
+      -- hiccup), then empty again. The failed tick must leave the counter where
+      -- the orphaning ticks left it.
+      f <- mkFakes
+        [ Right []                       -- orphan 1  -> ticks = 1
+        , Right []                       -- orphan 2  -> ticks = 2
+        , Right []                       -- orphan 3  -> ticks = 3
+        , Left (userError "tmux blip")   -- transient failure -> HELD at 3
+        , Right []                       -- orphan again -> ticks = 4
+        ]
+        Map.empty Map.empty
+      let deps = (fakeDeps f)
+            { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 2
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 3
+      afterThree <- Reg.snapshot reg
+      (Reg._he_orphanedTicks <$> afterThree) `shouldBe` [3]
+      -- The failed sweep: counter HELD (not advanced to 4, not reset to 0), the
+      -- entry stays Orphaned + marked stale, and it is NOT evicted.
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- transient failure
+      afterFail <- Reg.snapshot reg
+      [eHeld] <- pure afterFail
+      Reg._he_orphanedTicks eHeld `shouldBe` 3                       -- HELD, not advanced/reset
+      Reg._he_liveness eHeld      `shouldBe` Reg.LivenessOrphaned    -- still orphaned
+      Reg._he_stale eHeld         `shouldBe` True                    -- the blip marked it stale
+      readIORef evictRef `shouldReturn` []                          -- NOT evicted by the blip
+      -- The next real (empty) sweep resumes advancing from the held value.
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan again
+      afterResume <- Reg.snapshot reg
+      (Reg._he_orphanedTicks <$> afterResume) `shouldBe` [4]
+      readIORef evictRef `shouldReturn` []
+
   describe "runReconcileLoopWith — WU2 (loop emits a final eviction event)" $
     it "D2.2 emits a final HarnessStopped disappearance event on auto-eviction" $ do
       reg <- Reg.newRegistry
