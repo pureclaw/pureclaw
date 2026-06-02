@@ -1,8 +1,8 @@
 ---
 issue: pureclaw-3oy
 phase: 1
-pr: pending
-status: APPROVED — plan-review-gate PASSED (Feasibility/Completeness/Scope), additive-registry strategy
+pr: ready-for-pr
+status: COMPLETE — all 9 WUs implemented, reviewed (per-WU + final comprehensive), committed (Feasibility/Completeness/Scope), additive-registry strategy
 date_drafted: 2026-06-01
 design_doc: docs/harness-registry.md (APPROVED by 5-agent design-review-gate)
 beads_epic: pureclaw-3oy
