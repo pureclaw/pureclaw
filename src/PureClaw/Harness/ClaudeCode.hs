@@ -278,6 +278,7 @@ mkClaudeCodeHarnessWith deps policy th session windowName _windowIdx mWorkDir ex
                                 , Reg._he_stale       = False
                                 , Reg._he_sessionId   = Nothing
                                 , Reg._he_label       = windowName
+                                , Reg._he_orphanedTicks = 0
                                 , Reg._he_handle      = Just handle
                                 }
                           Reg.insertEntry reg entry

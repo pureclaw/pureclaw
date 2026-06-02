@@ -68,7 +68,6 @@ import PureClaw.Frontend.StreamBroker
   , defaultBrokerConfig
   , mkInProcessBroker
   )
-import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
 import PureClaw.Harness.Reconcile qualified as Reconcile
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Channels.AllowList
@@ -794,10 +793,24 @@ runChat opts = do
         -- stamps legacy claude-code-<idx> windows. The legacy '_env_harnesses'
         -- map was already seeded in parallel by 'discoverHarnesses' above.
         Reconcile.bootReconstruct Reconcile.defaultReconcileDeps harnessReg logger
+        -- Orphan grace policy (WU2): run the reconcile loop with an eviction
+        -- seam that, once an entry has been Orphaned for
+        -- 'Reconcile.defaultOrphanGraceTicks' consecutive ticks, drops it from
+        -- the legacy '_env_harnesses' map (keyed by the window-name label). The
+        -- loop itself deletes the registry entry; here we mirror that into the
+        -- legacy map. Neither path touches 'session.json', so the session
+        -- reappears in Recent Sessions.
+        let reconcileDeps = Reconcile.defaultReconcileDeps
+              { Reconcile._rd_evict = \hid label -> do
+                  Registry.deleteEntry harnessReg hid
+                  modifyIORef' harnessRef (Map.delete label)
+              }
         Async.withAsync
           (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
           Async.withAsync
-            (runActivityProbeLoop broker harnessReg logger) $ \_probeAsync ->
+            (Reconcile.runReconcileLoopWith
+               Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
+            $ \_probeAsync ->
             runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of

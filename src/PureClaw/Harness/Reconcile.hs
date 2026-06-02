@@ -42,6 +42,8 @@ module PureClaw.Harness.Reconcile
   ( -- * Dependencies (the IO seam)
     ReconcileDeps (..)
   , defaultReconcileDeps
+    -- * Orphan grace policy
+  , defaultOrphanGraceTicks
     -- * Pure classification + corroboration
   , CorroborationResult (..)
   , corroborate
@@ -52,6 +54,7 @@ module PureClaw.Harness.Reconcile
   , reconcileTick
   , runReconcileLoopWith
   , runReconcileLoop
+  , defaultTickMicros
     -- * Boot reconstruction
   , bootReconstruct
     -- * Legacy window-name recognition (exposed for unit coverage)
@@ -117,6 +120,14 @@ data ReconcileDeps = ReconcileDeps
     -- ^ Lazily stamp a legacy @claude-code-\<idx\>@ window (no @\@pcl_id@) with
     --   a fresh marker + id, returning the new id (production: generate an id,
     --   'setWindowMarker'). 'Nothing' for a window we do not own.
+  , _rd_evict :: Reg.HarnessId -> Text -> IO ()
+    -- ^ Auto-eviction seam (design §5\/§10 Q2). Called with the
+    --   @(harnessId, label)@ of an entry that has been Orphaned for
+    --   'defaultOrphanGraceTicks' consecutive ticks. Production wires this to
+    --   drop the entry from the LEGACY @_env_harnesses@ map (the registry
+    --   delete is done by the loop itself, in 'reconcileTick'); it must NOT
+    --   touch @session.json@ so the session reappears in Recent Sessions.
+    --   Tests inject a recorder to assert the @(id, label)@ that was evicted.
   }
 
 -- | Production dependency set. Sweeps the @\"pureclaw\"@ session plus any other
@@ -147,6 +158,11 @@ defaultReconcileDeps = ReconcileDeps
           setWindowMarker session windowName (Reg.harnessIdToText hid)
           pure (Just hid)
         else pure Nothing
+    -- Default eviction is a no-op: the loop itself deletes the evicted entry
+    -- from the registry; the legacy-map drop is wired in CLI.Commands (which
+    -- overrides this seam via 'runReconcileLoopWith'). Crucially this never
+    -- deletes @session.json@.
+  , _rd_evict = \_hid _label -> pure ()
   }
   where
     dedup = go []
@@ -258,7 +274,11 @@ reconcileTick
   :: ReconcileDeps
   -> Reg.HarnessRegistry
   -> LogHandle
-  -> IO (Map Text (Text, Reg.Liveness))
+  -> IO (Map Text (Text, Reg.Liveness), [Text])
+  -- ^ @(liveness snapshot keyed by id-text, sessionIds of entries auto-evicted
+  --   this tick)@. Evicted entries are removed from the snapshot map (so the
+  --   next diff does not re-report them) and the loop emits one final
+  --   disappearance event per returned sessionId.
 reconcileTick deps reg logger = do
   sessions <- _rd_sessions deps
   -- Sweep every session; a failed sweep yields Nothing (we then hold stale).
@@ -315,7 +335,29 @@ reconcileTick deps reg logger = do
                 pure (mkObservedLive e row liveness)
   let observed = map snd observedPairs
   Reg.mergeReconcile reg observed
-  pure (Map.fromList [ (k, v) | (k, v) <- map fst observedPairs ])
+  let snapMap = Map.fromList [ (k, v) | (k, v) <- map fst observedPairs ]
+  -- Orphan grace policy (design §5 / §10 Q2): after the merge, evict any entry
+  -- that has now been Orphaned for 'defaultOrphanGraceTicks' consecutive ticks.
+  -- Eviction drops the entry from the registry (here) and from the legacy map
+  -- (via the injectable '_rd_evict' seam, wired in CLI.Commands) — but never
+  -- touches @session.json@. The evicted ids are removed from the returned
+  -- snapshot so the next tick's diff does not re-report them; their sessionIds
+  -- are returned so the loop can emit one final disappearance event.
+  merged <- Reg.snapshot reg
+  let toEvict =
+        [ e | e <- merged, Reg._he_orphanedTicks e >= defaultOrphanGraceTicks ]
+  evictedSids <- forM toEvict $ \e -> do
+    _lh_logInfo logger
+      ("reconcile: evicting harness " <> Reg.harnessIdToText (Reg._he_id e)
+         <> " (label " <> Reg._he_label e <> ") after "
+         <> T.pack (show (Reg._he_orphanedTicks e))
+         <> " orphaned ticks; session.json retained")
+    _rd_evict deps (Reg._he_id e) (Reg._he_label e)
+    Reg.deleteEntry reg (Reg._he_id e)
+    pure (Reg.harnessIdToText (Reg._he_id e), sidOf e)
+  let evictedKeys = map fst evictedSids
+      snapMap'    = foldr Map.delete snapMap evictedKeys
+  pure (snapMap', map snd evictedSids)
   where
     -- Each result is ((keyText, (sessionId, liveness)), ObservedHarness).
     mkObservedHeld :: Reg.HarnessEntry -> ((Text, (Text, Reg.Liveness)), Reg.ObservedHarness)
@@ -328,7 +370,11 @@ reconcileTick deps reg logger = do
     mkObservedOrphaned e =
       ( (Reg.harnessIdToText (Reg._he_id e), (sidOf e, Reg.LivenessOrphaned))
       , (baseObserved e Reg.LivenessOrphaned)
-          { Reg._oh_liveness = Reg.LivenessOrphaned } )
+          { Reg._oh_liveness = Reg.LivenessOrphaned
+            -- The corroborated window is absent this tick: advance the
+            -- consecutive-orphaned counter so the grace policy can fire.
+          , Reg._oh_orphanedTicks = Reg._he_orphanedTicks e + 1
+          } )
 
     mkObservedLive
       :: Reg.HarnessEntry -> TmuxWindowRow -> Reg.Liveness
@@ -345,6 +391,9 @@ reconcileTick deps reg logger = do
              , Reg._oh_liveness    = liveness
              , Reg._oh_extModified = Reg._he_extModified e || extMod
              , Reg._oh_stale       = False
+               -- The window is present + corroborated this tick: the entry is
+               -- live again, so reset the consecutive-orphaned counter.
+             , Reg._oh_orphanedTicks = 0
              } )
 
     -- A held-state observed record reusing the entry's current coordinate.
@@ -358,6 +407,9 @@ reconcileTick deps reg logger = do
       , Reg._oh_liveness    = liveness
       , Reg._oh_extModified = Reg._he_extModified e
       , Reg._oh_stale       = False
+        -- Hold the current counter: a held (stale) observation neither advances
+        -- nor resets the grace clock; only a definite Orphaned/live tick does.
+      , Reg._oh_orphanedTicks = Reg._he_orphanedTicks e
       }
 
     sidOf :: Reg.HarnessEntry -> Text
@@ -396,6 +448,21 @@ runReconcileLoop broker reg =
 defaultTickMicros :: Int
 defaultTickMicros = 2_000_000
 
+-- | The orphan grace window, in consecutive reconcile ticks (design §5\/§10
+-- Q2). Once an entry has been classified 'Reg.LivenessOrphaned' for this many
+-- ticks in a row (i.e. '_he_orphanedTicks' reaches this value) the reconcile
+-- loop auto-evicts it from the registry and the legacy harness map and emits a
+-- final disappearance event — but never deletes @session.json@.
+--
+-- We count ticks rather than wall-clock so the policy is deterministic and
+-- test-injectable. At the production 2-second 'defaultTickMicros' cadence, 15
+-- ticks ≈ 30 seconds of continuous orphaning before eviction — long enough to
+-- ride out a transient tmux-server blip (which is held '_he_stale' and does
+-- NOT advance the counter), short enough that a genuinely gone harness clears
+-- from Active Tabs promptly.
+defaultOrphanGraceTicks :: Int
+defaultOrphanGraceTicks = 15
+
 -- | The reconcile loop with an explicit tick interval + injected deps. The
 -- first tick establishes the baseline (emits nothing); from the second tick on,
 -- one 'ActivityChanged' is published per entry whose liveness changed
@@ -411,16 +478,27 @@ runReconcileLoopWith
   -> IO ()
 runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
   threadDelay tickMicros
-  initial <- reconcileTick deps reg logger
+  -- Baseline tick: emits no transitions. Any eviction on this first tick still
+  -- emits its final disappearance event (an eviction is not a diff transition).
+  (initial, evicted0) <- reconcileTick deps reg logger
+  publishEvictions evicted0
   loop initial
   where
     loop prev = do
       threadDelay tickMicros
-      next <- reconcileTick deps reg logger
+      (next, evicted) <- reconcileTick deps reg logger
       forM_ (diffLiveness prev next) $ \(sid, liveness) ->
         _streamBroker_publish broker
           (ActivityChanged (SessionId sid) (SaHarnessStatus (livenessToActivity liveness)))
+      -- One final disappearance event per auto-evicted entry. The entry was
+      -- already Orphaned, so the diff above does NOT re-emit it; this guarantees
+      -- the frontend sees it leave even though no liveness transition occurred.
+      publishEvictions evicted
       loop next
+
+    publishEvictions = mapM_ $ \sid ->
+      _streamBroker_publish broker
+        (ActivityChanged (SessionId sid) (SaHarnessStatus (livenessToActivity Reg.LivenessOrphaned)))
 
     -- AsyncCancelled MUST be re-raised so 'Async.withAsync'/'Async.cancel'
     -- complete cleanly (project-wide invariant).
@@ -476,6 +554,7 @@ bootReconstruct deps reg logger = do
         , Reg._he_stale       = False
         , Reg._he_sessionId   = Nothing
         , Reg._he_label       = _twr_windowName row
+        , Reg._he_orphanedTicks = 0
         , Reg._he_handle      = Nothing
         }
 

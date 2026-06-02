@@ -2742,6 +2742,7 @@ baseEntry hid window mHandle = Registry.HarnessEntry
   , Registry._he_stale       = False
   , Registry._he_sessionId   = Nothing
   , Registry._he_label       = window
+  , Registry._he_orphanedTicks = 0
   , Registry._he_handle      = mHandle
   }
 

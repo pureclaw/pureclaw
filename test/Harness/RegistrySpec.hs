@@ -39,6 +39,7 @@ mkEntry hid lbl = HarnessEntry
   , _he_stale       = False
   , _he_sessionId   = Nothing
   , _he_label       = lbl
+  , _he_orphanedTicks = 0
   , _he_handle      = Nothing
   }
 
@@ -128,6 +129,7 @@ spec = do
             , _oh_liveness    = LivenessThinking
             , _oh_extModified = True
             , _oh_stale       = False
+            , _oh_orphanedTicks = 0
             }
       mergeReconcile reg [obsA]
       -- B survives untouched (no lost update).
@@ -154,6 +156,7 @@ spec = do
             , _oh_liveness    = LivenessExited
             , _oh_extModified = False
             , _oh_stale       = False
+            , _oh_orphanedTicks = 0
             }
       mergeReconcile reg [obsB]
       -- B was never registered; an observed row alone must not create it.
@@ -176,6 +179,7 @@ spec = do
             , _oh_liveness    = lv
             , _oh_extModified = False
             , _oh_stale       = False
+            , _oh_orphanedTicks = 0
             }
       mergeReconcile reg [obs idA LivenessThinking, obs idB LivenessExited]
       fa <- lookupById reg idA
@@ -188,6 +192,26 @@ spec = do
       insertEntry reg (mkEntry idA "a")
       m <- readTVarIO (unHarnessRegistry reg)
       Map.keys m `shouldBe` [idA]
+
+    -- WU2 (D2): applyObserved must copy the observed orphaned-tick counter onto
+    -- the entry so the grace policy rides the existing merge path.
+    it "copies _oh_orphanedTicks into the entry (grace counter rides the merge)" $ do
+      reg <- newRegistry
+      insertEntry reg (mkEntry idA "a")
+      let obs = ObservedHarness
+            { _oh_id          = idA
+            , _oh_session     = "pureclaw"
+            , _oh_windowName  = "a"
+            , _oh_shellPid    = Nothing
+            , _oh_harnessPid  = Nothing
+            , _oh_liveness    = LivenessOrphaned
+            , _oh_extModified = False
+            , _oh_stale       = False
+            , _oh_orphanedTicks = 3
+            }
+      mergeReconcile reg [obs]
+      found <- lookupById reg idA
+      (_he_orphanedTicks <$> found) `shouldBe` Just 3
 
   -- D2.4 — HarnessId JSON + text round-trips.
   describe "HarnessId round-trips (D2.4)" $ do
@@ -261,6 +285,7 @@ spec = do
           , _he_stale       = True
           , _he_sessionId   = Just "pcl-session-42"
           , _he_label       = "label-1"
+          , _he_orphanedTicks = 7
           , _he_handle      = Just mkNoOpHarnessHandle
           }
 
@@ -276,6 +301,7 @@ spec = do
       _he_stale full       `shouldBe` True
       _he_sessionId full   `shouldBe` Just "pcl-session-42"
       _he_label full       `shouldBe` "label-1"
+      _he_orphanedTicks full `shouldBe` 7
       -- HarnessHandle has no Eq/Show; assert presence via isJust.
       isJust (_he_handle full) `shouldBe` True
 

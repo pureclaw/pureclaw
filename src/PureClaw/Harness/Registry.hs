@@ -144,6 +144,14 @@ data HarnessEntry = HarnessEntry
     -- ^ The PureClaw session this harness backs (the join to @session.json@).
   , _he_label       :: !Text
     -- ^ Legacy window-name label, used for name->id resolution ('lookupByLabel').
+  , _he_orphanedTicks :: !Int
+    -- ^ Consecutive reconcile ticks this entry has been classified Orphaned.
+    --   0 whenever the entry is live (Idle\/Thinking\/Exited); the reconcile
+    --   loop increments it each tick the corroborated window stays absent and
+    --   auto-evicts the entry once it reaches 'PureClaw.Harness.Reconcile.defaultOrphanGraceTicks'
+    --   (the wall-clock-free grace policy, design §5\/§10 Q2). Eviction drops
+    --   the entry from the registry + the legacy harness map but never touches
+    --   @session.json@ (the session reappears in Recent Sessions).
   , _he_handle      :: !(Maybe HarnessHandle)
     -- ^ The live handle, if we have one. 'Nothing' for a boot-discovered entry
     --   that has not yet had a handle attached.
@@ -216,6 +224,10 @@ data ObservedHarness = ObservedHarness
   , _oh_liveness    :: !Liveness
   , _oh_extModified :: !Bool
   , _oh_stale       :: !Bool
+  , _oh_orphanedTicks :: !Int
+    -- ^ The entry's new consecutive-orphaned-tick count for this observation:
+    --   @old + 1@ when classified Orphaned, @0@ when live. Rides the
+    --   'mergeReconcile' path so the counter lives durably on the entry.
   }
   deriving stock (Eq, Show)
 
@@ -254,4 +266,5 @@ mergeReconcile reg observed =
           , _he_liveness    = _oh_liveness o
           , _he_extModified = _oh_extModified o
           , _he_stale       = _oh_stale o
+          , _he_orphanedTicks = _oh_orphanedTicks o
           }

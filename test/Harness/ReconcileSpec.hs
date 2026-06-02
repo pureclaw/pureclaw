@@ -20,6 +20,7 @@ module Harness.ReconcileSpec (spec) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
+import Control.Monad (replicateM_, void)
 import Control.Concurrent.STM (atomically, readTBQueue)
 import Control.Exception (throwIO, ErrorCall (..))
 import Data.IORef
@@ -65,6 +66,7 @@ mkEntry hid windowName shellPid harnessPid liveness = Reg.HarnessEntry
   , Reg._he_stale       = False
   , Reg._he_sessionId   = Just windowName
   , Reg._he_label       = windowName
+  , Reg._he_orphanedTicks = 0
   , Reg._he_handle      = Nothing
   }
 
@@ -119,6 +121,7 @@ fakeDeps f = ReconcileDeps
       m <- readIORef (f_aliveByPid f)
       pure (Map.findWithDefault True pid m)
   , _rd_stampLegacy = \_session _windowName -> pure Nothing
+  , _rd_evict = \_hid _label -> pure ()
   }
 
 -- | A log handle that records every warn\/error message into an 'IORef' so a
@@ -601,6 +604,162 @@ spec = do
       done `shouldBe` Just ()
       logs <- readIORef logRef
       any (\m -> "reconcile loop crashed" `T.isInfixOf` m) logs `shouldBe` True
+
+  -- WU2 — orphan grace/retention policy + auto-eviction (design §5 / §10 Q2).
+  describe "reconcileTick — WU2 orphan grace policy" $ do
+    -- D2.1: an Orphaned entry is RETAINED (still in the snapshot, greyed) while
+    -- its consecutive-orphaned-tick count is below the grace threshold.
+    it "D2.1 retains an Orphaned entry while below the grace threshold" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      evictRef <- newIORef ([] :: [(Reg.HarnessId, Text)])
+      -- Sweep is ALWAYS empty ⇒ the corroborated window is absent ⇒ Orphaned.
+      f <- mkFakes [Right []] Map.empty Map.empty
+      let deps = (fakeDeps f)
+            { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
+      -- Run threshold-1 orphaned ticks: the entry must survive every one.
+      replicateM_ (defaultOrphanGraceTicks - 1) $ do
+        _ <- reconcileTick deps reg mkNoOpLogHandle
+        pure ()
+      snap <- Reg.snapshot reg
+      map Reg._he_id snap `shouldBe` [hid]            -- still present (retained)
+      [e] <- pure snap
+      Reg._he_liveness e      `shouldBe` Reg.LivenessOrphaned  -- greyed, not gone
+      Reg._he_orphanedTicks e `shouldBe` (defaultOrphanGraceTicks - 1)
+      evicted <- readIORef evictRef
+      evicted `shouldBe` []                           -- not yet evicted
+
+    -- D2.2 + D2.5: at exactly the grace threshold the entry is evicted from the
+    -- registry, the injected eviction seam fires with (id, label) (the seam the
+    -- production wiring uses to also drop the LEGACY map), and reconcileTick
+    -- returns the entry's sessionId so the loop emits a final disappearance.
+    it "D2.2 evicts from the registry + fires _rd_evict (id,label) at the threshold" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let entry = (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+            { Reg._he_label = "claude-code-0", Reg._he_sessionId = Just "pcl-sid-7" }
+      Reg.insertEntry reg entry
+      evictRef <- newIORef ([] :: [(Reg.HarnessId, Text)])
+      f <- mkFakes [Right []] Map.empty Map.empty
+      let deps = (fakeDeps f)
+            { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
+      -- Run threshold-1 ticks (retained), then the threshold-th tick evicts.
+      replicateM_ (defaultOrphanGraceTicks - 1) (void (reconcileTick deps reg mkNoOpLogHandle))
+      (_snap, evictedSids) <- reconcileTick deps reg mkNoOpLogHandle
+      -- Registry: the entry is gone.
+      snap <- Reg.snapshot reg
+      map Reg._he_id snap `shouldBe` []
+      -- Eviction seam fired exactly once with (id, label) — this is the SAME
+      -- callback the production loop wires to delete the legacy '_env_harnesses'
+      -- map entry, proving both-store eviction (registry here + legacy via seam).
+      evicted <- readIORef evictRef
+      evicted `shouldBe` [(hid, "claude-code-0")]
+      -- The tick surfaces the evicted sessionId so the loop emits a final event.
+      evictedSids `shouldBe` ["pcl-sid-7"]
+
+    -- D2.3: the counter RESETS when the entry becomes live again before the
+    -- threshold, so a flapping window never accumulates to eviction.
+    it "D2.3 resets the orphaned counter when the entry becomes live again" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      evictRef <- newIORef ([] :: [(Reg.HarnessId, Text)])
+      -- Sweeps: a few empty (orphaning) ticks, then the window REAPPEARS idle,
+      -- then empties again. The reappearance must reset the counter to 0.
+      f <- mkFakes
+        [ Right []                                                       -- orphan 1
+        , Right []                                                       -- orphan 2
+        , Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]  -- live
+        , Right []                                                       -- orphan again
+        ]
+        (Map.singleton "claude-code-0" True)  -- idle when present
+        Map.empty
+      let deps = (fakeDeps f)
+            { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 2
+      afterTwo <- Reg.snapshot reg
+      (Reg._he_orphanedTicks <$> afterTwo) `shouldBe` [2]
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- live again ⇒ reset
+      afterLive <- Reg.snapshot reg
+      [eLive] <- pure afterLive
+      Reg._he_liveness eLive      `shouldBe` Reg.LivenessIdle
+      Reg._he_orphanedTicks eLive `shouldBe` 0       -- counter reset
+      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan again ⇒ count restarts at 1
+      afterReorphan <- Reg.snapshot reg
+      (Reg._he_orphanedTicks <$> afterReorphan) `shouldBe` [1]
+      evicted <- readIORef evictRef
+      evicted `shouldBe` []                          -- never evicted (counter reset)
+
+    -- D2.4: eviction NEVER touches session.json. The reconcile path's ONLY
+    -- deletion seam is '_rd_evict :: HarnessId -> Text -> IO ()' (id + label) —
+    -- there is no session-directory argument and no session-storage seam in
+    -- 'ReconcileDeps', so the eviction logic structurally cannot delete a
+    -- session. We assert the seam is invoked with id+label and that an injected
+    -- recorder which deliberately does NOTHING to any session storage leaves the
+    -- registry eviction working (the session is retained by construction).
+    it "D2.4 eviction only deletes via _rd_evict (id,label) — session.json untouched" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let entry = (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+            { Reg._he_label = "claude-code-0", Reg._he_sessionId = Just "pcl-sid-9" }
+      Reg.insertEntry reg entry
+      -- A "session store" the eviction must NEVER touch. The seam takes only
+      -- (id, label); it has no handle to this store, so it stays intact.
+      sessionStore <- newIORef (["pcl-sid-9"] :: [Text])
+      evictArgs    <- newIORef ([] :: [(Reg.HarnessId, Text)])
+      f <- mkFakes [Right []] Map.empty Map.empty
+      let deps = (fakeDeps f)
+            { _rd_evict = \i l -> modifyIORef' evictArgs (++ [(i, l)]) }
+      replicateM_ defaultOrphanGraceTicks (void (reconcileTick deps reg mkNoOpLogHandle))
+      -- Registry entry evicted...
+      snap <- Reg.snapshot reg
+      map Reg._he_id snap `shouldBe` []
+      -- ...the seam fired with id+label only...
+      args <- readIORef evictArgs
+      args `shouldBe` [(hid, "claude-code-0")]
+      -- ...and the session store is completely untouched (session.json retained,
+      -- so the sid reappears in Recent Sessions).
+      remainingSessions <- readIORef sessionStore
+      remainingSessions `shouldBe` ["pcl-sid-9"]
+
+  describe "runReconcileLoopWith — WU2 (loop emits a final eviction event)" $
+    it "D2.2 emits a final HarnessStopped disappearance event on auto-eviction" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let entry = (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+            { Reg._he_label = "claude-code-0", Reg._he_sessionId = Just "pcl-sid-evt" }
+      Reg.insertEntry reg entry
+      broker <- mkInProcessBroker defaultBrokerConfig
+      eSub   <- _streamBroker_subscribe broker
+      sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      evictRef <- newIORef ([] :: [(Reg.HarnessId, Text)])
+      -- Window is gone from tick 1 on ⇒ orphaned every tick ⇒ eviction after the
+      -- grace window. The loop must emit a final HarnessStopped for the sid even
+      -- though the entry was already Orphaned (no liveness transition at evict).
+      f <- mkFakes [Right []] Map.empty Map.empty
+      let deps = (fakeDeps f)
+            { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
+          tick = 4_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          -- Drain events until we both see the registry emptied AND captured the
+          -- eviction; assert a final HarnessStopped for the evicted sid arrived.
+          let drain :: Int -> IO Bool
+              drain 0 = pure False
+              drain n = do
+                mEv <- recvWithin (4 * tick) sub
+                case mEv of
+                  Just (ActivityChanged (SessionId s) (SaHarnessStatus HarnessStopped))
+                    | s == "pcl-sid-evt" -> do
+                        ev <- readIORef evictRef
+                        if null ev then drain (n - 1) else pure True
+                  _ -> drain (n - 1)
+          ok <- drain (defaultOrphanGraceTicks + 10)
+          ok `shouldBe` True
+          snap <- Reg.snapshot reg
+          map Reg._he_id snap `shouldBe` []
 
   describe "isLegacyWindowName" $ do
     it "recognizes a claude-code-<idx> window name" $ do
