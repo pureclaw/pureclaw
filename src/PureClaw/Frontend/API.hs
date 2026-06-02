@@ -1383,9 +1383,10 @@ routeViaName env sid mName userText transcriptPath respond = do
     Just hh ->
       -- D6.5: lazily back-fill the durable id when a corroborated registry
       -- entry matches this window name by label. Best-effort; runs only AFTER
-      -- a successful send (fire-and-forget, post-send) and is itself
-      -- exception-proof (D6.5c), so it can neither delay, block, nor fail the
-      -- send the user already received.
+      -- a successful send (post-send, synchronous-but-exception-proof: it runs
+      -- synchronously before 'respond' on the success branch — adding only
+      -- minor latency — but is itself exception-proof (D6.5c), so it can fail
+      -- neither the send the user already received nor the response.)
       routeViaHandle env sid hh userText transcriptPath
         (maybe (pure ()) (backfillHarnessId env sid) mName)
         respond
@@ -1395,10 +1396,11 @@ routeViaName env sid mName userText transcriptPath respond = do
 -- transcript), broadcast, bump @_sm_lastActive@, and respond. Shared by the
 -- id and name resolution paths.
 --
--- @postSend@ is a fire-and-forget action run ONLY after a successful send (the
--- name path uses it for the D6.5 id back-fill). It runs before @respond@ on the
--- success branch, so it never delays a failed send; callers MUST make it
--- exception-proof (see 'backfillHarnessId') so it cannot fail the send.
+-- @postSend@ is a synchronous-but-exception-proof action run ONLY after a
+-- successful send (the name path uses it for the D6.5 id back-fill). It runs
+-- synchronously before @respond@ on the success branch — so it can add minor
+-- latency to a successful response but never delays a failed send; callers MUST
+-- make it exception-proof (see 'backfillHarnessId') so it cannot fail the send.
 routeViaHandle
   :: FrontendEnv
   -> Text
@@ -1439,9 +1441,10 @@ routeViaHandle env sid hh userText transcriptPath postSend respond = do
     Right resp -> do
       touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
       broadcastLists env
-      -- Fire-and-forget post-send hook (e.g. the D6.5 id back-fill). It is
-      -- exception-proof at the source, so it cannot fail the send the user is
-      -- about to receive.
+      -- Synchronous-but-exception-proof post-send hook (e.g. the D6.5 id
+      -- back-fill). It runs synchronously here, before 'respond' — so it can add
+      -- minor latency — but is exception-proof at the source, so it cannot fail
+      -- the send the user is about to receive.
       postSend
       respond $ jsonResponse status200 (object ["response" .= resp])
 

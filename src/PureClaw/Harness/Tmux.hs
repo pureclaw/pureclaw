@@ -42,6 +42,10 @@ module PureClaw.Harness.Tmux
     -- * PID provenance (WU1)
   , harnessPidOf
   , selectHarnessPid
+  , parsePsRows
+    -- * Pure output helpers (unit-testable)
+  , stripAnsi
+  , escapeForShell
     -- * I/O (index-based, legacy)
   , sendToWindow
   , captureWindow
@@ -70,6 +74,8 @@ module PureClaw.Harness.Tmux
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BC
 import Data.ByteString.Lazy qualified as LBS
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -729,17 +735,31 @@ startTmuxSessionStatus sessionName = do
 --
 -- Pure over @(pid, ppid, comm)@ rows; chooses the shallowest matching
 -- descendant (BFS) so a direct child wins over a deeper one.
+--
+-- The @(pid, ppid)@ table is untrusted (parsed from @ps@ output, or in tests
+-- from arbitrary fixtures) and may describe a cycle — a self-parent
+-- (@pid == ppid@), a mutual cycle, or any longer loop. A visited-set bounds the
+-- descent so it is total over arbitrary rows: every PID is enqueued at most
+-- once, so the BFS terminates on any cycle and still returns the correct
+-- shallowest match (or 'Nothing' when no descendant matches).
 selectHarnessPid :: Int -> Text -> [(Int, Int, Text)] -> Maybe Int
-selectHarnessPid paneShellPid flavourComm rows = bfs [paneShellPid]
+selectHarnessPid paneShellPid flavourComm rows =
+  bfs (Set.singleton paneShellPid) [paneShellPid]
   where
     -- BFS over the descendant frontier; at each level prefer a comm match.
-    bfs :: [Int] -> Maybe Int
-    bfs []      = Nothing
-    bfs parents =
+    -- @visited@ accumulates every PID already enqueued so a cyclic table cannot
+    -- re-enqueue a node and loop forever.
+    bfs :: Set Int -> [Int] -> Maybe Int
+    bfs _       []      = Nothing
+    bfs visited parents =
       let kids = [ (pid, comm) | (pid, ppid, comm) <- rows, ppid `elem` parents ]
       in case [ pid | (pid, comm) <- kids, comm == flavourComm ] of
            (p : _) -> Just p
-           []      -> bfs (map fst kids)
+           []      ->
+             -- Descend only into children not yet visited; otherwise a cycle
+             -- (a ppid pointing back at an ancestor) would loop forever.
+             let nextPids = filter (`Set.notMember` visited) (map fst kids)
+             in bfs (foldr Set.insert visited nextPids) nextPids
 
 -- | IO wrapper around 'selectHarnessPid': gather @(pid, ppid, comm)@ rows via
 -- @ps -axo pid=,ppid=,comm=@ and select the harness PID descending from the

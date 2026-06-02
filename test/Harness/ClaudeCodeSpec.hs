@@ -399,6 +399,21 @@ spec = do
       isUiBoundary "\x2500\x2500\x2500" `shouldBe` True
       isUiBoundary "ordinary line" `shouldBe` False
 
+    it "isUiBoundary recognises the '? for shortcuts' hint line" $ do
+      -- Covers the `T.isPrefixOf \"?\" && T.isInfixOf \"shortcut\"` arm.
+      isUiBoundary "? for shortcuts" `shouldBe` True
+      -- A leading '?' alone (without "shortcut") is NOT a boundary.
+      isUiBoundary "? what is this" `shouldBe` False
+
+    it "extractLastResponse strips the alternate ⬤ marker prefix" $ do
+      -- A response block whose marker is the alternate glyph (U+2B24, ⬤)
+      -- exercises stripMarker's second prefix check.
+      let capture = TE.encodeUtf8 (T.intercalate "\n"
+            [ "\x2B24 alt-marked response"
+            , "\x276F "  -- boundary ends the block
+            ])
+      extractLastResponse capture `shouldBe` TE.encodeUtf8 "alt-marked response"
+
     it "extractLastResponse returns empty when there is no marker" $
       extractLastResponse "just\nplain\nlines" `shouldBe` ""
 
