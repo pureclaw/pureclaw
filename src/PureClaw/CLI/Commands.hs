@@ -763,19 +763,27 @@ runChat opts = do
                       cwd       = fmap T.unpack (SessionTypes._h_cwd spec)
                       canonical = fromMaybe name (resolveHarnessName name)
                       harnessKey = canonical <> "-" <> T.pack (show windowIdx)
-                  result <- startHarnessByName policy transcript "pureclaw" name
+                      -- WU7 (epic core fix): honor the requested tmux session
+                      -- (default "pureclaw"). The window is still auto-assigned
+                      -- (harnessKey = canonical-<idx>); honoring a caller's
+                      -- _tc_window for placement is deferred (pureclaw-jlc).
+                      session = resolveHarnessSession spec
+                  result <- startHarnessByName policy transcript session name
                               harnessKey windowIdx cwd skipPerms harnessReg
                   case result of
                     Left err -> pure (Left err)
-                    Right (_hid, hh) -> do
+                    Right (hid, hh) -> do
                       modifyIORef' harnessRef (Map.insert harnessKey hh)
                       modifyIORef' windowIdxRef (+ 1)
-                      pure (Right (StartedHarness harnessKey
-                        (SessionTypes.TmuxConfig
-                          { SessionTypes._tc_session = "pureclaw"
-                          , SessionTypes._tc_window  = harnessKey
-                          , SessionTypes._tc_pane    = Nothing
-                          })))
+                      pure (Right (StartedHarness
+                        { _shh_key  = harnessKey
+                        , _shh_tmux = SessionTypes.TmuxConfig
+                            { SessionTypes._tc_session = session
+                            , SessionTypes._tc_window  = harnessKey
+                            , SessionTypes._tc_pane    = Nothing
+                            }
+                        , _shh_id   = hid
+                        }))
               , _fe_listModels   = listModelsForProvider
               , _fe_listProviders = listConfiguredProviders
               , _fe_registry     = fullRegistry

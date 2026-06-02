@@ -1524,6 +1524,119 @@ spec = do
         harnessIdOfMeta reloaded `shouldBe` Nothing
 
   -- -----------------------------------------------------------------------
+  -- WU7: _fe_startHarness honors _tc_session; createHarnessTab persists the id
+  -- -----------------------------------------------------------------------
+
+  describe "resolveHarnessSession (WU7 — D7.3)" $ do
+    -- D7.3: a spec with no tmux session (the frontend's placeholder 'local'
+    -- request backend) resolves to the default "pureclaw".
+    it "defaults to \"pureclaw\" when the spec has no tmux session (D7.3)" $
+      resolveHarnessSession (harnessSpecWithBackend TbLocal)
+        `shouldBe` "pureclaw"
+
+    -- D7.3: an empty _tc_session is treated as unspecified -> default.
+    it "treats an empty _tc_session as unspecified (D7.3)" $
+      resolveHarnessSession
+        (harnessSpecWithBackend (TbTmux (TmuxConfig "" "w" Nothing)))
+        `shouldBe` "pureclaw"
+
+    -- D7.3: a spec specifying a non-empty _tc_session is honored verbatim.
+    it "honors a non-empty _tc_session (D7.3)" $
+      resolveHarnessSession
+        (harnessSpecWithBackend (TbTmux (TmuxConfig "my-proj" "w" Nothing)))
+        `shouldBe` "my-proj"
+
+  describe "POST /api/tabs/new (harness id persistence — WU7)" $ do
+    -- D7.1: a frontend-created harness registers a HarnessId entry in the shared
+    -- registry. The fake _fe_startHarness seeds a corroborated entry keyed by the
+    -- id (as the real spawn path does via startHarnessByName); we assert the
+    -- registry carries it after the create flows end-to-end through createHarnessTab.
+    it "registers a HarnessId entry in the shared registry (D7.1)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d71" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        sentRef <- newIORef []
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessWith (_fe_harnesses env0) "claude-code-0"
+                    fakeStartedHid (Just (_fe_harnessRegistry env0, sentRef)) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        mEntry <- Registry.lookupById (_fe_harnessRegistry env) fakeStartedHid
+        case mEntry of
+          Just _  -> pure ()
+          Nothing -> expectationFailure
+            "expected the frontend-created harness id in the registry"
+
+    -- D7.2: the persisted session.json carries BOTH the harnessId (Just) AND
+    -- the resolved _tc_session. Read both back from disk and assert.
+    it "persists BOTH harnessId and _tc_session into session.json (D7.2)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d72" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        -- harnessId read back from the raw persisted JSON.
+        rawMeta <- tryLoadMetaJson tmpDir newSid
+        harnessIdOfMeta rawMeta
+          `shouldBe` Just (Registry.harnessIdToText fakeStartedHid)
+        -- _tc_session read back from the decoded meta (default "pureclaw").
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> do
+            _h_harnessId hs `shouldBe` Just fakeStartedHid
+            case _h_backend hs of
+              TbTmux tc -> _tc_session tc `shouldBe` "pureclaw"
+              other -> expectationFailure ("expected TbTmux, got " <> show other)
+          other -> expectationFailure ("expected SkHarness, got " <> show other)
+
+    -- D7.3 (end-to-end): a request specifying a custom _tc_session is honored —
+    -- the persisted session.json carries that session, not the default.
+    it "honors a request-specified _tc_session end-to-end (D7.3)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d73e" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (harnessNewTabBodyWithSession "my-proj")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> case _h_backend hs of
+            TbTmux tc -> _tc_session tc `shouldBe` "my-proj"
+            other -> expectationFailure ("expected TbTmux, got " <> show other)
+          other -> expectationFailure ("expected SkHarness, got " <> show other)
+
+    -- D7.4: first-prompt routing still works via the persisted id. After
+    -- createHarnessTab persists the id and registers a corroborated registry
+    -- entry, a POST /api/sessions/<sid>/send resolves the persisted id through
+    -- the registry to the corroborated entry's handle (keystrokes reach it).
+    it "routes a post-create send via the persisted id through the registry (D7.4)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d74" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        sentRef <- newIORef []
+        -- The legacy name map is EMPTY; the only live handle is the registry
+        -- entry keyed by the id. A successful send therefore PROVES id-routing.
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessWith (_fe_harnesses env0) "claude-code-0"
+                    fakeStartedHid (Just (_fe_harnessRegistry env0, sentRef)) }
+        (stCreate, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        stCreate `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        (stSend, sendResp) <- postJSON env ["api", "sessions", newSid, "send"]
+          (Aeson.encode (object ["message" .= ("first prompt" :: Text)]))
+        stSend `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode sendResp)) "response"
+          `shouldBe` Just (Aeson.String "id-routed reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["first prompt"]
+
+  -- -----------------------------------------------------------------------
   -- WU4: frozen system prompt + per-session agent rendering (§9.1)
   -- -----------------------------------------------------------------------
 
@@ -2154,6 +2267,36 @@ harnessNewTabBody = Aeson.encode $ object
       ]
   ]
 
+-- | A harness New-tab request body that specifies a tmux backend with an
+-- explicit @session@ (WU7, D7.3). The window is a placeholder the spawn path
+-- overrides; only the session is honored for placement.
+harnessNewTabBodyWithSession :: Text -> LBS.ByteString
+harnessNewTabBodyWithSession session = Aeson.encode $ object
+  [ "kind" .= object
+      [ "tag" .= ("session" :: Text)
+      , "session_kind" .= object
+          [ "tag"     .= ("harness" :: Text)
+          , "flavour" .= ("claude-code" :: Text)
+          , "backend" .= object
+              [ "tag"     .= ("tmux" :: Text)
+              , "session" .= session
+              , "window"  .= ("requested-window" :: Text)
+              ]
+          ]
+      ]
+  ]
+
+-- | A minimal 'HarnessSpec' carrying the given backend (WU7 unit tests for
+-- 'resolveHarnessSession'). All other fields are inert defaults.
+harnessSpecWithBackend :: TerminalBackend -> HarnessSpec
+harnessSpecWithBackend backend = HarnessSpec
+  { _h_flavour   = HClaudeCode
+  , _h_backend   = backend
+  , _h_cwd       = Nothing
+  , _h_args      = []
+  , _h_harnessId = Nothing
+  }
+
 -- | A fake '_fe_startHarness' that registers a no-op 'HarnessHandle' under
 -- the given key and returns a 'StartedHarness' whose tmux window matches
 -- that key. Mirrors the dispatcher's real contract closely enough for the
@@ -2164,10 +2307,46 @@ fakeStartHarness
   :: IORef (Map.Map Text HarnessHandle)
   -> Text
   -> (HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness))
-fakeStartHarness harnessRef key _ _ = do
-  modifyIORef' harnessRef (Map.insert key mkNoOpHarnessHandle)
-  pure $ Right $ StartedHarness key
-    (TmuxConfig { _tc_session = "pureclaw", _tc_window = key, _tc_pane = Nothing })
+fakeStartHarness harnessRef key =
+  fakeStartHarnessWith harnessRef key fakeStartedHid Nothing
+
+-- | The canonical 'Registry.HarnessId' a 'fakeStartHarness' stamps onto its
+-- 'StartedHarness' result (WU7). Tests that assert id persistence read this
+-- back from the persisted @session.json@.
+fakeStartedHid :: Registry.HarnessId
+fakeStartedHid = mustParseHid "abcdef00-0000-4000-8000-000000000001"
+
+-- | A configurable fake '_fe_startHarness' (WU7). Mirrors the real
+-- dispatcher's WU7 contract: it resolves the tmux session from the requested
+-- spec via 'resolveHarnessSession' (honoring '_tc_session', default
+-- @"pureclaw"@), and returns a 'StartedHarness' carrying the injected
+-- 'Registry.HarnessId' plus the resolved 'TmuxConfig'. When @mReg@ is 'Nothing'
+-- it registers a live no-op handle under @key@ in the legacy '_fe_harnesses'
+-- map (the WU2 contract). When @mReg@ is @Just (reg, sentRef)@ it instead seeds
+-- a corroborated registry entry keyed by the id, whose handle records sends
+-- into @sentRef@ — letting a test prove a post-'createHarnessTab' send routes
+-- by the persisted id through the registry (D7.4).
+fakeStartHarnessWith
+  :: IORef (Map.Map Text HarnessHandle)
+  -> Text                              -- ^ window/map key
+  -> Registry.HarnessId                -- ^ id to stamp on the result
+  -> Maybe (Registry.HarnessRegistry, IORef [ByteString])
+                                       -- ^ optional: seed a corroborated entry
+  -> (HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness))
+fakeStartHarnessWith harnessRef key hid mReg reqSpec _ = do
+  let session = resolveHarnessSession reqSpec
+  case mReg of
+    Just (reg, sentRef) ->
+      Registry.insertEntry reg
+        (corroboratedEntry hid key
+          (Just (mkFakeHarnessHandle sentRef "id-routed reply")))
+    Nothing ->
+      modifyIORef' harnessRef (Map.insert key mkNoOpHarnessHandle)
+  pure $ Right $ StartedHarness
+    { _shh_key  = key
+    , _shh_tmux = TmuxConfig { _tc_session = session, _tc_window = key, _tc_pane = Nothing }
+    , _shh_id   = hid
+    }
 
 -- | A fake 'HarnessHandle' for the WU3 send-routing tests. It captures the
 -- bytes written via '_hh_send' into the supplied 'IORef' (newest last) and
