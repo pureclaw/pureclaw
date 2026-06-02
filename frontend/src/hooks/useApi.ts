@@ -1,7 +1,39 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { AgentInfo, HarnessInfo, SessionInfo, TabInfo, TranscriptEntry } from '../types'
+import type { AgentInfo, HarnessInfo, SessionInfo, TabInfo, TabOrigin, TabStatus, TranscriptEntry } from '../types'
 
 const POLL_INTERVAL = 3000
+
+/** Raw `/api/tabs` (and WS `lists`) wire shape: the backend emits the new
+ *  health fields in snake_case. `index`/`kind`/`name`/`status`/`session_id`
+ *  are already in their final shape; the rest map to camelCase TabInfo keys. */
+interface TabInfoWire {
+  index: number
+  kind: string
+  name: string
+  status: string
+  session_id: string | null
+  ext_modified?: boolean
+  stale?: boolean
+  origin?: string
+  attach_command?: string | null
+}
+
+/** Normalize a backend tab object to the camelCase `TabInfo` shape the UI
+ *  renders. Tolerant of Phase-1 objects lacking the new fields (back-compat):
+ *  flags default to false, attachCommand to null, origin to undefined. */
+export function mapTabInfo(wire: TabInfoWire): TabInfo {
+  return {
+    index: wire.index,
+    kind: wire.kind,
+    name: wire.name,
+    status: wire.status as TabStatus,
+    session_id: wire.session_id,
+    extModified: wire.ext_modified ?? false,
+    stale: wire.stale ?? false,
+    origin: wire.origin as TabOrigin | undefined,
+    attachCommand: wire.attach_command ?? null,
+  }
+}
 
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
@@ -64,9 +96,9 @@ export function useTabs() {
   const [error, setError] = useState(false)
 
   const poll = useCallback(async () => {
-    const data = await fetchJson<TabInfo[]>('/api/tabs')
+    const data = await fetchJson<TabInfoWire[]>('/api/tabs')
     if (data) {
-      setTabs(data)
+      setTabs(data.map(mapTabInfo))
       setError(false)
     } else {
       setError(true)
@@ -314,6 +346,33 @@ export async function createTab(agent?: string, _customPrompt?: string): Promise
 export async function closeTab(index: number): Promise<boolean> {
   try {
     const res = await fetch(`/api/tabs/${index}/close`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Dismiss an exited/orphaned tab by index — removes the live row. The
+ *  underlying session stays in Recent Sessions (session.json is untouched).
+ *  Returns true if the backend accepted the dismiss. */
+export async function dismissTab(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/dismiss`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Acknowledge an externally-modified tab by index — clears its `ext_modified`
+ *  flag on the registry entry. Returns true if the backend accepted it. */
+export async function acknowledgeTab(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/acknowledge`, {
       method: 'POST',
     })
     return res.ok

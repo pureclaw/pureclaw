@@ -31,6 +31,8 @@ const defaultProps = {
   onUnarchiveSession: vi.fn(),
   onCloseTab: vi.fn(),
   onArchiveTab: vi.fn(),
+  onDismissTab: vi.fn(),
+  onAcknowledgeTab: vi.fn(),
 }
 
 describe('ArchivedSessions', () => {

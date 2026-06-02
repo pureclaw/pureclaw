@@ -28,6 +28,13 @@ const state: HookState = {
 
 const focusSpy = vi.fn()
 const sendSpy = vi.fn()
+// Hoisted so the `vi.mock('../hooks/useApi')` factory (which vitest lifts to
+// the top of the module) can safely reference them — plain consts would be
+// in the temporal dead zone at hoist time.
+const { dismissSpy, acknowledgeSpy } = vi.hoisted(() => ({
+  dismissSpy: vi.fn().mockResolvedValue(true),
+  acknowledgeSpy: vi.fn().mockResolvedValue(true),
+}))
 
 vi.mock('../lib/streamClient', () => ({
   streamClient: () => ({
@@ -71,6 +78,8 @@ vi.mock('../hooks/useApi', async (importOriginal) => {
     setSessionArchived: vi.fn().mockResolvedValue(true),
     setSessionDescription: vi.fn().mockResolvedValue(true),
     closeTab: vi.fn().mockResolvedValue(undefined),
+    dismissTab: dismissSpy,
+    acknowledgeTab: acknowledgeSpy,
   }
 })
 
@@ -185,6 +194,8 @@ beforeEach(() => {
   state.transcripts = {}
   focusSpy.mockReset()
   sendSpy.mockReset()
+  dismissSpy.mockClear()
+  acknowledgeSpy.mockClear()
   window.history.replaceState(null, '', '/')
   // jsdom has no layout; ChatArea scrolls refs into view.
   HTMLElement.prototype.scrollIntoView = vi.fn() as unknown as HTMLElement['scrollIntoView']
@@ -572,5 +583,44 @@ describe('App branch draft flow', () => {
       expect(utils.queryByPlaceholderText('Type your first message…')).toBeNull()
     })
     expect(utils.getByText('other session msg')).toBeTruthy()
+  })
+})
+
+describe('App tab actions wiring (D4.7)', () => {
+  function exitedTab(index: number): TabInfo {
+    return {
+      index,
+      kind: 'session:harness',
+      name: `exited-${index}`,
+      status: 'exited',
+      session_id: `sess-${index}`,
+    }
+  }
+
+  it('clicking Dismiss on an exited tab calls dismissTab with the tab index', async () => {
+    mockFetchOk('x')
+    state.tabs = [exitedTab(2)]
+    const utils = render(<App />)
+    fireEvent.click(utils.getByRole('button', { name: /dismiss tab/i }))
+    await waitFor(() => {
+      expect(dismissSpy).toHaveBeenCalledWith(2)
+    })
+  })
+
+  it('clicking Acknowledge on an extModified tab calls acknowledgeTab with the tab index', async () => {
+    mockFetchOk('x')
+    state.tabs = [{
+      index: 3,
+      kind: 'session:harness',
+      name: 'edited-3',
+      status: 'idle',
+      session_id: 'sess-3',
+      extModified: true,
+    }]
+    const utils = render(<App />)
+    fireEvent.click(utils.getByRole('button', { name: /acknowledge tab/i }))
+    await waitFor(() => {
+      expect(acknowledgeSpy).toHaveBeenCalledWith(3)
+    })
   })
 })

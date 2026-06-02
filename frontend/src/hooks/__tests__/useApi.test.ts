@@ -1,6 +1,100 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
-import { closeTab, resumeArchivedSession, useSendMessage } from '../useApi'
+import { acknowledgeTab, closeTab, dismissTab, mapTabInfo, resumeArchivedSession, useSendMessage } from '../useApi'
+
+describe('mapTabInfo', () => {
+  it('maps snake_case wire fields to the camelCase TabInfo shape', () => {
+    const wire = {
+      index: 4,
+      kind: 'session:harness',
+      name: 'claude-code-abc',
+      status: 'exited',
+      session_id: 'sess-9',
+      ext_modified: true,
+      stale: false,
+      origin: 'discovered',
+      attach_command: 'tmux attach -t canonical-4:win',
+    }
+    expect(mapTabInfo(wire)).toEqual({
+      index: 4,
+      kind: 'session:harness',
+      name: 'claude-code-abc',
+      status: 'exited',
+      session_id: 'sess-9',
+      extModified: true,
+      stale: false,
+      origin: 'discovered',
+      attachCommand: 'tmux attach -t canonical-4:win',
+    })
+  })
+
+  it('tolerates a Phase-1 wire object missing the new fields (back-compat)', () => {
+    const wire = {
+      index: 0,
+      kind: 'shell:bash',
+      name: 'bash',
+      status: 'idle',
+      session_id: null,
+    }
+    expect(mapTabInfo(wire)).toEqual({
+      index: 0,
+      kind: 'shell:bash',
+      name: 'bash',
+      status: 'idle',
+      session_id: null,
+      extModified: false,
+      stale: false,
+      origin: undefined,
+      attachCommand: null,
+    })
+  })
+})
+
+describe('dismissTab', () => {
+  const originalFetch = globalThis.fetch
+  beforeEach(() => { globalThis.fetch = vi.fn() })
+  afterEach(() => { globalThis.fetch = originalFetch })
+
+  it('sends POST to /api/tabs/{index}/dismiss', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true })
+    const result = await dismissTab(5)
+    expect(result).toBe(true)
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/tabs/5/dismiss', { method: 'POST' })
+  })
+
+  it('returns false on a non-ok response', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false })
+    expect(await dismissTab(1)).toBe(false)
+  })
+
+  it('returns false when fetch throws', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('net'))
+    expect(await dismissTab(1)).toBe(false)
+  })
+})
+
+describe('acknowledgeTab', () => {
+  const originalFetch = globalThis.fetch
+  beforeEach(() => { globalThis.fetch = vi.fn() })
+  afterEach(() => { globalThis.fetch = originalFetch })
+
+  it('sends POST to /api/tabs/{index}/acknowledge', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true })
+    const result = await acknowledgeTab(6)
+    expect(result).toBe(true)
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/tabs/6/acknowledge', { method: 'POST' })
+  })
+
+  it('returns false on a non-ok response', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false })
+    expect(await acknowledgeTab(2)).toBe(false)
+  })
+
+  it('returns false when fetch throws', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('net'))
+    expect(await acknowledgeTab(2)).toBe(false)
+  })
+})
 
 describe('closeTab', () => {
   const originalFetch = globalThis.fetch

@@ -3,7 +3,7 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab } from './hooks/useApi'
 import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
@@ -861,6 +861,24 @@ export default function App() {
     }
   }, [tabs, selectedId])
 
+  // Dismiss an exited/orphaned tab — removes the live row from the registry.
+  // The session stays in Recent Sessions (session.json is untouched). The
+  // backend broadcasts a refreshed `lists` snapshot, so no local poll is
+  // needed; we just clear the selection if the dismissed tab was focused.
+  const handleDismissTab = useCallback(async (index: number) => {
+    await dismissTab(index)
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
+  // Acknowledge an externally-modified tab — clears its edited flag on the
+  // registry entry. The backend broadcasts a refreshed `lists` snapshot.
+  const handleAcknowledgeTab = useCallback(async (index: number) => {
+    await acknowledgeTab(index)
+  }, [])
+
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
     ? deriveAgent(selectedId, tabs, sessions)
@@ -913,6 +931,8 @@ export default function App() {
           onUnarchiveSession={handleUnarchiveSession}
           onCloseTab={handleCloseTab}
           onArchiveTab={handleArchiveTab}
+          onDismissTab={handleDismissTab}
+          onAcknowledgeTab={handleAcknowledgeTab}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}

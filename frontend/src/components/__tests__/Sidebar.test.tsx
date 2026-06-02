@@ -42,6 +42,8 @@ describe('Sidebar lifecycle transitions', () => {
     onUnarchiveSession: vi.fn(),
     onCloseTab: vi.fn(),
     onArchiveTab: vi.fn(),
+    onDismissTab: vi.fn(),
+    onAcknowledgeTab: vi.fn(),
   }
 
   it('passes onCloseTab to ActiveTabs so close buttons appear', () => {

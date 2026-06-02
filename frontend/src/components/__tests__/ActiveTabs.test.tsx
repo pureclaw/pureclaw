@@ -10,7 +10,24 @@ function makeTabs(...overrides: Partial<TabInfo>[]): TabInfo[] {
     name: o.name ?? `tab-${i}`,
     status: o.status ?? 'idle',
     session_id: 'session_id' in o ? (o.session_id ?? null) : `sess-${i}`,
+    ...('extModified' in o ? { extModified: o.extModified } : {}),
+    ...('stale' in o ? { stale: o.stale } : {}),
+    ...('origin' in o ? { origin: o.origin } : {}),
+    ...('attachCommand' in o ? { attachCommand: o.attachCommand } : {}),
   }))
+}
+
+/** All callback props ActiveTabs requires, with no-op defaults so each
+ *  test only overrides the one(s) it asserts on. */
+function noopProps() {
+  return {
+    onSelectTab: () => {},
+    onNewTab: () => {},
+    onCloseTab: () => {},
+    onArchiveTab: () => {},
+    onDismiss: () => {},
+    onAcknowledge: () => {},
+  }
 }
 
 describe('ActiveTabs', () => {
@@ -27,6 +44,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
 
@@ -43,6 +62,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     expect(screen.getByText('Active Tabs')).toBeInTheDocument()
@@ -58,6 +79,8 @@ describe('ActiveTabs', () => {
         onNewTab={onNewTab}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     const btn = screen.getByRole('button', { name: /new tab/i })
@@ -76,6 +99,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     // The running indicator should display the filled circle character
@@ -94,6 +119,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     const indicator = container.querySelector('[data-testid="status-idle"]')
@@ -101,21 +128,173 @@ describe('ActiveTabs', () => {
     expect(indicator!.textContent).toBe('○') // ○
   })
 
-  it('maps crashed status to a red X icon', () => {
-    const tabs = makeTabs({ status: 'crashed', name: 'crash-tab' })
+  it('D4.1: maps exited status to a red X icon', () => {
+    const tabs = makeTabs({ status: 'exited', name: 'exit-tab' })
     const { container } = render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />,
+    )
+    const indicator = container.querySelector('[data-testid="status-exited"]')
+    expect(indicator).toBeInTheDocument()
+    expect(indicator!.textContent).toBe('✕') // ✕
+  })
+
+  it('D4.1: maps orphaned status to a red X icon', () => {
+    const tabs = makeTabs({ status: 'orphaned', name: 'orphan-tab' })
+    const { container } = render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />,
+    )
+    const indicator = container.querySelector('[data-testid="status-orphaned"]')
+    expect(indicator).toBeInTheDocument()
+    expect(indicator!.textContent).toBe('✕') // ✕
+  })
+
+  it('D4.1: an exited tab renders a (disabled, reserved) Restart control and a Dismiss control', () => {
+    const tabs = makeTabs({ index: 0, status: 'exited', name: 'exit-tab' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    const restart = screen.getByRole('button', { name: /restart tab/i })
+    expect(restart).toBeInTheDocument()
+    expect(restart).toBeDisabled()
+    expect(screen.getByRole('button', { name: /dismiss tab/i })).toBeInTheDocument()
+  })
+
+  it('D4.1: an orphaned tab renders greyed + Dismiss and NOT an enabled Restart', () => {
+    const tabs = makeTabs({ index: 0, status: 'orphaned', name: 'orphan-tab' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    const row = screen.getByText('orphan-tab').closest('.agent-row')
+    expect(row).toHaveClass('tab-orphaned')
+    expect(screen.getByRole('button', { name: /dismiss tab/i })).toBeInTheDocument()
+    // No enabled Restart on an orphaned row.
+    expect(screen.queryByRole('button', { name: /restart tab/i })).not.toBeInTheDocument()
+  })
+
+  it('D4.1: idle/running tabs render neither Dismiss nor Restart', () => {
+    const tabs = makeTabs({ index: 0, status: 'running', name: 'run-tab' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.queryByRole('button', { name: /dismiss tab/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /restart tab/i })).not.toBeInTheDocument()
+  })
+
+  it('D4.4: Dismiss calls onDismiss with the correct tab index', () => {
+    const onDismiss = vi.fn()
+    const tabs = makeTabs(
+      { index: 0, status: 'exited', name: 'first' },
+      { index: 1, status: 'orphaned', name: 'second' },
+    )
+    render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} onDismiss={onDismiss} />,
+    )
+    const dismissButtons = screen.getAllByRole('button', { name: /dismiss tab/i })
+    fireEvent.click(dismissButtons[1]!)
+    expect(onDismiss).toHaveBeenCalledWith(1)
+  })
+
+  it('D4.4: Dismiss click does not trigger row selection', () => {
+    const onSelectTab = vi.fn()
+    const onDismiss = vi.fn()
+    const tabs = makeTabs({ index: 3, status: 'exited', name: 'only' })
+    render(
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
-        onSelectTab={() => {}}
-        onNewTab={() => {}}
-        onCloseTab={() => {}}
-        onArchiveTab={() => {}}
+        {...noopProps()}
+        onSelectTab={onSelectTab}
+        onDismiss={onDismiss}
       />,
     )
-    const indicator = container.querySelector('[data-testid="status-crashed"]')
-    expect(indicator).toBeInTheDocument()
-    expect(indicator!.textContent).toBe('✕') // ✕
+    fireEvent.click(screen.getByRole('button', { name: /dismiss tab/i }))
+    expect(onDismiss).toHaveBeenCalledWith(3)
+    expect(onSelectTab).not.toHaveBeenCalled()
+  })
+
+  it('D4.2: an extModified tab renders the edited pill and an Acknowledge control', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'edited-tab', extModified: true })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.getByText('edited')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /acknowledge tab/i })).toBeInTheDocument()
+  })
+
+  it('D4.2: a tab without extModified shows no edited pill or Acknowledge control', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'plain-tab' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.queryByText('edited')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /acknowledge tab/i })).not.toBeInTheDocument()
+  })
+
+  it('D4.2: Acknowledge calls onAcknowledge with the correct tab index', () => {
+    const onAcknowledge = vi.fn()
+    const tabs = makeTabs(
+      { index: 0, status: 'idle', name: 'first' },
+      { index: 7, status: 'idle', name: 'second', extModified: true },
+    )
+    render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} onAcknowledge={onAcknowledge} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /acknowledge tab/i }))
+    expect(onAcknowledge).toHaveBeenCalledWith(7)
+  })
+
+  it('D4.2: Acknowledge click does not trigger row selection', () => {
+    const onSelectTab = vi.fn()
+    const onAcknowledge = vi.fn()
+    const tabs = makeTabs({ index: 2, status: 'idle', name: 'only', extModified: true })
+    render(
+      <ActiveTabs
+        tabs={tabs}
+        selectedId={null}
+        {...noopProps()}
+        onSelectTab={onSelectTab}
+        onAcknowledge={onAcknowledge}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /acknowledge tab/i }))
+    expect(onAcknowledge).toHaveBeenCalledWith(2)
+    expect(onSelectTab).not.toHaveBeenCalled()
+  })
+
+  it('D4.3: a stale tab renders a dimmed/stale cue and holds its last icon', () => {
+    const tabs = makeTabs({ index: 0, status: 'running', name: 'stale-tab', stale: true })
+    const { container } = render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />,
+    )
+    const row = screen.getByText('stale-tab').closest('.agent-row')
+    expect(row).toHaveClass('tab-stale')
+    // The last (running) icon is still shown — no distinct stale glyph.
+    expect(container.querySelector('[data-testid="status-running"]')).toBeInTheDocument()
+  })
+
+  it('D4.3: a non-stale tab has no stale cue', () => {
+    const tabs = makeTabs({ index: 0, status: 'running', name: 'fresh-tab' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    const row = screen.getByText('fresh-tab').closest('.agent-row')
+    expect(row).not.toHaveClass('tab-stale')
+  })
+
+  it('D4.5: the attach command is rendered as a copyable control for a tab with attachCommand', () => {
+    const cmd = 'tmux attach -t canonical-0:win'
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'live-tab', attachCommand: cmd })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    const control = screen.getByRole('button', { name: /copy attach command/i })
+    expect(control).toBeInTheDocument()
+    // The control carries the command so the user can copy it.
+    expect(control).toHaveAttribute('data-attach-command', cmd)
+  })
+
+  it('D4.5: a tab without attachCommand shows no copy control', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'no-attach', attachCommand: null })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.queryByRole('button', { name: /copy attach command/i })).not.toBeInTheDocument()
+  })
+
+  it('D4.6: the origin pill renders the origin', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'origin-tab', origin: 'spawned' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.getByText('spawned')).toBeInTheDocument()
+  })
+
+  it('D4.6: a tab without origin shows no origin pill', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'no-origin' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.queryByText(/^(spawned|discovered|adopted)$/)).not.toBeInTheDocument()
   })
 
   it('shows [raw] badge for shell tabs', () => {
@@ -131,6 +310,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     const badges = screen.getAllByText('raw')
@@ -147,6 +328,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     expect(screen.queryByText('raw')).not.toBeInTheDocument()
@@ -166,6 +349,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     fireEvent.click(screen.getByText('second'))
@@ -185,6 +370,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     // The selected row should have the 'selected' class
@@ -206,6 +393,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     expect(screen.getByText('Running')).toBeInTheDocument()
@@ -224,6 +413,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     expect(screen.getByText('0')).toBeInTheDocument()
@@ -243,6 +434,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     const closeButtons = screen.getAllByRole('button', { name: /close tab/i })
@@ -263,6 +456,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={onCloseTab}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     const closeButtons = screen.getAllByRole('button', { name: /close tab/i })
@@ -282,6 +477,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={onCloseTab}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     const closeBtn = screen.getByRole('button', { name: /close tab/i })
@@ -302,6 +499,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     expect(screen.getByRole('button', { name: /archive tab/i })).toBeInTheDocument()
@@ -319,6 +518,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={() => {}}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     expect(screen.queryByRole('button', { name: /archive tab/i })).not.toBeInTheDocument()
@@ -337,6 +538,8 @@ describe('ActiveTabs', () => {
         onNewTab={() => {}}
         onCloseTab={() => {}}
         onArchiveTab={onArchiveTab}
+        onDismiss={() => {}}
+        onAcknowledge={() => {}}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: /archive tab/i }))

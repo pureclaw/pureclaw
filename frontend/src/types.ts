@@ -67,7 +67,13 @@ export function sessionSubtitle(s: { agent?: string | null; channel?: string | n
   return parts.join(' · ')
 }
 
-export type TabStatus = 'running' | 'idle' | 'crashed'
+/** Liveness of a tab/harness. `exited` (harness process died, window still
+ *  present) and `orphaned` (no live window for this id) replace the old
+ *  collapsed `crashed` value — the backend now reports them distinctly. */
+export type TabStatus = 'running' | 'idle' | 'exited' | 'orphaned'
+
+/** Where a harness came from, surfaced as a small pill. */
+export type TabOrigin = 'spawned' | 'discovered' | 'adopted'
 
 export interface TabInfo {
   index: number
@@ -75,6 +81,18 @@ export interface TabInfo {
   name: string
   status: TabStatus
   session_id: string | null
+  /** The harness window's name/session changed out-of-band since PureClaw
+   *  last reconciled it. An orthogonal flag (not a liveness state) — shows a
+   *  ⚠ "edited" pill + an Acknowledge action. */
+  extModified?: boolean
+  /** The last reconcile sweep failed for this entry, so its liveness is held
+   *  from the previous tick. Renders a subtle dimmed cue, no distinct glyph. */
+  stale?: boolean
+  /** How the harness entered the registry. */
+  origin?: TabOrigin
+  /** A copyable `tmux attach -t …` command for live rows, or null when the
+   *  tab has no attachable window. */
+  attachCommand?: string | null
 }
 
 export interface AgentInfo {

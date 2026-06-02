@@ -208,6 +208,8 @@ export function Sidebar({
   onUnarchiveSession,
   onCloseTab,
   onArchiveTab,
+  onDismissTab,
+  onAcknowledgeTab,
 }: {
   tabs: TabInfo[]
   sessions: SessionInfo[]
@@ -221,6 +223,8 @@ export function Sidebar({
   onUnarchiveSession: (id: string) => void
   onCloseTab: (index: number) => void
   onArchiveTab: (index: number) => void
+  onDismissTab: (index: number) => void
+  onAcknowledgeTab: (index: number) => void
 }) {
   return (
     <div
@@ -236,6 +240,8 @@ export function Sidebar({
           onNewTab={onNewTab}
           onCloseTab={onCloseTab}
           onArchiveTab={onArchiveTab}
+          onDismiss={onDismissTab}
+          onAcknowledge={onAcknowledgeTab}
         />
 
         {sessions.length > 0 && (
