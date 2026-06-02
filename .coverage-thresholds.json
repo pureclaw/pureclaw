@@ -224,19 +224,25 @@
           "Wire protocol golden fixtures all decode round-trip (StreamGoldensSpec)"
         ]
       },
-      "PureClaw.Frontend.ActivityProbe": {
-        "stagedBy": "WU6 (live transcript streaming #57)",
-        "filledBy": ["post-merge follow-up"],
-        "since": "2026-05-23",
-        "reason": "Top-level decl coverage is 28% (2/7); alternative coverage 33% (4/12); expression coverage 42% (51/121). The gap is the production wiring 'runActivityProbeLoop' which constructs the real harness-snapshot probe via 'PureClaw.Frontend.API.probeHarness' (the function chain that requires real tmux + 'captureWindow' calls). The probe loop's deterministic core ('runActivityProbeLoopWith') is fully exercised by 'Frontend.ActivityProbeSpec' (D17 baseline + idle->thinking + multi-session transitions; D24 lifecycle cancellation; exception discipline). The 'runActivityProbeLoop' production wrapper is a 3-line composition (snapshot via 'readIORef' + 'probeHarness' on each entry + delegate to 'runActivityProbeLoopWith') — its uncovered lines are the 'traverse probeHarness' call and the 'readIORef' wrapper, both of which require tmux to drive end-to-end.",
+      "PureClaw.Harness.Reconcile": {
+        "stagedBy": "WU5 (pureclaw-3oy.6, Harness Registry Phase 1) — pending commit on feat/harness-registry-p1",
+        "filledBy": ["WU9 (pureclaw-3oy.10)"],
+        "since": "2026-06-01",
+        "reason": "WU5 lands the registry-based reconcile loop. Expression coverage is 85% (423/494); alternative coverage 88% (38/43); top-level declaration coverage 77% (17/22). ALL pure/near-pure logic is exercised deterministically via injected 'ReconcileDeps' fakes in 'Harness.ReconcileSpec' — corroboration, classifyLiveness, livenessToActivity, diffLiveness, the reconcileTick passes (D5.1/D5.4/D5.5/D5.7), the resilience hold-stale paths (sweep failure AND capture/liveness-probe failure), the runReconcileLoopWith disappearance/baseline/resilience behaviour, bootReconstruct, isLegacyWindowName, and the loop's non-cancel crash-log arm. The remaining gap is EXACTLY the real-tmux IO wiring that cannot be driven without forking a live tmux server: (1) 'defaultReconcileDeps' — the production deps record whose five closures call 'listTmuxSessions', 'readMarkers', 'captureWindowNamed'+'isIdle', 'harnessPidOf', and 'setWindowMarker', including its local 'dedup' go-loop's duplicate-elimination arm (a duplicate session name can only arise from a live multi-session server); (2) the body of 'runReconcileLoop' ('runReconcileLoopWith defaultTickMicros defaultReconcileDeps ...') and the 'defaultTickMicros' = 2s production cadence — the production wrapper that wires the real deps + interval into the (fully-covered) 'runReconcileLoopWith'. These land end-to-end in WU9's integration tests against a real tmux server. The other HPC-uncovered spans are sub-expression / derived-instance accounting artifacts where the ENCLOSING expression is istickedoff: the auto-derived 'Eq'/'Show' of 'CorroborationResult' (used via '=='/'shouldBe' but HPC ticks the decl, not the derived method bodies), the 'session' bound-variable sub-arg of 'try (_rd_sweep deps session)' in reconcileTick + bootReconstruct (the try IS ticked, both arms exercised), the 'sidOf e' sub-application inside the result tuple (the tuple is built every tick), the '(Reg._he_session e)' sub-arg of '_rd_capture' (the capture call IS ticked), and the 'session' sub-arg of '_rd_stampLegacy' (the stamp call IS ticked).",
         "minimalChecks": [
-          "D17: zero events on first tick (ActivityProbeSpec baseline test)",
-          "D17: one ActivityChanged per state transition (ActivityProbeSpec idle->thinking)",
-          "D17: zero events on a tick with no change (ActivityProbeSpec no-change test)",
-          "D17: one event per session that transitioned in multi-session case (ActivityProbeSpec multi-session)",
-          "D18: handleNewSession publishes ActivityChanged sid (SaSessionCreated meta) (ActivityProbeSpec D18)",
-          "D24: Async.cancel returns within 1 s of outer-scope exit (ActivityProbeSpec D24)",
-          "Exception discipline: probe crash is caught + logged + loop exits (ActivityProbeSpec exception-discipline)"
+          "corroborate: PID-match Corroborated, PID-mismatch PidMismatch, and the no-recorded-PID second-signal (window-name prefix) match/mismatch",
+          "classifyLiveness: all 4 outcomes — pane_dead Exited, dead-harness Exited, alive+idle Idle, alive+busy Thinking",
+          "livenessToActivity: Idle/Thinking/Exited/Orphaned map to the broker vocabulary",
+          "diffLiveness: transition emits new liveness, disappearance (Orphaned) emits, unchanged emits nothing, brand-new entry emits baseline",
+          "reconcileTick D5.1: updates a registered entry's liveness + coordinate (rename ⇒ extModified)",
+          "reconcileTick D5.4: Exited on pane_dead (never captured), Orphaned when window absent, Exited when harness PID gone, provenance-less entry skips the alive-probe and classifies from the screen",
+          "reconcileTick D5.5/D5.7: PID-mismatched marker logged + never captured (Orphaned); unmatched @pcl_id ignored; corroboration-failure warning logged",
+          "reconcileTick D5.3: transient sweep failure holds last-known liveness + marks stale + logs; capture/liveness-probe failure holds one entry stale while siblings still reconcile + logs",
+          "reconcileTick sidOf fallback: publishes under _he_label when _he_sessionId is Nothing",
+          "runReconcileLoopWith: emits HarnessStopped on disappearance; zero events on the first-tick baseline; survives a transient sweep failure AND a capture-probe failure (keeps reconciling); non-AsyncCancelled crash logs 'reconcile loop crashed' and exits",
+          "bootReconstruct D5.6: registers @pcl_id windows; lazily stamps a legacy claude-code-<idx>; ignores unmarked non-legacy; seeds pane_dead window as Exited; logs + registers nothing on a boot sweep failure",
+          "isLegacyWindowName: recognizes claude-code-<idx>; rejects empty suffix, non-digit suffix, wrong prefix",
+          "ActivityProbe shim: runActivityProbeLoop wires through to runReconcileLoop (cancellable before the first tick)"
         ]
       }
     }

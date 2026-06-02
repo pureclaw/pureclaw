@@ -1,32 +1,23 @@
--- | Tests for "PureClaw.Frontend.ActivityProbe" — WU4.
+-- | Tests for "PureClaw.Frontend.ActivityProbe" and adjacent broker wiring.
 --
--- Covers the activity probe loop's behavioural DoDs:
+-- /Scope note (WU5)./ The activity-probe LOOP was replaced by the
+-- registry-based reconcile loop ("PureClaw.Harness.Reconcile"). Its behavioural
+-- DoDs — D17 (no events on the first tick; one per transition), D24 (cancels
+-- within 1 s), the exception discipline, AND the new D5.2 disappearance event —
+-- are now exercised against the reconcile loop in @test\/Harness\/ReconcileSpec.hs@.
+-- "PureClaw.Frontend.ActivityProbe.runActivityProbeLoop" is now a thin shim over
+-- 'PureClaw.Harness.Reconcile.runReconcileLoop'.
 --
---   * D17 — emit one 'ActivityChanged sid (SaHarnessStatus _)' per harness
---     state transition (NOT per probe tick); emit ZERO events on the first
---     tick (which establishes the baseline).
+-- What remains here is the broker wiring this module's neighbours rely on:
 --
---   * D24 — the loop terminates within 1 s of an outer
---     'Async.cancel' / 'Async.withAsync' scope exit.
---
--- The probe loop's harness-state source is the same 'Map Text HarnessActivity'
--- snapshot abstraction used by 'PureClaw.Frontend.API.probeHarness'. To keep
--- the tests deterministic (and avoid forking tmux processes in unit tests)
--- the production module exposes 'runActivityProbeLoopWith' which takes (a) a
--- caller-supplied probe action and (b) a caller-controlled tick interval —
--- the default 'runActivityProbeLoop' supplies the production wiring on top.
+--   * D18 — @POST \/api\/tabs\/new@ publishes @ActivityChanged sid (SaSessionCreated)@.
+--   * a subscription-liveness sanity check on the helper machinery.
 module Frontend.ActivityProbeSpec (spec) where
 
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async qualified as Async
-import Control.Concurrent.STM (atomically, orElse, readTBQueue)
-import Control.Exception (SomeException, try)
-import Control.Monad (replicateM)
+import Control.Concurrent.STM (atomically, readTBQueue)
 import Data.ByteString qualified as BS
 import Data.IORef
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Network.HTTP.Types (methodPost)
 import Network.Wai (Application, defaultRequest, requestMethod, pathInfo, setRequestBodyChunks)
@@ -41,7 +32,6 @@ import PureClaw.Frontend.API
   , apiApp
   )
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
-import PureClaw.Frontend.ActivityProbe (runActivityProbeLoopWith)
 import PureClaw.Handles.Harness (HarnessError (..))
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Frontend.StreamBroker
@@ -60,31 +50,10 @@ import PureClaw.Tools.Registry (emptyRegistry)
 -- Helpers
 -- ---------------------------------------------------------------------------
 
--- | Receive one broker event with a millisecond deadline. Returns 'Nothing'
--- if no event arrived in time. Used to assert "no event was emitted" by
--- checking 'Nothing' after a budget.
+-- | Receive one broker event with a millisecond deadline.
 recvWithin :: Int -> Subscription -> IO (Maybe BrokerEvent)
 recvWithin micros sub =
   timeout micros $ atomically $ readTBQueue (_sub_queue sub)
-
--- | Drain every event currently sitting in a subscription's queue without
--- blocking. The STM @orElse@ short-circuits to 'Nothing' when the queue is
--- empty rather than retrying.
-drainQueue :: Subscription -> IO [BrokerEvent]
-drainQueue sub = go []
-  where
-    go acc = do
-      r <- atomically
-        (orElse
-          (Just <$> readTBQueue (_sub_queue sub))
-          (pure Nothing))
-      case r of
-        Just ev -> go (ev : acc)
-        Nothing -> pure (reverse acc)
-
--- | A controllable probe action: returns the IORef's current value each time.
-mkSnapshotProbe :: IORef (Map Text HarnessActivity) -> IO (Map Text HarnessActivity)
-mkSnapshotProbe = readIORef
 
 -- ---------------------------------------------------------------------------
 -- Spec
@@ -92,137 +61,6 @@ mkSnapshotProbe = readIORef
 
 spec :: Spec
 spec = do
-  describe "runActivityProbeLoopWith — D17 (no events on first tick, one per transition)" $ do
-    it "emits zero events on the first tick (baseline only)" $ do
-      broker  <- mkInProcessBroker defaultBrokerConfig
-      eSub    <- _streamBroker_subscribe broker
-      sub     <- either (\e -> error ("subscribe: " <> show e)) pure eSub
-      stateRef <- newIORef (Map.singleton "claude-code-0" HarnessIdle)
-      let logger = mkNoOpLogHandle
-          tickMicros = 50_000  -- 50 ms tick for fast tests
-      Async.withAsync
-        (runActivityProbeLoopWith tickMicros (mkSnapshotProbe stateRef) broker logger)
-        $ \_a -> do
-          -- Allow the first tick to run (the loop sleeps THEN probes, so we
-          -- wait one interval + slack to be sure baseline was captured).
-          threadDelay (tickMicros + 50_000)
-          -- No state change occurred; we should observe ZERO events.
-          ev <- recvWithin 50_000 sub
-          ev `shouldBe` Nothing
-
-    it "emits exactly one ActivityChanged per state transition (idle → thinking)" $ do
-      broker  <- mkInProcessBroker defaultBrokerConfig
-      eSub    <- _streamBroker_subscribe broker
-      sub     <- either (\e -> error ("subscribe: " <> show e)) pure eSub
-      stateRef <- newIORef (Map.singleton "claude-code-0" HarnessIdle)
-      let logger = mkNoOpLogHandle
-          tickMicros = 50_000
-      Async.withAsync
-        (runActivityProbeLoopWith tickMicros (mkSnapshotProbe stateRef) broker logger)
-        $ \_a -> do
-          -- Let the first tick capture the baseline.
-          threadDelay (tickMicros + 30_000)
-          -- Flip the state.
-          writeIORef stateRef (Map.singleton "claude-code-0" HarnessThinking)
-          -- Wait for at least one full tick after the change.
-          mEv <- recvWithin (3 * tickMicros) sub
-          case mEv of
-            Just (ActivityChanged sid (SaHarnessStatus status)) -> do
-              sid    `shouldBe` SessionId "claude-code-0"
-              status `shouldBe` HarnessThinking
-            other -> expectationFailure $
-              "expected ActivityChanged thinking, got: " <> show other
-          -- And no second event for the same transition.
-          ev2 <- recvWithin (2 * tickMicros) sub
-          ev2 `shouldBe` Nothing
-
-    it "emits zero events on a tick with no change" $ do
-      broker  <- mkInProcessBroker defaultBrokerConfig
-      eSub    <- _streamBroker_subscribe broker
-      sub     <- either (\e -> error ("subscribe: " <> show e)) pure eSub
-      stateRef <- newIORef (Map.singleton "h-a" HarnessIdle)
-      let logger = mkNoOpLogHandle
-          tickMicros = 50_000
-      Async.withAsync
-        (runActivityProbeLoopWith tickMicros (mkSnapshotProbe stateRef) broker logger)
-        $ \_a -> do
-          -- Allow several ticks to pass with no state change.
-          threadDelay (5 * tickMicros)
-          drained <- drainQueue sub
-          drained `shouldBe` []
-
-    it "emits one event per session that transitioned (multi-session)" $ do
-      broker  <- mkInProcessBroker defaultBrokerConfig
-      eSub    <- _streamBroker_subscribe broker
-      sub     <- either (\e -> error ("subscribe: " <> show e)) pure eSub
-      stateRef <- newIORef $ Map.fromList
-        [ ("h-a", HarnessIdle)
-        , ("h-b", HarnessIdle)
-        , ("h-c", HarnessIdle)
-        ]
-      let logger = mkNoOpLogHandle
-          tickMicros = 50_000
-      Async.withAsync
-        (runActivityProbeLoopWith tickMicros (mkSnapshotProbe stateRef) broker logger)
-        $ \_a -> do
-          threadDelay (tickMicros + 30_000)
-          -- Transition h-a and h-c; leave h-b alone.
-          writeIORef stateRef $ Map.fromList
-            [ ("h-a", HarnessThinking)
-            , ("h-b", HarnessIdle)
-            , ("h-c", HarnessStopped)
-            ]
-          -- Collect two events (one per transitioned session).
-          mEvs <- timeout (5 * tickMicros) $
-            replicateM 2 (atomically (readTBQueue (_sub_queue sub)))
-          let evs = fromMaybe [] mEvs
-          length evs `shouldBe` 2
-          let pairs = [ (sid, st)
-                      | ActivityChanged sid (SaHarnessStatus st) <- evs ]
-          Map.fromList pairs `shouldBe` Map.fromList
-            [ (SessionId "h-a", HarnessThinking)
-            , (SessionId "h-c", HarnessStopped)
-            ]
-          -- No third event.
-          ev3 <- recvWithin (2 * tickMicros) sub
-          ev3 `shouldBe` Nothing
-
-  describe "runActivityProbeLoopWith — D24 (lifecycle: cancels within 1 s)" $
-    it "Async.cancel returns within 1 s of outer-scope exit" $ do
-      broker  <- mkInProcessBroker defaultBrokerConfig
-      stateRef <- newIORef (Map.singleton "h-x" HarnessIdle)
-      let logger = mkNoOpLogHandle
-          tickMicros = 100_000
-      a <- Async.async
-        (runActivityProbeLoopWith tickMicros (mkSnapshotProbe stateRef) broker logger)
-      -- Let the loop do one tick.
-      threadDelay (tickMicros + 50_000)
-      -- Cancellation MUST complete within 1 s.
-      result <- timeout 1_000_000 (Async.cancel a)
-      result `shouldBe` Just ()
-      -- And the async itself reports completion (no swallow of AsyncCancelled).
-      _ <- Async.waitCatch a
-      pure ()
-
-  describe "runActivityProbeLoopWith — exception discipline" $
-    it "logs and exits on a non-AsyncCancelled exception (no restart in v1)" $ do
-      broker  <- mkInProcessBroker defaultBrokerConfig
-      -- Throw on the SECOND probe so the baseline is established cleanly.
-      countRef <- newIORef (0 :: Int)
-      let probe = do
-            n <- atomicModifyIORef' countRef (\k -> (k + 1, k + 1))
-            if n >= 2
-              then error "probe crashed (test)"
-              else pure (Map.singleton "h-x" HarnessIdle)
-          logger     = mkNoOpLogHandle
-          tickMicros = 30_000
-      r <- try @SomeException $
-        timeout (10 * tickMicros) (runActivityProbeLoopWith tickMicros probe broker logger)
-      case r of
-        Right _ -> pure ()  -- handler swallowed the exception; loop exited
-        Left  e -> expectationFailure $
-          "probe crash should be caught, not propagated: " <> show e
-
   describe "handleNewTab — D18 (publishes SaSessionCreated to the broker)" $
     it "POST /api/tabs/new publishes ActivityChanged sid (SaSessionCreated meta)" $ do
       broker <- mkInProcessBroker defaultBrokerConfig

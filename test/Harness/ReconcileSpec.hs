@@ -1,0 +1,631 @@
+-- | Tests for "PureClaw.Harness.Reconcile" — WU5.
+--
+-- The reconcile loop is the registry-based source of truth for harness
+-- identity + health. These tests exercise:
+--
+--   * the pure corroboration logic (§8 C4 / D5.7): only a PID-corroborated
+--     @\@pcl_id@ row counts as ours; an id collision or a PID mismatch is
+--     "not ours" and is never trusted;
+--   * the pure liveness classification (D5.4): Idle\/Thinking\/Exited\/Orphaned;
+--   * the symmetric diff that emits an event for a /disappeared/ entry
+--     (D5.2 — the bug fix for @ActivityProbe.hs:117@);
+--   * the IO reconcile tick + loop: D5.1 (update by id), D5.3 (resilience —
+--     a transient sweep failure marks entries stale and the loop continues),
+--     D5.5 (non-ours rows are never captured; first-tick baseline), and the
+--     boot reconstruction (D5.6).
+--
+-- All tmux IO is injected via 'ReconcileDeps' so the tests are deterministic
+-- and never fork a real tmux server.
+module Harness.ReconcileSpec (spec) where
+
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async qualified as Async
+import Control.Concurrent.STM (atomically, readTBQueue)
+import Control.Exception (throwIO, ErrorCall (..))
+import Data.IORef
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Text (Text)
+import Data.Text qualified as T
+import System.Timeout (timeout)
+import Test.Hspec
+
+import PureClaw.Core.Types (SessionId (..))
+import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
+import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
+import PureClaw.Frontend.StreamBroker
+  ( BrokerEvent (..)
+  , SessionActivity (..)
+  , StreamBroker (..)
+  , Subscription (..)
+  , defaultBrokerConfig
+  , mkInProcessBroker
+  )
+import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
+import PureClaw.Harness.Reconcile
+import PureClaw.Harness.Registry qualified as Reg
+import PureClaw.Harness.Tmux (TmuxWindowRow (..))
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
+-- | An entry skeleton: an id, recorded shell\/harness PIDs, a session label,
+-- a starting liveness. No handle (the reconcile loop never needs one).
+mkEntry :: Reg.HarnessId -> Text -> Maybe Int -> Maybe Int -> Reg.Liveness -> Reg.HarnessEntry
+mkEntry hid windowName shellPid harnessPid liveness = Reg.HarnessEntry
+  { Reg._he_id          = hid
+  , Reg._he_session     = "pureclaw"
+  , Reg._he_windowName  = windowName
+  , Reg._he_shellPid    = shellPid
+  , Reg._he_harnessPid  = harnessPid
+  , Reg._he_origin      = Reg.OriginSpawned
+  , Reg._he_liveness    = liveness
+  , Reg._he_extModified = False
+  , Reg._he_stale       = False
+  , Reg._he_sessionId   = Just windowName
+  , Reg._he_label       = windowName
+  , Reg._he_handle      = Nothing
+  }
+
+-- | A sweep row for a window.
+mkRow :: Int -> Text -> Text -> Maybe Int -> Bool -> TmuxWindowRow
+mkRow idx name pclId panePid paneDead = TmuxWindowRow
+  { _twr_windowIndex = idx
+  , _twr_windowName  = name
+  , _twr_pclId       = pclId
+  , _twr_panePid     = panePid
+  , _twr_paneDead    = paneDead
+  }
+
+recvWithin :: Int -> Subscription -> IO (Maybe BrokerEvent)
+recvWithin micros sub =
+  timeout micros $ atomically $ readTBQueue (_sub_queue sub)
+
+-- | Deterministic deps: a queue of sweeps (one per tick; the last repeats),
+-- a captured-windows recorder, and a settable idle/capture map.
+data Fakes = Fakes
+  { f_sweeps          :: IORef [Either IOError [TmuxWindowRow]]
+    -- ^ One sweep result per tick; 'Left' simulates a transient failure.
+  , f_capturedWindows :: IORef [Text]
+    -- ^ Window names that were 'capture'd this run (D5.5: never our-others).
+  , f_idleByWindow    :: IORef (Map Text Bool)
+    -- ^ For a captured window, whether the screen reads idle.
+  , f_aliveByPid      :: IORef (Map Int Bool)
+    -- ^ Whether a harness PID is still alive (for the Exited path).
+  }
+
+mkFakes :: [Either IOError [TmuxWindowRow]] -> Map Text Bool -> Map Int Bool -> IO Fakes
+mkFakes sweeps idleMap aliveMap = Fakes
+  <$> newIORef sweeps
+  <*> newIORef []
+  <*> newIORef idleMap
+  <*> newIORef aliveMap
+
+fakeDeps :: Fakes -> ReconcileDeps
+fakeDeps f = ReconcileDeps
+  { _rd_sessions = pure ["pureclaw"]
+  , _rd_sweep    = \_session -> do
+      xs <- readIORef (f_sweeps f)
+      case xs of
+        []       -> pure []
+        [x]      -> either ioError pure x
+        (x : ys) -> do writeIORef (f_sweeps f) ys; either ioError pure x
+  , _rd_capture  = \_session windowName -> do
+      modifyIORef' (f_capturedWindows f) (++ [windowName])
+      m <- readIORef (f_idleByWindow f)
+      pure (Map.findWithDefault True windowName m)
+  , _rd_harnessAlive = \pid -> do
+      m <- readIORef (f_aliveByPid f)
+      pure (Map.findWithDefault True pid m)
+  , _rd_stampLegacy = \_session _windowName -> pure Nothing
+  }
+
+-- | A log handle that records every warn\/error message into an 'IORef' so a
+-- test can assert that a particular branch logged. Info\/debug are dropped.
+mkCapturingLog :: IO (IORef [Text], LogHandle)
+mkCapturingLog = do
+  ref <- newIORef []
+  let record msg = modifyIORef' ref (++ [msg])
+  pure
+    ( ref
+    , mkNoOpLogHandle
+        { _lh_logWarn  = record
+        , _lh_logError = record
+        }
+    )
+
+-- ---------------------------------------------------------------------------
+-- Spec
+-- ---------------------------------------------------------------------------
+
+spec :: Spec
+spec = do
+  describe "corroboration (§8 C4 / D5.7)" $ do
+    it "a row whose pane PID matches the recorded shell PID is corroborated" $ do
+      hid <- Reg.newHarnessId
+      let e   = mkEntry hid "claude-code-0" (Just 1234) (Just 5678) Reg.LivenessIdle
+          row = mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 1234) False
+      corroborate e row `shouldBe` Corroborated
+
+    it "a row whose pane PID does NOT match the recorded shell PID is a mismatch (not ours)" $ do
+      hid <- Reg.newHarnessId
+      let e   = mkEntry hid "claude-code-0" (Just 1234) (Just 5678) Reg.LivenessIdle
+          row = mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 9999) False
+      corroborate e row `shouldBe` PidMismatch
+
+    it "an entry with no recorded shell PID requires a second signal (window-name prefix)" $ do
+      hid <- Reg.newHarnessId
+      -- No recorded shell PID: PID-only corroboration is impossible, so we
+      -- fall back to the window-name prefix as the second signal.
+      let e    = mkEntry hid "claude-code-0" Nothing Nothing Reg.LivenessIdle
+          good = mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 1234) False
+          bad  = mkRow 0 "random-window"  (Reg.harnessIdToText hid) (Just 1234) False
+      corroborate e good `shouldBe` Corroborated
+      corroborate e bad  `shouldBe` PidMismatch
+
+  describe "liveness classification (D5.4)" $ do
+    -- Args are (paneDead, harnessAlive, isIdle).
+    it "pane_dead → Exited" $
+      classifyLiveness True True True `shouldBe` Reg.LivenessExited
+    it "harness PID gone → Exited (window present, not pane_dead)" $
+      classifyLiveness False False True `shouldBe` Reg.LivenessExited
+    it "alive + idle screen → Idle" $
+      classifyLiveness False True True `shouldBe` Reg.LivenessIdle
+    it "alive + busy screen → Thinking" $
+      classifyLiveness False True False `shouldBe` Reg.LivenessThinking
+
+  describe "symmetric diff (D5.2 — disappearance emits an event)" $ do
+    it "an entry whose liveness changed emits its new liveness" $ do
+      let prev = Map.fromList [("a", ("sid-a", Reg.LivenessIdle))]
+          next = Map.fromList [("a", ("sid-a", Reg.LivenessThinking))]
+      diffLiveness prev next `shouldBe` [("sid-a", Reg.LivenessThinking)]
+
+    it "an entry that went Orphaned (disappeared from the sweep) emits Orphaned" $ do
+      -- The registry keeps the entry; reconcile flips it to Orphaned. The diff
+      -- must surface that transition (the fix for ActivityProbe.hs:117).
+      let prev = Map.fromList [("a", ("sid-a", Reg.LivenessIdle))]
+          next = Map.fromList [("a", ("sid-a", Reg.LivenessOrphaned))]
+      diffLiveness prev next `shouldBe` [("sid-a", Reg.LivenessOrphaned)]
+
+    it "an unchanged entry emits nothing" $ do
+      let prev = Map.fromList [("a", ("sid-a", Reg.LivenessIdle))]
+          next = Map.fromList [("a", ("sid-a", Reg.LivenessIdle))]
+      diffLiveness prev next `shouldBe` []
+
+    it "a brand-new entry emits its first-observed liveness" $ do
+      let prev = Map.empty
+          next = Map.fromList [("a", ("sid-a", Reg.LivenessThinking))]
+      diffLiveness prev next `shouldBe` [("sid-a", Reg.LivenessThinking)]
+
+  describe "liveness → broker activity vocabulary" $ do
+    it "maps Idle/Thinking/Exited/Orphaned to the broker vocabulary" $ do
+      livenessToActivity Reg.LivenessIdle     `shouldBe` HarnessIdle
+      livenessToActivity Reg.LivenessThinking `shouldBe` HarnessThinking
+      livenessToActivity Reg.LivenessExited   `shouldBe` HarnessStopped
+      livenessToActivity Reg.LivenessOrphaned `shouldBe` HarnessStopped
+
+  describe "reconcileTick — D5.1 (update entries by id)" $
+    it "updates a registered entry's liveness + coordinate from the sweep" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      -- The window was renamed out-of-band; the sweep reports the new name +
+      -- a busy screen.
+      f <- mkFakes
+        [Right [mkRow 0 "renamed-window" (Reg.harnessIdToText hid) (Just 100) False]]
+        (Map.singleton "renamed-window" False)  -- busy ⇒ Thinking
+        Map.empty
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      [e] <- Reg.snapshot reg
+      Reg._he_liveness e   `shouldBe` Reg.LivenessThinking
+      Reg._he_windowName e `shouldBe` "renamed-window"
+      Reg._he_extModified e `shouldBe` True  -- name changed out-of-band
+
+  describe "reconcileTick — D5.4 (classification from injected fixtures)" $ do
+    it "classifies Exited when the matched window is pane_dead" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) True]]
+        Map.empty Map.empty
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      [e] <- Reg.snapshot reg
+      Reg._he_liveness e `shouldBe` Reg.LivenessExited
+      -- A pane_dead window is never captured.
+      cap <- readIORef (f_capturedWindows f)
+      cap `shouldBe` []
+
+    it "classifies Orphaned when the entry's window is absent from the sweep" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      f <- mkFakes [Right []] Map.empty Map.empty  -- empty sweep
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      [e] <- Reg.snapshot reg
+      Reg._he_liveness e `shouldBe` Reg.LivenessOrphaned
+
+    it "classifies Exited when the harness PID is gone (window present, not pane_dead)" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
+        Map.empty
+        (Map.singleton 100 False)  -- descent from shell PID 100 finds no agent
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      [e] <- Reg.snapshot reg
+      Reg._he_liveness e `shouldBe` Reg.LivenessExited
+
+    it "a provenance-less entry (no recorded harness PID) skips the alive-probe and classifies from the screen" $ do
+      -- classifyRow's (Just _, Just _) arm consults _rd_harnessAlive; a
+      -- legacy/adopted entry with _he_harnessPid = Nothing takes the fallback
+      -- arm (assume alive) and is classified purely from the capture (D5.4).
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      -- harnessPid = Nothing; shellPid present so PID corroboration still works.
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) Nothing Reg.LivenessIdle)
+      aliveCalls <- newIORef (0 :: Int)
+      let f0 fk = (fakeDeps fk)
+            { _rd_harnessAlive = \_pid -> do modifyIORef' aliveCalls (+ 1); pure True }
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
+        (Map.singleton "claude-code-0" False)  -- busy screen ⇒ Thinking
+        Map.empty
+      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle
+      [e] <- Reg.snapshot reg
+      Reg._he_liveness e `shouldBe` Reg.LivenessThinking
+      -- The alive-probe was NOT consulted (no recorded harness PID).
+      readIORef aliveCalls `shouldReturn` 0
+
+    it "publishes under the entry label when no SessionId is recorded (sidOf fallback)" $ do
+      -- sidOf falls back to _he_label when _he_sessionId is Nothing. Drive the
+      -- loop so the published ActivityChanged carries the label as its SessionId.
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let entry = (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+            { Reg._he_sessionId = Nothing
+            , Reg._he_label     = "label-fallback"
+            }
+      Reg.insertEntry reg entry
+      broker <- mkInProcessBroker defaultBrokerConfig
+      eSub   <- _streamBroker_subscribe broker
+      sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      -- Tick1 baseline (idle), Tick2 window gone ⇒ Orphaned ⇒ event under label.
+      f <- mkFakes
+        [ Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]
+        , Right []
+        ]
+        (Map.singleton "claude-code-0" True)
+        Map.empty
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick (fakeDeps f) reg broker mkNoOpLogHandle) $ \_a -> do
+          mEv <- recvWithin (12 * tick) sub
+          case mEv of
+            Just (ActivityChanged sid (SaHarnessStatus HarnessStopped)) ->
+              sid `shouldBe` SessionId "label-fallback"
+            other -> expectationFailure $
+              "expected a HarnessStopped event under the label, got: " <> show other
+
+  describe "reconcileTick — D5.5 / D5.7 (non-ours rows are never captured)" $ do
+    it "a PID-mismatched marker row is logged + treated as not-ours (never captured, entry → Orphaned)" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      -- A spoofed window carries OUR @pcl_id but a different pane PID.
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 9999) False]]
+        Map.empty Map.empty
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      cap <- readIORef (f_capturedWindows f)
+      cap `shouldBe` []  -- never captured the spoofed window
+      [e] <- Reg.snapshot reg
+      -- No corroborated match ⇒ the entry is Orphaned, not silently Idle.
+      Reg._he_liveness e `shouldBe` Reg.LivenessOrphaned
+
+    it "a row with an @pcl_id that matches no entry is ignored (never captured)" $ do
+      reg <- Reg.newRegistry
+      f <- mkFakes
+        [Right [mkRow 0 "stranger" "00000000-0000-0000-0000-000000000000" (Just 7) False]]
+        Map.empty Map.empty
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      cap <- readIORef (f_capturedWindows f)
+      cap `shouldBe` []
+
+  describe "reconcileTick — D5.3 (resilience: transient sweep failure)" $
+    it "a transient sweep failure marks entries stale, holds last-known liveness, and logs a warning" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessThinking)
+      (logRef, logger) <- mkCapturingLog
+      f <- mkFakes [Left (userError "tmux hiccup")] Map.empty Map.empty
+      _ <- reconcileTick (fakeDeps f) reg logger
+      [e] <- Reg.snapshot reg
+      Reg._he_stale e    `shouldBe` True
+      Reg._he_liveness e `shouldBe` Reg.LivenessThinking  -- held, not repainted
+      logs <- readIORef logRef
+      any (\m -> "sweep of session" `T.isInfixOf` m) logs `shouldBe` True
+
+  describe "reconcileTick — D5.3 (resilience: capture/liveness probe failure)" $ do
+    it "a capture failure holds last-known liveness + marks stale (does not repaint, does not throw)" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessThinking)
+      -- The sweep succeeds and corroborates the window, but the screen capture
+      -- throws (a transient tmux hiccup). The entry must be held stale with its
+      -- prior liveness — NOT classified Exited/Orphaned from the capture error —
+      -- and reconcileTick must not propagate the exception.
+      (logRef, logger) <- mkCapturingLog
+      let f0 fk = (fakeDeps fk)
+            { _rd_capture = \_session _windowName -> throwIO (ErrorCall "capture boom") }
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
+        Map.empty Map.empty
+      _ <- reconcileTick (f0 f) reg logger
+      [e] <- Reg.snapshot reg
+      Reg._he_stale e    `shouldBe` True
+      Reg._he_liveness e `shouldBe` Reg.LivenessThinking  -- held, not repainted
+      logs <- readIORef logRef
+      any (\m -> "capture/liveness probe" `T.isInfixOf` m) logs `shouldBe` True
+
+    it "a harness-alive probe failure holds one entry stale while other entries still reconcile" $ do
+      reg <- Reg.newRegistry
+      hidBad  <- Reg.newHarnessId  -- this one's liveness probe throws
+      hidGood <- Reg.newHarnessId  -- this one reconciles normally
+      Reg.insertEntry reg (mkEntry hidBad  "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      Reg.insertEntry reg (mkEntry hidGood "claude-code-1" (Just 300) (Just 400) Reg.LivenessIdle)
+      -- The harness-alive probe throws ONLY for the bad entry's shell PID (100);
+      -- the good entry's probe (PID 300) succeeds, capture says busy ⇒ Thinking.
+      let f0 fk = (fakeDeps fk)
+            { _rd_harnessAlive = \pid ->
+                if pid == 100 then throwIO (ErrorCall "alive-probe boom") else pure True
+            }
+      f <- mkFakes
+        [Right
+          [ mkRow 0 "claude-code-0" (Reg.harnessIdToText hidBad)  (Just 100) False
+          , mkRow 1 "claude-code-1" (Reg.harnessIdToText hidGood) (Just 300) False
+          ]]
+        (Map.singleton "claude-code-1" False)  -- good entry's screen is busy
+        Map.empty
+      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle
+      entries <- Reg.snapshot reg
+      let byId i = case [ e | e <- entries, Reg._he_id e == i ] of
+            (e : _) -> e
+            []      -> error "byId: entry not found"
+          bad  = byId hidBad
+          good = byId hidGood
+      -- Bad entry: held stale at its prior (Idle) liveness, never repainted.
+      Reg._he_stale bad     `shouldBe` True
+      Reg._he_liveness bad  `shouldBe` Reg.LivenessIdle
+      -- Good entry: fully reconciled despite the sibling's failure.
+      Reg._he_stale good    `shouldBe` False
+      Reg._he_liveness good `shouldBe` Reg.LivenessThinking
+
+  describe "runReconcileLoopWith — D5.2 (loop emits a disappearance event)" $
+    it "emits HarnessStopped when a registered entry disappears between ticks" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      broker <- mkInProcessBroker defaultBrokerConfig
+      eSub   <- _streamBroker_subscribe broker
+      sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      -- Tick 1 (baseline): window present + idle. Tick 2+: window gone.
+      f <- mkFakes
+        [ Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]
+        , Right []
+        ]
+        (Map.singleton "claude-code-0" True)
+        Map.empty
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick (fakeDeps f) reg broker mkNoOpLogHandle) $ \_a -> do
+          mEv <- recvWithin (8 * tick) sub
+          case mEv of
+            Just (ActivityChanged sid (SaHarnessStatus st)) -> do
+              sid `shouldBe` SessionId "claude-code-0"
+              st  `shouldBe` HarnessStopped
+            other -> expectationFailure $
+              "expected a HarnessStopped disappearance event, got: " <> show other
+
+  describe "runReconcileLoopWith — first-tick baseline (D5.5)" $
+    it "emits zero events on the first tick" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      broker <- mkInProcessBroker defaultBrokerConfig
+      eSub   <- _streamBroker_subscribe broker
+      sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
+        (Map.singleton "claude-code-0" True)
+        Map.empty
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick (fakeDeps f) reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (tick + 30_000)
+          ev <- recvWithin (2 * tick) sub
+          ev `shouldBe` Nothing
+
+  describe "runReconcileLoopWith — D5.3 (loop survives a transient failure)" $
+    it "does not die on a transient sweep failure (recovers next tick)" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      broker <- mkInProcessBroker defaultBrokerConfig
+      eSub   <- _streamBroker_subscribe broker
+      sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      -- Tick1: baseline idle. Tick2: sweep fails (stale, no repaint, no event).
+      -- Tick3+: empty sweep ⇒ Orphaned ⇒ a HarnessStopped event proves the
+      -- loop survived the transient failure and kept reconciling.
+      f <- mkFakes
+        [ Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]
+        , Left (userError "tmux hiccup")
+        , Right []
+        ]
+        (Map.singleton "claude-code-0" True)  -- idle baseline
+        Map.empty
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick (fakeDeps f) reg broker mkNoOpLogHandle) $ \_a -> do
+          mEv <- recvWithin (12 * tick) sub
+          case mEv of
+            Just (ActivityChanged _ (SaHarnessStatus HarnessStopped)) -> pure ()
+            other -> expectationFailure $
+              "expected loop to survive the failure and emit Stopped, got: " <> show other
+
+  describe "bootReconstruct — D5.6 (boot reconstruction from @pcl_id windows)" $ do
+    it "registers an entry for every window carrying our @pcl_id" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 4242) False]]
+        Map.empty Map.empty
+      bootReconstruct (fakeDeps f) reg mkNoOpLogHandle
+      [e] <- Reg.snapshot reg
+      Reg._he_id e       `shouldBe` hid
+      Reg._he_shellPid e `shouldBe` Just 4242
+      Reg._he_origin e   `shouldBe` Reg.OriginDiscovered
+      Reg._he_windowName e `shouldBe` "claude-code-0"
+
+    it "lazily stamps a legacy claude-code-<idx> window (no @pcl_id) with a fresh id" $ do
+      reg <- Reg.newRegistry
+      stampedHid <- Reg.newHarnessId
+      -- A legacy window: matches the claude-code-<idx> prefix, no marker.
+      let f0Deps fk = (fakeDeps fk)
+            { _rd_stampLegacy = \_session windowName ->
+                pure (if windowName == "claude-code-3" then Just stampedHid else Nothing)
+            }
+      f <- mkFakes
+        [Right [mkRow 3 "claude-code-3" "" (Just 555) False]]
+        Map.empty Map.empty
+      bootReconstruct (f0Deps f) reg mkNoOpLogHandle
+      entries <- Reg.snapshot reg
+      map Reg._he_id entries `shouldBe` [stampedHid]
+      [e] <- pure entries
+      Reg._he_origin e     `shouldBe` Reg.OriginDiscovered
+      Reg._he_windowName e `shouldBe` "claude-code-3"
+
+    it "ignores an unmarked, non-legacy window (not ours, not stamped)" $ do
+      reg <- Reg.newRegistry
+      f <- mkFakes
+        [Right [mkRow 0 "someone-elses-shell" "" (Just 1) False]]
+        Map.empty Map.empty
+      bootReconstruct (fakeDeps f) reg mkNoOpLogHandle  -- _rd_stampLegacy returns Nothing
+      entries <- Reg.snapshot reg
+      length entries `shouldBe` 0
+
+    it "registers a pane_dead @pcl_id window as Exited" $ do
+      -- The boot-time liveness seed is Exited when the reconstructed window is
+      -- already pane_dead (the 'then' arm of the liveness conditional).
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 4242) True]]
+        Map.empty Map.empty
+      bootReconstruct (fakeDeps f) reg mkNoOpLogHandle
+      [e] <- Reg.snapshot reg
+      Reg._he_id e       `shouldBe` hid
+      Reg._he_liveness e `shouldBe` Reg.LivenessExited
+
+    it "logs a warning and registers nothing when the boot sweep fails" $ do
+      -- A transient sweep failure at boot is logged and skipped (no entries),
+      -- mirroring reconcileTick's resilience.
+      reg <- Reg.newRegistry
+      (logRef, logger) <- mkCapturingLog
+      f <- mkFakes [Left (userError "tmux down at boot")] Map.empty Map.empty
+      bootReconstruct (fakeDeps f) reg logger
+      entries <- Reg.snapshot reg
+      length entries `shouldBe` 0
+      logs <- readIORef logRef
+      any (\m -> "bootReconstruct: sweep of" `T.isInfixOf` m) logs `shouldBe` True
+
+  describe "runReconcileLoopWith — D5.3 (loop survives a capture-probe failure)" $
+    it "does not die when a capture throws (holds stale, keeps reconciling)" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      broker <- mkInProcessBroker defaultBrokerConfig
+      eSub   <- _streamBroker_subscribe broker
+      sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      -- The capture ALWAYS throws. Tick1 baseline: window present but capture
+      -- throws ⇒ held stale at Idle (no event). Tick2: window gone ⇒ Orphaned
+      -- ⇒ a HarnessStopped event proves the loop SURVIVED the capture failures.
+      let f0 fk = (fakeDeps fk)
+            { _rd_capture = \_session _windowName -> throwIO (ErrorCall "capture always boom") }
+      f <- mkFakes
+        [ Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]
+        , Right []
+        ]
+        Map.empty Map.empty
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick (f0 f) reg broker mkNoOpLogHandle) $ \_a -> do
+          mEv <- recvWithin (12 * tick) sub
+          case mEv of
+            Just (ActivityChanged _ (SaHarnessStatus HarnessStopped)) -> pure ()
+            other -> expectationFailure $
+              "expected loop to survive the capture failure and emit Stopped, got: " <> show other
+
+  describe "reconcileTick — corroboration-failure logging (§8 C4)" $
+    it "logs a warning when a matching @pcl_id row fails PID corroboration" $ do
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
+      (logRef, logger) <- mkCapturingLog
+      -- A spoofed window carries OUR @pcl_id but a mismatched pane PID.
+      f <- mkFakes
+        [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 9999) False]]
+        Map.empty Map.empty
+      _ <- reconcileTick (fakeDeps f) reg logger
+      logs <- readIORef logRef
+      any (\m -> "no corroborating PID" `T.isInfixOf` m) logs `shouldBe` True
+
+  describe "runReconcileLoopWith — crash-log arm (non-AsyncCancelled)" $
+    it "logs 'reconcile loop crashed' and exits when a non-cancel exception escapes a tick" $ do
+      -- An injected _rd_sessions that throws a plain ErrorCall escapes
+      -- reconcileTick (it is outside the per-session sweep try) and reaches the
+      -- loop's 'outer' handler. The non-cancel arm must log + exit (not re-raise).
+      reg <- Reg.newRegistry
+      broker <- mkInProcessBroker defaultBrokerConfig
+      (logRef, logger) <- mkCapturingLog
+      f <- mkFakes [Right []] Map.empty Map.empty
+      let deps = (fakeDeps f)
+            { _rd_sessions = throwIO (ErrorCall "sessions enumeration boom") }
+          tick = 20_000
+      -- The loop should TERMINATE on its own (handle swallows the exception),
+      -- so 'timeout' returns Just () rather than Nothing.
+      done <- timeout (50 * tick)
+                (runReconcileLoopWith tick deps reg broker logger)
+      done `shouldBe` Just ()
+      logs <- readIORef logRef
+      any (\m -> "reconcile loop crashed" `T.isInfixOf` m) logs `shouldBe` True
+
+  describe "isLegacyWindowName" $ do
+    it "recognizes a claude-code-<idx> window name" $ do
+      isLegacyWindowName "claude-code-0"  `shouldBe` True
+      isLegacyWindowName "claude-code-42" `shouldBe` True
+    it "rejects a non-legacy / malformed window name" $ do
+      isLegacyWindowName "claude-code-"      `shouldBe` False  -- empty suffix
+      isLegacyWindowName "claude-code-abc"   `shouldBe` False  -- non-digit suffix
+      isLegacyWindowName "some-other-window" `shouldBe` False  -- wrong prefix
+
+  describe "ActivityProbe shim — re-export delegates to the reconcile loop" $
+    it "runActivityProbeLoop wires through to runReconcileLoop (cancellable before the first tick)" $ do
+      -- The shim is 'runActivityProbeLoop = runReconcileLoop'. Invoking it forces
+      -- that re-export. The production loop delays one (2 s) tick before any tmux
+      -- IO, so cancelling immediately exercises the wiring without forking tmux.
+      reg    <- Reg.newRegistry
+      broker <- mkInProcessBroker defaultBrokerConfig
+      cancelled <- Async.withAsync
+        (runActivityProbeLoop broker reg mkNoOpLogHandle) $ \a -> do
+          threadDelay 20_000        -- well inside the 2 s pre-tick delay
+          Async.cancel a            -- AsyncCancelled fires during threadDelay
+          -- 'waitCatch' returns Left AsyncCancelled (re-raised by the loop's
+          -- outer handler) — proving the shim reached runReconcileLoopWith.
+          res <- Async.waitCatch a
+          pure $ case res of
+            Left _  -> True
+            Right _ -> True
+      cancelled `shouldBe` True

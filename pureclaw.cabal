@@ -94,6 +94,7 @@ library
     -- Harness (tmux lifecycle)
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode
+    PureClaw.Harness.Reconcile
     PureClaw.Harness.Registry
     PureClaw.Harness.Tmux
     -- Tools (take handles, return IO results)
@@ -346,6 +347,7 @@ test-suite pureclaw-test
     -- Frontend (live transcript streaming — WU6: HTTP-API regression)
     Frontend.APISpec
     Harness.ClaudeCodeSpec
+    Harness.ReconcileSpec
     Harness.RegistrySpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs

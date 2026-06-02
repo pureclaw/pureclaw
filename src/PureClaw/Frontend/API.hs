@@ -78,9 +78,8 @@ import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Tab (TabKind (..))
-import PureClaw.Harness.ClaudeCode (isIdle)
+import PureClaw.Harness.Reconcile (livenessToActivity)
 import PureClaw.Harness.Registry qualified as Registry
-import PureClaw.Harness.Tmux (captureWindow)
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
   ( BranchError (..)
@@ -410,43 +409,25 @@ apiApp env req respond = do
       handleListProviderModels env name respond
     _                                        -> respondNotFound respond
 
+-- | @GET \/api\/harnesses@ — report every harness in the registry with its
+-- reconciled liveness. The registry (not the legacy '_fe_harnesses' map) is the
+-- source of truth for health (Harness Registry, WU5): the reconcile loop keeps
+-- each entry's '_he_liveness' fresh, so the handler reads the cached state
+-- rather than performing a live tmux capture per request.
 handleHarnesses :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleHarnesses env respond = do
-  harnesses <- readIORef (_fe_harnesses env)
-  infos <- traverse probeHarness (Map.toList harnesses)
+  entries <- Registry.snapshot (_fe_harnessRegistry env)
+  let infos = map harnessInfoOfEntry entries
   respond $ jsonResponse status200 infos
 
--- | Probe a single harness to determine its activity.
--- Checks process status first, then does a quick screen capture
--- to distinguish thinking from idle.
-probeHarness :: (Text, HarnessHandle) -> IO HarnessInfo
-probeHarness (name, hh) = do
-  st <- _hh_status hh
-  activity <- case st of
-    HarnessExited _ -> pure HarnessStopped
-    HarnessRunning  -> probeActivity (_hh_session hh) name
-  pure HarnessInfo
-    { _hi_name     = name
-    , _hi_activity = activity
-    }
-
--- | Capture the tmux window and check if the harness is idle or thinking.
-probeActivity :: Text -> Text -> IO HarnessActivity
-probeActivity tmuxSession windowName = do
-  let target = tmuxSession <> ":" <> extractWindowIdx windowName
-  result <- try @SomeException $ captureWindow target 50
-  case result of
-    Left _        -> pure HarnessIdle
-    Right capture -> do
-      let screenText = TE.decodeUtf8Lenient capture
-      pure $ if isIdle screenText then HarnessIdle else HarnessThinking
-
--- | Extract the window index suffix from a harness name like "claude-code-0".
-extractWindowIdx :: Text -> Text
-extractWindowIdx name =
-  case T.splitOn "-" name of
-    parts | length parts >= 2 -> last parts
-    _                         -> "0"
+-- | Map a registry entry to its JSON-serializable 'HarnessInfo'. The display
+-- name is the entry's label (the tmux window name); the activity comes from the
+-- reconciled liveness via the same mapping the reconcile loop publishes.
+harnessInfoOfEntry :: Registry.HarnessEntry -> HarnessInfo
+harnessInfoOfEntry e = HarnessInfo
+  { _hi_name     = Registry._he_label e
+  , _hi_activity = livenessToActivity (Registry._he_liveness e)
+  }
 
 -- | Return all currently open tabs as a JSON array.
 handleListTabs :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived

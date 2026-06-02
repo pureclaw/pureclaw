@@ -670,6 +670,40 @@ spec = do
   -- WU-8: GET /api/tabs
   -- -----------------------------------------------------------------------
 
+  describe "GET /api/harnesses (registry-backed — WU5)" $ do
+    it "returns an empty list when the registry is empty" $ do
+      env <- mkTestFrontendEnv
+      (st, respBody) <- getJSON env ["api", "harnesses"]
+      st `shouldBe` HTTP.status200
+      respBody `shouldBe` Aeson.encode ([] :: [Aeson.Value])
+
+    it "reports each registry entry's reconciled liveness (not a live capture)" $ do
+      env <- mkTestFrontendEnv
+      let hidA = mustParseHid "11111111-1111-4111-8111-111111111111"
+          hidB = mustParseHid "22222222-2222-4222-8222-222222222222"
+      -- Two entries with DIFFERENT cached liveness; the handler must read the
+      -- registry's reconciled state, not perform a tmux capture.
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidA "claude-code-0" Nothing)
+          { Registry._he_liveness = Registry.LivenessThinking }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidB "claude-code-1" Nothing)
+          { Registry._he_liveness = Registry.LivenessOrphaned }
+      (st, respBody) <- getJSON env ["api", "harnesses"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody :: Maybe [Aeson.Value] of
+        Just arr -> do
+          let pairs =
+                [ (n, a)
+                | v <- arr
+                , Just (Aeson.String n) <- [lookupKey v "name"]
+                , Just (Aeson.String a) <- [lookupKey v "activity"]
+                ]
+          -- Orphaned collapses to "stopped"; Thinking → "thinking".
+          lookup "claude-code-0" pairs `shouldBe` Just "thinking"
+          lookup "claude-code-1" pairs `shouldBe` Just "stopped"
+        Nothing -> expectationFailure "harnesses response was not a JSON array"
+
   describe "GET /api/tabs" $ do
     it "returns an empty list when no tabs are open" $ do
       env <- mkTestFrontendEnv

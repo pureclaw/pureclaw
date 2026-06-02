@@ -69,6 +69,7 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   )
 import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
+import PureClaw.Harness.Reconcile qualified as Reconcile
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
@@ -780,10 +781,15 @@ runChat opts = do
               , _fe_registry     = fullRegistry
               , _fe_maxToolIterations = 90
               }
+        -- Boot reconstruction (WU5, D5.6): one tmux sweep builds the registry
+        -- from windows carrying our @pcl_id (PCL-restart reconnect) and lazily
+        -- stamps legacy claude-code-<idx> windows. The legacy '_env_harnesses'
+        -- map was already seeded in parallel by 'discoverHarnesses' above.
+        Reconcile.bootReconstruct Reconcile.defaultReconcileDeps harnessReg logger
         Async.withAsync
           (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
           Async.withAsync
-            (runActivityProbeLoop broker harnessRef logger) $ \_probeAsync ->
+            (runActivityProbeLoop broker harnessReg logger) $ \_probeAsync ->
             runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of
