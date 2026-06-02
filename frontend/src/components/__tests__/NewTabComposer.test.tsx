@@ -272,6 +272,76 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     )
   })
 
+  it('tmux backend has a Session Name field but no Window field (window is auto-assigned)', async () => {
+    vi.stubGlobal('fetch', defaultMockFetch())
+    render(<ComposerHarness onSubmit={onSubmit} />)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
+
+    // Session Name is still there...
+    expect(screen.getByLabelText('Session Name')).toBeInTheDocument()
+    // ...but the Window input has been removed — the backend auto-assigns
+    // a canonical window name, so the user never picks one.
+    expect(screen.queryByLabelText('Window')).not.toBeInTheDocument()
+  })
+
+  it('tmux harness buildBody always carries window:"" so the backend decode succeeds', async () => {
+    vi.stubGlobal('fetch', defaultMockFetch())
+    render(<ComposerHarness onSubmit={onSubmit} />)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
+    fireEvent.change(screen.getByLabelText('Session Name'), { target: { value: 'main' } })
+
+    fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
+    fireEvent.click(screen.getByLabelText('Bottom send button'))
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      {
+        kind: {
+          tag: 'session',
+          session_kind: {
+            tag: 'harness',
+            flavour: 'claude-code',
+            // window is emitted unconditionally for tmux (auto-assigned
+            // server-side, ignored for placement) so the required
+            // `o .: "window"` backend decode still succeeds.
+            backend: { tag: 'tmux', session: 'main', window: '' },
+            args: [],
+          },
+        },
+      },
+      'hi',
+    )
+  })
+
+  it('tmux harness buildBody carries window:"" even with no session typed', async () => {
+    vi.stubGlobal('fetch', defaultMockFetch())
+    render(<ComposerHarness onSubmit={onSubmit} />)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
+
+    fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
+    fireEvent.click(screen.getByLabelText('Bottom send button'))
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      {
+        kind: {
+          tag: 'session',
+          session_kind: {
+            tag: 'harness',
+            flavour: 'claude-code',
+            backend: { tag: 'tmux', window: '' },
+            args: [],
+          },
+        },
+      },
+      'hi',
+    )
+  })
+
   it('shows "no providers configured" hint when /api/providers is empty', async () => {
     const mockFetch = vi.fn().mockImplementation((url: string) => {
       if (url === '/api/providers') {

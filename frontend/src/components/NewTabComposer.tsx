@@ -285,6 +285,10 @@ function BackendFields({
     <>
       {tag === 'tmux' && (
         <>
+          {/* No Window input: the tmux window is auto-assigned by the
+              backend (`canonical-<idx>`) and ignored for placement, so the
+              user only picks the session. buildBackendPayload still sends
+              `window: ''` to satisfy the backend's required decode. */}
           <Row label="Session Name" htmlFor="backend-session">
             <input
               id="backend-session"
@@ -293,16 +297,6 @@ function BackendFields({
               onChange={(e) => onConfigUpdate({ session: e.target.value })}
               style={inputStyle}
               placeholder="e.g. main"
-            />
-          </Row>
-          <Row label="Window" htmlFor="backend-window">
-            <input
-              id="backend-window"
-              type="text"
-              value={config.window ?? ''}
-              onChange={(e) => onConfigUpdate({ window: e.target.value })}
-              style={inputStyle}
-              placeholder="e.g. 0"
             />
           </Row>
         </>

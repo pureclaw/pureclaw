@@ -75,7 +75,12 @@ function buildBackendPayload(tag: BackendTag, config: BackendConfig): Record<str
   const backend: Record<string, unknown> = { tag }
   if (tag === 'tmux') {
     if (config.session) backend.session = config.session
-    if (config.window) backend.window = config.window
+    // The tmux window is auto-assigned by the backend (`canonical-<idx>`)
+    // and ignored for placement, so the composer no longer offers a Window
+    // input. We still emit the key unconditionally because the backend's
+    // `TmuxConfig` request decode requires `o .: "window"`; sending `''`
+    // satisfies that decode while letting the server pick the real name.
+    backend.window = config.window ?? ''
   } else if (tag === 'ssh') {
     if (config.host) backend.host = config.host
     if (config.port) backend.port = config.port
