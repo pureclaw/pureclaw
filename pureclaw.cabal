@@ -44,6 +44,7 @@ library
     -- Security (pure where possible)
     PureClaw.Security.Path
     PureClaw.Security.Command
+    PureClaw.Security.Adoption
     PureClaw.Security.Policy
     PureClaw.Security.Secrets
     PureClaw.Security.Crypto
@@ -250,6 +251,7 @@ test-suite pureclaw-test
     Security.PolicySpec
     Security.PathSpec
     Security.CommandSpec
+    Security.AdoptionSpec
     Core.ConfigSpec
     Handles.LogSpec
     Handles.FileSpec

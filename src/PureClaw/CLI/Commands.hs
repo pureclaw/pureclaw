@@ -484,7 +484,10 @@ runChat opts = do
           else pure (Just (identitySystemPrompt ident))
 
   -- Security policy
-  let policy = buildPolicy effectiveAutonomy effectiveAllow
+  adoptablePatterns <- parseAdoptableSessions logger
+    (fromMaybe [] (_fc_adoptableSessions fileCfg))
+  let policy = (buildPolicy effectiveAutonomy effectiveAllow)
+        { _sp_adoptableSessionPatterns = adoptablePatterns }
 
   -- Handles
   let workspace = WorkspaceRoot "."
@@ -937,6 +940,7 @@ buildPolicy (Just level) [] = SecurityPolicy
   { _sp_allowedCommands       = AllowAll
   , _sp_autonomy              = level
   , _sp_allowedRemoteCommands = AllowList Set.empty
+  , _sp_adoptableSessionPatterns = []
   }
 buildPolicy (Just level) cmds =
   let cmdNames = Set.fromList (map (CommandName . T.pack) cmds)
@@ -944,6 +948,7 @@ buildPolicy (Just level) cmds =
     { _sp_allowedCommands       = AllowList cmdNames
     , _sp_autonomy              = level
     , _sp_allowedRemoteCommands = AllowList Set.empty
+    , _sp_adoptableSessionPatterns = []
     }
 buildPolicy Nothing [] = defaultPolicy
 buildPolicy Nothing cmds =
@@ -952,7 +957,25 @@ buildPolicy Nothing cmds =
     { _sp_allowedCommands       = AllowList cmdNames
     , _sp_autonomy              = Full
     , _sp_allowedRemoteCommands = AllowList Set.empty
+    , _sp_adoptableSessionPatterns = []
     }
+
+-- | Parse the configured @adoptable_sessions@ strings into validated
+-- 'SessionPattern's, dropping (and logging) any that fail validation
+-- (e.g. a bare @*@, which would otherwise be an implicit allow-all).
+--
+-- A missing\/empty config list yields @[]@ — i.e. adoption stays DENIED by
+-- default. This NEVER produces an allow-all, by construction
+-- ('parseSessionPattern' rejects bare @*@\/empty-prefix).
+parseAdoptableSessions :: LogHandle -> [T.Text] -> IO [SessionPattern]
+parseAdoptableSessions logger raws = do
+  let (invalids, valids) = partitionSessionPatterns raws
+  mapM_ warnInvalid invalids
+  pure valids
+  where
+    warnInvalid r = _lh_logWarn logger $
+      "ignoring invalid adoptable_sessions pattern: " <> r
+      <> " (a bare '*' or empty pattern is rejected; adoption stays denied for it)"
 
 -- | Resolve the LLM provider from the provider type.
 -- Checks CLI flag first, then the vault for the API key.
