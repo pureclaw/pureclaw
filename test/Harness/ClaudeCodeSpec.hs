@@ -19,7 +19,7 @@ import PureClaw.Handles.Harness
 import PureClaw.Handles.Transcript
 import PureClaw.Harness.ClaudeCode
 import PureClaw.Harness.Registry qualified as Reg
-import PureClaw.Harness.Tmux (TmuxWindowRow (..))
+import PureClaw.Harness.Tmux (TmuxWindowRow (..), validateTmuxIdent)
 import PureClaw.Security.Adoption
 import PureClaw.Security.Command
 import PureClaw.Security.Policy
@@ -653,6 +653,131 @@ spec = do
       hh <- mkDiscoveredClaudeCodeHandle transcript "my-session" "claude-code-3"
       _hh_name hh `shouldBe` "Claude Code"
       _hh_session hh `shouldBe` "my-session"
+
+  -- WU8 Part A (WU6-review must-do): the adopted/discovered tmux-IO path takes
+  -- window/session names that ORIGINATE from the server-wide sweep (§8 C3/C4 —
+  -- attacker-writable). 'validateTmuxIdent' must be applied FAIL-CLOSED on this
+  -- most-exposed path so an injected identifier (leading @-@ → mis-parsed as a
+  -- tmux OPTION; @:@ → spills into the @session:window@ target; a control char →
+  -- corrupts the @-F@ sweep) is refused WITHOUT issuing any tmux op. Session and
+  -- window are validated SEPARATELY (as in WU6's 'sendToWindowNamed').
+  describe "adopted-path identifier validation (WU8 Part A — §8 C3/C4 defense-in-depth)" $ do
+    -- These assert the SAFE FAILURE VALUE for a malicious identifier. The guard
+    -- short-circuits BEFORE 'findTmux', so the safe value is returned regardless
+    -- of whether a tmux server (or a matching window) is present — i.e. no tmux
+    -- op is ever issued for a rejected identifier.
+    let badIdents =
+          [ ("leading-dash window", "ok-session", "-injected")
+          , ("leading-dash session", "-evil", "ok-window")
+          , ("colon window",     "ok-session", "win:spill")
+          , ("colon session",    "ses:spill", "ok-window")
+          , ("control window",   "ok-session", "win\nrm")
+          , ("empty window",     "ok-session", "")
+          ]
+
+    -- Sanity: the bad identifiers really are rejected by the pure predicate and
+    -- the good ones pass (guards against a future predicate change silently
+    -- defanging these tests).
+    it "the chosen bad identifiers fail validateTmuxIdent and the good ones pass" $ do
+      validateTmuxIdent "ok-session" `shouldBe` True
+      validateTmuxIdent "ok-window"  `shouldBe` True
+      and [ not (validateTmuxIdent s && validateTmuxIdent w)
+          | (_, s, w) <- badIdents ] `shouldBe` True
+
+    it "realSendNamed refuses (False) for an invalid session/window — no tmux op" $
+      mapM_ (\(label, s, w) -> do
+                ok <- realSendNamed s w "payload"
+                (label, ok) `shouldBe` (label, False))
+            badIdents
+
+    it "realCaptureNamed refuses (Nothing) for an invalid session/window — no tmux op" $
+      mapM_ (\(label, s, w) -> do
+                r <- realCaptureNamed s w 100
+                (label, r) `shouldBe` (label, Nothing))
+            badIdents
+
+    it "realStatus refuses (HarnessExited) for an invalid session/window — no tmux op" $
+      mapM_ (\(label, s, w) -> do
+                st <- realStatus s w
+                case st of
+                  HarnessExited _ -> pure ()
+                  HarnessRunning  ->
+                    expectationFailure (label <> ": expected HarnessExited, got HarnessRunning"))
+            badIdents
+
+    -- The strongest fail-closed proof: 'adoptExternalWindow' uses INJECTED deps,
+    -- so we can observe that ZERO tmux mutations (setMarker / setRemain) and ZERO
+    -- captures fire when an identifier is invalid, and the result is Left.
+    it "adoptExternalWindow refuses an invalid WINDOW name with NO tmux op (fail-closed)" $
+      withSystemTempDirectory "pcl-adopt-badwin" $ \tmp -> do
+        reg <- Reg.newRegistry
+        markersRef <- newIORef ([] :: [(Text, Text, Text)])
+        remainRef  <- newIORef ([] :: [(Text, Text)])
+        captureRef <- newIORef (0 :: Int)
+        let deps = okDeps
+              { _ccd_setMarker    = \s w u -> modifyIORef' markersRef ((s, w, u) :)
+              , _ccd_setRemain    = \s w -> modifyIORef' remainRef ((s, w) :)
+              , _ccd_captureNamed = \_ _ _ -> modifyIORef' captureRef (+ 1) >> pure (Just "")
+              }
+            -- session "scratch" is allow-listed (valid); the WINDOW is malicious.
+            adoptable = "scratch"
+            gatePolicy = defaultPolicy
+              { _sp_adoptableSessionPatterns =
+                  case parseSessionPattern adoptable of
+                    Just p  -> [p]
+                    Nothing -> error "test setup: pattern rejected"
+              }
+            token = case authorizeAdoption gatePolicy ConsentInteractive adoptable of
+              Right tok -> tok
+              Left e    -> error ("test setup: gate denied: " <> show e)
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token "-rm-rf"
+        case result of
+          Right _   -> expectationFailure "expected adopt to refuse an invalid window name"
+          -- Force the refusal value: it is a HarnessNotAuthorized carrying the
+          -- offending identifier (proves the guard's then-branch, not some other
+          -- Left, and that the diagnostic names the rejected coordinate).
+          Left err  -> do
+            case err of
+              HarnessNotAuthorized _ -> pure ()
+              other -> expectationFailure
+                ("expected HarnessNotAuthorized, got " <> show other)
+            T.isInfixOf "-rm-rf" (T.pack (show err)) `shouldBe` True
+        readIORef markersRef >>= (`shouldBe` [])
+        readIORef remainRef  >>= (`shouldBe` [])
+        readIORef captureRef >>= (`shouldBe` 0)
+        -- And nothing was registered nor any session.json written.
+        Reg.snapshot reg >>= (\es -> length es `shouldBe` 0)
+        loadAllSessionMetas tmp >>= (\ms -> length ms `shouldBe` 0)
+
+    it "adoptExternalWindow refuses an invalid SESSION (from the token) with NO tmux op" $
+      withSystemTempDirectory "pcl-adopt-badses" $ \tmp -> do
+        reg <- Reg.newRegistry
+        markersRef <- newIORef ([] :: [(Text, Text, Text)])
+        captureRef <- newIORef (0 :: Int)
+        let deps = okDeps
+              { _ccd_setMarker    = \s w u -> modifyIORef' markersRef ((s, w, u) :)
+              , _ccd_captureNamed = \_ _ _ -> modifyIORef' captureRef (+ 1) >> pure (Just "")
+              }
+            -- A LITERAL allow-list entry with a leading '-' (a misconfiguration)
+            -- mints a token for a session that tmux would mis-read as an option.
+            -- The argv defense holds, but the adopt path must STILL refuse it.
+            adoptable = "-evil-session"
+            gatePolicy = defaultPolicy
+              { _sp_adoptableSessionPatterns =
+                  case parseSessionPattern adoptable of
+                    Just p  -> [p]
+                    Nothing -> error "test setup: pattern rejected"
+              }
+            token = case authorizeAdoption gatePolicy ConsentInteractive adoptable of
+              Right tok -> tok
+              Left e    -> error ("test setup: gate denied: " <> show e)
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token "ok-window"
+        case result of
+          Right _ -> expectationFailure "expected adopt to refuse an invalid session name"
+          Left _  -> pure ()
+        readIORef markersRef >>= (`shouldBe` [])
+        readIORef captureRef >>= (`shouldBe` 0)
+        Reg.snapshot reg >>= (\es -> length es `shouldBe` 0)
 
 -- | Spawn a harness with a Full policy that allows claude, returning the result.
 -- Individual tests pass the deps they want to observe.

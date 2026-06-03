@@ -6,6 +6,10 @@ module PureClaw.Harness.ClaudeCode
   , mkDiscoveredClaudeCodeHandle
     -- * Adopt an existing external window (WU4)
   , adoptExternalWindow
+    -- * Production name-based tmux IO (exported for fail-closed testing — WU8)
+  , realSendNamed
+  , realCaptureNamed
+  , realStatus
     -- * Injectable dependencies (D4.2 / D4.3 seam)
   , ClaudeCodeDeps (..)
   , defaultClaudeCodeDeps
@@ -153,6 +157,10 @@ realPanePidOf session windowName = do
 -- contract: found-ness is determined by the LITERAL send (the targeting step);
 -- the Enter is only attempted when that succeeded.
 realSendNamed :: Text -> Text -> ByteString -> IO Bool
+realSendNamed session windowName _input
+  -- WU8 Part A (§8 C3/C4): fail-closed on the adopted/discovered path — an
+  -- invalid session/window identifier is refused (False) WITHOUT any tmux op.
+  | not (validateTmuxIdent session && validateTmuxIdent windowName) = pure False
 realSendNamed session windowName input = do
   mPath <- findTmux
   case mPath of
@@ -173,6 +181,10 @@ realSendNamed session windowName input = do
 -- | Capture from a named window through the WU3 tmux seam. 'Nothing' signals a
 -- missing window (tmux exit non-zero); 'Just' carries the (ANSI-stripped) bytes.
 realCaptureNamed :: Text -> Text -> Int -> IO (Maybe ByteString)
+realCaptureNamed session windowName _lineCount
+  -- WU8 Part A (§8 C3/C4): fail-closed — an invalid identifier is refused
+  -- (Nothing, the missing-window value) WITHOUT issuing capture-pane.
+  | not (validateTmuxIdent session && validateTmuxIdent windowName) = pure Nothing
 realCaptureNamed session windowName lineCount = do
   mPath <- findTmux
   case mPath of
@@ -191,6 +203,11 @@ realCaptureNamed session windowName lineCount = do
 -- | Window-status check by name through the WU3 tmux seam: a present window is
 -- 'HarnessRunning'; a missing one is 'HarnessExited'.
 realStatus :: Text -> Text -> IO HarnessStatus
+realStatus session windowName
+  -- WU8 Part A (§8 C3/C4): fail-closed — an invalid identifier is treated as a
+  -- missing/unusable window ('HarnessExited') WITHOUT issuing list-windows.
+  | not (validateTmuxIdent session && validateTmuxIdent windowName) =
+      pure (HarnessExited (ExitFailure 1))
 realStatus session windowName = do
   mTmux <- findTmux
   case mTmux of
@@ -403,6 +420,31 @@ adoptExternalWindow
   -> IO (Either HarnessError (HarnessId, HarnessHandle))
 adoptExternalWindow deps reg th sessionsDir token windowName = do
   let session = adoptedSession token
+  -- WU8 Part A (§8 C3/C4 defense-in-depth): the adopted coordinates originate
+  -- from the server-wide sweep (attacker-writable) and the allow-list (a literal
+  -- pattern can mint any session string). Validate BOTH identifiers FAIL-CLOSED
+  -- BEFORE any tmux mutation — a leading @-@ / @:@ / control char never reaches
+  -- set-option, capture-pane, or registration. The argv defense already holds;
+  -- this refuses the most-exposed path outright (no marker stamped, nothing
+  -- registered, no session.json written).
+  if not (validateTmuxIdent session && validateTmuxIdent windowName)
+    then pure (Left (HarnessNotAuthorized
+      (CommandNotAllowed ("invalid tmux identifier for adoption: "
+        <> session <> ":" <> windowName))))
+    else adoptValidated deps reg th sessionsDir session windowName
+
+-- | The adopt mechanism proper, reached only AFTER both tmux identifiers have
+-- passed 'validateTmuxIdent' (WU8 Part A). Split out so the guard in
+-- 'adoptExternalWindow' provably precedes every tmux op below.
+adoptValidated
+  :: ClaudeCodeDeps
+  -> HarnessRegistry
+  -> TranscriptHandle
+  -> FilePath
+  -> Text                -- ^ validated tmux session name
+  -> Text                -- ^ validated tmux window name
+  -> IO (Either HarnessError (HarnessId, HarnessHandle))
+adoptValidated deps reg th sessionsDir session windowName = do
   -- Step 1: fresh identity.
   hid <- _ccd_newId deps
   -- Step 2: establish identity on the EXISTING window (C4 anchor at adopt time).
@@ -488,8 +530,11 @@ writeSessionMeta baseDir meta = do
       tmpP   = finalP <> ".tmp"
   Dir.createDirectoryIfMissing True dir
   LBS.writeFile tmpP (Aeson.encode meta)
-  -- A failed rename must surface; but a non-existent tmp (already moved) is not
-  -- expected here. Swallow only a benign double-cleanup IO fault.
+  -- Best-effort persistence: a failed rename is SWALLOWED (swallow-and-continue),
+  -- not surfaced. The adopt mechanism has already stamped identity and registered
+  -- the OriginAdopted entry by this point, so a session.json write fault must not
+  -- fail the adoption — the in-memory registry entry still routes; the persisted
+  -- metadata is a reconnect convenience that the next reconcile/save can rebuild.
   result <- try (Dir.renameFile tmpP finalP) :: IO (Either IOError ())
   case result of
     Right () -> pure ()
@@ -783,6 +828,10 @@ discoveredReceive th session windowName = do
 -- | Capture the full scrollback buffer (not just the visible pane) by name,
 -- through the WU3 tmux seam. Returns empty on a missing window or tmux absence.
 captureFullScrollbackNamed :: Text -> Text -> IO ByteString
+captureFullScrollbackNamed session windowName
+  -- WU8 Part A (§8 C3/C4): fail-closed on the discovered receive path — an
+  -- invalid identifier yields the empty capture WITHOUT issuing capture-pane.
+  | not (validateTmuxIdent session && validateTmuxIdent windowName) = pure ""
 captureFullScrollbackNamed session windowName = do
   mPath <- findTmux
   case mPath of

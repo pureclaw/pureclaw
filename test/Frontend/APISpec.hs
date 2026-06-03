@@ -2078,6 +2078,48 @@ spec = do
         sent <- readIORef sentRef
         sent `shouldBe` ["ping"]
 
+    -- WU8 Part B (WU4-review): an ADOPTED harness's output must flow exactly like
+    -- a SPAWNED one. 'harnessKeyFromKind' returns the adopted entry's id;
+    -- 'sendToHarness' routes by id to the PID-corroborated OriginAdopted entry's
+    -- handle; and 'routeViaHandle' is the SOLE recorder of the session
+    -- transcript (the adopted handle, like the spawned one, was given a no-op
+    -- transcript). This proves a send to an adopted harness records exactly one
+    -- Request + one Response to the SESSION transcript — adoption is consistent
+    -- with the spawn-via-frontend path.
+    it "records a send to an ADOPTED harness to the session transcript (WU8 Part B)" $ do
+      withSystemTempDirectory "pureclaw-wu8-partb" $ \tmpDir -> do
+        let sid    = "sess-adopted-route"
+            hidTxt = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+            hid    = mustParseHid hidTxt
+            window = "adopted-window-0"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- An OriginAdopted, PID-corroborated entry with a live handle, keyed by
+        -- id. The legacy name map is EMPTY so a pass means id-routing to the
+        -- adopted entry (not a name-fallback).
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (adoptedCorroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "adopted reply")))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hello adopted" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "adopted reply")
+        -- The keystrokes reached the adopted handle.
+        sent <- readIORef sentRef
+        sent `shouldBe` ["hello adopted"]
+        -- handleSend recorded exactly one Request + one Response to the SESSION
+        -- transcript (sole recorder — no double-write from the adopted handle,
+        -- whose own transcript is a no-op, mirroring the spawn path).
+        entries <- readSessionTranscript tmpDir sid
+        let reqs  = [ e | e <- entries, _te_direction e == Request ]
+            resps = [ e | e <- entries, _te_direction e == Response ]
+        length reqs  `shouldBe` 1
+        length resps `shouldBe` 1
+        _te_payload (head reqs)  `shouldBe` "hello adopted"
+        _te_payload (head resps) `shouldBe` "adopted reply"
+
     -- D6.4: id not in the registry -> falls back to the legacy name-keyed
     -- _fe_harnesses map (the PR #74 path). Proves the name fallback survives.
     it "falls back to the name-keyed map when the id is unregistered (D6.4)" $ do
@@ -3258,6 +3300,15 @@ mustParseHid t = case Registry.parseHarnessId t of
 corroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
 corroboratedEntry hid window mHandle = (baseEntry hid window mHandle)
   { Registry._he_harnessPid = Just 4242 }
+
+-- | A PID-corroborated, OriginAdopted registry entry (WU8 Part B). Mirrors what
+-- 'adoptExternalWindow' registers: an adopted window with recorded PID
+-- provenance and an attached handle whose own transcript is a NO-OP (so
+-- 'handleSend'/'routeViaHandle' remains the SOLE recorder, exactly as on the
+-- spawn path).
+adoptedCorroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+adoptedCorroboratedEntry hid window mHandle = (corroboratedEntry hid window mHandle)
+  { Registry._he_origin = Registry.OriginAdopted }
 
 -- | An UNcorroborated entry: a bare (spoofable) marker with NO recorded PIDs.
 uncorroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
