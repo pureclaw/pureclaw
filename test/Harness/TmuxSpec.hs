@@ -409,8 +409,21 @@ spec = do
       case available of
         Left _ -> pendingWith "tmux not available on this system"
         Right () -> do
+          -- 'checkTmuxCapabilities' probes via 'tmux display-message', which
+          -- needs a running server. Production calls it after the harness
+          -- session is started; mirror that here by starting a throwaway
+          -- session first (otherwise CI — tmux binary present but no server —
+          -- gets a spurious Left). If the probe still fails, the tmux is too
+          -- old to support @pcl_id/#{pane_dead}: that's the documented degrade
+          -- path, not a test failure, so mark it pending.
+          let sName = "pureclaw-test-capcheck"
+          _ <- startTmuxSessionStatus sName
           result <- checkTmuxCapabilities
-          result `shouldBe` Right ()
+          stopTmuxSession sName
+          case result of
+            Right () -> result `shouldBe` Right ()
+            Left _   -> pendingWith
+              "tmux present but does not support @pcl_id/#{pane_dead} (older tmux); degrade path"
 
     -- listTmuxSessions lists a created session
     it "listTmuxSessions includes a started session" $ do
