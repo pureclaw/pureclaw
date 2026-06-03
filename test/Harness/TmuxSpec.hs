@@ -23,11 +23,35 @@ spec = do
     it "handles names with hyphens and digits" $
       windowTarget "sess" "harness-ab12cd" `shouldBe` "sess:harness-ab12cd"
 
-  -- D1.1 — the name-targeted I/O argv builders target <session>:<windowName>
-  describe "name-targeted argv builders (D1.1)" $ do
-    it "sendKeysNamedArgs (small) targets the window name and appends Enter" $ do
+  -- D1.1 / D6.1 — the name-targeted I/O argv builders target <session>:<windowName>
+  describe "name-targeted argv builders (D1.1 / D6.1)" $ do
+    -- D6.1 (C3 input hygiene): the small-payload send is now LITERAL. The
+    -- payload is delivered via `send-keys -l --` so tmux does NOT interpret it
+    -- as key tokens, and `--` ends option parsing so a payload starting with
+    -- `-` is never treated as a flag. Enter is a SEPARATE key (sendEnterNamedArgs).
+    it "sendKeysNamedArgs (small) sends the payload LITERALLY with -l -- (no Enter)" $ do
       let argv = sendKeysNamedArgs "pureclaw" "claude-code-0" (BC.pack "hello")
-      argv `shouldBe` ["send-keys", "-t", "pureclaw:claude-code-0", "hello", "Enter"]
+      argv `shouldBe` ["send-keys", "-t", "pureclaw:claude-code-0", "-l", "--", "hello"]
+
+    it "sendEnterNamedArgs submits the line as a SEPARATE Enter key" $ do
+      let argv = sendEnterNamedArgs "pureclaw" "claude-code-0"
+      argv `shouldBe` ["send-keys", "-t", "pureclaw:claude-code-0", "Enter"]
+
+    -- D6.1: a payload containing tmux key tokens (C-c, Enter, ;) must be carried
+    -- VERBATIM in the `-l --` argv — never split into separate key tokens that
+    -- tmux would interpret (e.g. C-c = interrupt, ; = command separator).
+    it "carries tmux key tokens (C-c / Enter / ;) literally, not as keys" $ do
+      let payload = BC.pack "C-c Enter ; rm -rf /"
+          argv = sendKeysNamedArgs "pureclaw" "claude-code-0" payload
+      argv `shouldBe`
+        ["send-keys", "-t", "pureclaw:claude-code-0", "-l", "--", "C-c Enter ; rm -rf /"]
+      -- The whole payload is a SINGLE argv element (literal), not tokenized.
+      drop 5 argv `shouldBe` ["C-c Enter ; rm -rf /"]
+
+    it "carries a payload starting with '-' literally after the -- terminator" $ do
+      let argv = sendKeysNamedArgs "pureclaw" "claude-code-0" (BC.pack "--version")
+      argv `shouldBe`
+        ["send-keys", "-t", "pureclaw:claude-code-0", "-l", "--", "--version"]
 
     it "pasteBufferNamedArgs (large) targets the window name" $ do
       let argv = pasteBufferNamedArgs "pureclaw" "claude-code-0"
@@ -54,6 +78,35 @@ spec = do
       argv `shouldBe`
         ["new-window", "-t", "pureclaw", "-n", "claude-code-x", "-c", "/tmp/work", "the-cmd"]
 
+  -- D6.3 (regression) — the launch path (`cd <dir>` + the stealth-launch
+  -- command, in addHarnessWindowNamed / realSendNamed) must STILL EXECUTE: it
+  -- sends the command text LITERALLY, then a SEPARATE Enter to run it. This
+  -- pins the two-step argv shape that every launch/send relies on so a future
+  -- refactor cannot silently drop the Enter (which would leave the command
+  -- typed but un-executed). The real round-trip is exercised by the
+  -- "addHarnessWindowNamed then captureWindowNamed" integration test below.
+  describe "launch two-step argv (D6.3 regression)" $ do
+    it "a `cd <dir>` send is literal text followed by a separate Enter" $ do
+      let cmd = BC.pack "cd /tmp/work"
+          literalArgv = sendKeysNamedArgs "pureclaw" "claude-code-0" cmd
+          enterArgv   = sendEnterNamedArgs "pureclaw" "claude-code-0"
+      literalArgv `shouldBe`
+        ["send-keys", "-t", "pureclaw:claude-code-0", "-l", "--", "cd /tmp/work"]
+      enterArgv `shouldBe`
+        ["send-keys", "-t", "pureclaw:claude-code-0", "Enter"]
+
+    it "a stealth-launch command is literal text followed by a separate Enter" $ do
+      let cmd = BC.pack (stealthShellCommand "/usr/bin/claude" ["--flag"])
+          literalArgv = sendKeysNamedArgs "pureclaw" "claude-code-0" cmd
+          enterArgv   = sendEnterNamedArgs "pureclaw" "claude-code-0"
+      -- The command text rides verbatim in the -l -- literal slot ...
+      take 5 literalArgv
+        `shouldBe` ["send-keys", "-t", "pureclaw:claude-code-0", "-l", "--"]
+      drop 5 literalArgv `shouldBe` [BC.unpack cmd]
+      -- ... and a separate Enter actually runs it.
+      enterArgv `shouldBe`
+        ["send-keys", "-t", "pureclaw:claude-code-0", "Enter"]
+
   -- D1.5 — set-option argv (marker + remain-on-exit)
   describe "set-option argv builders (D1.3 / D1.5)" $ do
     it "setWindowMarkerArgs sets @pcl_id on the named window" $ do
@@ -78,6 +131,36 @@ spec = do
       let argv = clearWindowMarkerArgs "scratch" "harness-ab12cd"
       argv `shouldBe`
         ["set-option", "-wu", "-t", "scratch:harness-ab12cd", "@pcl_id"]
+
+  -- D6.2 (C3 input hygiene) — tmux identifier validation. argv-style P.proc is
+  -- the PRIMARY injection defense (each identifier is a distinct argv element);
+  -- validateTmuxIdent is defense-in-depth against tmux *option*-injection, where
+  -- a leading '-' could be parsed as a flag (e.g. by `set-option -t <name>`).
+  describe "validateTmuxIdent (D6.2)" $ do
+    it "accepts ordinary harness/session names" $ do
+      validateTmuxIdent "claude-code-0" `shouldBe` True
+      validateTmuxIdent "pureclaw" `shouldBe` True
+      validateTmuxIdent "harness-ab12cd" `shouldBe` True
+      validateTmuxIdent "0" `shouldBe` True
+
+    it "rejects a name with a leading '-' (option-injection guard)" $ do
+      validateTmuxIdent "-d" `shouldBe` False
+      validateTmuxIdent "--kill" `shouldBe` False
+
+    it "rejects an empty name" $
+      validateTmuxIdent "" `shouldBe` False
+
+    it "rejects a NUL byte" $
+      validateTmuxIdent (T.pack "win\NULname") `shouldBe` False
+
+    it "rejects control characters (newline / tab)" $ do
+      validateTmuxIdent (T.pack "a\nb") `shouldBe` False
+      validateTmuxIdent (T.pack "a\tb") `shouldBe` False
+
+    it "rejects a name containing ':' (the session:window target separator)" $
+      -- ':' would let one component spill into the next when joined by
+      -- windowTarget, so each single component must not carry one.
+      validateTmuxIdent "scratch:win" `shouldBe` False
 
   -- D1.2 (parse half, pure) — readMarkers row parsing
   describe "parseMarkerRows (D1.2)" $ do

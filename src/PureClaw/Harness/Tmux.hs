@@ -49,8 +49,11 @@ module PureClaw.Harness.Tmux
     -- * I/O (name-based, WU1)
   , sendToWindowNamed
   , captureWindowNamed
+    -- * Identifier validation (WU6 — C3 input hygiene, defense-in-depth)
+  , validateTmuxIdent
     -- * Pure argv builders (WU1, unit-testable)
   , sendKeysNamedArgs
+  , sendEnterNamedArgs
   , pasteBufferNamedArgs
   , captureNamedArgs
   , killWindowNamedArgs
@@ -70,6 +73,7 @@ module PureClaw.Harness.Tmux
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BC
+import Data.Char qualified as Char
 import Data.ByteString.Lazy qualified as LBS
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -311,6 +315,34 @@ windowTarget :: Text -> Text -> String
 windowTarget sessionName windowName =
   T.unpack sessionName <> ":" <> T.unpack windowName
 
+-- | Validate a tmux session\/window identifier (C3 input hygiene, §8 C3,
+-- defense-in-depth).
+--
+-- The PRIMARY injection defense is argv-style 'P.proc' (via the
+-- 'tmuxProc'\/'Command.authorizeTmuxCommand' seam): every identifier is passed
+-- as a DISTINCT argv element, so it can never be re-tokenized into extra tmux
+-- arguments. 'validateTmuxIdent' is a second layer that rejects identifiers
+-- which — even as a single argv element — tmux could misread:
+--
+--   * a leading @-@ (would be parsed as an OPTION by @set-option@\/@send-keys@
+--     @-t <name>@ etc. — the @\@pcl_id@ marker path is the chief concern when a
+--     name is derived from an adopted\/discovered external window);
+--   * an empty identifier (no window\/session to target);
+--   * a NUL or any control character (newline\/tab corrupts the @-F@ sweep
+--     parsing and is never a legitimate harness name);
+--   * a @:@ (the 'windowTarget' @session:window@ separator — a @:@ inside a
+--     single component would let it spill into the next).
+--
+-- Total and pure. Valid harness names (e.g. @claude-code-0@, @pureclaw@, a bare
+-- index like @0@) pass.
+validateTmuxIdent :: Text -> Bool
+validateTmuxIdent ident =
+  not (T.null ident)
+    && T.head ident /= '-'
+    && T.all ok ident
+  where
+    ok c = c /= ':' && not (Char.isControl c)
+
 -- | Parse a non-negative 'Int' from 'Text', returning 'Nothing' on any
 -- trailing garbage or empty input.
 readIntMaybe :: Text -> Maybe Int
@@ -322,11 +354,28 @@ readIntMaybe t = case reads (T.unpack t) of
 -- Pure argv builders (unit-testable; the IO wrappers call straight through)
 -- ---------------------------------------------------------------------------
 
--- | @send-keys@ argv for a small payload, targeting a window by name.
--- Appends @Enter@ to submit the line.
+-- | @send-keys -l --@ argv for a small payload, targeting a window by name.
+--
+-- C3 input hygiene (§8 C3): the payload is delivered LITERALLY via @-l@ so tmux
+-- does NOT interpret it as key tokens (a payload containing @C-c@, @Enter@, @;@,
+-- etc. is typed verbatim, never executed as a tmux key/command). The @--@ ends
+-- option parsing so a payload that begins with @-@ is never mistaken for a flag.
+--
+-- This builder does NOT submit the line — 'sendEnterNamedArgs' sends a SEPARATE
+-- @Enter@ key. Splitting the literal text from the submit keystroke is what
+-- prevents key-token injection while still letting callers actually run a
+-- command (literal text, then Enter).
 sendKeysNamedArgs :: Text -> Text -> ByteString -> [String]
 sendKeysNamedArgs sessionName windowName input =
-  ["send-keys", "-t", windowTarget sessionName windowName, BC.unpack input, "Enter"]
+  ["send-keys", "-t", windowTarget sessionName windowName, "-l", "--", BC.unpack input]
+
+-- | @send-keys ... Enter@ argv — the SEPARATE submit keystroke that follows a
+-- 'sendKeysNamedArgs' (or 'pasteBufferNamedArgs') literal payload. Kept distinct
+-- from the literal send so injected key tokens in the payload can never be
+-- interpreted (C3); the only intentional key tmux sees is this @Enter@.
+sendEnterNamedArgs :: Text -> Text -> [String]
+sendEnterNamedArgs sessionName windowName =
+  ["send-keys", "-t", windowTarget sessionName windowName, "Enter"]
 
 -- | @paste-buffer@ argv targeting a window by name (large-payload path).
 pasteBufferNamedArgs :: Text -> Text -> [String]
@@ -390,12 +439,21 @@ setRemainOnExitArgs sessionName windowName =
 -- ---------------------------------------------------------------------------
 
 -- | Send input to a harness window addressed by name.
--- Small input (<= 256 bytes) uses @send-keys@; large input uses
--- @load-buffer@ + @paste-buffer@.
+--
+-- C3 input hygiene (§8 C3): small input (<= 256 bytes) is delivered LITERALLY
+-- via @send-keys -l --@ (so tmux key tokens in the payload are NOT interpreted),
+-- followed by a SEPARATE @Enter@ to submit. Large input uses
+-- @load-buffer@ + @paste-buffer@ (already literal) with a separate @Enter@.
+--
+-- Identifiers are validated (defense-in-depth) before any tmux op: an invalid
+-- session\/window name (leading @-@, empty, control char, @:@) is a no-op
+-- (fail-closed) since argv targeting could otherwise be misread as options.
 sendToWindowNamed :: Text -> Text -> ByteString -> IO ()
 sendToWindowNamed sessionName windowName input
+  | not (validateTmuxIdent sessionName && validateTmuxIdent windowName) = pure ()
   | BC.length input <= 256 = do
       _ <- runTmuxSilent (sendKeysNamedArgs sessionName windowName input)
+      _ <- runTmuxSilent (sendEnterNamedArgs sessionName windowName)
       pure ()
   | otherwise =
       Temp.withSystemTempFile "pureclaw-tmux-input" $ \tmpPath tmpHandle -> do
@@ -403,8 +461,20 @@ sendToWindowNamed sessionName windowName input
         IO.hClose tmpHandle
         _ <- runTmuxSilent ["load-buffer", tmpPath]
         _ <- runTmuxSilent (pasteBufferNamedArgs sessionName windowName)
-        _ <- runTmuxSilent ["send-keys", "-t", windowTarget sessionName windowName, "Enter"]
+        _ <- runTmuxSilent (sendEnterNamedArgs sessionName windowName)
         pure ()
+
+-- | Type a command LINE into a window and run it: send the bytes LITERALLY
+-- (@send-keys -l --@) then a SEPARATE @Enter@ to execute (C3 two-step). Used by
+-- the launch path ('addHarnessWindowNamed') for the @cd@ and stealth-launch
+-- commands, which MUST still execute. Fail-closed on an invalid identifier.
+sendLineNamed :: Text -> Text -> ByteString -> IO ()
+sendLineNamed sessionName windowName input
+  | not (validateTmuxIdent sessionName && validateTmuxIdent windowName) = pure ()
+  | otherwise = do
+      _ <- runTmuxSilent (sendKeysNamedArgs sessionName windowName input)
+      _ <- runTmuxSilent (sendEnterNamedArgs sessionName windowName)
+      pure ()
 
 -- | Capture output from a harness window addressed by name, stripping ANSI
 -- escape sequences.
@@ -454,12 +524,14 @@ addHarnessWindowNamed sessionName windowName binary args mWorkDir = do
           -- Reuse the session's fresh default window 0: name it, then run.
           renameWindowNamed sessionName "0" windowName
           case mWorkDir of
-            Just dir -> do
-              _ <- runTmuxSilent
-                (sendKeysNamedArgs sessionName windowName (BC.pack ("cd " <> shellEscapeStr dir)))
-              pure ()
+            Just dir ->
+              -- C3: send the `cd` command text LITERALLY, then a SEPARATE Enter
+              -- so it actually executes (the launch path MUST still run).
+              sendLineNamed sessionName windowName (BC.pack ("cd " <> shellEscapeStr dir))
             Nothing -> pure ()
-          _ <- runTmuxSilent (sendKeysNamedArgs sessionName windowName (BC.pack stealthCmd))
+          -- Same two-step for the stealth-launch command — literal text, then
+          -- Enter to execute it.
+          sendLineNamed sessionName windowName (BC.pack stealthCmd)
           pure (Right ())
         else do
           (exitCode, _stderr) <- runTmux (newWindowNamedArgs sessionName windowName mWorkDir stealthCmd)

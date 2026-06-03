@@ -145,19 +145,30 @@ realPanePidOf session windowName = do
 
 -- | Send to a named window through the WU3 tmux seam, reporting whether the
 -- window was found. tmux exits non-zero when @-t@ targets a missing window.
+--
+-- C3 input hygiene (§8 C3): the payload is sent LITERALLY (@send-keys -l --@)
+-- so embedded tmux key tokens (@C-c@, @Enter@, @;@, …) are typed verbatim rather
+-- than interpreted, then a SEPARATE @Enter@ submits the line (so a launch
+-- command still executes). The two-step preserves this function's @IO Bool@
+-- contract: found-ness is determined by the LITERAL send (the targeting step);
+-- the Enter is only attempted when that succeeded.
 realSendNamed :: Text -> Text -> ByteString -> IO Bool
 realSendNamed session windowName input = do
   mPath <- findTmux
   case mPath of
     Nothing -> pure False
     Just tmuxBin -> do
-      let args = sendKeysNamedArgs session windowName input
-          config = P.setStdin P.closed
-                 $ P.setStdout P.nullStream
-                 $ P.setStderr P.nullStream
-                 $ tmuxProc (authorizeTmuxCommand tmuxBin (map T.pack args))
-      exitCode <- P.runProcess config
-      pure (exitCode == ExitSuccess)
+      let run args = P.runProcess
+            $ P.setStdin P.closed
+            $ P.setStdout P.nullStream
+            $ P.setStderr P.nullStream
+            $ tmuxProc (authorizeTmuxCommand tmuxBin (map T.pack args))
+      litCode <- run (sendKeysNamedArgs session windowName input)
+      case litCode of
+        ExitSuccess -> do
+          _ <- run (sendEnterNamedArgs session windowName)
+          pure True
+        ExitFailure _ -> pure False
 
 -- | Capture from a named window through the WU3 tmux seam. 'Nothing' signals a
 -- missing window (tmux exit non-zero); 'Just' carries the (ANSI-stripped) bytes.
