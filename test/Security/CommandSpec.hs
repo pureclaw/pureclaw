@@ -49,7 +49,6 @@ spec = do
             { _sp_allowedCommands       = AllowAll
             , _sp_autonomy              = Full
             , _sp_allowedRemoteCommands = AllowList Set.empty
-            , _sp_adoptableSessionPatterns = []
             }
       property $ \(cmdText :: String) ->
         case authorize allPolicy cmdText [] of

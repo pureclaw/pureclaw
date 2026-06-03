@@ -6,48 +6,47 @@ module PureClaw.Security.Adoption
   , ConsentChannel (..)
     -- * Adoption errors
   , AdoptError (..)
-    -- * The default-deny, consent-gated adoption gate (pure — no IO)
+    -- * The consent-only adoption gate (pure — no IO)
   , authorizeAdoption
   ) where
 
 import Data.Text (Text)
 
-import PureClaw.Security.Policy
-
 -- | Where the run that is attempting an adoption is being driven from.
 --
 -- Adoption is a trust-boundary expansion (PureClaw begins managing\/capturing
--- an external, unmanaged tmux window), so it requires a human at an interactive
--- confirm dialog. Any non-interactive invocation — a gateway\/bot server, an
--- import, a future cron\/daemon\/background mode — has no such human, so it maps
--- to 'ConsentHeadless' and is denied (fail-closed).
+-- an external, unmanaged tmux window). In the interactive path the human
+-- /picking a session in the foreground New-Tab form IS the consent/, so any
+-- interactive run may adopt the session it picked. Any non-interactive
+-- invocation — a gateway\/bot server, an import, a future cron\/daemon\/
+-- background mode — has no human at a confirm dialog, so it maps to
+-- 'ConsentHeadless' and is denied (fail-closed). This headless-deny is the
+-- single, load-bearing remaining control on this gate.
 data ConsentChannel
   = ConsentInteractive  -- ^ foreground interactive run; a human can confirm
   | ConsentHeadless     -- ^ no human at a confirm dialog; adoption denied
   deriving stock (Show, Eq)
 
 -- | Why an adoption attempt was refused.
+--
+-- After the allow-list was dropped (the foreground session pick IS the
+-- consent), the ONLY reason the gate refuses is the absence of an interactive
+-- consent channel.
 data AdoptError
   = AdoptNoConsentChannel
-    -- ^ the run has no interactive consent channel ('ConsentHeadless').
-    -- Checked FIRST, so it dominates 'AdoptNotAllowed': a headless run is
-    -- denied even if the session is allow-listed.
-  | AdoptNotAllowed !Text
-    -- ^ the session name is not covered by the policy's adoptable-session
-    -- allow-list ('_sp_adoptableSessionPatterns'). The default (empty list)
-    -- denies everything.
+    -- ^ the run has no interactive consent channel ('ConsentHeadless'); a
+    -- headless\/gateway\/import\/cron run cannot adopt (fail-closed).
   deriving stock (Show, Eq)
 
 -- | A capability token proving that adopting a particular tmux session has
 -- passed the security gate.
 --
 -- The value constructor is intentionally NOT exported — the ONLY way to obtain
--- an 'AdoptedHarness' is 'authorizeAdoption', which enforces the consent +
--- allow-list checks. Downstream adoption mechanism code (later work units)
--- REQUIRES an 'AdoptedHarness' argument, so it is impossible by construction to
--- adopt a window without first passing this gate. This mirrors the
--- @AuthorizedCommand@ \/ @SafePath@ precedent in "PureClaw.Security.Command"
--- and "PureClaw.Security.Path".
+-- an 'AdoptedHarness' is 'authorizeAdoption', which enforces the consent check.
+-- Downstream adoption mechanism code REQUIRES an 'AdoptedHarness' argument, so
+-- it is impossible by construction to adopt a window without first passing this
+-- gate. This mirrors the @AuthorizedCommand@ \/ @SafePath@ precedent in
+-- "PureClaw.Security.Command" and "PureClaw.Security.Path".
 newtype AdoptedHarness = AdoptedHarness { _unAdoptedHarness :: Text }
   deriving stock (Show, Eq)
 
@@ -55,28 +54,26 @@ newtype AdoptedHarness = AdoptedHarness { _unAdoptedHarness :: Text }
 adoptedSession :: AdoptedHarness -> Text
 adoptedSession = _unAdoptedHarness
 
--- | The typed, default-deny, consent-gated adoption gate. Pure — no IO.
+-- | The typed, consent-only adoption gate. Pure — no IO.
 --
--- Checks, IN ORDER (the order is load-bearing — headless-deny dominates):
+-- The allow-list was deliberately dropped (an explicit security-model
+-- relaxation): in the interactive path the user picking a session in the
+-- foreground New-Tab form IS the consent, so adoption is gated by consent
+-- alone:
 --
---   1. If the run is 'ConsentHeadless' → 'Left' 'AdoptNoConsentChannel'.
---      This is checked FIRST so a headless run is denied even when the session
---      IS allow-listed (no allow-list entry can grant a non-interactive run an
---      adoption).
---   2. Otherwise, if the session name is not matched by the policy's
---      'matchesSessionPattern' allow-list → 'Left' ('AdoptNotAllowed' session).
---      The default policy carries an empty list, so this DENIES by default.
---   3. Otherwise → 'Right' an 'AdoptedHarness' token for the session.
+--   * 'ConsentHeadless' → 'Left' 'AdoptNoConsentChannel' (a headless\/gateway\/
+--     import\/cron run has no human at the confirm dialog — fail-closed; this
+--     is the single remaining control).
+--   * 'ConsentInteractive' → 'Right' an 'AdoptedHarness' token for ANY session.
+--
+-- The capability-token construction (unexported ctor) and the downstream adopt
+-- mechanism's own identifier hygiene (@send-keys -l --@ + @validateTmuxIdent@,
+-- §8 C3) remain unchanged.
 authorizeAdoption
-  :: SecurityPolicy
-  -> ConsentChannel
+  :: ConsentChannel
   -> Text                -- ^ tmux session name to adopt
   -> Either AdoptError AdoptedHarness
-authorizeAdoption policy consent session =
+authorizeAdoption consent session =
   case consent of
-    ConsentHeadless -> Left AdoptNoConsentChannel
-    ConsentInteractive
-      | matchesSessionPattern (_sp_adoptableSessionPatterns policy) session ->
-          Right (AdoptedHarness session)
-      | otherwise ->
-          Left (AdoptNotAllowed session)
+    ConsentHeadless    -> Left AdoptNoConsentChannel
+    ConsentInteractive -> Right (AdoptedHarness session)

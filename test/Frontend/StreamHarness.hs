@@ -53,7 +53,6 @@ import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Security.Adoption (ConsentChannel (..))
-import PureClaw.Security.Policy (defaultPolicy)
 import PureClaw.Tools.Registry (emptyRegistry)
 
 -- | The default Origin used by tests. Tests that exercise the Origin
@@ -83,7 +82,6 @@ mkTestFrontendEnv sessionsDir broker guard = do
   pure FrontendEnv
     { _fe_harnesses    = harnesses
     , _fe_harnessRegistry = harnessReg
-    , _fe_policy       = defaultPolicy
     , _fe_consentChannel = ConsentHeadless  -- tests fail-closed
     , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ())

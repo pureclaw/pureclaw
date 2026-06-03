@@ -1,13 +1,14 @@
 -- | On-demand discovery of adoptable (PureClaw-UNMARKED) tmux windows.
 --
 -- Discovery is the read-only, user-invoked precursor to adoption (Phase 3,
--- design @docs\/harness-registry.md@ §6, §8 B4\/C1). It answers "which external
+-- design @docs\/harness-registry.md@ §6, §8 B2\/C1). It answers "which external
 -- windows COULD I adopt?" and nothing more:
 --
---   * __Bounded (§8 B4).__ Only sessions matching the adoption allow-list
---     ('PureClaw.Security.Policy._sp_adoptableSessionPatterns') are scanned. An
---     empty allow-list scans nothing. Sessions outside the allow-list are never
---     even read.
+--   * __Lists ALL sessions.__ The adoption allow-list was deliberately dropped
+--     (the user picking a session in the foreground New-Tab form IS the
+--     consent — enforced at adopt time by 'PureClaw.Security.Adoption'). So a
+--     scan enumerates every tmux session and surfaces every UNMARKED, live
+--     window regardless of session name. Consent gates adoption, not discovery.
 --   * __Metadata-only (§8 C1), by construction.__ A scan returns a transient
 --     list of 'DiscoverableWindow' values. A 'DiscoverableWindow' carries NO
 --     handle and NO capture capability, so a discovered candidate is
@@ -30,11 +31,6 @@ import Data.Aeson (ToJSON (..), object, (.=))
 import Data.Text (Text)
 
 import PureClaw.Harness.Tmux (TmuxWindowRow (..), listTmuxSessions, readMarkers)
-import PureClaw.Security.Policy
-  ( SecurityPolicy (..)
-  , SessionPattern
-  , matchesSessionPattern
-  )
 
 -- | A single adoptable candidate window surfaced by a discovery scan.
 --
@@ -61,37 +57,33 @@ instance ToJSON DiscoverableWindow where
     , "pane_pid"     .= _dw_panePid dw
     ]
 
--- | Scan for adoptable windows, BOUNDED to the allow-list and METADATA-ONLY.
+-- | Scan for adoptable windows across ALL sessions, METADATA-ONLY.
 --
 -- Seamed for testability and for the §8 C1 structural guarantee — the function
 -- is given only:
 --
---   * the adoption allow-list patterns,
 --   * a @readMarkers@-shaped seam returning per-window metadata rows, and
 --   * a @listSessions@-shaped seam returning the server's session names.
 --
 -- It has NO capture-pane seam, so it is structurally incapable of capturing a
 -- pane. Logic:
 --
---   1. list all sessions;
---   2. keep ONLY sessions matching 'matchesSessionPattern' (an empty allow-list
---      matches nothing, so nothing is read — §8 B4);
---   3. for each kept session, read its window metadata rows;
---   4. keep rows that are UNMARKED (@_twr_pclId == ""@ — not already ours) AND
+--   1. list all sessions (the allow-list was dropped — consent gates adoption,
+--      not discovery);
+--   2. for each session, read its window metadata rows;
+--   3. keep rows that are UNMARKED (@_twr_pclId == ""@ — not already ours) AND
 --      not @pane_dead@;
---   5. project each surviving row into a 'DiscoverableWindow'.
+--   4. project each surviving row into a 'DiscoverableWindow'.
 --
 -- Pure-ish: all IO is in the injected seams, so the filtering logic is fully
 -- unit-testable.
 scanDiscoverable
-  :: [SessionPattern]                  -- ^ adoption allow-list patterns
-  -> (Text -> IO [TmuxWindowRow])      -- ^ @readMarkers@-shaped seam
+  :: (Text -> IO [TmuxWindowRow])      -- ^ @readMarkers@-shaped seam
   -> IO [Text]                         -- ^ @listTmuxSessions@-shaped seam
   -> IO [DiscoverableWindow]
-scanDiscoverable patterns readMarkersSeam listSessionsSeam = do
+scanDiscoverable readMarkersSeam listSessionsSeam = do
   sessions <- listSessionsSeam
-  let allowed = filter (matchesSessionPattern patterns) sessions
-  concat <$> mapM scanSession allowed
+  concat <$> mapM scanSession sessions
   where
     scanSession :: Text -> IO [DiscoverableWindow]
     scanSession session = do
@@ -109,10 +101,8 @@ scanDiscoverable patterns readMarkersSeam listSessionsSeam = do
       , _dw_panePid     = _twr_panePid row
       }
 
--- | Production wrapper: scan the real tmux server, bounded by the policy's
--- adoption allow-list, using the real metadata-only tmux seams. Wires
--- 'readMarkers' and 'listTmuxSessions' into 'scanDiscoverable'. Like
--- 'scanDiscoverable', it never captures a pane.
-scanDiscoverableIO :: SecurityPolicy -> IO [DiscoverableWindow]
-scanDiscoverableIO policy =
-  scanDiscoverable (_sp_adoptableSessionPatterns policy) readMarkers listTmuxSessions
+-- | Production wrapper: scan the real tmux server (ALL sessions) using the real
+-- metadata-only tmux seams. Wires 'readMarkers' and 'listTmuxSessions' into
+-- 'scanDiscoverable'. Like 'scanDiscoverable', it never captures a pane.
+scanDiscoverableIO :: IO [DiscoverableWindow]
+scanDiscoverableIO = scanDiscoverable readMarkers listTmuxSessions

@@ -540,15 +540,11 @@ spec = do
     -- The only way a test (or any caller) obtains the token is by passing the
     -- consent + allow-list gate, so every test below first runs the gate.
     let adoptableSession = "scratch"
-        gatePolicy =
-          defaultPolicy
-            { _sp_adoptableSessionPatterns =
-                case parseSessionPattern adoptableSession of
-                  Just p  -> [p]
-                  Nothing -> error "test setup: pattern rejected"
-            }
+        -- Consent-only gate (allow-list dropped): interactive consent mints a
+        -- token for ANY session string. The token is the ONLY way to obtain an
+        -- 'AdoptedHarness'.
         mkToken =
-          case authorizeAdoption gatePolicy ConsentInteractive adoptableSession of
+          case authorizeAdoption ConsentInteractive adoptableSession of
             Right tok -> tok
             Left e    -> error ("test setup: gate denied: " <> show e)
 
@@ -719,15 +715,10 @@ spec = do
               , _ccd_setRemain    = \s w -> modifyIORef' remainRef ((s, w) :)
               , _ccd_captureNamed = \_ _ _ -> modifyIORef' captureRef (+ 1) >> pure (Just "")
               }
-            -- session "scratch" is allow-listed (valid); the WINDOW is malicious.
+            -- session "scratch" is fine; the WINDOW is malicious. Consent-only:
+            -- interactive consent mints a token for the session.
             adoptable = "scratch"
-            gatePolicy = defaultPolicy
-              { _sp_adoptableSessionPatterns =
-                  case parseSessionPattern adoptable of
-                    Just p  -> [p]
-                    Nothing -> error "test setup: pattern rejected"
-              }
-            token = case authorizeAdoption gatePolicy ConsentInteractive adoptable of
+            token = case authorizeAdoption ConsentInteractive adoptable of
               Right tok -> tok
               Left e    -> error ("test setup: gate denied: " <> show e)
         result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token "-rm-rf"
@@ -758,17 +749,12 @@ spec = do
               { _ccd_setMarker    = \s w u -> modifyIORef' markersRef ((s, w, u) :)
               , _ccd_captureNamed = \_ _ _ -> modifyIORef' captureRef (+ 1) >> pure (Just "")
               }
-            -- A LITERAL allow-list entry with a leading '-' (a misconfiguration)
-            -- mints a token for a session that tmux would mis-read as an option.
-            -- The argv defense holds, but the adopt path must STILL refuse it.
+            -- Consent-only mints a token for a session string with a leading
+            -- '-' (which tmux would mis-read as an option). The gate no longer
+            -- validates the name — the adopt MECHANISM must STILL refuse it
+            -- (C3 identifier hygiene lives in adoptExternalWindow, not the gate).
             adoptable = "-evil-session"
-            gatePolicy = defaultPolicy
-              { _sp_adoptableSessionPatterns =
-                  case parseSessionPattern adoptable of
-                    Just p  -> [p]
-                    Nothing -> error "test setup: pattern rejected"
-              }
-            token = case authorizeAdoption gatePolicy ConsentInteractive adoptable of
+            token = case authorizeAdoption ConsentInteractive adoptable of
               Right tok -> tok
               Left e    -> error ("test setup: gate denied: " <> show e)
         result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token "ok-window"

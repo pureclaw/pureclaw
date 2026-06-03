@@ -45,7 +45,6 @@ import PureClaw.Frontend.StreamBroker
   )
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Security.Adoption (ConsentChannel (..))
-import PureClaw.Security.Policy (defaultPolicy)
 import PureClaw.Session.Types (SessionMeta (..))
 import PureClaw.Tools.Registry (emptyRegistry)
 
@@ -128,7 +127,6 @@ mkFrontendEnvForD18 broker sessionsDir = do
   pure FrontendEnv
     { _fe_harnesses    = harnessesRef
     , _fe_harnessRegistry = harnessReg
-    , _fe_policy       = defaultPolicy
     , _fe_consentChannel = ConsentHeadless  -- tests fail-closed
     , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ())

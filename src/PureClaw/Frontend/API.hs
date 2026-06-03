@@ -97,7 +97,6 @@ import PureClaw.Security.Adoption
   , ConsentChannel (..)
   , authorizeAdoption
   )
-import PureClaw.Security.Policy (SecurityPolicy)
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
   ( BranchError (..)
@@ -135,20 +134,15 @@ data FrontendEnv = FrontendEnv
     -- 'Registry.HarnessId' that survives tmux rename\/move and restart. Shares
     -- the SAME underlying 'TVar' as 'AgentEnv._env_harnessRegistry' so the
     -- frontend and agent observe the same registry.
-  , _fe_policy       :: SecurityPolicy
-    -- ^ The active security policy. Carried here so the discovery\/adoption
-    -- endpoints can consult the adoption allow-list
-    -- ('_sp_adoptableSessionPatterns') — discovery is BOUNDED to the allow-list
-    -- (design @docs\/harness-registry.md@ §8 B4). Default-deny: an empty
-    -- allow-list discovers nothing.
   , _fe_consentChannel :: ConsentChannel
     -- ^ Whether the run that drives this frontend was launched as the
     -- foreground interactive TUI ('ConsentInteractive') or anything else
     -- ('ConsentHeadless'). The @POST \/api\/adopt@ endpoint passes this to
     -- 'authorizeAdoption' BEFORE any tmux mutation, so a headless\/gateway\/
-    -- import run is denied even with an allow-listed session + a valid consent
-    -- body (design §8 B2, SEC-1\/FEAS-2). Tests default to 'ConsentHeadless'
-    -- (fail-closed).
+    -- import run is denied even with a valid consent body (design §8 B2,
+    -- SEC-1\/FEAS-2). This is the SOLE remaining adoption gate now that the
+    -- allow-list was dropped (the foreground session pick IS the consent).
+    -- Tests default to 'ConsentHeadless' (fail-closed).
   , _fe_adopt        :: AdoptedHarness -> Text -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle))
     -- ^ Adopt an external, discovered tmux window into the registry. The
     -- 'AdoptedHarness' argument is the capability token from 'authorizeAdoption'
@@ -659,14 +653,14 @@ handleListTabs env respond = do
   respond $ jsonResponse status200 tabs
 
 -- | On-demand discovery of adoptable (PureClaw-unmarked) tmux windows
--- (Phase 3, WU2). The scan is BOUNDED to the policy's adoption allow-list
--- ('_sp_adoptableSessionPatterns') and is METADATA-ONLY — it never captures a
--- pane (design @docs\/harness-registry.md@ §8 B4\/C1). With the default-deny
--- empty allow-list this returns @[]@. Discovered candidates are transient (not
--- registry entries); adopting one is a separate, consent-gated action (WU4).
+-- (Phase 3, WU2). The scan LISTS ALL tmux sessions and is METADATA-ONLY — it
+-- never captures a pane (design @docs\/harness-registry.md@ §8 B2\/C1). The
+-- adoption allow-list was dropped: consent gates adoption (a separate action,
+-- WU4), not discovery. Discovered candidates are transient (not registry
+-- entries).
 handleDiscoveryScan :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-handleDiscoveryScan env respond = do
-  candidates <- scanDiscoverableIO (_fe_policy env)
+handleDiscoveryScan _env respond = do
+  candidates <- scanDiscoverableIO
   respond $ jsonResponse status200 (candidates :: [DiscoverableWindow])
 
 -- | Request body for @POST \/api\/adopt@. A discovered candidate has NO tab
@@ -697,13 +691,11 @@ instance FromJSON AdoptRequest where
 -- Steps:
 --
 --   1. Decode the body; require @consent_confirmed == true@ (else @400@).
---   2. 'authorizeAdoption' (_fe_policy) (_fe_consentChannel) session:
+--   2. 'authorizeAdoption' (_fe_consentChannel) session:
 --
 --        * @Left AdoptNoConsentChannel@ → @403@ (a headless\/gateway\/import run
---          has no human at the confirm dialog — fail-closed, dominates even an
---          allow-listed session + @consent_confirmed:true@).
---        * @Left (AdoptNotAllowed _)@ → @403@ (the session is not on the
---          adoption allow-list; default-deny).
+--          has no human at the confirm dialog — fail-closed, the SOLE remaining
+--          denial; denies even a @consent_confirmed:true@ body).
 --        * @Right token@ → run '_fe_adopt' with the token. On success @200@; on
 --          a tmux\/adopt failure @500@.
 --
@@ -723,13 +715,10 @@ handleAdopt env req respond = do
       | otherwise ->
           -- SEC-1: the gate runs BEFORE any tmux mutation. On Left we respond
           -- and NEVER call '_fe_adopt', so nothing is stamped/registered.
-          case authorizeAdoption (_fe_policy env) (_fe_consentChannel env) (_ar_session ar) of
+          case authorizeAdoption (_fe_consentChannel env) (_ar_session ar) of
             Left AdoptNoConsentChannel ->
               respond $ jsonResponse status403
                 (object ["error" .= ("adoption requires an interactive consent channel" :: Text)])
-            Left (AdoptNotAllowed s) ->
-              respond $ jsonResponse status403
-                (object ["error" .= ("session not adoptable: " <> s)])
             Right token -> do
               result <- _fe_adopt env token (_ar_window ar)
               case result of

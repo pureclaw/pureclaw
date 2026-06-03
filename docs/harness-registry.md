@@ -184,17 +184,27 @@ window**; transcript-retention on release is specified in §8 C2.
   string (`stealthShellCommand`) whose safety rests separately on `shellEscape`/`escapeForShell` — distinct
   boundaries the plan must treat separately. **§10(b) decision (tmux: new gate vs reuse `AuthorizedCommand`)
   must be made before Phase 1 implementation, not during it** (CTO).
-- **B2 — adoption gate is typed + default-deny.** Adoption yields an `AdoptedHarness` constructible only via
-  an explicit policy check (mirroring `AuthorizedCommand`/`SafePath`). Default **deny**; allow-list of
-  adoptable session-name patterns in `SecurityPolicy`. **Headless/cron/RemoteTrigger runs cannot adopt**
-  (no consent channel) regardless of allow-list. (Mirrors the channel allow-list "fail-loud" precedent.)
+- **B2 — adoption gate is typed + consent-only.** Adoption yields an `AdoptedHarness` constructible only via
+  an explicit consent check (mirroring `AuthorizedCommand`/`SafePath`); the value constructor stays
+  unexported, so downstream adopt code is type-forced through the gate. **The allow-list was deliberately
+  dropped (adoption-UX-rework WU1, an explicit security-model relaxation):** in the interactive path the user
+  *picking a session in the foreground New-Tab form IS the consent*, so `authorizeAdoption ConsentInteractive
+  <session>` succeeds for ANY session. The single, load-bearing remaining control is **headless-deny**:
+  `ConsentHeadless` (gateway/bot server, import, cron/daemon/RemoteTrigger, any non-interactive run) →
+  `Left AdoptNoConsentChannel` — those runs **cannot adopt** (fail-closed; no human at the confirm dialog).
+  All other Phase-3 controls remain: capture-from-adoption-point (B3), `send-keys -l --` input hygiene +
+  `validateTmuxIdent` (C3), and the metadata-only discovery guarantee (C1). The adopt MECHANISM (not the
+  gate) still validates the session/window identifiers, so a malicious session string minted into a token
+  is refused at `adoptExternalWindow`.
 - **B3 — scrollback exfiltration.** Adopted-harness output flows to `transcript.jsonl` and is **broadcast to
   WS subscribers**. On adoption, capture **from the adoption point forward**, not the pre-existing backlog,
   so a window's prior secrets don't cross into the transcript/broadcast. Documented that the broker audience
   is the adopting principal.
 - **B4 — bounded enumeration.** The continuous sweep reads server-wide metadata but **only retains/acts on
-  our `@pcl_id` windows**; it never captures other sessions. Adoption *discovery* is on-demand and may be
-  **scoped to an allow-list of session-name patterns** rather than enumerating everything.
+  our `@pcl_id` windows**; it never captures other sessions. Adoption *discovery* is on-demand and now
+  **lists ALL sessions' unmarked, live windows** (the allow-list scope was dropped — see B2; consent gates
+  adoption, not discovery). Discovery stays metadata-only (C1): it never captures a pane, only enumerates
+  candidates for the user to pick.
 - **C1 — discovered = metadata-only, type-enforced.** A `Discovered` entry carries **no capture capability**
   (cannot call `capture-pane`); liveness for unadopted windows is PID/`pane_dead` only, never screen capture.
 - **C2 — Release retention.** Release is a tmux-marker op; captured transcript/`session.json` **persist** by

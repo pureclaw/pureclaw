@@ -44,17 +44,11 @@ import PureClaw.Handles.Harness
   , HarnessStatus (..)
   , mkNoOpHarnessHandle
   )
-import PureClaw.Harness.Discovery (DiscoverableWindow (..))
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Harness.Tmux (TmuxWindowRow (..))
 import Data.ByteString (ByteString)
 import PureClaw.Security.Adoption (AdoptedHarness, ConsentChannel (..))
 import PureClaw.Security.Command (CommandError (..))
-import PureClaw.Security.Policy
-  ( SecurityPolicy (..)
-  , defaultPolicy
-  , parseSessionPattern
-  )
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
 import PureClaw.Providers.Class
@@ -752,31 +746,14 @@ spec = do
           lookupKey t2 "status"     `shouldBe` Just (Aeson.String "crashed")
         Just _ -> expectationFailure "Expected JSON array"
 
-  describe "POST /api/discovery/scan (Phase 3 WU2 — bounded metadata-only scan)" $ do
+  describe "POST /api/discovery/scan (list-all metadata-only scan — allow-list dropped)" $ do
     it "D2.5 returns a 200 JSON array" $ do
-      env <- mkTestFrontendEnv     -- default-deny policy: empty allow-list
-      (st, respBody) <- postJSON env ["api", "discovery", "scan"] ""
-      st `shouldBe` HTTP.status200
-      case Aeson.decode respBody of
-        Just (Aeson.Array _) -> pure ()
-        _ -> expectationFailure "Expected a JSON array body"
-
-    it "D2.5/D2.2 default-deny (empty allow-list) -> empty array, no tmux IO" $ do
-      env <- mkTestFrontendEnv     -- _fe_policy = defaultPolicy ([] patterns)
-      (st, respBody) <- postJSON env ["api", "discovery", "scan"] ""
-      st `shouldBe` HTTP.status200
-      respBody `shouldBe` Aeson.encode ([] :: [DiscoverableWindow])
-
-    it "D2.5 the endpoint consults _fe_policy's adoption allow-list" $ do
-      -- A policy whose allow-list is non-empty would scan the real tmux server;
-      -- here we only assert the endpoint is wired to the policy by confirming a
-      -- distinct (non-default) policy is accepted and still yields a 200 array.
-      -- (The bounded-scan filtering itself is unit-tested in Harness.DiscoverySpec.)
-      pat <- case parseSessionPattern "pureclaw-discovery-test-*" of
-        Just p  -> pure p
-        Nothing -> expectationFailure "test setup: pattern rejected" >> error "unreachable"
-      env0 <- mkTestFrontendEnv
-      let env = env0 { _fe_policy = defaultPolicy { _sp_adoptableSessionPatterns = [pat] } }
+      -- Discovery now LISTS ALL tmux sessions (consent gates at adopt time, not
+      -- here). The endpoint wires the real tmux IO ('scanDiscoverableIO'); with
+      -- no tmux server reachable it returns an empty array, so the contract we
+      -- assert is "200 + JSON array" regardless of the host's tmux state. The
+      -- list-all filtering itself is unit-tested in Harness.DiscoverySpec.
+      env <- mkTestFrontendEnv
       (st, respBody) <- postJSON env ["api", "discovery", "scan"] ""
       st `shouldBe` HTTP.status200
       case Aeson.decode respBody of
@@ -784,25 +761,20 @@ spec = do
         _ -> expectationFailure "Expected a JSON array body"
 
   describe "POST /api/adopt (Phase 3 WU4 — typed default-deny consent gate, SEC-1)" $ do
-    -- A policy whose allow-list admits the target session, used by the
-    -- allow-path and the headless-denial tests (so the ONLY difference between
-    -- allow and deny in D4.2's first case is the consent CHANNEL).
-    let adoptPat = case parseSessionPattern "scratch" of
-          Just p  -> p
-          Nothing -> error "test setup: pattern rejected"
-        allowPolicy = defaultPolicy { _sp_adoptableSessionPatterns = [adoptPat] }
-        adoptBody s w = Aeson.encode $ object
+    -- The adopt body always confirms consent; the differentiator across tests
+    -- is the consent CHANNEL ('_fe_consentChannel'), which is the SOLE remaining
+    -- gate now that the allow-list is dropped.
+    let adoptBody s w = Aeson.encode $ object
           [ "session"           .= (s :: Text)
           , "window"            .= (w :: Text)
           , "consent_confirmed" .= True
           ]
 
-    it "D4.2 (SEC-1) returns 403 for a ConsentHeadless env EVEN with an allow-listed session + consent_confirmed:true, and calls _fe_adopt ZERO times (no tmux mutation)" $ do
+    it "W1.5 (SEC-1) returns 403 for a ConsentHeadless env EVEN with consent_confirmed:true, and calls _fe_adopt ZERO times (no tmux mutation)" $ do
       env0 <- mkTestFrontendEnv
       adoptCalls <- newIORef (0 :: Int)
       let env = env0
-            { _fe_policy         = allowPolicy
-            , _fe_consentChannel = ConsentHeadless  -- the ONLY denial cause here
+            { _fe_consentChannel = ConsentHeadless  -- the ONLY denial cause
             , _fe_adopt          = \_ _ -> do
                 modifyIORef' adoptCalls (+ 1)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
@@ -817,29 +789,27 @@ spec = do
       entries <- Registry.snapshot (_fe_harnessRegistry env)
       length entries `shouldBe` 0
 
-    it "D4.2 (SEC-1) returns 403 for a NON-allow-listed session with ConsentInteractive, and calls _fe_adopt ZERO times" $ do
+    it "W1.5 ConsentInteractive adopts ANY session (no allow-list) — calls _fe_adopt once and returns 200" $ do
+      -- The allow-list is gone: a session the OLD default-deny policy would have
+      -- rejected is now adopted under interactive consent.
       env0 <- mkTestFrontendEnv
       adoptCalls <- newIORef (0 :: Int)
       let env = env0
-            { _fe_policy         = defaultPolicy  -- empty allow-list: default-deny
-            , _fe_consentChannel = ConsentInteractive
+            { _fe_consentChannel = ConsentInteractive
             , _fe_adopt          = \_ _ -> do
                 modifyIORef' adoptCalls (+ 1)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
-      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "not-allowed" "win-0")
-      st `shouldBe` HTTP.status403
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "any-arbitrary-session" "win-0")
+      st `shouldBe` HTTP.status200
       calls <- readIORef adoptCalls
-      calls `shouldBe` 0
-      entries <- Registry.snapshot (_fe_harnessRegistry env)
-      length entries `shouldBe` 0
+      calls `shouldBe` 1
 
     it "returns 400 when consent_confirmed is false/absent, and calls _fe_adopt ZERO times" $ do
       env0 <- mkTestFrontendEnv
       adoptCalls <- newIORef (0 :: Int)
       let env = env0
-            { _fe_policy         = allowPolicy
-            , _fe_consentChannel = ConsentInteractive
+            { _fe_consentChannel = ConsentInteractive
             , _fe_adopt          = \_ _ -> do
                 modifyIORef' adoptCalls (+ 1)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
@@ -851,7 +821,7 @@ spec = do
       calls <- readIORef adoptCalls
       calls `shouldBe` 0
 
-    it "the gate token is type-enforced: _fe_adopt is reachable ONLY on Right (allow-listed + interactive)" $ do
+    it "the gate token is type-enforced: _fe_adopt is reachable ONLY on Right (interactive + consent_confirmed)" $ do
       -- D4.3 mirror at the endpoint layer: _fe_adopt receives an AdoptedHarness
       -- argument and is invoked EXACTLY ONCE only on the allow path, with the
       -- requested window. (The mechanism's own type-enforcement is asserted in
@@ -859,8 +829,7 @@ spec = do
       env0 <- mkTestFrontendEnv
       gotWindow <- newIORef Nothing
       let env = env0
-            { _fe_policy         = allowPolicy
-            , _fe_consentChannel = ConsentInteractive
+            { _fe_consentChannel = ConsentInteractive
             , _fe_adopt          = \(_tok :: AdoptedHarness) w -> do
                 writeIORef gotWindow (Just w)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
@@ -872,8 +841,7 @@ spec = do
     it "syncs the legacy _fe_harnesses map on a successful adopt (D-ADD-2)" $ do
       env0 <- mkTestFrontendEnv
       let env = env0
-            { _fe_policy         = allowPolicy
-            , _fe_consentChannel = ConsentInteractive
+            { _fe_consentChannel = ConsentInteractive
             , _fe_adopt          = \_ _ ->
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
@@ -891,8 +859,7 @@ spec = do
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
           reg = _fe_harnessRegistry env0
           env = env0
-            { _fe_policy         = allowPolicy
-            , _fe_consentChannel = ConsentInteractive
+            { _fe_consentChannel = ConsentInteractive
             , _fe_adopt          = \tok w -> do
                 Registry.insertEntry reg
                   ((baseEntry hid w (Just mkNoOpHarnessHandle))
@@ -2948,7 +2915,6 @@ mkTestFrontendEnvWith maxTabs = do
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
-    , _fe_policy       = defaultPolicy
     , _fe_consentChannel = ConsentHeadless  -- fail-closed default; adopt tests override
     , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ())
