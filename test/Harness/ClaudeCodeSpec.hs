@@ -428,6 +428,101 @@ spec = do
       extractLastResponse capture `shouldBe`
         TE.encodeUtf8 "second response\nmore of second"
 
+  describe "dropBaselineLines (pure, B3 baseline mechanism)" $ do
+    it "n = 0 is the identity (spawn default keeps everything)" $ do
+      let capture = TE.encodeUtf8 (T.intercalate "\n" ["line a", "line b", "line c"])
+      dropBaselineLines 0 capture `shouldBe` capture
+
+    it "drops exactly n leading lines when n is in range" $ do
+      let capture = TE.encodeUtf8 (T.intercalate "\n" ["old 0", "old 1", "new 0", "new 1"])
+      dropBaselineLines 2 capture
+        `shouldBe` TE.encodeUtf8 (T.intercalate "\n" ["new 0", "new 1"])
+
+    it "drops exactly one leading line for n = 1" $ do
+      let capture = TE.encodeUtf8 (T.intercalate "\n" ["first", "second"])
+      dropBaselineLines 1 capture `shouldBe` TE.encodeUtf8 "second"
+
+    it "returns empty when n equals the line count" $ do
+      let capture = TE.encodeUtf8 (T.intercalate "\n" ["a", "b", "c"])
+      dropBaselineLines 3 capture `shouldBe` ""
+
+    it "returns empty when n exceeds the line count" $ do
+      let capture = TE.encodeUtf8 (T.intercalate "\n" ["a", "b"])
+      dropBaselineLines 99 capture `shouldBe` ""
+
+    it "is empty-in / empty-out for n = 0 on empty input" $
+      dropBaselineLines 0 "" `shouldBe` ""
+
+  describe "receive baseline exclusion (B3 / D3.1 / D3.3)" $ do
+    it "excludes pre-baseline backlog from both responseText and the transcript" $ do
+      -- D3.1 + D3.3: with the baseline set to the count of pre-existing
+      -- scrollback lines, a subsequent capture whose FIRST N lines are old
+      -- backlog and whose later lines are post-baseline activity must yield
+      -- ONLY the post-baseline content — and the backlog must reach NEITHER the
+      -- returned responseText NOR the recorded transcript entry.
+      --
+      -- NON-TAUTOLOGICAL CONSTRUCTION (this is the whole point of the test):
+      -- the ONLY response marker (⏺) lives in the pre-baseline backlog. The
+      -- post-baseline region carries NO marker (just an idle prompt). Because
+      -- 'extractLastResponse' selects the LAST ⏺ marker, the result hinges on
+      -- whether the strip runs:
+      --   * WITHOUT the strip → 'extractLastResponse' over the FULL capture
+      --     finds the backlog marker and returns the SECRET backlog text.
+      --   * WITH the strip → the backlog (incl. its marker) is dropped, no
+      --     marker remains, and 'extractLastResponse' returns "".
+      -- Neutering 'dropBaselineLines' to the identity therefore turns this test
+      -- RED (responseText would contain SECRET), proving the strip is wired in.
+      entriesRef <- newIORef []
+      let transcript = mkNoOpTranscriptHandle
+            { _th_record = \entry -> modifyIORef' entriesRef (entry :) }
+          -- Pre-existing backlog: the ONLY response marker in the capture, and
+          -- it carries the SECRET payload that must never escape the baseline.
+          backlog = [ "\x23FA OLD SECRET backlog response", "more backlog text" ]
+          -- Post-baseline region: an idle prompt with NO response marker. This
+          -- keeps the capture idle (so pollUntilIdle terminates) while leaving
+          -- zero markers once the backlog is stripped.
+          postBaseline = [ "\x276F " ]
+          fullScreen = TE.encodeUtf8 (T.intercalate "\n" (backlog <> postBaseline))
+          captureDeps = okDeps { _ccd_captureNamed = \_ _ _ -> pure (Just fullScreen) }
+      reg <- Reg.newRegistry
+      -- Spawn first to register the entry the handle resolves its coordinate from.
+      Right (hid, _) <- mkClaudeCodeHarnessWith captureDeps
+        (withAutonomy Full (allowCommand (CommandName "claude") defaultPolicy))
+        mkNoOpTranscriptHandle "pureclaw" "claude-code-0" 0 Nothing []
+        reg
+      -- WU4 hook: build a handle whose baseline excludes the pre-existing
+      -- backlog (adopt sets baseline = the window's current line count).
+      hh <- mkClaudeCodeHandleWithBaseline captureDeps reg hid transcript
+              "pureclaw" (length backlog)
+      out <- _hh_receive hh
+      -- responseText excludes the backlog: no marker survives the strip, so the
+      -- extraction is empty. Crucially it does NOT contain the backlog SECRET.
+      TE.decodeUtf8Lenient out `shouldNotSatisfy` T.isInfixOf "SECRET"
+      out `shouldBe` ""
+      -- the recorded transcript Response entry also excludes the backlog.
+      entries <- readIORef entriesRef
+      let resps = filter (\e -> _te_direction e == Response) entries
+      case resps of
+        (entry : _) -> do
+          let payload = _te_payload entry
+          payload `shouldNotSatisfy` T.isInfixOf "SECRET"
+          payload `shouldBe` ""
+        [] -> expectationFailure "expected a Response transcript entry"
+
+    it "baseline = 0 (spawn default) preserves existing extract behavior (D3.2)" $ do
+      -- Regression: with no baseline set (spawn default 0), the full capture is
+      -- extracted exactly as before.
+      let idleScreen = TE.encodeUtf8 (T.intercalate "\n"
+            [ "\x23FA the answer", "\x276F " ])
+      reg <- Reg.newRegistry
+      Right (_, hh) <- mkClaudeCodeHarnessWith
+        okDeps { _ccd_captureNamed = \_ _ _ -> pure (Just idleScreen) }
+        (withAutonomy Full (allowCommand (CommandName "claude") defaultPolicy))
+        mkNoOpTranscriptHandle "pureclaw" "claude-code-0" 0 Nothing []
+        reg
+      out <- _hh_receive hh
+      out `shouldBe` TE.encodeUtf8 "the answer"
+
   describe "discovered handle" $ do
     it "mkDiscoveredClaudeCodeHandle threads the real session name" $ do
       let transcript = mkNoOpTranscriptHandle

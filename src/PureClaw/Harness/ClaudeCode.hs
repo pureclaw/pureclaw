@@ -2,12 +2,14 @@ module PureClaw.Harness.ClaudeCode
   ( -- * Construction
     mkClaudeCodeHarness
   , mkClaudeCodeHarnessWith
+  , mkClaudeCodeHandleWithBaseline
   , mkDiscoveredClaudeCodeHandle
     -- * Injectable dependencies (D4.2 / D4.3 seam)
   , ClaudeCodeDeps (..)
   , defaultClaudeCodeDeps
     -- * Response extraction (exported for testing)
   , extractLastResponse
+  , dropBaselineLines
   , isIdle
   , isResponseMarker
   , isUiBoundary
@@ -256,15 +258,14 @@ mkClaudeCodeHarnessWith deps policy th session windowName _windowIdx mWorkDir ex
                             Just shellPid -> _ccd_harnessPidOf deps shellPid claudeComm
                             Nothing       -> pure Nothing
                           -- Step 8: Wire up the cached-coordinate handle (D4.3).
-                          baselineRef <- newIORef BS.empty
-                          let handle = HarnessHandle
-                                { _hh_send    = harnessSend deps reg hid th baselineRef
-                                , _hh_receive = harnessReceive deps reg hid th baselineRef
-                                , _hh_name    = "Claude Code"
-                                , _hh_session = session
-                                , _hh_status  = harnessStatus deps reg hid
-                                , _hh_stop    = harnessStop deps reg hid
-                                }
+                          -- Spawn baseline = 0: PureClaw created this window
+                          -- fresh, so there is no pre-existing backlog to
+                          -- exclude (B3 / D3.2 — behavior unchanged). WU4
+                          -- (adopt) instead calls
+                          -- 'mkClaudeCodeHandleWithBaseline' with the window's
+                          -- current scrollback line count so an adopted
+                          -- window's prior backlog never enters the transcript.
+                          handle <- mkClaudeCodeHandleWithBaseline deps reg hid th session 0
                           -- Step 9: Register the Spawned entry (D4.2).
                           let entry = Reg.HarnessEntry
                                 { Reg._he_id          = hid
@@ -293,6 +294,39 @@ preAuthorize :: SecurityPolicy -> Either CommandError ()
 preAuthorize policy = case authorize policy "claude" [] of
   Left err -> Left err
   Right _  -> Right ()
+
+-- | Build a cached-coordinate 'HarnessHandle' for an already-registered harness
+-- with an explicit capture /baseline/ (B3 mechanism, D5).
+--
+-- The baseline is the number of pre-existing scrollback lines to EXCLUDE from
+-- captured\/recorded output (see 'dropBaselineLines'). 'harnessReceive' drops
+-- the first @baseline@ lines of every full capture before extraction, so
+-- pre-baseline backlog can never reach the transcript NOR the WS broadcast
+-- (D3.3 — both derive from the baseline-stripped capture).
+--
+-- The spawn path ('mkClaudeCodeHarnessWith') passes @0@: a freshly-created
+-- window has no pre-existing backlog, so behavior is unchanged (D3.2). WU4
+-- (adopt) is the intended other caller: it passes the adopted window's CURRENT
+-- scrollback line count so the window's prior backlog is excluded from the
+-- adoption point forward.
+mkClaudeCodeHandleWithBaseline
+  :: ClaudeCodeDeps
+  -> HarnessRegistry
+  -> HarnessId
+  -> TranscriptHandle
+  -> Text            -- ^ tmux session name (for '_hh_session')
+  -> Int             -- ^ initial capture baseline: pre-existing lines to exclude
+  -> IO HarnessHandle
+mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do
+  baselineRef <- newIORef baseline
+  pure HarnessHandle
+    { _hh_send    = harnessSend deps reg hid th baselineRef
+    , _hh_receive = harnessReceive deps reg hid th baselineRef
+    , _hh_name    = "Claude Code"
+    , _hh_session = session
+    , _hh_status  = harnessStatus deps reg hid
+    , _hh_stop    = harnessStop deps reg hid
+    }
 
 -- ---------------------------------------------------------------------------
 -- Cached-coordinate, self-healing handle (D4.3)
@@ -328,7 +362,7 @@ reResolve deps reg hid session = do
 
 -- | Send input to the harness, logging the request. Reads the cached coordinate;
 -- on a tmux \"no such window\" it re-resolves once by @\@pcl_id@ and retries.
-harnessSend :: ClaudeCodeDeps -> HarnessRegistry -> HarnessId -> TranscriptHandle -> IORef ByteString -> ByteString -> IO ()
+harnessSend :: ClaudeCodeDeps -> HarnessRegistry -> HarnessId -> TranscriptHandle -> IORef Int -> ByteString -> IO ()
 harnessSend deps reg hid th _baselineRef input = do
   entryId <- UUID.toText <$> UUID.nextRandom
   now <- getCurrentTime
@@ -359,8 +393,8 @@ harnessSend deps reg hid th _baselineRef input = do
 
 -- | Poll the harness window until idle, then capture and extract the last
 -- response. Re-resolves the coordinate once on a tmux \"no such window\".
-harnessReceive :: ClaudeCodeDeps -> HarnessRegistry -> HarnessId -> TranscriptHandle -> IORef ByteString -> IO ByteString
-harnessReceive deps reg hid th _baselineRef = do
+harnessReceive :: ClaudeCodeDeps -> HarnessRegistry -> HarnessId -> TranscriptHandle -> IORef Int -> IO ByteString
+harnessReceive deps reg hid th baselineRef = do
   mCoord <- currentCoord reg hid
   case mCoord of
     Nothing -> pure ""
@@ -376,7 +410,12 @@ harnessReceive deps reg hid th _baselineRef = do
       startTime <- getCurrentTime
       pollUntilIdle session windowName startTime "" (0 :: Int)
       fullCapture <- fromMaybe "" <$> _ccd_captureNamed deps session windowName 0
-      let responseText = extractLastResponse fullCapture
+      -- B3: exclude everything before the recorded baseline (the count of
+      -- pre-existing scrollback lines) so pre-baseline backlog can never be
+      -- extracted/recorded. Both 'responseText' (the WS-broadcast value) and
+      -- the transcript entry below derive from the stripped capture (D3.3).
+      baseline <- readIORef baselineRef
+      let responseText = extractLastResponse (dropBaselineLines baseline fullCapture)
       entryId <- UUID.toText <$> UUID.nextRandom
       now <- getCurrentTime
       let entry = TranscriptEntry
@@ -437,6 +476,18 @@ isIdle screen =
                 || T.isInfixOf "Thinking" screen
                 || T.isInfixOf "Running" screen
   in hasPrompt && not isBusy
+
+-- | Drop the first @n@ scrollback lines from a raw capture (B3 baseline
+-- mechanism). The baseline is the number of pre-existing lines to EXCLUDE.
+--
+-- Total: @n <= 0@ → identity; @n >= line count@ → empty; otherwise drops
+-- exactly @n@ leading newline-delimited lines and re-joins the remainder with
+-- @0x0A@. Splitting on @0x0A@ mirrors 'extractLastResponse' so the line indices
+-- agree.
+dropBaselineLines :: Int -> ByteString -> ByteString
+dropBaselineLines n capture
+  | n <= 0    = capture
+  | otherwise = BS.intercalate (BS.singleton 0x0A) (drop n (BS.split 0x0A capture))
 
 -- | Extract the last response block from Claude Code scrollback.
 extractLastResponse :: ByteString -> ByteString
