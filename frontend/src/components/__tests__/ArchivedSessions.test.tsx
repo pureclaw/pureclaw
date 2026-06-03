@@ -1,7 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { Sidebar } from '../Sidebar'
-import type { DiscoverableWindow, SessionInfo, TabInfo } from '../../types'
+import type { SessionInfo, TabInfo } from '../../types'
 
 function makeSessions(...overrides: Partial<SessionInfo>[]): SessionInfo[] {
   return overrides.map((o, i) => ({
@@ -23,7 +23,6 @@ const defaultProps = {
   tabs: [] as TabInfo[],
   sessions: [] as SessionInfo[],
   archivedSessions: [] as SessionInfo[],
-  discoverableWindows: [] as DiscoverableWindow[],
   selectedId: null as string | null,
   onSelectTab: vi.fn(),
   onSelectSession: vi.fn(),
@@ -35,8 +34,6 @@ const defaultProps = {
   onDismissTab: vi.fn(),
   onAcknowledgeTab: vi.fn(),
   onReleaseTab: vi.fn(),
-  onScanDiscoverable: vi.fn(),
-  onAdoptWindow: vi.fn(),
 }
 
 describe('ArchivedSessions', () => {

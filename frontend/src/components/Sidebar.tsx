@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { DiscoverableWindow, SessionInfo, TabInfo } from '../types'
+import type { SessionInfo, TabInfo } from '../types'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import type { SessionActivityState } from '../types/stream'
 import { ActiveTabs } from './ActiveTabs'
@@ -184,124 +184,6 @@ function ArchivedSection({
   )
 }
 
-/** The collapsed-by-default "Discoverable" section: lists external (unmanaged)
- *  tmux windows surfaced by an on-demand discovery scan, each with an Adopt
- *  action gated behind a consent confirmation naming the trust consequence.
- *  Modeled on `ArchivedSection` (collapsed/counted/hidden-when-empty) but the
- *  Scan button lives in the standalone header so the user can scan even when
- *  the list is currently empty. */
-function DiscoverableSection({
-  windows,
-  onScan,
-  onAdopt,
-}: {
-  windows: DiscoverableWindow[]
-  onScan: () => void
-  onAdopt: (session: string, window: string) => void
-}) {
-  const [expanded, setExpanded] = useState(false)
-  // The candidate awaiting consent confirmation (null = no dialog shown).
-  const [pendingAdopt, setPendingAdopt] = useState<DiscoverableWindow | null>(null)
-
-  return (
-    <>
-      {/* Standalone Scan control — always available, even with no results. */}
-      <div
-        className="px-3 py-1.5 flex items-center justify-between"
-        style={{ color: 'var(--text-muted)' }}
-      >
-        <span className="text-xs font-semibold uppercase" style={{ letterSpacing: '0.08em' }}>
-          Discover
-        </span>
-        <button
-          className="btn btn-ghost"
-          style={{ fontSize: 10, padding: '1px 6px', lineHeight: 1.4 }}
-          onClick={onScan}
-          aria-label="Scan for adoptable tmux windows"
-          title="Scan tmux for adoptable external windows"
-        >
-          Scan
-        </button>
-      </div>
-
-      {windows.length > 0 && (
-        <div data-testid="discoverable-section" className="flex flex-col">
-          <div
-            className="px-3 py-1.5 flex items-center justify-between cursor-pointer"
-            style={{ color: 'var(--text-muted)' }}
-            onClick={() => setExpanded(!expanded)}
-          >
-            <span className="text-xs font-semibold uppercase" style={{ letterSpacing: '0.08em' }}>
-              Discoverable ({windows.length})
-            </span>
-            <span style={{ fontSize: 12 }}>{expanded ? '▾' : '▸'}</span>
-          </div>
-          {expanded && (
-            <div>
-              {windows.map((w) => (
-                <div
-                  key={`${w.session}:${w.windowIndex}:${w.windowName}`}
-                  className="agent-row px-3 py-2 flex items-center gap-2"
-                >
-                  <span
-                    className="text-sm truncate mr-auto"
-                    style={{ color: 'var(--text-muted)', letterSpacing: 'var(--tracking-tight)' }}
-                    title={`${w.session}:${w.windowName}`}
-                  >
-                    {w.session}:{w.windowName}
-                  </span>
-                  <button
-                    className="btn btn-ghost"
-                    style={{ fontSize: 10, padding: '1px 6px', lineHeight: 1.4 }}
-                    aria-label="Adopt"
-                    title={`Adopt ${w.session}:${w.windowName}`}
-                    onClick={() => setPendingAdopt(w)}
-                  >
-                    Adopt
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {pendingAdopt && (
-        <div
-          className="px-3 py-2"
-          role="dialog"
-          aria-label="Confirm adopt external tmux window"
-          style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-elevated)' }}
-        >
-          <div className="text-xs" style={{ color: 'var(--text-primary)', lineHeight: 'var(--leading-tight)' }}>
-            Adopt <strong>{pendingAdopt.session}:{pendingAdopt.windowName}</strong>? PureClaw will
-            manage it and capture its output from now on.
-          </div>
-          <div className="flex items-center gap-2 mt-2">
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 10, padding: '1px 6px', lineHeight: 1.4 }}
-              onClick={() => {
-                onAdopt(pendingAdopt.session, pendingAdopt.windowName)
-                setPendingAdopt(null)
-              }}
-            >
-              Confirm Adopt
-            </button>
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 10, padding: '1px 6px', lineHeight: 1.4 }}
-              onClick={() => setPendingAdopt(null)}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
-
 function formatAge(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime()
   const mins = Math.floor(diff / 60000)
@@ -317,7 +199,6 @@ export function Sidebar({
   tabs,
   sessions,
   archivedSessions,
-  discoverableWindows,
   selectedId,
   sessionActivity,
   onSelectTab,
@@ -330,13 +211,10 @@ export function Sidebar({
   onDismissTab,
   onAcknowledgeTab,
   onReleaseTab,
-  onScanDiscoverable,
-  onAdoptWindow,
 }: {
   tabs: TabInfo[]
   sessions: SessionInfo[]
   archivedSessions: SessionInfo[]
-  discoverableWindows: DiscoverableWindow[]
   selectedId: string | null
   sessionActivity?: Record<string, SessionActivityState>
   onSelectTab: (index: number) => void
@@ -349,8 +227,6 @@ export function Sidebar({
   onDismissTab: (index: number) => void
   onAcknowledgeTab: (index: number) => void
   onReleaseTab: (index: number) => void
-  onScanDiscoverable: () => void
-  onAdoptWindow: (session: string, window: string) => void
 }) {
   return (
     <div
@@ -369,12 +245,6 @@ export function Sidebar({
           onDismiss={onDismissTab}
           onAcknowledge={onAcknowledgeTab}
           onRelease={onReleaseTab}
-        />
-
-        <DiscoverableSection
-          windows={discoverableWindows}
-          onScan={onScanDiscoverable}
-          onAdopt={onAdoptWindow}
         />
 
         {sessions.length > 0 && (
