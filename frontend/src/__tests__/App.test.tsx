@@ -31,10 +31,20 @@ const sendSpy = vi.fn()
 // Hoisted so the `vi.mock('../hooks/useApi')` factory (which vitest lifts to
 // the top of the module) can safely reference them — plain consts would be
 // in the temporal dead zone at hoist time.
-const { dismissSpy, acknowledgeSpy } = vi.hoisted(() => ({
+const { dismissSpy, acknowledgeSpy, adoptSpy, scanSpy } = vi.hoisted(() => ({
   dismissSpy: vi.fn().mockResolvedValue(true),
   acknowledgeSpy: vi.fn().mockResolvedValue(true),
+  adoptSpy: vi.fn().mockResolvedValue(true),
+  scanSpy: vi.fn().mockResolvedValue(undefined),
 }))
+
+// Mutable overrides for the useNewTabSpec mock so a test can drive the
+// composer kind (e.g. 'attach') and the attach session/window selection.
+const specOverride: { kind: string; attachSession: string; attachWindow: string } = {
+  kind: 'provider',
+  attachSession: '',
+  attachWindow: '',
+}
 
 vi.mock('../lib/streamClient', () => ({
   streamClient: () => ({
@@ -80,6 +90,8 @@ vi.mock('../hooks/useApi', async (importOriginal) => {
     closeTab: vi.fn().mockResolvedValue(undefined),
     dismissTab: dismissSpy,
     acknowledgeTab: acknowledgeSpy,
+    adoptWindow: adoptSpy,
+    useDiscoverableWindows: () => ({ windows: [], error: false, scan: scanSpy }),
   }
 })
 
@@ -88,7 +100,7 @@ vi.mock('../hooks/useApi', async (importOriginal) => {
 vi.mock('../hooks/useNewTabSpec', () => ({
   CUSTOM_MODEL_VALUE: '__custom__',
   useNewTabSpec: () => ({
-    kind: 'provider',
+    kind: specOverride.kind,
     setKind: vi.fn(),
     configuredProviders: [],
     providersLoaded: true,
@@ -115,6 +127,16 @@ vi.mock('../hooks/useNewTabSpec', () => ({
     handleBackendTagChange: vi.fn(),
     backendConfig: {},
     updateBackendConfig: vi.fn(),
+    // Attach (Existing Harness) fields.
+    attachSession: specOverride.attachSession,
+    attachWindow: specOverride.attachWindow,
+    setAttachSession: vi.fn(),
+    setAttachWindow: vi.fn(),
+    attachManual: false,
+    setAttachManual: vi.fn(),
+    discoverableWindows: [],
+    discoveryError: false,
+    scanDiscoverable: scanSpy,
     validationError: null,
     // Worst case for the branch flow: the shared composer is in 'harness'
     // mode (the user toggled it on a prior New-tab). A branch send must
@@ -196,6 +218,12 @@ beforeEach(() => {
   sendSpy.mockReset()
   dismissSpy.mockClear()
   acknowledgeSpy.mockClear()
+  adoptSpy.mockClear()
+  adoptSpy.mockResolvedValue(true)
+  scanSpy.mockClear()
+  specOverride.kind = 'provider'
+  specOverride.attachSession = ''
+  specOverride.attachWindow = ''
   window.history.replaceState(null, '', '/')
   // jsdom has no layout; ChatArea scrolls refs into view.
   HTMLElement.prototype.scrollIntoView = vi.fn() as unknown as HTMLElement['scrollIntoView']
@@ -622,5 +650,67 @@ describe('App tab actions wiring (D4.7)', () => {
     await waitFor(() => {
       expect(acknowledgeSpy).toHaveBeenCalledWith(3)
     })
+  })
+})
+
+describe('App Existing-Harness (attach) compose flow', () => {
+  it('W3.4: submitting "Existing Harness" calls adoptWindow(session, window) and does NOT POST /api/tabs/new', async () => {
+    const fetchMock = mockFetchOk('unused')
+    specOverride.kind = 'attach'
+    specOverride.attachSession = 'work'
+    specOverride.attachWindow = 'claude'
+    window.history.replaceState(null, '', '/')
+    const utils = render(<App />)
+
+    // Compose mode: the bottom input is present. Attach submits with no
+    // message, so just click Send.
+    await waitFor(() => {
+      expect(utils.getByPlaceholderText('Attach to the selected session…')).toBeTruthy()
+    })
+    const sendBtn = utils.getByRole('button', { name: /^Send/ })
+    await act(async () => { fireEvent.click(sendBtn) })
+
+    await waitFor(() => {
+      expect(adoptSpy).toHaveBeenCalledWith('work', 'claude')
+    })
+    // Adoption does NOT go through the tab-create endpoint.
+    expect(fetchMock.mock.calls.some((c) => c[0] === '/api/tabs/new')).toBe(false)
+  })
+
+  it('W3.4: a successful attach closes the composer (clears compose mode)', async () => {
+    mockFetchOk('unused')
+    specOverride.kind = 'attach'
+    specOverride.attachSession = 'work'
+    specOverride.attachWindow = 'claude'
+    window.history.replaceState(null, '', '/')
+    const utils = render(<App />)
+    await waitFor(() => utils.getByPlaceholderText('Attach to the selected session…'))
+
+    await act(async () => { fireEvent.click(utils.getByRole('button', { name: /^Send/ })) })
+
+    // On success the composer is dismissed — the "Tab kind" radiogroup
+    // (only rendered in a fresh new-tab compose) goes away.
+    await waitFor(() => {
+      expect(utils.queryByLabelText('Tab kind')).toBeNull()
+    })
+  })
+
+  it('W3.4: a failed attach surfaces an error and keeps the composer open', async () => {
+    mockFetchOk('unused')
+    adoptSpy.mockResolvedValue(false)
+    specOverride.kind = 'attach'
+    specOverride.attachSession = 'work'
+    specOverride.attachWindow = 'claude'
+    window.history.replaceState(null, '', '/')
+    const utils = render(<App />)
+    await waitFor(() => utils.getByPlaceholderText('Attach to the selected session…'))
+
+    await act(async () => { fireEvent.click(utils.getByRole('button', { name: /^Send/ })) })
+
+    await waitFor(() => {
+      expect(utils.getByRole('alert')).toHaveTextContent(/could not attach|adopt|denied/i)
+    })
+    // Still in compose mode (the composer form is still shown).
+    expect(utils.queryByLabelText('Tab kind')).toBeTruthy()
   })
 })

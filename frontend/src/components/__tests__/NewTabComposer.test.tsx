@@ -90,7 +90,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     render(<ComposerHarness onSubmit={onSubmit} />)
 
     expect(screen.getByRole('radio', { name: 'AI Provider' })).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByRole('radio', { name: 'AI Harness' })).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByRole('radio', { name: 'New Harness' })).toHaveAttribute('aria-checked', 'false')
     // Raw Shell has been removed as a top-level option — the backend
     // selector now lives inside the AI Provider section.
     expect(screen.queryByRole('radio', { name: 'Raw Shell' })).not.toBeInTheDocument()
@@ -110,7 +110,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
 
     expect(screen.getByLabelText('Flavour')).toBeInTheDocument()
     expect(screen.getByLabelText('Backend')).toBeInTheDocument()
@@ -173,7 +173,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
     fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'ssh' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
@@ -188,7 +188,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
     fireEvent.change(screen.getByLabelText('Flavour'), { target: { value: 'custom' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
@@ -203,7 +203,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
     fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'container' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
@@ -276,7 +276,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
     fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
 
     // Session Name is still there...
@@ -290,7 +290,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
     fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
     fireEvent.change(screen.getByLabelText('Session Name'), { target: { value: 'main' } })
 
@@ -320,7 +320,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'AI Harness' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
     fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
@@ -442,5 +442,120 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     expect(screen.getByRole('option', { name: 'OpenAI' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Ollama' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'Anthropic' })).not.toBeInTheDocument()
+  })
+
+  // ── Existing Harness (attach / adoption) section ───────────────────
+
+  // Default mock that also answers the discovery scan with two windows.
+  function attachMockFetch(windows: Array<{ session: string; window_name: string; window_index: number; pane_pid: number | null }> = [
+    { session: 'work', window_name: 'claude', window_index: 0, pane_pid: 111 },
+    { session: 'side', window_name: 'codex', window_index: 1, pane_pid: 222 },
+  ]) {
+    return vi.fn().mockImplementation((url: string, _init?: RequestInit) => {
+      if (url === '/api/discovery/scan') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(windows) })
+      }
+      if (url === '/api/providers') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([{ name: 'anthropic', isDefault: true }]) })
+      }
+      if (url === '/api/providers/anthropic/models') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(['claude-sonnet-4-5']) })
+      }
+      if (url === '/api/agents') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([{ name: 'coder', isDefault: true }]) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+  }
+
+  it('W3.1: the kind selector shows 3 options — AI Provider, New Harness, Existing Harness', async () => {
+    vi.stubGlobal('fetch', attachMockFetch())
+    render(<ComposerHarness onSubmit={onSubmit} />)
+
+    expect(screen.getByRole('radio', { name: 'AI Provider' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'New Harness' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'Existing Harness' })).toBeInTheDocument()
+  })
+
+  it('W3.2: selecting "Existing Harness" auto-loads the detected-sessions dropdown (scans once)', async () => {
+    const mockFetch = attachMockFetch()
+    vi.stubGlobal('fetch', mockFetch)
+    render(<ComposerHarness onSubmit={onSubmit} />)
+
+    // No scan before the section is shown.
+    expect(mockFetch.mock.calls.filter((c) => c[0] === '/api/discovery/scan')).toHaveLength(0)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Existing Harness' }))
+
+    // Auto-loads: scan is POSTed exactly once on show.
+    await waitFor(() => {
+      expect(mockFetch.mock.calls.filter((c) => c[0] === '/api/discovery/scan')).toHaveLength(1)
+    })
+    const scanCall = mockFetch.mock.calls.find((c) => c[0] === '/api/discovery/scan')!
+    expect((scanCall[1] as RequestInit).method).toBe('POST')
+
+    // Options reflect the returned windows (session:windowName).
+    const select = await screen.findByLabelText('Detected Session') as HTMLSelectElement
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'work:claude' })).toBeInTheDocument()
+    })
+    expect(screen.getByRole('option', { name: 'side:codex' })).toBeInTheDocument()
+    expect(select).toBeInTheDocument()
+  })
+
+  it('W3.3: a manual-entry fallback lets the user specify a session/window not in the dropdown', async () => {
+    vi.stubGlobal('fetch', attachMockFetch())
+    render(<ComposerHarness onSubmit={onSubmit} />)
+    fireEvent.click(screen.getByRole('radio', { name: 'Existing Harness' }))
+
+    // Wait for the auto-load so the dropdown (and the manual toggle) appear.
+    const toggle = await screen.findByLabelText('Enter manually')
+    // Reveal the manual fields.
+    fireEvent.click(toggle)
+    expect(screen.getByLabelText('Session')).toBeInTheDocument()
+    expect(screen.getByLabelText('Window')).toBeInTheDocument()
+  })
+
+  it('W3.5: a consent note naming the trust consequence is shown in the Existing-Harness section', async () => {
+    vi.stubGlobal('fetch', attachMockFetch())
+    render(<ComposerHarness onSubmit={onSubmit} />)
+    fireEvent.click(screen.getByRole('radio', { name: 'Existing Harness' }))
+
+    expect(screen.getByText(/PureClaw will manage this window and capture its output/i)).toBeInTheDocument()
+  })
+
+  it('Existing Harness with empty scan results shows a hint and falls back to manual entry', async () => {
+    vi.stubGlobal('fetch', attachMockFetch([]))
+    render(<ComposerHarness onSubmit={onSubmit} />)
+    fireEvent.click(screen.getByRole('radio', { name: 'Existing Harness' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/no .* sessions detected/i)).toBeInTheDocument()
+    })
+    // Manual fields are available directly (no dropdown to pick from).
+    expect(screen.getByLabelText('Session')).toBeInTheDocument()
+  })
+
+  it('Existing Harness surfaces a scan error and still offers manual entry', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/discovery/scan') {
+        return Promise.resolve({ ok: false, json: () => Promise.resolve([]) })
+      }
+      if (url === '/api/providers') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([{ name: 'anthropic', isDefault: true }]) })
+      }
+      if (url === '/api/providers/anthropic/models') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(['claude-sonnet-4-5']) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    render(<ComposerHarness onSubmit={onSubmit} />)
+    fireEvent.click(screen.getByRole('radio', { name: 'Existing Harness' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/could not scan/i)).toBeInTheDocument()
+    })
+    expect(screen.getByLabelText('Session')).toBeInTheDocument()
   })
 })

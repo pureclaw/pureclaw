@@ -3,7 +3,7 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab, releaseHarness } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab, releaseHarness, adoptWindow } from './hooks/useApi'
 import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
@@ -619,6 +619,10 @@ export default function App() {
   // branch create while retaining the draft so the user can retry.
   const [branchDraft, setBranchDraft] = useState<BranchDraft | null>(null)
   const [branchError, setBranchError] = useState<string | null>(null)
+  // Error from a failed "Existing Harness" (attach/adopt) submit. Retained
+  // so the user sees why nothing happened (e.g. a headless run → 403, or the
+  // window no longer exists) and can adjust + retry.
+  const [attachError, setAttachError] = useState<string | null>(null)
 
   const handleNewTab = useCallback(() => {
     setSelectedId(null)
@@ -628,6 +632,10 @@ export default function App() {
     // Clicking New tab abandons any in-progress branch draft.
     setBranchDraft(null)
     setBranchError(null)
+    // Re-open the composer (and clear any prior attach error) for the new
+    // compose session.
+    setComposerDismissed(false)
+    setAttachError(null)
   }, [])
 
   // Branch from a transcript entry: slice the currently-displayed messages
@@ -659,6 +667,8 @@ export default function App() {
       prefixModel,
     })
     setBranchError(null)
+    setComposerDismissed(false)
+    setAttachError(null)
     setSelectedId(null)
     setNewTabFocusTick((n) => n + 1)
     window.history.pushState(null, '', '/')
@@ -670,7 +680,12 @@ export default function App() {
   // can read from a single source of truth — the panel renders config
   // fields, the bottom input drives the create-and-send flow on submit.
   const composerSpec = useNewTabSpec()
-  const composing = selectedId === null
+  // After a successful "Existing Harness" attach there's no session to
+  // navigate to (the adopted window surfaces as a tab via the lists
+  // broadcast), so we dismiss the composer explicitly. Cleared on the next
+  // "New tab" click or selection change.
+  const [composerDismissed, setComposerDismissed] = useState(false)
+  const composing = selectedId === null && !composerDismissed
 
   // The transcript refresh callback is bound to whichever session is
   // currently focused. We keep the latest one in a ref so that the
@@ -681,6 +696,29 @@ export default function App() {
 
   const handleComposerSend = useCallback(
     async (message: string) => {
+      // Existing Harness (attach/adopt) flow. The user's pick+submit in this
+      // foreground form IS the consent (adoptWindow sends
+      // consent_confirmed:true). We don't create a tab — adoption registers
+      // the running window server-side, which then surfaces as an adopted tab
+      // in the next lists snapshot. No message is sent.
+      if (composerSpec.kind === 'attach') {
+        const session = composerSpec.attachSession.trim()
+        const window = composerSpec.attachWindow.trim()
+        const ok = await adoptWindow(session, window)
+        if (!ok) {
+          setAttachError(
+            'Could not attach to that session — adoption was denied (a headless run can’t confirm consent) or the window no longer exists. Please try again.',
+          )
+          return
+        }
+        // Success: dismiss the composer. The adopted window appears as a tab
+        // via the broadcast lists snapshot; we just leave compose mode.
+        setAttachError(null)
+        setBranchDraft(null)
+        setBranchError(null)
+        setComposerDismissed(true)
+        return
+      }
       const body = composerSpec.buildBody()
       // Capture the branch state up-front: the draft is cleared on a
       // successful create (below) before we issue /send, so we snapshot
@@ -977,7 +1015,7 @@ export default function App() {
           selectedId={selectedId}
           onBranch={selectedSession?.runtime === 'provider' ? handleBranch : undefined}
           prefixMessages={composing && branchDraft ? branchDraft.prefixMessages : undefined}
-          composeError={composing && branchDraft ? branchError : null}
+          composeError={composing ? (branchDraft ? branchError : attachError) : null}
           currentModel={modelDropdownValue}
           availableModels={[...transcriptModels, ...composerSpec.models]}
           onModelChange={modelDropdownValue !== null ? setModelOverride : undefined}

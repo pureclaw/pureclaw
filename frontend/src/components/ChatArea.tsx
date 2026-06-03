@@ -910,7 +910,10 @@ export function ChatArea({
    *  stays in its normal position. */
   composerControls?: {
     panel: React.ReactNode
-    kind: 'provider' | 'harness'
+    /** 'attach' (Existing Harness) submits WITHOUT a typed message — the
+     *  submit button is gated only by `valid`. The other kinds require a
+     *  first message before send enables. */
+    kind: 'provider' | 'harness' | 'attach'
     /** False when the spec has a known-invalid field; the send button
      *  is disabled in that case. */
     valid: boolean
@@ -1163,11 +1166,16 @@ export function ChatArea({
           shell. */}
       {(() => {
         const isCompose = !!composerControls
-        const placeholder = isCompose
-          ? 'Type your first message\u2026'
-          : `Message ${selectedAgent.name}\u2026`
+        // Attach (Existing Harness) needs no message \u2014 the user only picks a
+        // session and submits. Other compose kinds require a first message.
+        const isAttach = composerControls?.kind === 'attach'
+        const placeholder = isAttach
+          ? 'Attach to the selected session\u2026'
+          : isCompose
+            ? 'Type your first message\u2026'
+            : `Message ${selectedAgent.name}\u2026`
         const submitDisabled = isCompose
-          ? !composerControls!.valid || !input.trim()
+          ? !composerControls!.valid || (!isAttach && !input.trim())
           : (!input.trim() || !onSend)
         const onSubmit = () => {
           if (isCompose) {
