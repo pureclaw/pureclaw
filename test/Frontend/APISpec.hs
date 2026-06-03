@@ -46,6 +46,7 @@ import PureClaw.Handles.Harness
   )
 import PureClaw.Harness.Discovery (DiscoverableWindow (..))
 import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Harness.Tmux (TmuxWindowRow (..))
 import Data.ByteString (ByteString)
 import PureClaw.Security.Adoption (AdoptedHarness, ConsentChannel (..))
 import PureClaw.Security.Command (CommandError (..))
@@ -1160,6 +1161,238 @@ spec = do
       env <- mkTestFrontendEnvWithRegistryTabs
       (st, _) <- postJSON env ["api", "tabs", "notanint", "dismiss"] "{}"
       st `shouldBe` HTTP.status400
+
+  -- =========================================================================
+  -- Phase 3 WU5 — POST /api/tabs/{index}/release (never kills; SEC-3)
+  -- =========================================================================
+  describe "pickLiveMarker (Phase 3 WU5 — pure live-@pcl_id lookup)" $ do
+    let row name pclId = TmuxWindowRow
+          { _twr_windowIndex = 0
+          , _twr_windowName  = name
+          , _twr_pclId       = pclId
+          , _twr_panePid     = Just 100
+          , _twr_paneDead    = False
+          }
+    it "returns the non-empty @pcl_id of the matching window" $
+      pickLiveMarker "win-a" [row "win-x" "id-x", row "win-a" "id-a"]
+        `shouldBe` Just "id-a"
+    it "returns Nothing when the window is absent" $
+      pickLiveMarker "win-z" [row "win-a" "id-a"] `shouldBe` Nothing
+    it "treats an empty marker as no marker (window present but unmarked)" $
+      pickLiveMarker "win-a" [row "win-a" ""] `shouldBe` Nothing
+    it "returns Nothing for an empty sweep" $
+      pickLiveMarker "win-a" [] `shouldBe` Nothing
+
+  describe "POST /api/tabs/{index}/release (Phase 3 WU5)" $ do
+    let adoptedHid = mustParseHid "33333333-3333-4333-8333-333333333333"
+        -- An OriginAdopted entry whose live @pcl_id WILL match its id text.
+        adoptedEntry hid window =
+          (corroboratedEntry hid window (Just mkNoOpHarnessHandle))
+            { Registry._he_session    = "scratch"
+            , Registry._he_windowName = window
+            , Registry._he_label      = window
+            , Registry._he_origin     = Registry.OriginAdopted
+            }
+        -- A ReleaseTmux that records every (session, window) the handler asks it
+        -- to clear, and answers the live-marker probe from a fixed map.
+        recordingReleaseTmux liveRef clearedRef =
+          ReleaseTmux
+            { _rt_liveMarker  = \s w -> do
+                m <- readIORef liveRef
+                pure (Map.lookup (s, w) m)
+            , _rt_clearMarker = \s w ->
+                modifyIORef' clearedRef (++ [(s, w)])
+            }
+
+    it "D5.1 corroborated adopted entry: clears @pcl_id (set-option -wu via seam), removes from registry+legacy map, NO kill issued" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      -- The live marker matches the entry's id text → corroborated.
+      liveRef <- newIORef
+        (Map.singleton ("scratch", "win-adopted")
+                       (Registry.harnessIdToText adoptedHid))
+      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      modifyIORef' (_fe_harnesses env)
+        (Map.insert "win-adopted" mkNoOpHarnessHandle)
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      -- The ONLY tmux mutation was the unmark, targeting our window — no kill.
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` [("scratch", "win-adopted")]
+      -- Gone from the registry...
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+      -- ...and gone from the legacy map.
+      legacy <- readIORef (_fe_harnesses env)
+      Map.member "win-adopted" legacy `shouldBe` False
+
+    it "D5.2 (SEC-3) STALE entry (live @pcl_id mismatch): deregisters WITHOUT any tmux set-option, and logs a refusal" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      logRef <- newIORef []
+      clearedRef <- newIORef []
+      -- The live marker is a DIFFERENT id (the window was replaced / PID reuse).
+      liveRef <- newIORef
+        (Map.singleton ("scratch", "win-adopted")
+                       "99999999-9999-4999-8999-999999999999")
+      let env = env0
+            { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+            , _fe_logger      = captureWarnLogger logRef
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      modifyIORef' (_fe_harnesses env)
+        (Map.insert "win-adopted" mkNoOpHarnessHandle)
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      -- The invariant: NO window op (clearMarker NEVER called) on a stale entry.
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` []
+      -- A refusal was logged.
+      warns <- readIORef logRef
+      warns `shouldSatisfy` any ("no longer corroborated" `T.isInfixOf`)
+      -- Still deregistered from BOTH stores (we stop managing it either way).
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+      legacy <- readIORef (_fe_harnesses env)
+      Map.member "win-adopted" legacy `shouldBe` False
+
+    it "D5.2 (SEC-3) window gone (no live marker): deregisters WITHOUT any tmux set-option, and logs" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      logRef <- newIORef []
+      clearedRef <- newIORef []
+      liveRef <- newIORef Map.empty  -- the window is gone → Nothing
+      let env = env0
+            { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+            , _fe_logger      = captureWarnLogger logRef
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      (st, _) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status200
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` []
+      -- The refusal log names the missing marker ("<none>") and is forced here.
+      warns <- readIORef logRef
+      warns `shouldSatisfy` any (\w -> "no longer corroborated" `T.isInfixOf` w
+                                       && "<none>" `T.isInfixOf` w)
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+
+    it "D5.2 rejects a non-adopted (Spawned) entry with 409 and NO tmux mutation, leaving it registered" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      -- A corroborating live marker is present — but origin is Spawned, so the
+      -- handler must reject BEFORE consulting it.
+      liveRef <- newIORef
+        (Map.singleton ("pureclaw", "claude-code-0")
+                       (Registry.harnessIdToText adoptedHid))
+      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
+      -- baseEntry defaults to OriginSpawned.
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry adoptedHid "claude-code-0" (Just mkNoOpHarnessHandle))
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status409
+      lookupKey' respBody "error"
+        `shouldBe` Just (Aeson.String "not an adopted harness")
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` []
+      -- Still registered (release never touched it).
+      still <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> still) `shouldBe` Just adoptedHid
+
+    it "returns 404 for an out-of-range index (no tmux op)" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      liveRef <- newIORef Map.empty
+      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      (st, _) <- postJSON env ["api", "tabs", "5", "release"] "{}"
+      st `shouldBe` HTTP.status404
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` []
+
+    it "returns 400 for a non-numeric index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, _) <- postJSON env ["api", "tabs", "notanint", "release"] "{}"
+      st `shouldBe` HTTP.status400
+
+    it "tolerates a non-JSON body (purge defaults to false): still releases a corroborated entry" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      liveRef <- newIORef
+        (Map.singleton ("scratch", "win-adopted")
+                       (Registry.harnessIdToText adoptedHid))
+      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "not json at all"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` [("scratch", "win-adopted")]
+
+    it "D5.3 retention: transcript/session.json persist after release — the sid still loads in Recent" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-007"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        clearedRef <- newIORef []
+        liveRef <- newIORef
+          (Map.singleton ("scratch", "win-adopted")
+                         (Registry.harnessIdToText adoptedHid))
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          ((adoptedEntry adoptedHid "win-adopted")
+            { Registry._he_sessionId = Just sid })
+        (st, _) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+        st `shouldBe` HTTP.status200
+        -- The session.json was NOT deleted → it reappears in Recent Sessions.
+        (rst, recentBody) <- getJSON env ["api", "sessions", "recent"]
+        rst `shouldBe` HTTP.status200
+        case Aeson.decode recentBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr
+                          , Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+
+    it "D5.4 the purge flag is accepted but reserved (documented no-op): session.json is NOT deleted" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-008"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        clearedRef <- newIORef []
+        infoRef <- newIORef []
+        liveRef <- newIORef
+          (Map.singleton ("scratch", "win-adopted")
+                         (Registry.harnessIdToText adoptedHid))
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+              , _fe_logger      = captureInfoLogger infoRef
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          ((adoptedEntry adoptedHid "win-adopted")
+            { Registry._he_sessionId = Just sid })
+        -- Body explicitly requests purge:true — which is RESERVED (no-op).
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "release"]
+          (Aeson.encode (object ["purge" .= True]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+        -- The reserved-purge no-op is logged (auditable) but NOT acted upon.
+        infos <- readIORef infoRef
+        infos `shouldSatisfy` any ("purge requested but RESERVED" `T.isInfixOf`)
+        -- The session dir is still on disk (purge did NOT delete it).
+        stillThere <- doesDirectoryExist (tmpDir </> T.unpack sid)
+        stillThere `shouldBe` True
 
   describe "POST /api/tabs/{index}/acknowledge (P2-WU3 D3.2)" $ do
     it "clears the ext_modified flag (verified via a follow-up /api/tabs)" $ do
@@ -2676,6 +2909,7 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_policy       = defaultPolicy
     , _fe_consentChannel = ConsentHeadless  -- fail-closed default; adopt tests override
     , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
+    , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ())
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
     , _fe_recentLimit  = 20
     , _fe_provider     = provRef
@@ -3051,6 +3285,19 @@ baseEntry hid window mHandle = Registry.HarnessEntry
 captureErrorLogger :: IORef [Text] -> LogHandle
 captureErrorLogger ref = mkNoOpLogHandle
   { _lh_logError = \msg -> modifyIORef' ref (++ [msg]) }
+
+-- | A 'LogHandle' that captures every warn-level message into the 'IORef'.
+-- Used by the Release SEC-3 tests to assert the deregister-only refusal is
+-- logged.
+captureWarnLogger :: IORef [Text] -> LogHandle
+captureWarnLogger ref = mkNoOpLogHandle
+  { _lh_logWarn = \msg -> modifyIORef' ref (++ [msg]) }
+
+-- | A 'LogHandle' that captures every info-level message into the 'IORef'.
+-- Used by the Release D5.4 test to assert the reserved-purge no-op is logged.
+captureInfoLogger :: IORef [Text] -> LogHandle
+captureInfoLogger ref = mkNoOpLogHandle
+  { _lh_logInfo = \msg -> modifyIORef' ref (++ [msg]) }
 
 -- | Reload a session's @session.json@ as raw JSON (test-only).
 tryLoadMetaJson :: FilePath -> Text -> IO (Maybe Aeson.Value)

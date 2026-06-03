@@ -4,6 +4,9 @@ module PureClaw.Frontend.API
     -- * Environment
   , FrontendEnv (..)
   , StartedHarness (..)
+  , ReleaseTmux (..)
+  , productionReleaseTmux
+  , pickLiveMarker
     -- * Harness routing helpers
   , harnessKeyFromKind
   , shouldRouteToHarness
@@ -86,6 +89,7 @@ import PureClaw.Handles.Log
 import PureClaw.Handles.Tab (TabKind (..))
 import PureClaw.Harness.Discovery (DiscoverableWindow, scanDiscoverableIO)
 import PureClaw.Harness.Reconcile (livenessToActivity)
+import PureClaw.Harness.Tmux qualified as Tmux
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Security.Adoption
   ( AdoptError (..)
@@ -156,6 +160,16 @@ data FrontendEnv = FrontendEnv
     -- end, registers an @OriginAdopted@ entry, and links a @session.json@); the
     -- default test stub returns @Left@. The endpoint additionally syncs the
     -- legacy '_fe_harnesses' map on success (D-ADD-2).
+  , _fe_releaseTmux  :: ReleaseTmux
+    -- ^ The two tmux primitives the @POST \/api\/tabs\/{index}\/release@
+    -- endpoint needs, bundled so they can be injected as a single seam (Phase 3
+    -- WU5). 'productionReleaseTmux' wires them to the real
+    -- 'Tmux.readMarkers'-based live-@\@pcl_id@ lookup and 'Tmux.clearWindowMarker'.
+    -- The endpoint re-corroborates the live marker BEFORE issuing any
+    -- @set-option@ (SEC-3 anti-spoof): it NEVER calls @_rt_clearMarker@ unless
+    -- the live marker still equals THIS entry's id. Tests inject a recording
+    -- 'ReleaseTmux' to assert the @set-option -wu@ argv (D5.1) and to prove no
+    -- tmux mutation happens on a stale\/uncorroborated entry (D5.2).
   , _fe_sessionsDir  :: FilePath
     -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
   , _fe_recentLimit  :: Int
@@ -237,6 +251,47 @@ data StartedHarness = StartedHarness
     -- into '_sm_kind' (WU7, D7.2) so subsequent sends route by id through the
     -- registry rather than only by the dual-written window name.
   }
+
+-- | The two tmux primitives the Release endpoint (Phase 3 WU5) needs, bundled
+-- as one injectable seam so the security-critical /corroborate-before-mutate/
+-- ordering lives in the handler (not hidden behind the seam) while still being
+-- fully testable.
+--
+-- @_rt_liveMarker session window@ re-reads the LIVE @\@pcl_id@ of the window at
+-- the entry's cached @(session, window)@ coordinate, returning 'Nothing' when
+-- the window is gone or carries no (non-empty) marker. @_rt_clearMarker session
+-- window@ unsets @\@pcl_id@ (@set-option -wu@) — it is invoked ONLY after the
+-- handler confirms the live marker still equals THIS entry's id (SEC-3), and it
+-- NEVER kills the window.
+data ReleaseTmux = ReleaseTmux
+  { _rt_liveMarker  :: Text -> Text -> IO (Maybe Text)
+  , _rt_clearMarker :: Text -> Text -> IO ()
+  }
+
+-- | The production 'ReleaseTmux': the live-marker lookup is a 'Tmux.readMarkers'
+-- sweep of the session filtered to the target window (returning its non-empty
+-- @\@pcl_id@), and the clear is 'Tmux.clearWindowMarker' (@set-option -wu@).
+-- Both route through the authorized tmux seam ('Tmux.tmuxProc').
+productionReleaseTmux :: ReleaseTmux
+productionReleaseTmux = ReleaseTmux
+  { _rt_liveMarker  = \session window ->
+      pickLiveMarker window <$> Tmux.readMarkers session
+  , _rt_clearMarker = Tmux.clearWindowMarker
+  }
+
+-- | Pure core of the production live-@\@pcl_id@ lookup: from a session's
+-- 'Tmux.readMarkers' sweep, return the non-empty @\@pcl_id@ of the row whose
+-- window name matches @window@, or 'Nothing' when the window is absent or its
+-- marker is empty\/unset. Empty markers are treated as \"no marker\" so an
+-- unmarked\/cleared window never spuriously corroborates.
+pickLiveMarker :: Text -> [Tmux.TmuxWindowRow] -> Maybe Text
+pickLiveMarker window rows =
+  Maybe.listToMaybe
+    [ Tmux._twr_pclId r
+    | r <- rows
+    , Tmux._twr_windowName r == window
+    , not (T.null (Tmux._twr_pclId r))
+    ]
 
 -- | The default tmux session name a frontend-spawned harness lands in when the
 -- requested 'HarnessSpec' does not specify one (WU7, D7.3).
@@ -547,6 +602,8 @@ apiApp env req respond = do
       handleCloseTab env tidx respond
     ("POST", ["api", "tabs", tidx, "dismiss"]) ->
       handleDismissTab env tidx respond
+    ("POST", ["api", "tabs", tidx, "release"]) ->
+      handleReleaseTab env tidx req respond
     ("POST", ["api", "tabs", tidx, "acknowledge"]) ->
       handleAcknowledgeTab env tidx respond
     ("POST", ["api", "tabs", _tidx, "restart"]) ->
@@ -743,6 +800,118 @@ handleDismissTab env tidxText respond =
     modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
     broadcastLists env
     respond $ jsonResponse status200 (object ["dismissed" .= True])
+
+-- | Request body for @POST \/api\/tabs\/{index}\/release@. The @purge@ flag is
+-- ACCEPTED but RESERVED for the Phase-3 MVP: transcript\/@session.json@ are
+-- retained regardless (design §8 C2). It is decoded so a future release can
+-- honor it without a wire-format change; today it is a documented no-op.
+data ReleaseRequest = ReleaseRequest
+  { _rr_purge :: !Bool
+  }
+
+instance FromJSON ReleaseRequest where
+  parseJSON = Aeson.withObject "ReleaseRequest" $ \o ->
+    ReleaseRequest <$> o .:? "purge" .!= False
+
+-- | @POST \/api\/tabs\/{index}\/release@ — release an ADOPTED harness: stop
+-- managing it and REMOVE PureClaw's @\@pcl_id@ marker, but NEVER kill the
+-- window and RETAIN its transcript\/@session.json@ (design §6, §8 C2). Distinct
+-- from Dismiss (which removes a dead row with no tmux op) and from Close (which
+-- never kills either): Release issues a @set-option -wu@ on a LIVE window — but
+-- ONLY after re-corroborating it is still ours (SEC-3 anti-spoof).
+--
+-- SECURITY-CRITICAL ordering — re-corroboration runs BEFORE any tmux mutation:
+--
+--   1. Resolve the display index → entry (shared 'tabIndexToEntry' resolver).
+--   2. The entry MUST be 'Registry.OriginAdopted'; a Spawned\/Discovered entry
+--      → @409@ \"not an adopted harness\", NO mutation.
+--   3. Re-read the LIVE @\@pcl_id@ of the entry's @(session, windowName)@ via
+--      the injected seam and compare to @harnessIdToText (_he_id entry)@:
+--
+--        * MATCH → 'Tmux.clearWindowMarker' (the only @set-option -wu@), then
+--          deregister from the registry AND the legacy '_fe_harnesses' map;
+--          respond @200 {"released":true}@. The window is NOT killed.
+--        * MISMATCH \/ window gone (the cached coord now points at a different
+--          \/absent window — the PID-reuse\/replacement case) → deregister from
+--          BOTH stores WITHOUT issuing ANY tmux @set-option@\/mutation, and log
+--          a refusal; respond @200 {"released":true,"note":...}@. The invariant:
+--          NEVER @set-option -wu@ a window we cannot confirm is ours.
+--
+-- The @purge@ body flag is accepted but RESERVED (documented no-op; retention
+-- only — design §8 C2).
+handleReleaseTab
+  :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleReleaseTab env tidxText req respond = do
+  body <- consumeBody req
+  -- The body is optional; an empty/garbage body decodes to the default
+  -- (purge = False). The purge flag is reserved regardless, so we never fail the
+  -- request on a bad body.
+  let reservedPurge = case Aeson.eitherDecode body of
+        Right rr -> _rr_purge rr
+        Left _   -> False
+  -- RESERVED (Phase-3 MVP = retention only, design §8 C2): accepted but a
+  -- documented no-op. We log when it is requested so the intent is auditable,
+  -- but we do NOT purge/delete the transcript or session.json.
+  when reservedPurge $
+    _lh_logInfo (_fe_logger env)
+      "release: purge requested but RESERVED (Phase-3 MVP retains transcript/session.json)"
+  withResolvedTab env tidxText respond $ \e ->
+    case Registry._he_origin e of
+      Registry.OriginAdopted -> releaseAdopted env e respond
+      _ ->
+        -- Release applies ONLY to adopted harnesses. A Spawned/Discovered row
+        -- is rejected with no tmux mutation (and nothing is deregistered).
+        respond $ jsonResponse status409
+          (object ["error" .= ("not an adopted harness" :: Text)])
+
+-- | The corroborate-then-act core of Release, for an entry already confirmed to
+-- be 'Registry.OriginAdopted'. Re-reads the live @\@pcl_id@ BEFORE any mutation
+-- (SEC-3) and branches: corroborated → unmark + deregister; stale → deregister
+-- only (no tmux op) + warn. Either way the entry leaves both stores, the window
+-- survives, and the transcript\/@session.json@ are retained (C2).
+releaseAdopted
+  :: FrontendEnv -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+releaseAdopted env e respond = do
+  let session  = Registry._he_session e
+      window   = Registry._he_windowName e
+      expected = Registry.harnessIdToText (Registry._he_id e)
+      rt       = _fe_releaseTmux env
+  liveMarker <- _rt_liveMarker rt session window
+  if liveMarker == Just expected
+    then do
+      -- Corroborated: the live window still carries THIS entry's marker, so it
+      -- is safe to unmark it. clearWindowMarker is the ONLY tmux mutation, and
+      -- it NEVER kills the window.
+      _rt_clearMarker rt session window
+      deregister env e
+      broadcastLists env
+      respond $ jsonResponse status200 (object ["released" .= True])
+    else do
+      -- Stale/uncorroborated: the cached coord no longer points at our window
+      -- (mismatched marker or window gone — PID-reuse/replacement). We refuse to
+      -- `set-option -wu` a window we can't confirm is ours; deregister WITHOUT
+      -- any tmux mutation and log the refusal.
+      _lh_logWarn (_fe_logger env) $
+        "release: window " <> session <> ":" <> window
+          <> " no longer corroborated (live @pcl_id="
+          <> Maybe.fromMaybe "<none>" liveMarker
+          <> ", expected " <> expected
+          <> "); deregistering WITHOUT unmarking"
+      deregister env e
+      broadcastLists env
+      respond $ jsonResponse status200
+        (object
+          [ "released" .= True
+          , "note"     .= ("window no longer corroborated; deregistered without unmarking" :: Text)
+          ])
+
+-- | Remove an entry from BOTH the registry and the legacy '_fe_harnesses' map
+-- (shared by both Release branches). Mirrors Dismiss's deregistration; NEVER
+-- touches @session.json@\/the transcript (retention — design §8 C2).
+deregister :: FrontendEnv -> Registry.HarnessEntry -> IO ()
+deregister env e = do
+  Registry.deleteEntry (_fe_harnessRegistry env) (Registry._he_id e)
+  modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
 
 -- | @POST \/api\/tabs\/{index}\/acknowledge@ — clear the out-of-band
 -- '_he_extModified' flag (the §7 ⚠ \"edited\" pill). Uses 'Registry.modifyEntry'

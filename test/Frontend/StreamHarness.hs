@@ -86,6 +86,7 @@ mkTestFrontendEnv sessionsDir broker guard = do
     , _fe_policy       = defaultPolicy
     , _fe_consentChannel = ConsentHeadless  -- tests fail-closed
     , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
+    , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ())
     , _fe_sessionsDir  = sessionsDir
     , _fe_recentLimit  = 20
     , _fe_provider     = providerRef

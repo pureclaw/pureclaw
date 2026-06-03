@@ -31,6 +31,7 @@ module PureClaw.Harness.Tmux
   , renameWindowNamed
     -- * Identity markers (WU1)
   , setWindowMarker
+  , clearWindowMarker
   , setRemainOnExit
   , readMarkers
   , showWindowOption
@@ -56,6 +57,7 @@ module PureClaw.Harness.Tmux
   , renameWindowNamedArgs
   , newWindowNamedArgs
   , setWindowMarkerArgs
+  , clearWindowMarkerArgs
   , setRemainOnExitArgs
     -- * Stealth mode
   , stealthShellCommand
@@ -368,6 +370,14 @@ setWindowMarkerArgs :: Text -> Text -> Text -> [String]
 setWindowMarkerArgs sessionName windowName uuid =
   ["set-option", "-w", "-t", windowTarget sessionName windowName, "@pcl_id", T.unpack uuid]
 
+-- | @set-option -wu @pcl_id@ argv — UNSETS the durable identity anchor on a
+-- window (the inverse of 'setWindowMarkerArgs'). Used by Release (Phase 3 WU5)
+-- to stop managing an adopted window: it removes PureClaw's @\@pcl_id@ marker
+-- WITHOUT killing the window. @-u@ unsets the option, so no value follows.
+clearWindowMarkerArgs :: Text -> Text -> [String]
+clearWindowMarkerArgs sessionName windowName =
+  ["set-option", "-wu", "-t", windowTarget sessionName windowName, "@pcl_id"]
+
 -- | @set-option -w remain-on-exit on@ argv — required so a dead harness leaves
 -- a @pane_dead@ pane in place (observable as @Exited@) instead of the window
 -- vanishing (collapsing into @Orphaned@); see spike §11 E3.
@@ -493,6 +503,15 @@ markerFormat =
 setWindowMarker :: Text -> Text -> Text -> IO ()
 setWindowMarker sessionName windowName uuid = do
   _ <- runTmuxSilent (setWindowMarkerArgs sessionName windowName uuid)
+  pure ()
+
+-- | Unset the @\@pcl_id@ identity marker on a named window (Phase 3 WU5,
+-- Release). Routes through the same 'tmuxProc'\/'authorizeTmuxCommand' seam as
+-- 'setWindowMarker'. NEVER kills the window — it only removes the marker so
+-- PureClaw stops claiming the (now-released) adopted window.
+clearWindowMarker :: Text -> Text -> IO ()
+clearWindowMarker sessionName windowName = do
+  _ <- runTmuxSilent (clearWindowMarkerArgs sessionName windowName)
   pure ()
 
 -- | Enable @remain-on-exit@ on a named window (spike §11 E3).

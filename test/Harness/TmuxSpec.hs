@@ -66,6 +66,19 @@ spec = do
       argv `shouldBe`
         ["set-option", "-w", "-t", "pureclaw:claude-code-0", "remain-on-exit", "on"]
 
+    -- WU5 (D5.1) — release unmarks a window by UNSETTING @pcl_id via
+    -- `set-option -wu` (the inverse of setWindowMarkerArgs). NO value follows
+    -- (unset), and it NEVER kills the window.
+    it "clearWindowMarkerArgs unsets @pcl_id on the named window (set-option -wu)" $ do
+      let argv = clearWindowMarkerArgs "pureclaw" "claude-code-0"
+      argv `shouldBe`
+        ["set-option", "-wu", "-t", "pureclaw:claude-code-0", "@pcl_id"]
+
+    it "clearWindowMarkerArgs targets the window name (different session/window)" $ do
+      let argv = clearWindowMarkerArgs "scratch" "harness-ab12cd"
+      argv `shouldBe`
+        ["set-option", "-wu", "-t", "scratch:harness-ab12cd", "@pcl_id"]
+
   -- D1.2 (parse half, pure) — readMarkers row parsing
   describe "parseMarkerRows (D1.2)" $ do
     it "parses a full tab-separated row including @pcl_id, pane_pid, pane_dead" $ do

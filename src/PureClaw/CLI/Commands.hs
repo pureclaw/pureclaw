@@ -61,7 +61,7 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Frontend.API (mkStreamGuard, harnessEntriesToTabs)
+import PureClaw.Frontend.API (mkStreamGuard, harnessEntriesToTabs, productionReleaseTmux)
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
@@ -763,6 +763,7 @@ runChat consentChannel opts = do
               , _fe_adopt        =
                   adoptExternalWindow defaultClaudeCodeDeps harnessReg
                     mkNoOpTranscriptHandle sessionsDir
+              , _fe_releaseTmux  = productionReleaseTmux
               , _fe_sessionsDir  = sessionsDir
               , _fe_recentLimit  = 50
               , _fe_provider     = providerRef
