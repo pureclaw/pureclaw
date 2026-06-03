@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { AgentInfo, HarnessInfo, SessionInfo, TabInfo, TabOrigin, TabStatus, TranscriptEntry } from '../types'
+import type { AgentInfo, DiscoverableWindow, HarnessInfo, SessionInfo, TabInfo, TabOrigin, TabStatus, TranscriptEntry } from '../types'
 
 const POLL_INTERVAL = 3000
 
@@ -32,6 +32,26 @@ export function mapTabInfo(wire: TabInfoWire): TabInfo {
     stale: wire.stale ?? false,
     origin: wire.origin as TabOrigin | undefined,
     attachCommand: wire.attach_command ?? null,
+  }
+}
+
+/** Raw `/api/discovery/scan` wire row: the backend emits a discoverable
+ *  window in snake_case (`window_name`/`window_index`/`pane_pid`). */
+export interface DiscoverableWindowWire {
+  session: string
+  window_name: string
+  window_index: number
+  pane_pid: number | null
+}
+
+/** Normalize a backend discovery row to the camelCase `DiscoverableWindow`
+ *  shape the UI renders. */
+export function mapDiscoverableWindow(wire: DiscoverableWindowWire): DiscoverableWindow {
+  return {
+    session: wire.session,
+    windowName: wire.window_name,
+    windowIndex: wire.window_index,
+    panePid: wire.pane_pid,
   }
 }
 
@@ -143,6 +163,36 @@ export function useArchivedSessions() {
   }, [poll])
 
   return { sessions, error }
+}
+
+/** On-demand discovery of adoptable external tmux windows. Unlike the other
+ *  list hooks this is NOT polled — discovery is an explicit, user-invoked
+ *  action (bounded server-side by the adoption allow-list). `scan()` POSTs
+ *  `/api/discovery/scan`, maps the wire rows, and replaces the list. On any
+ *  failure the list is cleared and `error` is set so the section can surface
+ *  it. */
+export function useDiscoverableWindows() {
+  const [windows, setWindows] = useState<DiscoverableWindow[]>([])
+  const [error, setError] = useState(false)
+
+  const scan = useCallback(async () => {
+    try {
+      const res = await fetch('/api/discovery/scan', { method: 'POST' })
+      if (!res.ok) {
+        setWindows([])
+        setError(true)
+        return
+      }
+      const rows = await res.json() as DiscoverableWindowWire[]
+      setWindows(Array.isArray(rows) ? rows.map(mapDiscoverableWindow) : [])
+      setError(false)
+    } catch {
+      setWindows([])
+      setError(true)
+    }
+  }, [])
+
+  return { windows, error, scan }
 }
 
 export function useTranscript(sessionId: string | null) {
@@ -373,6 +423,38 @@ export async function dismissTab(index: number): Promise<boolean> {
 export async function acknowledgeTab(index: number): Promise<boolean> {
   try {
     const res = await fetch(`/api/tabs/${index}/acknowledge`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Adopt an external (discovered) tmux window so PureClaw begins managing and
+ *  capturing it. The body carries `consent_confirmed: true` — the user has
+ *  acknowledged the trust consequence in the confirmation dialog. Returns
+ *  true on 200; false on a denial (403 — headless run or not allow-listed) or
+ *  any error. */
+export async function adoptWindow(session: string, window: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/adopt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session, window, consent_confirmed: true }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Release an adopted harness by tab index — PureClaw stops managing it and
+ *  clears its `@pcl_id` marker, but never kills the underlying tmux window.
+ *  Distinct from close/dismiss. Returns true if the backend accepted it. */
+export async function releaseHarness(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/release`, {
       method: 'POST',
     })
     return res.ok

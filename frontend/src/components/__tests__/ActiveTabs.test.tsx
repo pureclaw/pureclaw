@@ -27,6 +27,7 @@ function noopProps() {
     onArchiveTab: () => {},
     onDismiss: () => {},
     onAcknowledge: () => {},
+    onRelease: () => {},
   }
 }
 
@@ -46,6 +47,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
 
@@ -64,6 +66,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     expect(screen.getByText('Active Tabs')).toBeInTheDocument()
@@ -81,6 +84,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     const btn = screen.getByRole('button', { name: /new tab/i })
@@ -101,6 +105,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     // The running indicator should display the filled circle character
@@ -121,6 +126,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     const indicator = container.querySelector('[data-testid="status-idle"]')
@@ -314,6 +320,61 @@ describe('ActiveTabs', () => {
     expect(screen.queryByText(/^(spawned|discovered|adopted)$/)).not.toBeInTheDocument()
   })
 
+  it('D7.4: the origin pill renders "adopted" on an adopted row', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'adopted-tab', origin: 'adopted' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.getByText('adopted')).toBeInTheDocument()
+  })
+
+  it('D7.3: an adopted tab renders a Release control', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'adopted-tab', origin: 'adopted' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.getByRole('button', { name: /release tab/i })).toBeInTheDocument()
+  })
+
+  it('D7.3: a non-adopted tab (spawned) renders NO Release control', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'spawned-tab', origin: 'spawned' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.queryByRole('button', { name: /release tab/i })).not.toBeInTheDocument()
+  })
+
+  it('D7.3: a tab with no origin renders NO Release control', () => {
+    const tabs = makeTabs({ index: 0, status: 'idle', name: 'no-origin' })
+    render(<ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} />)
+    expect(screen.queryByRole('button', { name: /release tab/i })).not.toBeInTheDocument()
+  })
+
+  it('D7.3: Release calls onRelease with the correct tab index', () => {
+    const onRelease = vi.fn()
+    const tabs = makeTabs(
+      { index: 0, status: 'idle', name: 'spawned', origin: 'spawned' },
+      { index: 9, status: 'idle', name: 'adopted', origin: 'adopted' },
+    )
+    render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} onRelease={onRelease} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /release tab/i }))
+    expect(onRelease).toHaveBeenCalledWith(9)
+  })
+
+  it('D7.3: Release click does not trigger row selection', () => {
+    const onSelectTab = vi.fn()
+    const onRelease = vi.fn()
+    const tabs = makeTabs({ index: 4, status: 'idle', name: 'adopted', origin: 'adopted' })
+    render(
+      <ActiveTabs
+        tabs={tabs}
+        selectedId={null}
+        {...noopProps()}
+        onSelectTab={onSelectTab}
+        onRelease={onRelease}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /release tab/i }))
+    expect(onRelease).toHaveBeenCalledWith(4)
+    expect(onSelectTab).not.toHaveBeenCalled()
+  })
+
   it('shows [raw] badge for shell tabs', () => {
     const tabs = makeTabs(
       { kind: 'shell:bash', name: 'bash-raw' },
@@ -329,6 +390,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     const badges = screen.getAllByText('raw')
@@ -347,6 +409,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     expect(screen.queryByText('raw')).not.toBeInTheDocument()
@@ -368,6 +431,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     fireEvent.click(screen.getByText('second'))
@@ -389,6 +453,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     // The selected row should have the 'selected' class
@@ -412,6 +477,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     expect(screen.getByText('Running')).toBeInTheDocument()
@@ -432,6 +498,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     expect(screen.getByText('0')).toBeInTheDocument()
@@ -453,6 +520,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     const closeButtons = screen.getAllByRole('button', { name: /close tab/i })
@@ -475,6 +543,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     const closeButtons = screen.getAllByRole('button', { name: /close tab/i })
@@ -496,6 +565,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     const closeBtn = screen.getByRole('button', { name: /close tab/i })
@@ -518,6 +588,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     expect(screen.getByRole('button', { name: /archive tab/i })).toBeInTheDocument()
@@ -537,6 +608,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={() => {}}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     expect(screen.queryByRole('button', { name: /archive tab/i })).not.toBeInTheDocument()
@@ -557,6 +629,7 @@ describe('ActiveTabs', () => {
         onArchiveTab={onArchiveTab}
         onDismiss={() => {}}
         onAcknowledge={() => {}}
+        onRelease={() => {}}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: /archive tab/i }))

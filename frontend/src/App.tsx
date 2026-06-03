@@ -3,7 +3,7 @@ import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, useDiscoverableWindows, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab, adoptWindow, releaseHarness } from './hooks/useApi'
 import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
@@ -373,6 +373,8 @@ function modelContextWindow(model: string | null): number {
 export default function App() {
   const { tabs, recentSessions: rawSessions, archivedSessions } = useListsStream()
   const { agents } = useAgents()
+  // On-demand discovery of adoptable external tmux windows (not polled).
+  const { windows: discoverableWindows, scan: scanDiscoverable } = useDiscoverableWindows()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const [customPromptFile, setCustomPromptFile] = useState<{ name: string; content: string } | null>(null)
@@ -879,6 +881,26 @@ export default function App() {
     await acknowledgeTab(index)
   }, [])
 
+  // Adopt a discovered external tmux window — the user has confirmed the
+  // consent dialog in the sidebar. On success the backend broadcasts a
+  // refreshed `lists` snapshot (so the adopted row appears in Active Tabs);
+  // we re-scan so the adopted window drops out of the Discoverable list.
+  const handleAdoptWindow = useCallback(async (session: string, window: string) => {
+    const ok = await adoptWindow(session, window)
+    if (ok) await scanDiscoverable()
+  }, [scanDiscoverable])
+
+  // Release an adopted harness — PureClaw stops managing it (never kills the
+  // tmux window). The backend broadcasts a refreshed `lists` snapshot; we
+  // clear the selection if the released tab was focused.
+  const handleReleaseTab = useCallback(async (index: number) => {
+    await releaseHarness(index)
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
     ? deriveAgent(selectedId, tabs, sessions)
@@ -922,6 +944,7 @@ export default function App() {
           tabs={tabs}
           sessions={sessions}
           archivedSessions={archivedSessions}
+          discoverableWindows={discoverableWindows}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
           onSelectTab={handleSelectTab}
@@ -933,6 +956,9 @@ export default function App() {
           onArchiveTab={handleArchiveTab}
           onDismissTab={handleDismissTab}
           onAcknowledgeTab={handleAcknowledgeTab}
+          onReleaseTab={handleReleaseTab}
+          onScanDiscoverable={scanDiscoverable}
+          onAdoptWindow={handleAdoptWindow}
         />
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}

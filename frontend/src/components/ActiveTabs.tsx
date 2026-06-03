@@ -57,6 +57,7 @@ function TabRow({
   onArchive,
   onDismiss,
   onAcknowledge,
+  onRelease,
   activity,
 }: {
   tab: TabInfo
@@ -66,6 +67,7 @@ function TabRow({
   onArchive: () => void
   onDismiss: () => void
   onAcknowledge: () => void
+  onRelease: () => void
   activity?: SessionActivityState
 }) {
   // Defensive lookup: an unknown status string (malformed backend payload)
@@ -79,6 +81,10 @@ function TabRow({
   const isExited = tab.status === 'exited'
   const isOrphaned = tab.status === 'orphaned'
   const isDead = isExited || isOrphaned
+  // Adopted harnesses can be Released — PureClaw stops managing them without
+  // killing the underlying tmux window. Distinct from Close/Dismiss, and only
+  // offered on adopted rows.
+  const isAdopted = tab.origin === 'adopted'
 
   const rowClasses = [
     'agent-row px-3 py-2',
@@ -212,6 +218,24 @@ function TabRow({
               </svg>
             </button>
           )}
+          {isAdopted && (
+            <button
+              className="session-archive"
+              title="Release this adopted harness (stops managing it; does NOT kill the tmux window)"
+              aria-label="Release tab"
+              onClick={(e) => { e.stopPropagation(); onRelease() }}
+            >
+              <svg
+                width="11" height="11" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M6 3 H4 a1 1 0 0 0 -1 1 v8 a1 1 0 0 0 1 1 h8 a1 1 0 0 0 1 -1 v-2" />
+                <path d="M9 7 L14 2" />
+                <path d="M10 2 h4 v4" />
+              </svg>
+            </button>
+          )}
           <button
             className="session-archive"
             title="Close tab"
@@ -249,6 +273,7 @@ export function ActiveTabs({
   onArchiveTab,
   onDismiss,
   onAcknowledge,
+  onRelease,
 }: {
   tabs: TabInfo[]
   selectedId: string | null
@@ -259,6 +284,7 @@ export function ActiveTabs({
   onArchiveTab: (index: number) => void
   onDismiss: (index: number) => void
   onAcknowledge: (index: number) => void
+  onRelease: (index: number) => void
 }) {
   return (
     <>
@@ -292,6 +318,7 @@ export function ActiveTabs({
           onArchive={() => onArchiveTab(tab.index)}
           onDismiss={() => onDismiss(tab.index)}
           onAcknowledge={() => onAcknowledge(tab.index)}
+          onRelease={() => onRelease(tab.index)}
           activity={tab.session_id ? sessionActivity?.[tab.session_id] : undefined}
         />
       ))}

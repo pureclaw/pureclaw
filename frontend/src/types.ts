@@ -95,6 +95,19 @@ export interface TabInfo {
   attachCommand?: string | null
 }
 
+/** An external (unmanaged) tmux window that PureClaw discovered via an
+ *  on-demand discovery scan and could be adopted. Transient, metadata-only —
+ *  it is NOT a registry entry and carries no capture capability. Mirrors the
+ *  backend `DiscoverableWindow` JSON (snake_case `window_name`/`window_index`/
+ *  `pane_pid`), mapped to camelCase at the fetch boundary. */
+export interface DiscoverableWindow {
+  session: string
+  windowName: string
+  windowIndex: number
+  /** The pane's shell PID, or null when tmux reported none. */
+  panePid: number | null
+}
+
 export interface AgentInfo {
   name: string
   isDefault: boolean
