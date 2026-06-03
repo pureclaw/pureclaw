@@ -68,8 +68,10 @@ import PureClaw.Frontend.StreamBroker
   , defaultBrokerConfig
   , mkInProcessBroker
   )
+import PureClaw.Harness.ClaudeCode (adoptExternalWindow, defaultClaudeCodeDeps)
 import PureClaw.Harness.Reconcile qualified as Reconcile
 import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Handles.Transcript (mkNoOpTranscriptHandle)
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -96,6 +98,7 @@ import PureClaw.Providers.Class
 import PureClaw.Providers.Ollama
 import PureClaw.Providers.OpenAI
 import PureClaw.Providers.OpenRouter
+import PureClaw.Security.Adoption (ConsentChannel (..))
 import PureClaw.Security.Policy
 import PureClaw.Security.Secrets
 import PureClaw.Security.Vault
@@ -315,8 +318,14 @@ runCLI :: IO ()
 runCLI = do
   cmd <- execParser cliParserInfo
   case cmd of
-    CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
-    CmdGateway opts -> runChat opts
+    -- FEAS-2 / D3 (SEC-1): the consent channel is derived from the invocation
+    -- mode here, where the 'Command' is known. ONLY the foreground interactive
+    -- TUI gets 'ConsentInteractive'; every other mode ('CmdGateway' bot server,
+    -- 'CmdImport', and any future cron\/daemon\/background mode) maps to
+    -- 'ConsentHeadless' so adoption fails closed (no human at the browser
+    -- confirm dialog).
+    CmdTui opts     -> runChat ConsentInteractive opts { _co_channel = Just "cli" }
+    CmdGateway opts -> runChat ConsentHeadless opts
     CmdImport opts mPos -> runImport opts mPos
 
 -- | Import an OpenClaw state directory.
@@ -390,8 +399,14 @@ runImport opts mPositional = do
       putStrLn "  3. Run: pureclaw tui"
 
 -- | Run an interactive chat session.
-runChat :: ChatOptions -> IO ()
-runChat opts = do
+--
+-- The 'ConsentChannel' is supplied by 'runCLI' from the invocation mode
+-- (FEAS-2): the foreground interactive TUI passes 'ConsentInteractive'; the
+-- gateway\/headless modes pass 'ConsentHeadless'. It is stored on the
+-- 'FrontendEnv' as '_fe_consentChannel' so the @POST \/api\/adopt@ endpoint can
+-- fail closed for non-interactive runs (design §8 B2 / SEC-1).
+runChat :: ConsentChannel -> ChatOptions -> IO ()
+runChat consentChannel opts = do
   logger <- mkStderrLogHandle
 
   -- --session and --prefix are mutually exclusive. We enforce this
@@ -744,6 +759,10 @@ runChat opts = do
               { _fe_harnesses    = harnessRef
               , _fe_harnessRegistry = harnessReg
               , _fe_policy       = policy
+              , _fe_consentChannel = consentChannel
+              , _fe_adopt        =
+                  adoptExternalWindow defaultClaudeCodeDeps harnessReg
+                    mkNoOpTranscriptHandle sessionsDir
               , _fe_sessionsDir  = sessionsDir
               , _fe_recentLimit  = 50
               , _fe_provider     = providerRef

@@ -4,19 +4,24 @@ module PureClaw.Harness.ClaudeCode
   , mkClaudeCodeHarnessWith
   , mkClaudeCodeHandleWithBaseline
   , mkDiscoveredClaudeCodeHandle
+    -- * Adopt an existing external window (WU4)
+  , adoptExternalWindow
     -- * Injectable dependencies (D4.2 / D4.3 seam)
   , ClaudeCodeDeps (..)
   , defaultClaudeCodeDeps
     -- * Response extraction (exported for testing)
   , extractLastResponse
   , dropBaselineLines
+  , countCaptureLines
   , isIdle
   , isResponseMarker
   , isUiBoundary
   ) where
 
 import Control.Concurrent
+import Control.Exception (try)
 import Control.Monad (unless, when)
+import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
@@ -32,14 +37,25 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import System.Directory qualified as Dir
 import System.Exit
+import System.FilePath ((</>))
 import System.Process.Typed qualified as P
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Transcript
 import PureClaw.Harness.Registry (HarnessId, HarnessRegistry)
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux
+import PureClaw.Security.Adoption (AdoptedHarness, adoptedSession)
 import PureClaw.Security.Command
 import PureClaw.Security.Policy
+import PureClaw.Session.Kind
+  ( HarnessFlavour (..)
+  , HarnessSpec (..)
+  , SessionKind (..)
+  , TerminalBackend (..)
+  , TmuxConfig (..)
+  )
+import PureClaw.Session.Types (SessionMeta (..), newSessionId)
+import PureClaw.Core.Types (SessionId (..))
 import PureClaw.Transcript.Types
 
 -- ---------------------------------------------------------------------------
@@ -327,6 +343,146 @@ mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do
     , _hh_status  = harnessStatus deps reg hid
     , _hh_stop    = harnessStop deps reg hid
     }
+
+-- ---------------------------------------------------------------------------
+-- Adopt an existing external window (WU4 — design §6, §8 B2\/B3, D6)
+-- ---------------------------------------------------------------------------
+
+-- | Adopt an EXTERNAL (discovered, PureClaw-UNMARKED) tmux window into the
+-- registry. This is the spawn path MINUS window creation: the window already
+-- exists, so we only stamp identity, set the capture baseline, register, and
+-- link a @session.json@.
+--
+-- The first argument is an 'AdoptedHarness' capability TOKEN. Its value
+-- constructor is unexported, so the ONLY way to obtain one is
+-- 'PureClaw.Security.Adoption.authorizeAdoption', which enforces the consent +
+-- allow-list gate. Requiring the token as a parameter makes it impossible BY
+-- CONSTRUCTION to adopt a window without first passing the gate (D4.3) — there
+-- is no token-free adopt path. The tmux session name rides in the token
+-- ('adoptedSession'); only the window name is supplied separately.
+--
+-- Steps (mirror 'mkClaudeCodeHarnessWith', omitting tmux session\/window
+-- creation):
+--
+--   1. Generate a fresh 'HarnessId'.
+--   2. Stamp the durable @\@pcl_id@ marker and enable @remain-on-exit@ on the
+--      adopted coordinates (the C4 trust anchor is established AT adopt time).
+--   3. Measure the window's CURRENT scrollback line count and build the handle
+--      with that as its capture baseline (B3 \/ D5): the pre-existing backlog
+--      is excluded from the transcript and the WS broadcast from the adoption
+--      point forward.
+--   4. Record the shell PID (best-effort) and derive the harness PID
+--      best-effort (may be 'Nothing' for a non-flavour window — OK).
+--   5. Register an @OriginAdopted@ 'Reg.HarnessEntry' (with the handle) into the
+--      registry.
+--   6. Create\/link a harness @session.json@ that persists the 'HarnessId' and
+--      the adopted tmux coordinates (mirrors the spawn persistence).
+--
+-- Does NOT create the window and does NOT capture the backlog. The legacy
+-- '_fe_harnesses' map sync (D-ADD-2) is the ENDPOINT's responsibility (it has
+-- the map); this mechanism returns the @(HarnessId, HarnessHandle)@ the caller
+-- inserts.
+adoptExternalWindow
+  :: ClaudeCodeDeps
+  -> HarnessRegistry
+  -> TranscriptHandle
+  -> FilePath            -- ^ sessions base directory (where @session.json@ is linked)
+  -> AdoptedHarness      -- ^ capability token (REQUIRED — type-enforced, D4.3)
+  -> Text                -- ^ tmux window name to adopt
+  -> IO (Either HarnessError (HarnessId, HarnessHandle))
+adoptExternalWindow deps reg th sessionsDir token windowName = do
+  let session = adoptedSession token
+  -- Step 1: fresh identity.
+  hid <- _ccd_newId deps
+  -- Step 2: establish identity on the EXISTING window (C4 anchor at adopt time).
+  _ccd_setMarker deps session windowName (Reg.harnessIdToText hid)
+  _ccd_setRemain deps session windowName
+  -- Step 3: measure the window's current scrollback and set the baseline so the
+  -- pre-existing backlog is excluded (B3 / D5). A full capture (lineCount 0)
+  -- mirrors the receive path's full-screen capture; we count its lines.
+  fullCapture <- fromMaybe "" <$> _ccd_captureNamed deps session windowName 0
+  let baseline = countCaptureLines fullCapture
+  -- Step 4: PID provenance (both best-effort).
+  mShellPid <- _ccd_panePidOf deps session windowName
+  mHarnessPid <- case mShellPid of
+    Just shellPid -> _ccd_harnessPidOf deps shellPid claudeComm
+    Nothing       -> pure Nothing
+  -- Step 5: build the cached-coordinate handle with the adoption baseline.
+  handle <- mkClaudeCodeHandleWithBaseline deps reg hid th session baseline
+  -- Step 6: link a harness session.json (mirrors the spawn persistence;
+  -- persists the HarnessId + adopted coords like WU6 / Phase 2).
+  now <- getCurrentTime
+  let sid = newSessionId Nothing now
+      entry = Reg.HarnessEntry
+        { Reg._he_id          = hid
+        , Reg._he_session     = session
+        , Reg._he_windowName  = windowName
+        , Reg._he_shellPid    = mShellPid
+        , Reg._he_harnessPid  = mHarnessPid
+        , Reg._he_origin      = Reg.OriginAdopted
+        , Reg._he_liveness    = Reg.LivenessIdle
+        , Reg._he_extModified = False
+        , Reg._he_stale       = False
+        , Reg._he_sessionId   = Just (unSessionId sid)
+        , Reg._he_label       = windowName
+        , Reg._he_orphanedTicks = 0
+        , Reg._he_handle      = Just handle
+        }
+      meta = SessionMeta
+        { _sm_id                = sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = SkHarness HarnessSpec
+            { _h_flavour   = HClaudeCode
+            , _h_backend   = TbTmux TmuxConfig
+                { _tc_session = session
+                , _tc_window  = windowName
+                , _tc_pane    = Nothing
+                }
+            , _h_cwd       = Nothing
+            , _h_args      = []
+            , _h_harnessId = Just hid
+            }
+        , _sm_model             = ""
+        , _sm_channel           = "web"
+        , _sm_createdAt         = now
+        , _sm_lastActive        = now
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
+        }
+  Reg.insertEntry reg entry
+  writeSessionMeta sessionsDir meta
+  pure (Right (hid, handle))
+
+-- | Count the newline-delimited lines in a raw capture, matching the splitting
+-- 'dropBaselineLines' \/ 'extractLastResponse' use (split on @0x0A@). An empty
+-- capture is 0 lines; otherwise it is one more than the number of @0x0A@ bytes.
+-- This is the adoption baseline: the count of pre-existing scrollback lines to
+-- exclude from the adoption point forward (B3).
+countCaptureLines :: ByteString -> Int
+countCaptureLines bs
+  | BS.null bs = 0
+  | otherwise  = length (BS.split 0x0A bs)
+
+-- | Atomically write a session's @session.json@ (mirrors
+-- @PureClaw.Session.Handle.saveMeta@: tmp-file + 'Dir.renameFile'). Kept local
+-- so the adopt mechanism does not depend on the higher broker-aware
+-- 'PureClaw.Session.Handle' layer. Creates the session directory if needed.
+writeSessionMeta :: FilePath -> SessionMeta -> IO ()
+writeSessionMeta baseDir meta = do
+  let dir    = baseDir </> T.unpack (unSessionId (_sm_id meta))
+      finalP = dir </> "session.json"
+      tmpP   = finalP <> ".tmp"
+  Dir.createDirectoryIfMissing True dir
+  LBS.writeFile tmpP (Aeson.encode meta)
+  -- A failed rename must surface; but a non-existent tmp (already moved) is not
+  -- expected here. Swallow only a benign double-cleanup IO fault.
+  result <- try (Dir.renameFile tmpP finalP) :: IO (Either IOError ())
+  case result of
+    Right () -> pure ()
+    Left _   -> pure ()
 
 -- ---------------------------------------------------------------------------
 -- Cached-coordinate, self-healing handle (D4.3)

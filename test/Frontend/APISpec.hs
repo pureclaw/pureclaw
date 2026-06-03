@@ -47,6 +47,7 @@ import PureClaw.Handles.Harness
 import PureClaw.Harness.Discovery (DiscoverableWindow (..))
 import PureClaw.Harness.Registry qualified as Registry
 import Data.ByteString (ByteString)
+import PureClaw.Security.Adoption (AdoptedHarness, ConsentChannel (..))
 import PureClaw.Security.Command (CommandError (..))
 import PureClaw.Security.Policy
   ( SecurityPolicy (..)
@@ -780,6 +781,141 @@ spec = do
       case Aeson.decode respBody of
         Just (Aeson.Array _) -> pure ()
         _ -> expectationFailure "Expected a JSON array body"
+
+  describe "POST /api/adopt (Phase 3 WU4 — typed default-deny consent gate, SEC-1)" $ do
+    -- A policy whose allow-list admits the target session, used by the
+    -- allow-path and the headless-denial tests (so the ONLY difference between
+    -- allow and deny in D4.2's first case is the consent CHANNEL).
+    let adoptPat = case parseSessionPattern "scratch" of
+          Just p  -> p
+          Nothing -> error "test setup: pattern rejected"
+        allowPolicy = defaultPolicy { _sp_adoptableSessionPatterns = [adoptPat] }
+        adoptBody s w = Aeson.encode $ object
+          [ "session"           .= (s :: Text)
+          , "window"            .= (w :: Text)
+          , "consent_confirmed" .= True
+          ]
+
+    it "D4.2 (SEC-1) returns 403 for a ConsentHeadless env EVEN with an allow-listed session + consent_confirmed:true, and calls _fe_adopt ZERO times (no tmux mutation)" $ do
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_policy         = allowPolicy
+            , _fe_consentChannel = ConsentHeadless  -- the ONLY denial cause here
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-0")
+      st `shouldBe` HTTP.status403
+      -- No tmux mutation on denial: the adopt mechanism was never invoked, so
+      -- nothing was stamped (@pcl_id) and no entry could be created.
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 0
+      -- And the registry remains empty.
+      entries <- Registry.snapshot (_fe_harnessRegistry env)
+      length entries `shouldBe` 0
+
+    it "D4.2 (SEC-1) returns 403 for a NON-allow-listed session with ConsentInteractive, and calls _fe_adopt ZERO times" $ do
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_policy         = defaultPolicy  -- empty allow-list: default-deny
+            , _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "not-allowed" "win-0")
+      st `shouldBe` HTTP.status403
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 0
+      entries <- Registry.snapshot (_fe_harnessRegistry env)
+      length entries `shouldBe` 0
+
+    it "returns 400 when consent_confirmed is false/absent, and calls _fe_adopt ZERO times" $ do
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_policy         = allowPolicy
+            , _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+          noConsent = Aeson.encode $ object
+            [ "session" .= ("scratch" :: Text), "window" .= ("win-0" :: Text) ]
+      (st, _) <- postJSON env ["api", "adopt"] noConsent
+      st `shouldBe` HTTP.status400
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 0
+
+    it "the gate token is type-enforced: _fe_adopt is reachable ONLY on Right (allow-listed + interactive)" $ do
+      -- D4.3 mirror at the endpoint layer: _fe_adopt receives an AdoptedHarness
+      -- argument and is invoked EXACTLY ONCE only on the allow path, with the
+      -- requested window. (The mechanism's own type-enforcement is asserted in
+      -- Harness.ClaudeCodeSpec — there is no token-free adopt path.)
+      env0 <- mkTestFrontendEnv
+      gotWindow <- newIORef Nothing
+      let env = env0
+            { _fe_policy         = allowPolicy
+            , _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \(_tok :: AdoptedHarness) w -> do
+                writeIORef gotWindow (Just w)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-7")
+      st `shouldBe` HTTP.status200
+      readIORef gotWindow `shouldReturn` Just "win-7"
+
+    it "syncs the legacy _fe_harnesses map on a successful adopt (D-ADD-2)" $ do
+      env0 <- mkTestFrontendEnv
+      let env = env0
+            { _fe_policy         = allowPolicy
+            , _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ _ ->
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-9")
+      st `shouldBe` HTTP.status200
+      handles <- readIORef (_fe_harnesses env)
+      Map.member "win-9" handles `shouldBe` True
+
+    it "D4.4 a freshly-adopted window appears in GET /api/tabs with origin=\"adopted\" + an attach_command" $ do
+      -- End-to-end at the endpoint: a real registry, a _fe_adopt that inserts an
+      -- OriginAdopted entry (as the production mechanism does), and the
+      -- production-wired _fe_listTabs. After POST /api/adopt the tab list shows
+      -- the adopted row.
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          reg = _fe_harnessRegistry env0
+          env = env0
+            { _fe_policy         = allowPolicy
+            , _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \tok w -> do
+                Registry.insertEntry reg
+                  ((baseEntry hid w (Just mkNoOpHarnessHandle))
+                    { Registry._he_session    = "scratch"
+                    , Registry._he_windowName = w
+                    , Registry._he_label      = w
+                    , Registry._he_origin     = Registry.OriginAdopted
+                    , Registry._he_shellPid   = Just 4242  -- corroborated
+                    })
+                _ <- pure (tok :: AdoptedHarness)
+                pure (Right (hid, mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-adopted")
+      st `shouldBe` HTTP.status200
+      (tabSt, tabBody) <- getJSON env ["api", "tabs"]
+      tabSt `shouldBe` HTTP.status200
+      case Aeson.decode tabBody of
+        Just (Aeson.Array items) -> case toList' items of
+          [t] -> do
+            lookupKey t "origin" `shouldBe` Just (Aeson.String "adopted")
+            lookupKey t "attach_command"
+              `shouldBe` Just (Aeson.String "tmux attach -t scratch:win-adopted")
+          other -> expectationFailure ("expected one tab, got " <> show (length other))
+        _ -> expectationFailure "expected a JSON array of tabs"
 
   -- -----------------------------------------------------------------------
   -- WU8: registry-backed Active-Tabs slice (the reported symptom)
@@ -2538,6 +2674,8 @@ mkTestFrontendEnvWith maxTabs = do
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
     , _fe_policy       = defaultPolicy
+    , _fe_consentChannel = ConsentHeadless  -- fail-closed default; adopt tests override
+    , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
     , _fe_recentLimit  = 20
     , _fe_provider     = provRef

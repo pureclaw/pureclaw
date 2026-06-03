@@ -40,7 +40,7 @@ import Control.Concurrent.STM (TVar, newTVarIO)
 import Control.Exception (IOException, SomeException, bracket, bracket_, try)
 import Control.Monad (filterM, unless, when)
 import Data.Aeson qualified as Aeson
-import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
+import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?), (.!=))
 import Data.Aeson.Types qualified as AesonTypes
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
@@ -87,6 +87,12 @@ import PureClaw.Handles.Tab (TabKind (..))
 import PureClaw.Harness.Discovery (DiscoverableWindow, scanDiscoverableIO)
 import PureClaw.Harness.Reconcile (livenessToActivity)
 import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Security.Adoption
+  ( AdoptError (..)
+  , AdoptedHarness
+  , ConsentChannel (..)
+  , authorizeAdoption
+  )
 import PureClaw.Security.Policy (SecurityPolicy)
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
@@ -131,6 +137,25 @@ data FrontendEnv = FrontendEnv
     -- ('_sp_adoptableSessionPatterns') — discovery is BOUNDED to the allow-list
     -- (design @docs\/harness-registry.md@ §8 B4). Default-deny: an empty
     -- allow-list discovers nothing.
+  , _fe_consentChannel :: ConsentChannel
+    -- ^ Whether the run that drives this frontend was launched as the
+    -- foreground interactive TUI ('ConsentInteractive') or anything else
+    -- ('ConsentHeadless'). The @POST \/api\/adopt@ endpoint passes this to
+    -- 'authorizeAdoption' BEFORE any tmux mutation, so a headless\/gateway\/
+    -- import run is denied even with an allow-listed session + a valid consent
+    -- body (design §8 B2, SEC-1\/FEAS-2). Tests default to 'ConsentHeadless'
+    -- (fail-closed).
+  , _fe_adopt        :: AdoptedHarness -> Text -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle))
+    -- ^ Adopt an external, discovered tmux window into the registry. The
+    -- 'AdoptedHarness' argument is the capability token from 'authorizeAdoption'
+    -- (its value constructor is unexported, so this seam is impossible to call
+    -- without first passing the consent + allow-list gate — D4.3, type-enforced).
+    -- The 'Text' is the window name to adopt; the session rides in the token.
+    -- The dispatcher wires the real 'adoptExternalWindow' mechanism (which
+    -- stamps @\@pcl_id@, sets the capture baseline to the current scrollback
+    -- end, registers an @OriginAdopted@ entry, and links a @session.json@); the
+    -- default test stub returns @Left@. The endpoint additionally syncs the
+    -- legacy '_fe_harnesses' map on success (D-ADD-2).
   , _fe_sessionsDir  :: FilePath
     -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
   , _fe_recentLimit  :: Int
@@ -530,6 +555,8 @@ apiApp env req respond = do
       handleNewTab env req respond
     ("POST", ["api", "discovery", "scan"]) ->
       handleDiscoveryScan env respond
+    ("POST", ["api", "adopt"]) ->
+      handleAdopt env req respond
     ("POST", ["api", "sessions", "new"]) ->
       handleNewSessionGone respond
     ("POST", ["api", "sessions", sid, "send"]) ->
@@ -584,6 +611,85 @@ handleDiscoveryScan :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO Re
 handleDiscoveryScan env respond = do
   candidates <- scanDiscoverableIO (_fe_policy env)
   respond $ jsonResponse status200 (candidates :: [DiscoverableWindow])
+
+-- | Request body for @POST \/api\/adopt@. A discovered candidate has NO tab
+-- index (it is not a registry entry yet), so it is addressed by
+-- @session@ + @window@ — the "resolve a 'DiscoverableWindow' target" shape. The
+-- @consent_confirmed@ flag is the browser dialog's confirmation; the endpoint
+-- requires it @== true@ (a 400 otherwise) AND independently requires an
+-- interactive consent CHANNEL via 'authorizeAdoption' (a 403 otherwise) — a
+-- client cannot bypass the channel check by sending @consent_confirmed:true@.
+data AdoptRequest = AdoptRequest
+  { _ar_session          :: !Text
+  , _ar_window           :: !Text
+  , _ar_consentConfirmed :: !Bool
+  }
+
+instance FromJSON AdoptRequest where
+  parseJSON = Aeson.withObject "AdoptRequest" $ \o ->
+    AdoptRequest
+      <$> o .: "session"
+      <*> o .: "window"
+      <*> o .:? "consent_confirmed" .!= False
+
+-- | @POST \/api\/adopt@ — adopt an external (discovered, UNMARKED) tmux window
+-- into the registry (Phase 3, WU4). SECURITY-CRITICAL ordering (SEC-1):
+-- 'authorizeAdoption' runs BEFORE any tmux mutation, so a denied request stamps
+-- NO @\@pcl_id@ and creates NO registry entry.
+--
+-- Steps:
+--
+--   1. Decode the body; require @consent_confirmed == true@ (else @400@).
+--   2. 'authorizeAdoption' (_fe_policy) (_fe_consentChannel) session:
+--
+--        * @Left AdoptNoConsentChannel@ → @403@ (a headless\/gateway\/import run
+--          has no human at the confirm dialog — fail-closed, dominates even an
+--          allow-listed session + @consent_confirmed:true@).
+--        * @Left (AdoptNotAllowed _)@ → @403@ (the session is not on the
+--          adoption allow-list; default-deny).
+--        * @Right token@ → run '_fe_adopt' with the token. On success @200@; on
+--          a tmux\/adopt failure @500@.
+--
+-- On a successful adopt the legacy '_fe_harnesses' map is synced (D-ADD-2) so
+-- name-keyed routing keeps working until the session.json id is consulted.
+handleAdopt :: FrontendEnv -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleAdopt env req respond = do
+  body <- consumeBody req
+  case Aeson.eitherDecode body of
+    Left err ->
+      respond $ jsonResponse status400
+        (object ["error" .= ("Invalid JSON: " <> T.pack err)])
+    Right ar
+      | not (_ar_consentConfirmed ar) ->
+          respond $ jsonResponse status400
+            (object ["error" .= ("adoption requires consent_confirmed: true" :: Text)])
+      | otherwise ->
+          -- SEC-1: the gate runs BEFORE any tmux mutation. On Left we respond
+          -- and NEVER call '_fe_adopt', so nothing is stamped/registered.
+          case authorizeAdoption (_fe_policy env) (_fe_consentChannel env) (_ar_session ar) of
+            Left AdoptNoConsentChannel ->
+              respond $ jsonResponse status403
+                (object ["error" .= ("adoption requires an interactive consent channel" :: Text)])
+            Left (AdoptNotAllowed s) ->
+              respond $ jsonResponse status403
+                (object ["error" .= ("session not adoptable: " <> s)])
+            Right token -> do
+              result <- _fe_adopt env token (_ar_window ar)
+              case result of
+                Left err ->
+                  respond $ harnessErrorResponse err
+                Right (hid, hh) -> do
+                  -- D-ADD-2: sync the legacy name-keyed map so name-fallback
+                  -- routing reaches the adopted handle immediately.
+                  modifyIORef' (_fe_harnesses env) (Map.insert (_ar_window ar) hh)
+                  broadcastLists env
+                  respond $ jsonResponse status200
+                    (object
+                      [ "adopted"     .= True
+                      , "harness_id"  .= Registry.harnessIdToText hid
+                      , "session"     .= _ar_session ar
+                      , "window"      .= _ar_window ar
+                      ])
 
 -- | Close a tab by index via the '_fe_closeTab' callback.
 handleCloseTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived

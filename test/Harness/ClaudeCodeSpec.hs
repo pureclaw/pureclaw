@@ -1,11 +1,17 @@
 module Harness.ClaudeCodeSpec (spec) where
 
+import Control.Monad (filterM)
+import Data.Either (rights)
 import Data.IORef
 import Data.Maybe (fromMaybe)
+import Data.Maybe qualified as Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import System.Directory (doesFileExist, listDirectory)
 import System.Exit (ExitCode (..))
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import PureClaw.Core.Types
@@ -14,8 +20,13 @@ import PureClaw.Handles.Transcript
 import PureClaw.Harness.ClaudeCode
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux (TmuxWindowRow (..))
+import PureClaw.Security.Adoption
 import PureClaw.Security.Command
 import PureClaw.Security.Policy
+import PureClaw.Session.Kind
+import PureClaw.Session.Types (SessionMeta (..))
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import PureClaw.Transcript.Types
 
 -- | Helper: assert that a result is a specific Left error.
@@ -523,6 +534,119 @@ spec = do
       out <- _hh_receive hh
       out `shouldBe` TE.encodeUtf8 "the answer"
 
+  describe "adoptExternalWindow (WU4 — typed-gated adopt mechanism)" $ do
+    -- D4.3: there is NO token-free adopt path. 'adoptExternalWindow' REQUIRES
+    -- an 'AdoptedHarness', which is constructible ONLY via 'authorizeAdoption'.
+    -- The only way a test (or any caller) obtains the token is by passing the
+    -- consent + allow-list gate, so every test below first runs the gate.
+    let adoptableSession = "scratch"
+        gatePolicy =
+          defaultPolicy
+            { _sp_adoptableSessionPatterns =
+                case parseSessionPattern adoptableSession of
+                  Just p  -> [p]
+                  Nothing -> error "test setup: pattern rejected"
+            }
+        mkToken =
+          case authorizeAdoption gatePolicy ConsentInteractive adoptableSession of
+            Right tok -> tok
+            Left e    -> error ("test setup: gate denied: " <> show e)
+
+    it "D4.1 stamps @pcl_id + remain-on-exit, records the shell PID, and registers an OriginAdopted entry + legacy map" $
+      withSystemTempDirectory "pcl-adopt" $ \tmp -> do
+        reg <- Reg.newRegistry
+        legacyRef <- newIORef (mempty :: [(Text, Text)])  -- (session, window) of registered handle
+        markersRef <- newIORef ([] :: [(Text, Text, Text)])  -- (session, window, uuid)
+        remainRef  <- newIORef ([] :: [(Text, Text)])
+        -- A window with a NON-empty current scrollback so the baseline ≠ 0.
+        let backlog = TE.encodeUtf8 (T.intercalate "\n"
+              [ "old line 1", "old line 2", "old line 3" ])
+            deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_setMarker    = \s w u -> modifyIORef' markersRef ((s, w, u) :)
+              , _ccd_setRemain    = \s w -> modifyIORef' remainRef ((s, w) :)
+              , _ccd_panePidOf    = \_ _ -> pure (Just 4242)
+              , _ccd_harnessPidOf = \_ _ -> pure Nothing  -- non-flavour window: OK
+              , _ccd_captureNamed = \_ _ _ -> pure (Just backlog)
+              }
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-3"
+        case result of
+          Left e -> expectationFailure ("adopt failed: " <> show e)
+          Right (hid, _hh) -> do
+            -- @pcl_id stamped with the new id, on the adopted coordinates.
+            markers <- readIORef markersRef
+            markers `shouldBe` [(adoptableSession, "win-3", Reg.harnessIdToText hid)]
+            -- remain-on-exit set on the adopted coordinates.
+            remains <- readIORef remainRef
+            remains `shouldBe` [(adoptableSession, "win-3")]
+            -- Registry entry: OriginAdopted, shell PID recorded, with a handle.
+            mEntry <- Reg.lookupById reg hid
+            case mEntry of
+              Nothing -> expectationFailure "expected an OriginAdopted registry entry"
+              Just e  -> do
+                Reg._he_origin e     `shouldBe` Reg.OriginAdopted
+                Reg._he_session e    `shouldBe` adoptableSession
+                Reg._he_windowName e `shouldBe` "win-3"
+                Reg._he_shellPid e   `shouldBe` Just 4242
+                Maybe.isJust (Reg._he_handle e) `shouldBe` True
+            _ <- pure legacyRef  -- legacy map sync is the caller's job (endpoint); see APISpec D4.x
+            pure ()
+
+    it "D4.1 sets the capture baseline to the window's CURRENT scrollback line count (≠ 0 with backlog)" $
+      withSystemTempDirectory "pcl-adopt" $ \tmp -> do
+        -- NON-TAUTOLOGICAL: the ONLY response marker (⏺ + SECRET) lives in the
+        -- backlog that exists at adopt time. After adoption the baseline must
+        -- exclude that backlog, so a subsequent receive (capturing the SAME
+        -- screen) must NOT surface the SECRET. If the baseline were 0, the
+        -- marker would be extracted and the test would go RED.
+        reg <- Reg.newRegistry
+        entriesRef <- newIORef []
+        let transcript = mkNoOpTranscriptHandle
+              { _th_record = \entry -> modifyIORef' entriesRef (entry :) }
+            backlog = [ "\x23FA OLD SECRET backlog response", "more backlog text" ]
+            postIdle = [ "\x276F " ]
+            -- The screen at adopt time AND at receive time is identical: backlog
+            -- followed by an idle prompt. Adopt measures the backlog as baseline.
+            fullScreen = TE.encodeUtf8 (T.intercalate "\n" (backlog <> postIdle))
+            deps = okDeps
+              { _ccd_panePidOf    = \_ _ -> pure (Just 99)
+              , _ccd_captureNamed = \_ _ _ -> pure (Just fullScreen)
+              }
+        Right (_, hh) <-
+          adoptExternalWindow deps reg transcript tmp mkToken "win-baseline"
+        out <- _hh_receive hh
+        -- The pre-adoption backlog (incl. its SECRET marker) is excluded.
+        TE.decodeUtf8Lenient out `shouldNotSatisfy` T.isInfixOf "SECRET"
+        entries <- readIORef entriesRef
+        let resps = filter (\e -> _te_direction e == Response) entries
+        case resps of
+          (entry : _) -> _te_payload entry `shouldNotSatisfy` T.isInfixOf "SECRET"
+          []          -> expectationFailure "expected a Response transcript entry"
+
+    it "D4.1 creates a session.json carrying _h_harnessId + the adopted coords" $
+      withSystemTempDirectory "pcl-adopt" $ \tmp -> do
+        reg <- Reg.newRegistry
+        let deps = okDeps
+              { _ccd_panePidOf    = \_ _ -> pure (Just 7)
+              , _ccd_captureNamed = \_ _ _ -> pure (Just "line\n")
+              }
+        Right (hid, _) <-
+          adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-sess"
+        -- Exactly one session dir was created; its session.json loads and
+        -- carries the harness id + adopted tmux coordinates.
+        metas <- loadAllSessionMetas tmp
+        case metas of
+          [meta] -> case _sm_kind meta of
+            SkHarness hs -> do
+              _h_harnessId hs `shouldBe` Just hid
+              case _h_backend hs of
+                TbTmux tc -> do
+                  _tc_session tc `shouldBe` adoptableSession
+                  _tc_window tc  `shouldBe` "win-sess"
+                other -> expectationFailure ("expected TbTmux backend, got " <> show other)
+            other -> expectationFailure ("expected SkHarness kind, got " <> show other)
+          other -> expectationFailure ("expected exactly one session.json, got " <> show (length other))
+
   describe "discovered handle" $ do
     it "mkDiscoveredClaudeCodeHandle threads the real session name" $ do
       let transcript = mkNoOpTranscriptHandle
@@ -541,3 +665,14 @@ spawnOk reg deps =
     "pureclaw" "claude-code-0" 0 Nothing [] reg
   where
     policy = withAutonomy Full $ allowCommand (CommandName "claude") defaultPolicy
+
+-- | Load every @session.json@ under a sessions base directory (one per
+-- immediate sub-directory). Used by the adopt tests to assert exactly one
+-- session was created and that it carries the expected harness coordinates.
+loadAllSessionMetas :: FilePath -> IO [SessionMeta]
+loadAllSessionMetas baseDir = do
+  entries <- listDirectory baseDir
+  let metaPaths = [ baseDir </> e </> "session.json" | e <- entries ]
+  present <- filterM doesFileExist metaPaths
+  metas <- mapM (fmap Aeson.eitherDecode' . LBS.readFile) present
+  pure (rights metas)

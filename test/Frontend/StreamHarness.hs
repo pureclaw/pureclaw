@@ -52,6 +52,7 @@ import PureClaw.Handles.Harness (HarnessError (..))
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Security.Adoption (ConsentChannel (..))
 import PureClaw.Security.Policy (defaultPolicy)
 import PureClaw.Tools.Registry (emptyRegistry)
 
@@ -83,6 +84,8 @@ mkTestFrontendEnv sessionsDir broker guard = do
     { _fe_harnesses    = harnesses
     , _fe_harnessRegistry = harnessReg
     , _fe_policy       = defaultPolicy
+    , _fe_consentChannel = ConsentHeadless  -- tests fail-closed
+    , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_sessionsDir  = sessionsDir
     , _fe_recentLimit  = 20
     , _fe_provider     = providerRef
