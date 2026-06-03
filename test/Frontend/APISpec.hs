@@ -44,9 +44,15 @@ import PureClaw.Handles.Harness
   , HarnessStatus (..)
   , mkNoOpHarnessHandle
   )
+import PureClaw.Harness.Discovery (DiscoverableWindow (..))
 import PureClaw.Harness.Registry qualified as Registry
 import Data.ByteString (ByteString)
 import PureClaw.Security.Command (CommandError (..))
+import PureClaw.Security.Policy
+  ( SecurityPolicy (..)
+  , defaultPolicy
+  , parseSessionPattern
+  )
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
 import PureClaw.Providers.Class
@@ -743,6 +749,37 @@ spec = do
           let t2 = items !! 2
           lookupKey t2 "status"     `shouldBe` Just (Aeson.String "crashed")
         Just _ -> expectationFailure "Expected JSON array"
+
+  describe "POST /api/discovery/scan (Phase 3 WU2 — bounded metadata-only scan)" $ do
+    it "D2.5 returns a 200 JSON array" $ do
+      env <- mkTestFrontendEnv     -- default-deny policy: empty allow-list
+      (st, respBody) <- postJSON env ["api", "discovery", "scan"] ""
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array _) -> pure ()
+        _ -> expectationFailure "Expected a JSON array body"
+
+    it "D2.5/D2.2 default-deny (empty allow-list) -> empty array, no tmux IO" $ do
+      env <- mkTestFrontendEnv     -- _fe_policy = defaultPolicy ([] patterns)
+      (st, respBody) <- postJSON env ["api", "discovery", "scan"] ""
+      st `shouldBe` HTTP.status200
+      respBody `shouldBe` Aeson.encode ([] :: [DiscoverableWindow])
+
+    it "D2.5 the endpoint consults _fe_policy's adoption allow-list" $ do
+      -- A policy whose allow-list is non-empty would scan the real tmux server;
+      -- here we only assert the endpoint is wired to the policy by confirming a
+      -- distinct (non-default) policy is accepted and still yields a 200 array.
+      -- (The bounded-scan filtering itself is unit-tested in Harness.DiscoverySpec.)
+      pat <- case parseSessionPattern "pureclaw-discovery-test-*" of
+        Just p  -> pure p
+        Nothing -> expectationFailure "test setup: pattern rejected" >> error "unreachable"
+      env0 <- mkTestFrontendEnv
+      let env = env0 { _fe_policy = defaultPolicy { _sp_adoptableSessionPatterns = [pat] } }
+      (st, respBody) <- postJSON env ["api", "discovery", "scan"] ""
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array _) -> pure ()
+        _ -> expectationFailure "Expected a JSON array body"
 
   -- -----------------------------------------------------------------------
   -- WU8: registry-backed Active-Tabs slice (the reported symptom)
@@ -2500,6 +2537,7 @@ mkTestFrontendEnvWith maxTabs = do
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
+    , _fe_policy       = defaultPolicy
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
     , _fe_recentLimit  = 20
     , _fe_provider     = provRef

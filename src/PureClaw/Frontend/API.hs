@@ -84,8 +84,10 @@ import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Tab (TabKind (..))
+import PureClaw.Harness.Discovery (DiscoverableWindow, scanDiscoverableIO)
 import PureClaw.Harness.Reconcile (livenessToActivity)
 import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Security.Policy (SecurityPolicy)
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
   ( BranchError (..)
@@ -123,6 +125,12 @@ data FrontendEnv = FrontendEnv
     -- 'Registry.HarnessId' that survives tmux rename\/move and restart. Shares
     -- the SAME underlying 'TVar' as 'AgentEnv._env_harnessRegistry' so the
     -- frontend and agent observe the same registry.
+  , _fe_policy       :: SecurityPolicy
+    -- ^ The active security policy. Carried here so the discovery\/adoption
+    -- endpoints can consult the adoption allow-list
+    -- ('_sp_adoptableSessionPatterns') — discovery is BOUNDED to the allow-list
+    -- (design @docs\/harness-registry.md@ §8 B4). Default-deny: an empty
+    -- allow-list discovers nothing.
   , _fe_sessionsDir  :: FilePath
     -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
   , _fe_recentLimit  :: Int
@@ -520,6 +528,8 @@ apiApp env req respond = do
       handleRestartTab respond
     ("POST", ["api", "tabs", "new"]) ->
       handleNewTab env req respond
+    ("POST", ["api", "discovery", "scan"]) ->
+      handleDiscoveryScan env respond
     ("POST", ["api", "sessions", "new"]) ->
       handleNewSessionGone respond
     ("POST", ["api", "sessions", sid, "send"]) ->
@@ -563,6 +573,17 @@ handleListTabs :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO Respons
 handleListTabs env respond = do
   tabs <- _fe_listTabs env
   respond $ jsonResponse status200 tabs
+
+-- | On-demand discovery of adoptable (PureClaw-unmarked) tmux windows
+-- (Phase 3, WU2). The scan is BOUNDED to the policy's adoption allow-list
+-- ('_sp_adoptableSessionPatterns') and is METADATA-ONLY — it never captures a
+-- pane (design @docs\/harness-registry.md@ §8 B4\/C1). With the default-deny
+-- empty allow-list this returns @[]@. Discovered candidates are transient (not
+-- registry entries); adopting one is a separate, consent-gated action (WU4).
+handleDiscoveryScan :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleDiscoveryScan env respond = do
+  candidates <- scanDiscoverableIO (_fe_policy env)
+  respond $ jsonResponse status200 (candidates :: [DiscoverableWindow])
 
 -- | Close a tab by index via the '_fe_closeTab' callback.
 handleCloseTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived

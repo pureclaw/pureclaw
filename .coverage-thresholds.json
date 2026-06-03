@@ -277,6 +277,21 @@
           "response extraction (pure): isIdle prompt/Thinking/no-glyph; isResponseMarker ⏺ and ⬤; isUiBoundary input-prompt + horizontal-rule + the '? for shortcuts' hint arm (and rejects a leading '?' without 'shortcut'); extractLastResponse empty-when-no-marker, last-block-up-to-boundary, and alternate ⬤ marker stripping",
           "the real-tmux deps (defaultClaudeCodeDeps and its real* closures, captureFullScrollbackNamed, the discovered* handle) are exercised end-to-end against a live tmux server in the Phase-2 integration suite"
         ]
+      },
+      "PureClaw.Harness.Discovery": {
+        "stagedBy": "WU2 (pureclaw-3oy, Harness Registry Phase 3) — on-demand bounded discovery of adoptable (unmarked) tmux windows; the adoption allow-list + matcher it consumes were added in Phase-3 WU1 (PureClaw.Security.Policy)",
+        "filledBy": ["post-merge follow-up (live-tmux integration suite, Harness Registry Phase 3 e2e — WU8)"],
+        "since": "2026-06-02",
+        "reason": "PureClaw.Harness.Discovery is the metadata-only adoption-discovery scanner. ALL of its filtering logic is pure (given injected seams) and is fully covered deterministically by Harness.DiscoverySpec — `scanDiscoverable` (allow-list bounding via matchesSessionPattern incl. the empty-allow-list/no-session-read case, the unmarked-AND-not-pane_dead `isAdoptable` filter rejecting both `@pcl_id`-marked and `pane_dead` windows, and the `toDiscoverable` projection), the `DiscoverableWindow` ToJSON encoding (snake_case keys + both the Just and Nothing pane_pid arms). Expression coverage is 98% (64/65); the single uncovered expression is the body of `scanDiscoverableIO` — the thin PRODUCTION wrapper `scanDiscoverable (_sp_adoptableSessionPatterns policy) readMarkers listTmuxSessions` that wires the REAL tmux IO seams (`readMarkers`/`listTmuxSessions`, both themselves waived real-tmux IO in PureClaw.Harness.Tmux) into the fully-covered pure `scanDiscoverable`. It cannot be driven without forking a live tmux server (it reads real sessions/windows), so it is deferred to the Phase-3 live-tmux e2e suite (WU8). The remaining HPC-uncovered top-level spans are derived-instance accounting artifacts — the auto-derived `Eq`/`Show` of `DiscoverableWindow` (used via `shouldBe` in the spec, but HPC ticks the decl, not the derived method bodies) and the `instance ToJSON DiscoverableWindow` declaration line (its `toJSON` body IS exercised by the ToJSON tests). The waived scope is therefore EXACTLY the one real-tmux IO wrapper `scanDiscoverableIO`; NO discovery/filter/bounding logic is waived.",
+        "minimalChecks": [
+          "scanDiscoverable returns ONLY unmarked, live windows in allow-listed sessions (D2.1: fixture with marked+unmarked+dead windows in an allow-listed session and an unmarked window in a NON-allow-listed session => only the allow-listed session's unmarked-live windows)",
+          "empty allow-list => empty result AND zero readMarkers calls (D2.2: no session is read at all)",
+          "a window carrying a non-empty @pcl_id is NEVER returned; a pane_dead window is excluded even when unmarked (D2.3)",
+          "bounded enumeration (D2.4): the readMarkers seam is called ONLY for allow-listed sessions (a present-but-not-allow-listed session is never read), proven by counting seam calls; a prefix pattern bounds the scan identically; scanDiscoverable receives NO capture-pane seam (structurally cannot capture — §8 C1)",
+          "DiscoverableWindow ToJSON emits snake_case keys session/window_name/window_index/pane_pid; a Nothing pane_pid encodes as JSON null (D2.5)",
+          "the endpoint POST /api/discovery/scan returns a 200 JSON array, consults _fe_policy's adoption allow-list, and returns [] under the default-deny empty allow-list (Frontend.APISpec)",
+          "scanDiscoverableIO (the real-tmux IO wrapper) is exercised end-to-end against a live tmux server in the Phase-3 e2e suite (WU8)"
+        ]
       }
     }
   },

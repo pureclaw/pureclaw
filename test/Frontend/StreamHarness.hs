@@ -52,6 +52,7 @@ import PureClaw.Handles.Harness (HarnessError (..))
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Security.Policy (defaultPolicy)
 import PureClaw.Tools.Registry (emptyRegistry)
 
 -- | The default Origin used by tests. Tests that exercise the Origin
@@ -81,6 +82,7 @@ mkTestFrontendEnv sessionsDir broker guard = do
   pure FrontendEnv
     { _fe_harnesses    = harnesses
     , _fe_harnessRegistry = harnessReg
+    , _fe_policy       = defaultPolicy
     , _fe_sessionsDir  = sessionsDir
     , _fe_recentLimit  = 20
     , _fe_provider     = providerRef

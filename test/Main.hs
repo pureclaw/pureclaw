@@ -89,6 +89,7 @@ import qualified Transcript.TypesSpec
 import qualified Handles.TranscriptSpec
 import qualified Handles.HarnessSpec
 import qualified Harness.ClaudeCodeSpec
+import qualified Harness.DiscoverySpec
 import qualified Harness.ReconcileSpec
 import qualified Harness.RegistrySpec
 import qualified Harness.TmuxSpec
@@ -229,6 +230,7 @@ main = hspec $ do
   describe "Handles.Transcript" Handles.TranscriptSpec.spec
   describe "Handles.Harness" Handles.HarnessSpec.spec
   describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
+  describe "Harness.Discovery" Harness.DiscoverySpec.spec
   describe "Harness.Reconcile" Harness.ReconcileSpec.spec
   describe "Harness.Registry" Harness.RegistrySpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec

@@ -743,6 +743,7 @@ runChat opts = do
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_harnessRegistry = harnessReg
+              , _fe_policy       = policy
               , _fe_sessionsDir  = sessionsDir
               , _fe_recentLimit  = 50
               , _fe_provider     = providerRef
