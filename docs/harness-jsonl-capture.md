@@ -1,210 +1,255 @@
-# Design: Harness Conversation Capture via JSONL Session-Log Tail
+# Design: Optional High-Fidelity Harness Conversation View (claude-code JSONL log)
 
 **Issue:** `pureclaw-3oy.33` (epic `pureclaw-3oy`)
 **Branch:** `feat/harness-registry-p1`
-**Status:** draft — pending design-review gate
+**Status:** draft round 2 — addressing design-review-gate round 1; pending re-review
 **Author:** orchestrator (session of 2026-06-04)
 
-## Problem
+## Problem & guiding principle
 
-A user creates a PureClaw-spawned claude-code harness, sends some messages through
-the PureClaw UI (these appear), then types a message **directly into the harness's
-tmux window**. That out-of-band message and its response **never appear** in the
-PureClaw frontend session transcript.
+Observed bug: a user created a PureClaw-spawned claude-code harness, typed a message
+**directly into its tmux window** (not the PureClaw UI), and that message + response
+never appeared in the PureClaw frontend.
 
-### Root cause (verified)
+**Guiding principle (user decision):** the fundamental session experience must be
+**guaranteed to work for every harness flavour** and must **not depend on any
+harness-specific log**. Therefore:
 
-Harness transcript capture is driven **exclusively by PureClaw-initiated
-request/response cycles**:
+- The **default** harness transcript shows **exactly the messages PureClaw sent and
+  received** — the existing behaviour, unchanged, harness-agnostic.
+- Some harnesses (claude-code) *also* keep a richer structured log on disk. **When such
+  a log is available, PureClaw offers an optional control to view it** — a
+  higher-fidelity, complete record (including out-of-band turns). When it is not
+  available (other flavours, or an adopted harness), the control simply does not appear
+  and nothing degrades.
 
-- `harnessSend` (`ClaudeCode.hs:577`) records a `Request` entry and types the
-  message into tmux.
-- `harnessReceive` (`ClaudeCode.hs:608`) polls until idle, captures the **rendered
-  TUI screen** (`capture-pane`), runs `extractLastResponse` (grabs only the *last*
-  response), and records one `Response` entry.
-- These are invoked only from the UI send path (`API.hs:1946`), the agent loop
-  (`Loop.hs:173`), and `/msg` (`SlashCommands.hs:1209`).
+So this feature is **purely additive and optional**: it never replaces or modifies the
+guaranteed core transcript. The original bug is resolved *for spawned claude-code* by
+letting the user opt into the complete log view; for other harnesses the default
+PureClaw-sent/received transcript remains the (accepted) limit of what is capturable.
 
-The reconcile/activity loop captures the screen every 2 s but only to compute an
-`isIdle :: Bool` for the status dot (`Reconcile.hs:143`) — it discards the content.
+## Background: how harness capture works today
 
-**Nothing records activity the user initiates directly in tmux.** Worse,
-`extractLastResponse` only ever yields the latest response, so even the next
-UI-initiated turn would not backfill an intervening out-of-band exchange. Scraping a
-redrawing full-screen TUI is also inherently lossy/fragile.
+- `harnessSend` (`ClaudeCode.hs:577`) records a `Request` entry and types the message
+  into tmux. `harnessReceive` (`ClaudeCode.hs:608`) polls until idle, scrapes the
+  rendered TUI screen, `extractLastResponse` takes the last response, records a
+  `Response` entry. Invoked from the UI send path (`API.hs:1946`), the agent loop, and
+  `/msg`. **This is the guaranteed core and is NOT changed by this feature.**
+- The reconcile loop captures the screen every 2 s only for an `isIdle :: Bool`
+  (`Reconcile.hs:143`); it records no content.
 
-## Key finding: claude-code writes a structured on-disk log
+## The optional source: claude-code's on-disk JSONL session log
 
-Claude Code maintains an **append-only JSONL session log** per session at:
+Claude Code continuously appends a structured JSONL log per session at:
 
 ```
 ~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl
 ```
 
-where `<sanitized-cwd>` is the absolute cwd with `/` replaced by `-`
-(e.g. `/Users/zoe/code/pureclaw` → `-Users-zoe-code-pureclaw`). Each line is a typed
-JSON event. The relevant ones:
+(`<sanitized-cwd>` = absolute cwd with `/`→`-`, e.g. `-Users-zoe-code-pureclaw`). One
+typed JSON event per line: `type:"user"` `{message:{role,content},timestamp,uuid,
+parentUuid,sessionId,cwd,...}`, `type:"assistant"` `{message:{role,content:[blocks],
+model,usage,stop_reason},timestamp,uuid,requestId,...}`, plus metadata types we ignore.
+It records **every turn regardless of origin** (UI or tmux), with timestamps, model,
+usage, and structured content blocks.
 
-- `type:"user"` → `{ message:{role:"user", content:<str|[blocks]>}, timestamp, uuid,
-  parentUuid, sessionId, cwd, gitBranch, ... }`
-- `type:"assistant"` → `{ message:{role:"assistant", content:[blocks], model, usage,
-  stop_reason, ...}, timestamp, uuid, parentUuid, requestId, ... }`
-- Other types (`mode`, `permission-mode`, `system`, `file-history-snapshot`,
-  `last-prompt`, `ai-title`, `queue-operation`, `attachment`, …) are ignored.
+**PureClaw does not write this file — Claude Code does.** PureClaw only reads it. Because
+Claude Code maintains it independently, the full history is always on disk whether or not
+PureClaw is watching — which is why the optional view can be **load-on-demand** with no
+risk of missing data.
 
-This log contains **every turn regardless of origin** — UI-sent or typed directly in
-tmux — with timestamps, model, token usage, and structured content blocks. It is a
-strictly better capture source than the TUI scrape.
-
-`claude --session-id <uuid>` is a supported CLI flag, so PureClaw can mint a UUID,
-spawn `claude --session-id <uuid> …`, and **deterministically** know which file to
-tail. No race-prone "newest file" guessing for spawned harnesses.
+`claude --session-id <uuid>` is a supported flag, so a PureClaw-spawned harness can mint a
+UUID, launch `claude --session-id <uuid>`, and **deterministically** derive the file path.
+Adopted harnesses (no minted id) and non-claude-code flavours have **no** available log →
+no control offered.
 
 ## Goals
 
-1. Out-of-band turns (input typed in the harness's tmux window) and their responses
-   appear in the PureClaw transcript + live UI stream for **PureClaw-spawned
-   claude-code harnesses**.
-2. Full-fidelity capture: assistant `text`, `thinking`, and `tool_use`/`tool_result`
-   blocks are recorded like a native provider session renders them.
-3. Survive restart: a reconnected harness re-tails the same JSONL file.
-4. No double-recording: the UI send path and the tail must not both record the same
-   turn.
+1. The default harness transcript is unchanged: PureClaw-sent/received messages, working
+   for all flavours, depending on nothing external. (Guarantee preserved.)
+2. For a **spawned claude-code** harness, the user can **optionally** open a complete,
+   high-fidelity conversation view sourced from claude-code's JSONL log, including
+   out-of-band tmux turns.
+3. The optional view renders at full fidelity: assistant `text`, `tool_use`/`tool_result`,
+   **and `thinking`** (a new frontend rendering path — §6), matching how a native session
+   would render the same blocks.
+4. The optional view survives restart (re-derive the path from the persisted session-id).
 
 ## Non-goals
 
-- Adopted claude-code harnesses (PureClaw did not spawn → no known session-id):
-  **keep the current TUI scraping.** No JSONL tail.
-- Non-claude-code flavours (codex, opencode, hermes, custom): keep TUI scraping. The
-  JSONL backend is selected by **flavour = claude-code AND origin = spawned**.
-- Editing/replaying claude-code's log. We only read it.
+- Modifying or replacing the guaranteed core transcript. (It is untouched.)
+- Merging the two records into one stream (this is what created the round-1 de-dup
+  blocker — explicitly avoided; they are independent).
+- An always-on per-harness tailer. The optional view is loaded on demand and torn down
+  when closed.
+- Capturing out-of-band turns for adopted harnesses or non-claude-code flavours (no log
+  available; the default transcript is the accepted limit there).
+- Editing/replaying claude-code's log. Read-only.
 
 ## Design
 
-### 1. Correlation & spawn
+### A. Capability detection
 
-- When spawning a claude-code harness, mint a fresh `SessionUuid` and inject
-  `--session-id <uuid>` into the claude argv (command assembly in `ClaudeCode.hs`).
-- Persist the uuid in the session's `session.json` (`_sm_kind`'s harness spec or a
-  sibling field) so a restart can relaunch with the same `--session-id` (resume) and
-  re-tail the same file.
-- Derive the log path from the harness cwd + uuid:
-  `~/.claude/projects/<sanitize(cwd)>/<uuid>.jsonl`. The **cwd fix landed earlier this
-  session** (`faac3da`) is what makes this derivation reliable.
+- A spawned claude-code harness advertises an **available structured log** capability:
+  `flavour == claude-code && origin == OriginSpawned && a persisted session-id exists`.
+- This capability is surfaced to the frontend (e.g. a `has_session_log: bool` on the
+  harness's tab/registry snapshot). The frontend shows the optional-view control **only**
+  when true. Origin/flavour are taken from the **in-memory registry** decision, never a
+  raw serialized flag (security §G).
 
-`sanitize(cwd)` = replace every `/` with `-` on the absolute path. (Edge: leading `/`
-yields a leading `-`, matching observed dir names. Confirm against odd cwds — see Risks.)
+### B. Spawn correlation & persistence
 
-### 2. Per-harness async tailer
+- On spawn, mint a `SessionUuid` (a **validated newtype** — §G) and inject
+  `--session-id <uuid>` into the claude argv (injection point: `mkClaudeCodeHarnessWith`
+  / `_ccd_addWindow`, `ClaudeCode.hs:287`; confirm arg handling like `hasUnsafeFlag` is
+  unaffected).
+- Persist the uuid additively as `_h_sessionUuid :: Maybe Text` on `HarnessSpec`, with a
+  tolerant `.:? "sessionUuid"` + emit-when-Just codec — exactly mirroring `_h_harnessId`
+  (`Kind.hs:71-77`), provably non-breaking for old `session.json`.
+- Persist the **canonicalized** cwd used at spawn (the one the factory validated via
+  `mkSafePath`), not the raw `_h_cwd` text, so path derivation on restart cannot diverge.
 
-- Each spawned claude-code harness owns a lightweight `Async` that follows its JSONL
-  file from a byte offset, polling at ~250–500 ms (kqueue/inotify optional later).
-- Lifecycle: started when the harness is registered/spawned, cancelled when the
-  harness is destroyed/released/exits. Tracked alongside the registry entry.
-- A tailer is a pure-ish loop over an injected seam (`readFrom :: FilePath -> Offset
-  -> IO (ByteString, Offset)`) so it is deterministic in tests (feed byte chunks).
+### C. On-demand load + live tail (only while the view is open)
 
-### 3. Backfill + live tail (offset model)
+When the user opens the optional view for a harness:
 
-- **On open/spawn:** read the file from the start to current EOF, convert all
-  user/assistant events, record them (idempotently — see §5), and remember the EOF
-  byte offset.
-- **Live:** from that offset, read appended bytes, split on `\n`, hold a partial
-  trailing line until its newline arrives, convert complete lines, advance the offset.
-- This single offset model unifies backfill and live tail with no gap/overlap.
+1. Resolve the log path via the `SafeClaudeLogPath` smart constructor (§G).
+2. **Backfill:** read the whole file start→EOF, convert `user`/`assistant` events to
+   `TranscriptEntry` (§E), deliver them, remember the byte offset.
+3. **Live tail:** poll appended bytes past the offset (~250–500 ms), split on `\n`,
+   buffer a partial trailing line until its newline arrives, convert complete lines,
+   advance the offset.
+4. **Teardown:** when the view closes (or the harness is destroyed/exits), stop the tail.
 
-### 4. Full-fidelity content mapping
+No offset is persisted: every open backfills from 0. Because the JSONL `uuid` is the
+entry id (§E), re-opening is naturally idempotent within the view's own record. The
+optional record is stored **separately** from the core transcript (its own file, e.g.
+`claude-session.jsonl`, and its own broadcast stream/topic) so the core transcript writer
+and its "sole writer" invariant (`API.hs:1930-1937`) are completely untouched.
 
-Map each `user`/`assistant` JSONL event to a PureClaw `TranscriptEntry`:
+### D. Tailer architecture (Handle pattern + DI)
 
-- `user` event → `Request` entry; `content` (string or block list) → payload.
-- `assistant` event → `Response` entry; `content` blocks (`text`, `thinking`,
-  `tool_use`) → the same payload shape provider responses already use, so the frontend
-  renders thinking/tool calls identically. `model` → `_te_model`; `usage` → metadata.
-- `_te_id` / `_te_correlationId` derive from the JSONL event `uuid` (stable, enables
-  idempotency). `_te_timestamp` from the event `timestamp`.
-- `tool_result` (which claude-code logs as a subsequent `user`-type event with a
-  tool_result block) is matched to its `tool_use` by `tool_use_id`, mirroring the
-  existing provider tool-call rendering.
+- A `JsonlTailDeps` **named record of IO ops** + `defaultJsonlTailDeps`, mirroring
+  `ClaudeCodeDeps`/`ReconcileDeps`: `readFrom :: SafeClaudeLogPath -> Offset ->
+  IO (ByteString, Offset)`, an EOF/size probe, and the content sanitizer (§G). Tests
+  inject fakes; no filesystem needed.
+- `newtype Offset = Offset Integer`. The line-splitter is a **pure** function
+  `ByteString -> Buffer -> ([CompleteLine], Buffer)` so partial-line and split-across-reads
+  cases are unit-tested without IO.
+- While a view is open, an `Async` runs the tail loop. Its handle lives in a **sidecar
+  map keyed by HarnessId** (NOT a serialized field on `HarnessEntry`, which is snapshotted).
+- **AsyncCancelled discipline:** the tail loop's catch-all **re-raises `AsyncCancelled`**
+  (per the project invariant at `Reconcile.hs:505`, `BroadcastingTranscript.hs:87`) so
+  `withAsync`/`cancel` teardown works; it swallows only non-async exceptions (logged). §8's
+  "never crashes" applies to *non-cancellation* errors only.
 
-### 5. De-dup with the UI send path (the tricky part)
+### E. Payload contract (pinned to the frontend parser)
 
-**Decision:** *UI send records + tail fills gaps* (not "tail is sole recorder").
-Rationale: the UI send path gives immediate, low-latency echo of a user-sent message
-and its response; the tail backfills only what the UI did not originate (out-of-band
-turns). This is the option with the most de-dup risk and is called out for the gate.
+The frontend does **not** render the raw JSONL shape. It parses (`App.tsx:70-235`):
+- **Response** entry payload as a top-level `{ content: [blocks], usage, model }`
+  (`CompletionResponse` shape).
+- **Request** entry payload as a top-level `{ system_prompt?, messages: [{role,content}] }`,
+  with `tool_result` blocks harvested from `role:"user"` content.
 
-Mechanism to guarantee no duplicates:
+So the converter must **transform** each JSONL event into that exact shape:
+- `assistant` event → **Response** entry: `message.content` → top-level `content`;
+  `message.usage` → top-level `usage`; `message.model` → `_te_model`.
+- `user` event → **Request** entry: wrap as `{ messages: [{ role:"user", content }] }`.
+- `tool_result` (claude-code logs it as a subsequent `user`-type event with a
+  `tool_result` block) → a **Request** entry whose `messages[].content[]` carries the
+  `tool_use_id`+content, so `App.tsx buildToolResultIndex` (`App.tsx:67-90`) joins it to
+  its `tool_use`.
+- `_te_id`/`_te_correlationId` ← the JSONL event `uuid`; `_te_timestamp` ← event
+  `timestamp`.
 
-- All tail-recorded entries are keyed by their JSONL event `uuid`. The transcript
-  writer becomes **idempotent on `uuid`**: recording an entry whose `uuid` is already
-  present is a no-op.
-- UI-originated entries (`_hh_send`/`_hh_receive`) do **not** carry a JSONL uuid, so to
-  prevent the tail from re-recording the same turn the tailer maintains a short
-  **correlation window**: when it sees a `user` JSONL event whose content matches a
-  message PureClaw just injected via `_hh_send` (within N seconds), it treats that turn
-  (and the immediately-following assistant event) as already-owned by the UI path and
-  **reconciles** rather than appends — replacing the UI's heuristic-scraped entry with
-  the precise JSONL one (same display position), or skipping if good enough.
-- Out-of-band `user` events (no matching recent injection) are appended as new turns.
+These exact target JSON shapes are pinned as **golden fixtures asserted against
+`App.tsx`'s parser** (a real captured provider `_te_payload` is the reference target).
 
-> **Gate focus.** This reconciliation is the riskiest element. An alternative — "tail
-> is the sole recorder, `_hh_send` only injects keystrokes" — removes the matching
-> problem entirely at the cost of ~250–500 ms echo latency on UI sends. The gate should
-> decide whether the gap-fill complexity is justified over sole-recorder simplicity.
+### F. Thinking rendering (new frontend path — full fidelity)
 
-### 6. Adopted harnesses & other flavours
+The frontend currently has **no renderer for `thinking` blocks** (`extractTextFromContent`
+handles only `text`; `extractToolCalls` only `tool_use`) — native sessions drop them too.
+To deliver Goal 3, add a `MessageContent` **thinking** variant rendered collapsed-by-default
+(reusing the existing `collapsedText` affordance) + the matching extractor. This applies to
+both the optional harness view and native provider sessions (a free fidelity win).
 
-- The JSONL capture backend is selected iff `flavour == claude-code && origin ==
-  spawned`. Everything else keeps `harnessSend`/`harnessReceive` TUI scraping
-  unchanged. No behaviour change for adopted/codex/etc.
+### G. Security (the round-1 CRITICAL items)
 
-### 7. Restart / resume
+- **`SafeClaudeLogPath` smart constructor** (value constructor unexported, mirroring
+  `SafePath`): the *only* way to obtain the path the reader opens. It (a) computes the base
+  root from the same source claude-code uses (incl. `CLAUDE_CONFIG_DIR`/env relocation),
+  (b) `canonicalizePath`es the fully-assembled candidate, (c) verifies canonical containment
+  under the canonical `~/.claude/projects` root (catches symlink escape, as `mkSafePath`
+  does at `Path.hs:99-105`), (d) opens the final component with `O_NOFOLLOW` to harden
+  against TOCTOU symlink swaps.
+- **`SessionUuid` validated newtype:** smart constructor accepts only a canonical UUID
+  (hex+hyphens, fixed length); `FromJSON` routes through it (mirroring `SessionPrefix`,
+  `Session/Types.hs:93-97`) and is **re-validated on restart** before any path derivation —
+  so a hostile/edited `session.json` cannot inject `/`, `..`, or NUL into the path.
+- **Derive the path from the canonicalized spawn cwd** (persisted, §B), and re-run the
+  containment check at every (re)open — not only at first spawn.
+- **Sanitization parity:** JSONL-derived content passes through the same
+  `sanitizeHarnessOutput` filter the TUI/display path uses (`Handles/Harness.hs:61-89`)
+  before reaching the broadcast, so terminal escapes/control chars are stripped consistently.
+- **DoS caps:** a max file size for backfill and a max single-line length (skip + debug-log
+  an over-long line rather than buffering unbounded); bound concurrent reader memory.
+- **Trusted origin:** the "spawned claude-code" capability is decided from the in-memory
+  registry, never a serialized `origin` flag, so an edited `session.json` cannot coerce
+  tailing of an adopted/foreign session's log.
 
-- On boot reconstruction of a spawned claude-code harness, read the persisted uuid,
-  relaunch `claude --session-id <uuid> --resume` (or `--continue`) so claude resumes
-  the same session and continues appending to the same JSONL, and restart the tailer
-  from the persisted/derived offset (or re-backfill).
+### H. Phase-0 spike (mandatory before any reader code)
 
-### 8. Defensive parsing
+Empirically verify the load-bearing assumptions against the installed `claude` binary,
+capturing real artifacts as fixtures:
+1. `claude --session-id <uuid>` on a **fresh** spawn creates exactly that uuid's `.jsonl`;
+   `--resume`/`--continue` **appends to the same file** (does not fork a new one).
+2. The exact `sanitize(cwd)` algorithm (spaces, dots, symlinks, trailing slash, long
+   paths, `CLAUDE_CONFIG_DIR`) — capture the real path, don't reverse-engineer.
+3. Claude Code only ever **appends** to the JSONL (never rewrites/compacts in place) — the
+   byte-offset tail depends on this. If compaction exists, the open-time backfill still
+   works (we re-read from 0 each open); only the *live* offset tail would need a re-read.
+4. **Loud fallback:** if the derived path does not appear within a short window after the
+   view opens, log loudly and show a "log unavailable" state — never silently show nothing.
 
-- Unknown `type` values → ignored. Malformed/partial trailing line → buffered until
-  its newline. A line that fails JSON decode → logged at debug and skipped (never
-  crashes the tailer). Missing optional fields tolerated. Format drift across Claude
-  Code versions degrades gracefully (skip what we can't map).
+## Frontend / UX
 
-## Security considerations
-
-- The tailer reads files under `~/.claude/projects/`. It only ever opens the **exact
-  path derived from a uuid PureClaw itself minted** for a harness it spawned — never an
-  arbitrary or user-supplied path. cwd is already validated (`validateCwd`).
-- No writes to claude-code's logs. No new outbound surface.
-- The JSONL may contain secrets the user typed; it flows into the PureClaw transcript
-  exactly as UI-sent content already does (same trust domain, same on-disk transcript).
-  No new exposure beyond what PureClaw already stores.
+- Default harness view: the existing PureClaw-sent/received transcript (unchanged). For a
+  harness, this lives in the harness pane alongside the controls we just shipped
+  (`HarnessControls`).
+- When `has_session_log` is true, a control (toggle/tab, e.g. "Full session (claude-code
+  log)") reveals the optional complete view, loaded on demand (§C). Closing it tears down
+  the tail.
+- The optional view renders text + tool calls + thinking (§E/§F). It is visibly labelled
+  as the claude-code session log so the user understands it is the richer, complete record
+  (and may include turns they typed directly in tmux).
+- Degraded states surfaced (not silent): log unavailable / parse-degraded → a small notice
+  in the optional view.
 
 ## Testing strategy
 
-- Pure converter: golden fixtures of real JSONL lines (user/assistant/thinking/
-  tool_use/tool_result/unknown/partial) → expected `TranscriptEntry` values.
-- Tailer loop: injected `readFrom` seam fed scripted byte chunks (incl. a line split
-  across two reads) → asserts entries recorded once, offset advances, partial line
-  buffered.
-- Idempotency: replaying the same uuids is a no-op; the UI-correlation window
-  suppresses the duplicate of a just-injected turn.
-- Path derivation: cwd → sanitized dir name table (incl. trailing slash, nested).
-- Integration: spawn stub writes a JSONL file; assert out-of-band turn appears in the
-  transcript + WS broadcast.
+- **Pure path derivation** (`SafeClaudeLogPath`): table-driven (trailing slash, nested,
+  root, env-relocated base) + rejection tests (`..`, symlink-escape via a temp symlink,
+  non-canonical-containment, bad uuid).
+- **`SessionUuid`**: accepts canonical UUIDs; rejects `/`, `..`, NUL, wrong length;
+  `FromJSON` round-trip + hostile-`session.json` rejection.
+- **Pure JSONL→`TranscriptEntry` converter:** golden fixtures (user / assistant /
+  thinking / tool_use / tool_result / unknown-type-skipped / malformed-skipped) asserted to
+  produce the exact `_te_payload` JSON `App.tsx` parses.
+- **Pure line-splitter:** chunk fed across two reads → one complete line + buffered partial.
+- **Tailer loop** over injected `JsonlTailDeps`: offset monotonicity, partial buffering,
+  teardown on cancel (AsyncCancelled re-raised).
+- **Frontend:** vitest for the thinking renderer + the optional-view toggle visibility
+  (shown iff `has_session_log`) and rendering of a golden full-session record.
+- **Integration:** a stub writes a JSONL file incl. an out-of-band turn; opening the
+  optional view shows that turn; the default transcript is unaffected.
 
-## Risks / open questions
+## Risks / open questions (for re-review)
 
-1. **De-dup correctness** (§5) — the gap-fill matching is the main risk; sole-recorder
-   is the simpler fallback if the gate rejects it.
-2. **cwd sanitization rule** — confirm claude-code's exact algorithm for unusual cwds
-   (spaces, dots, symlinks, very long paths) rather than assuming `/`→`-`.
-3. **`--session-id` resume semantics** — confirm `--session-id <uuid>` on a *fresh*
-   spawn creates that id, and that resume re-uses the same file (vs `--fork-session`).
-4. **Log location override** — `CLAUDE_CONFIG_DIR`/env may relocate `~/.claude`;
-   derive the base from the same rule claude-code uses.
-5. **Format stability** — undocumented format; pin a tolerant parser and add a
-   version-drift smoke check.
+1. **Spike assumptions (§H)** are load-bearing; the spike must land first as its own WU.
+2. **Two stored records** — confirm the separate optional record file + broadcast topic do
+   not interfere with the core transcript's REST seed / WS reconcile (they are keyed and
+   streamed independently; the default view never reads the optional store).
+3. **`claude --session-id` create-vs-fork semantics** and **append-vs-compaction** — both in
+   the spike; the design degrades gracefully (open-time backfill) if compaction exists.
+4. **Capability surfacing** — adding `has_session_log` to the snapshot must be additive and
+   not perturb existing tab JSON consumers.
