@@ -122,10 +122,16 @@ When the user opens the optional view for a harness:
 4. **Teardown:** when the view closes (or the harness is destroyed/exits), stop the tail.
 
 No offset is persisted: every open backfills from 0. Because the JSONL `uuid` is the
-entry id (§E), re-opening is naturally idempotent within the view's own record. The
-optional record is stored **separately** from the core transcript (its own file, e.g.
-`claude-session.jsonl`, and its own broadcast stream/topic) so the core transcript writer
-and its "sole writer" invariant (`API.hs:1930-1937`) are completely untouched.
+entry id (§E), re-opening is naturally idempotent.
+
+**No second on-disk PureClaw store.** Claude Code's own `<uuid>.jsonl` is the source of
+truth and is always on disk; the optional view is a **read-through** of that file plus a
+**separate in-process broadcast topic** for the live tail. PureClaw writes no second
+transcript file. This keeps the core transcript writer and its "sole writer" invariant
+(`API.hs:1930-1937`) completely untouched (PureClaw still never writes claude-code's log
+either — §56). The separate broadcast topic **reuses the core transcript stream's existing
+per-client authorization boundary** (cite the `API.hs` WS auth check) — it introduces no
+new unauthenticated egress path.
 
 ### D. Tailer architecture (Handle pattern + DI)
 
@@ -242,6 +248,63 @@ capturing real artifacts as fixtures:
   (shown iff `has_session_log`) and rendering of a golden full-session record.
 - **Integration:** a stub writes a JSONL file incl. an out-of-band turn; opening the
   optional view shows that turn; the default transcript is unaffected.
+
+## Round-2 review resolutions (folded; binding refinements, non-blocking)
+
+All five reviewers APPROVED round 2. The following suggestions are folded in as binding
+refinements for the implementation plan:
+
+- **Naming (Architect):** name the claude-code id `ClaudeSessionUuid` /
+  `_h_claudeSessionUuid` to keep it unmistakably distinct from the existing
+  `Registry._he_sessionId` (the PureClaw session join). Add a disambiguating doc note.
+- **No second store (Architect):** see §C — the optional view is a read-through + a
+  separate broadcast topic; no `claude-session.jsonl` is written. `readFrom` must define a
+  total degraded path when the file shrinks/disappears (return current size, signal
+  re-read-from-0) so the tailer never returns a negative/garbage delta.
+- **Security hardening (Security):** (a) `SafeClaudeLogPath` also checks
+  `owner == geteuid()` (and rejects group/other-write), mirroring `mkSafeKeyPath`'s
+  `checkModeAndOwner`, to close the foreign-/pre-created-file substitution vector that
+  `O_NOFOLLOW` alone does not; (b) the minted `ClaudeSessionUuid` uses a **CSPRNG** (v4
+  from a cryptographic source) so an attacker cannot pre-create the target file; (c)
+  `ClaudeSessionUuid` / `SafeClaudeLogPath` get a **redacted `Show`** (like
+  `SafeKeyPath`/`SafeRuntimePath`) so the path is not leaked into general logs; (d) pin
+  **concrete numeric DoS limits** (max backfill file size, max single-line bytes, max
+  buffered partial-line bytes) so VALIDATE can assert them; over-cap → the loud
+  "log unavailable" fallback (§H.4), never a silent partial read; (e) the frontend
+  thinking/tool render path must treat JSONL content as untrusted (React text-escaping;
+  no `dangerouslySetInnerHTML`) in addition to `sanitizeHarnessOutput`.
+- **Fidelity rendering (Designer):** the thinking block renders with its **own distinct
+  collapsed label ("Thinking")**, not the bare `CollapsedBlock` chrome used for the System
+  prompt. Golden fixtures assert **both** `_te_payload` **and** the sibling `_te_model` /
+  `_te_harness` columns (the rendered agentName comes from the column, not the payload).
+- **TDD obligations (CTO):** (a) golden fixtures are captured by serializing a **real**
+  `TranscriptEntry` payload from the Haskell encoder (byte-for-byte vs production), not
+  hand-written JSON — the first sub-step of the converter WU; (b) add an **idempotence
+  golden**: feed the same JSONL event twice → de-duped by `_te_id`; (c) pin a concrete
+  `Buffer` newtype and assert the splitter does not strip a stray `\r` into content
+  (logs are LF); (d) inject `--session-id` through the **existing `[Text]` args** at the
+  `mkClaudeCodeHarnessWith` call site, not by widening `_ccd_addWindow`'s signature; (e)
+  the thinking renderer is its **own WU** with a regression assertion that native-session
+  text/tool_use rendering is unchanged (it touches native sessions too).
+- **WU ordering (CTO):** the **Phase-0 spike (§H) blocks** the `SafeClaudeLogPath`
+  derivation and converter WUs — its captured artifacts (real path, real JSONL lines) are
+  those WUs' fixtures. Not parallel.
+- **Capability surfacing (Architect/CTO):** `has_session_log` is **computed** at
+  snapshot-build time from the in-memory registry decision (`flavour==claude-code &&
+  OriginSpawned && claudeSessionUuid present`), **not a stored field**, so it cannot drift
+  from the trusted-origin decision (§G). Add a snapshot-builder test asserting the additive
+  field does not perturb existing tab-JSON consumers. Wire the harness **exit** signal
+  (reconcile-detected death) to cancel the sidecar tail Async, not only explicit view-close.
+- **UX (Designer/PM):** the optional-view control lives in/near `HarnessControls`, gated on
+  `has_session_log` (mirroring the existing `tab.origin` conditional there); degraded and
+  "not available for this harness" states use the same muted `Field` styling. The label
+  states the view is the **higher-fidelity, complete** claude-code session log (a superset
+  that may include turns typed directly in tmux). Per-open opt-in (no sticky preference) is
+  the deliberate v1 model.
+- **Measurable success criteria (PM):** (1) an out-of-band tmux turn appears in the
+  optional view within a few seconds of opening it; (2) opening/closing the optional view
+  never alters or drops an entry in the default transcript; (3) the control is absent for
+  non-claude-code/adopted harnesses and that absence is explained, not silent.
 
 ## Risks / open questions (for re-review)
 
