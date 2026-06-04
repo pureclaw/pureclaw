@@ -342,6 +342,40 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     )
   })
 
+  it('New Harness buildBody sends the working directory as `cwd` (the backend HarnessSpec field name)', async () => {
+    vi.stubGlobal('fetch', defaultMockFetch())
+    render(<ComposerHarness onSubmit={onSubmit} />)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
+    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
+    fireEvent.change(screen.getByLabelText('Session Name'), { target: { value: 'main' } })
+    fireEvent.change(screen.getByLabelText('Working Directory'), {
+      target: { value: '/home/me/project' },
+    })
+
+    fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
+    fireEvent.click(screen.getByLabelText('Bottom send button'))
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      {
+        kind: {
+          tag: 'session',
+          session_kind: {
+            tag: 'harness',
+            flavour: 'claude-code',
+            // The backend's FromJSON HarnessSpec decodes `cwd` (Session/Kind.hs);
+            // `working_dir` would be silently dropped to Nothing and the harness
+            // would start in the default directory.
+            cwd: '/home/me/project',
+            backend: { tag: 'tmux', session: 'main', window: '' },
+            args: [],
+          },
+        },
+      },
+      'hi',
+    )
+  })
+
   it('shows "no providers configured" hint when /api/providers is empty', async () => {
     const mockFetch = vi.fn().mockImplementation((url: string) => {
       if (url === '/api/providers') {

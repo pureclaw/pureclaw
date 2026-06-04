@@ -286,7 +286,10 @@ export function useNewTabSpec(): NewTabSpec {
       backend: buildBackendPayload(backendTag, backendConfig),
       args: parseArgs(extraArgs),
     }
-    if (workingDir.trim()) sessionKind.working_dir = workingDir.trim()
+    // Field name must be `cwd` — the backend's FromJSON HarnessSpec
+    // (Session/Kind.hs) decodes `cwd`; any other name is silently dropped to
+    // Nothing and the harness starts in the default directory.
+    if (workingDir.trim()) sessionKind.cwd = workingDir.trim()
     return { kind: { tag: 'session', session_kind: sessionKind } }
   }, [kind, provider, model, agent, flavour, customBinary, workingDir, extraArgs, backendTag, backendConfig])
 
