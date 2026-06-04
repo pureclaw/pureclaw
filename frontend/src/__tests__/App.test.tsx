@@ -31,11 +31,12 @@ const sendSpy = vi.fn()
 // Hoisted so the `vi.mock('../hooks/useApi')` factory (which vitest lifts to
 // the top of the module) can safely reference them — plain consts would be
 // in the temporal dead zone at hoist time.
-const { dismissSpy, acknowledgeSpy, adoptSpy, scanSpy } = vi.hoisted(() => ({
+const { dismissSpy, acknowledgeSpy, adoptSpy, scanSpy, destroySpy } = vi.hoisted(() => ({
   dismissSpy: vi.fn().mockResolvedValue(true),
   acknowledgeSpy: vi.fn().mockResolvedValue(true),
   adoptSpy: vi.fn().mockResolvedValue(true),
   scanSpy: vi.fn().mockResolvedValue(undefined),
+  destroySpy: vi.fn().mockResolvedValue(true),
 }))
 
 // Mutable overrides for the useNewTabSpec mock so a test can drive the
@@ -91,6 +92,7 @@ vi.mock('../hooks/useApi', async (importOriginal) => {
     dismissTab: dismissSpy,
     acknowledgeTab: acknowledgeSpy,
     adoptWindow: adoptSpy,
+    destroyHarness: destroySpy,
     useDiscoverableWindows: () => ({ windows: [], error: false, scan: scanSpy }),
   }
 })
@@ -218,6 +220,8 @@ beforeEach(() => {
   sendSpy.mockReset()
   dismissSpy.mockClear()
   acknowledgeSpy.mockClear()
+  destroySpy.mockClear()
+  destroySpy.mockResolvedValue(true)
   adoptSpy.mockClear()
   adoptSpy.mockResolvedValue(true)
   scanSpy.mockClear()
@@ -649,6 +653,66 @@ describe('App tab actions wiring (D4.7)', () => {
     fireEvent.click(utils.getByRole('button', { name: /acknowledge tab/i }))
     await waitFor(() => {
       expect(acknowledgeSpy).toHaveBeenCalledWith(3)
+    })
+  })
+})
+
+describe('App harness controls view (RH/HC)', () => {
+  function runningHarness(index: number, overrides: Partial<TabInfo> = {}): TabInfo {
+    return {
+      index,
+      kind: 'harness',
+      name: `claude-code-${index}`,
+      status: 'running',
+      session_id: `sess-${index}`,
+      origin: 'spawned',
+      ...overrides,
+    }
+  }
+
+  it('selecting a running harness shows the controls view (Destroy), not a transcript', async () => {
+    mockFetchOk('x')
+    state.tabs = [runningHarness(0)]
+    state.recentSessions = [harnessSession('sess-0')]
+    state.transcripts['sess-0'] = [userEntry('e1', 'harness transcript text')]
+    const utils = render(<App />)
+
+    // Click the harness row in the Running Harnesses section.
+    fireEvent.click(utils.getByText('claude-code-0'))
+
+    await waitFor(() => {
+      expect(utils.getByRole('button', { name: /destroy harness/i })).toBeInTheDocument()
+    })
+    // The conversation transcript is NOT rendered for a harness selection.
+    expect(utils.queryByText('harness transcript text')).not.toBeInTheDocument()
+  })
+
+  it('clicking Destroy on a spawned harness calls destroyHarness(index, false)', async () => {
+    mockFetchOk('x')
+    state.tabs = [runningHarness(2, { origin: 'spawned' })]
+    const utils = render(<App />)
+
+    fireEvent.click(utils.getByText('claude-code-2'))
+    fireEvent.click(await utils.findByRole('button', { name: /destroy harness/i }))
+
+    await waitFor(() => {
+      expect(destroySpy).toHaveBeenCalledWith(2, false)
+    })
+  })
+
+  it('destroying an adopted harness requires confirmation, then calls destroyHarness(index, true)', async () => {
+    mockFetchOk('x')
+    state.tabs = [runningHarness(1, { origin: 'adopted' })]
+    const utils = render(<App />)
+
+    fireEvent.click(utils.getByText('claude-code-1'))
+    fireEvent.click(await utils.findByRole('button', { name: /destroy harness/i }))
+    // No destroy yet — confirmation is required for adopted harnesses.
+    expect(destroySpy).not.toHaveBeenCalled()
+    fireEvent.click(utils.getByRole('button', { name: /confirm destroy/i }))
+
+    await waitFor(() => {
+      expect(destroySpy).toHaveBeenCalledWith(1, true)
     })
   })
 })

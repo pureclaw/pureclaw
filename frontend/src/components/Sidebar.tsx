@@ -3,6 +3,7 @@ import type { SessionInfo, TabInfo } from '../types'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import type { SessionActivityState } from '../types/stream'
 import { ActiveTabs } from './ActiveTabs'
+import { RunningHarnesses } from './RunningHarnesses'
 import { ActivityDot } from './StatusDot'
 
 function SectionHeader({ label }: { label: string }) {
@@ -228,6 +229,18 @@ export function Sidebar({
   onAcknowledgeTab: (index: number) => void
   onReleaseTab: (index: number) => void
 }) {
+  // Harnesses (the harness-registry rows, kind "harness") get their own
+  // "Running Harnesses" section; everything else stays under "Active Tabs".
+  const harnessTabs = tabs.filter((t) => t.kind === 'harness')
+  const otherTabs = tabs.filter((t) => t.kind !== 'harness')
+
+  // De-dupe: a running harness already appears in "Running Harnesses", so its
+  // backing session must not also show up in "Recent Sessions".
+  const harnessSessionIds = new Set(
+    harnessTabs.map((t) => t.session_id).filter((id): id is string => id !== null),
+  )
+  const recentSessions = sessions.filter((s) => !harnessSessionIds.has(s.id))
+
   return (
     <div
       className="shrink-0 flex flex-col"
@@ -235,7 +248,7 @@ export function Sidebar({
     >
       <div className="flex-1 overflow-y-auto sidebar-scroll py-1 min-h-0">
         <ActiveTabs
-          tabs={tabs}
+          tabs={otherTabs}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
           onSelectTab={onSelectTab}
@@ -247,10 +260,22 @@ export function Sidebar({
           onRelease={onReleaseTab}
         />
 
-        {sessions.length > 0 && (
+        <RunningHarnesses
+          tabs={harnessTabs}
+          selectedId={selectedId}
+          sessionActivity={sessionActivity}
+          onSelectTab={onSelectTab}
+          onCloseTab={onCloseTab}
+          onArchiveTab={onArchiveTab}
+          onDismiss={onDismissTab}
+          onAcknowledge={onAcknowledgeTab}
+          onRelease={onReleaseTab}
+        />
+
+        {recentSessions.length > 0 && (
           <>
             <SectionHeader label="Recent Sessions" />
-            {sessions.map((s) => (
+            {recentSessions.map((s) => (
               <SessionRow
                 key={s.id}
                 session={s}

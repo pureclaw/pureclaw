@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { Sidebar } from '../Sidebar'
 import type { SessionInfo, TabInfo } from '../../types'
@@ -146,5 +146,73 @@ describe('Sidebar lifecycle transitions', () => {
     expect(screen.queryByTestId('discoverable-section')).not.toBeInTheDocument()
     expect(screen.queryByText(/Discover/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /scan/i })).not.toBeInTheDocument()
+  })
+
+  it('RH.1: harness-kind tabs render under "Running Harnesses", not "Active Tabs"', () => {
+    render(
+      <Sidebar
+        {...defaultProps}
+        tabs={makeTabs({ index: 0, name: 'claude-code-0', kind: 'harness', session_id: 'sess-h' })}
+      />,
+    )
+    // The "Active Tabs" header still exists (kept, but empty for now)...
+    expect(screen.getByText('Active Tabs')).toBeInTheDocument()
+    // ...and the harness row lives inside the Running Harnesses section.
+    const section = screen.getByTestId('running-harnesses-section')
+    expect(within(section).getByText('claude-code-0')).toBeInTheDocument()
+  })
+
+  it('RH.2: a non-harness tab stays in Active Tabs and not in Running Harnesses', () => {
+    render(
+      <Sidebar
+        {...defaultProps}
+        tabs={makeTabs({ index: 0, name: 'plain-tab', kind: 'session:provider', session_id: 'sess-p' })}
+      />,
+    )
+    expect(screen.queryByTestId('running-harnesses-section')).not.toBeInTheDocument()
+    expect(screen.getByText('plain-tab')).toBeInTheDocument()
+  })
+
+  it('RH.3: a session backed by a running harness is de-duped out of Recent Sessions', () => {
+    render(
+      <Sidebar
+        {...defaultProps}
+        tabs={makeTabs({ index: 0, name: 'claude-code-0', kind: 'harness', session_id: 'sess-h' })}
+        sessions={makeSessions(
+          { id: 'sess-h', description: 'harness session' },
+          { id: 'sess-p', description: 'plain session' },
+        )}
+      />,
+    )
+    // The harness's own session must not appear a second time in Recent Sessions.
+    expect(screen.queryByText('harness session')).not.toBeInTheDocument()
+    // Unrelated provider sessions are unaffected.
+    expect(screen.getByText('plain session')).toBeInTheDocument()
+  })
+
+  it('RH.4: the Running Harnesses accordion collapses on click and re-expands when a new harness is added', () => {
+    const { rerender } = render(
+      <Sidebar
+        {...defaultProps}
+        tabs={makeTabs({ index: 0, name: 'h0', kind: 'harness', session_id: 's0' })}
+      />,
+    )
+    // Starts expanded → the row is visible.
+    expect(screen.getByText('h0')).toBeInTheDocument()
+    // User collapses it.
+    fireEvent.click(screen.getByText('Running Harnesses'))
+    expect(screen.queryByText('h0')).not.toBeInTheDocument()
+    // A new harness appears → the section auto-expands.
+    rerender(
+      <Sidebar
+        {...defaultProps}
+        tabs={makeTabs(
+          { index: 0, name: 'h0', kind: 'harness', session_id: 's0' },
+          { index: 1, name: 'h1', kind: 'harness', session_id: 's1' },
+        )}
+      />,
+    )
+    expect(screen.getByText('h1')).toBeInTheDocument()
+    expect(screen.getByText('h0')).toBeInTheDocument()
   })
 })

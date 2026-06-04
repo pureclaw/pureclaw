@@ -49,7 +49,7 @@ function Pill({
   )
 }
 
-function TabRow({
+export function TabRow({
   tab,
   selected,
   onSelect,

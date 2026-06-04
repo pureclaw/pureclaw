@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
+import { HarnessControls } from './components/HarnessControls'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab, releaseHarness, adoptWindow } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab, releaseHarness, adoptWindow, destroyHarness } from './hooks/useApi'
 import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
@@ -928,6 +929,28 @@ export default function App() {
     }
   }, [selectedId])
 
+  // Destroy a harness — terminates its claude-code + shell processes and
+  // archives its session. `confirmAdopted` is forwarded to the backend, which
+  // fail-closes on an adopted harness unless the user has confirmed the kill.
+  // The backend broadcasts a refreshed `lists` snapshot; we clear the
+  // selection if the destroyed harness was focused.
+  const handleDestroyHarness = useCallback(async (index: number, confirmAdopted: boolean) => {
+    await destroyHarness(index, confirmAdopted)
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
+  // The selected tab when it is a harness — drives the right-pane view router:
+  // a harness has no transcript, so we show HarnessControls instead of ChatArea.
+  const selectedHarnessTab = useMemo(() => {
+    if (!selectedId?.startsWith('tab:')) return null
+    const idx = parseInt(selectedId.slice('tab:'.length), 10)
+    const t = tabs.find((tab) => tab.index === idx)
+    return t && t.kind === 'harness' ? t : null
+  }, [selectedId, tabs])
+
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
     ? deriveAgent(selectedId, tabs, sessions)
@@ -984,6 +1007,17 @@ export default function App() {
           onAcknowledgeTab={handleAcknowledgeTab}
           onReleaseTab={handleReleaseTab}
         />
+        {selectedHarnessTab ? (
+          <HarnessControls
+            tab={selectedHarnessTab}
+            session={
+              sessions.find((s) => s.id === selectedHarnessTab.session_id)
+              ?? archivedSessions.find((s) => s.id === selectedHarnessTab.session_id)
+              ?? null
+            }
+            onDestroy={handleDestroyHarness}
+          />
+        ) : (
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
           selectedSession={selectedSession}
@@ -1020,6 +1054,7 @@ export default function App() {
           availableModels={[...transcriptModels, ...composerSpec.models]}
           onModelChange={modelDropdownValue !== null ? setModelOverride : undefined}
         />
+        )}
       </div>
     </>
   )

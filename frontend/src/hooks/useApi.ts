@@ -463,6 +463,27 @@ export async function releaseHarness(index: number): Promise<boolean> {
   }
 }
 
+/** Destroy a harness by tab index — terminates its claude-code + shell
+ *  processes (kills the tmux window) and archives its session (the transcript
+ *  is kept on disk). Distinct from Release (which never kills) and Close.
+ *
+ *  `confirmAdopted` must be true to destroy an ADOPTED harness: killing a
+ *  window PureClaw did not create breaks the "release never kills" contract,
+ *  so the backend fail-closes unless the caller explicitly confirms. Sent as
+ *  `confirm_adopted` in the body. Returns true if the backend accepted it. */
+export async function destroyHarness(index: number, confirmAdopted: boolean): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/destroy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm_adopted: confirmAdopted }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 /** Resume an archived session: unarchive it, then create a new tab for it.
  *  Returns the new tab response on success, or null on failure. */
 export async function resumeArchivedSession(sessionId: string): Promise<NewTabResponse | null> {

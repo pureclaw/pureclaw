@@ -6,6 +6,7 @@ module PureClaw.Frontend.API
   , StartedHarness (..)
   , ReleaseTmux (..)
   , productionReleaseTmux
+  , productionKillWindow
   , pickLiveMarker
     -- * Harness routing helpers
   , harnessKeyFromKind
@@ -164,6 +165,14 @@ data FrontendEnv = FrontendEnv
     -- the live marker still equals THIS entry's id. Tests inject a recording
     -- 'ReleaseTmux' to assert the @set-option -wu@ argv (D5.1) and to prove no
     -- tmux mutation happens on a stale\/uncorroborated entry (D5.2).
+  , _fe_killWindow   :: Text -> Text -> IO ()
+    -- ^ Kill the tmux window at @(session, windowName)@ — terminates the
+    -- harness's claude-code process and the pane's shell. Used ONLY by
+    -- @POST \/api\/tabs\/{index}\/destroy@, and ONLY after the handler
+    -- re-corroborates (via '_fe_releaseTmux'\'s @_rt_liveMarker@) that the live
+    -- @\@pcl_id@ still equals THIS entry's id (SEC-3): we never kill a window we
+    -- cannot confirm is ours. Production wires 'Tmux.stopHarnessWindowNamed'
+    -- (@kill-window@); the default test stub is a no-op.
   , _fe_sessionsDir  :: FilePath
     -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
   , _fe_recentLimit  :: Int
@@ -272,6 +281,13 @@ productionReleaseTmux = ReleaseTmux
       pickLiveMarker window <$> Tmux.readMarkers session
   , _rt_clearMarker = Tmux.clearWindowMarker
   }
+
+-- | The production '_fe_killWindow': 'Tmux.stopHarnessWindowNamed', which issues
+-- @kill-window -t session:window@ through the authorized tmux seam. Terminates
+-- the harness's claude-code process and the pane shell. Invoked by Destroy ONLY
+-- after the handler re-corroborates the window is ours (SEC-3).
+productionKillWindow :: Text -> Text -> IO ()
+productionKillWindow = Tmux.stopHarnessWindowNamed
 
 -- | Pure core of the production live-@\@pcl_id@ lookup: from a session's
 -- 'Tmux.readMarkers' sweep, return the non-empty @\@pcl_id@ of the row whose
@@ -598,6 +614,8 @@ apiApp env req respond = do
       handleDismissTab env tidx respond
     ("POST", ["api", "tabs", tidx, "release"]) ->
       handleReleaseTab env tidx req respond
+    ("POST", ["api", "tabs", tidx, "destroy"]) ->
+      handleDestroyTab env tidx req respond
     ("POST", ["api", "tabs", tidx, "acknowledge"]) ->
       handleAcknowledgeTab env tidx respond
     ("POST", ["api", "tabs", _tidx, "restart"]) ->
@@ -901,6 +919,99 @@ deregister :: FrontendEnv -> Registry.HarnessEntry -> IO ()
 deregister env e = do
   Registry.deleteEntry (_fe_harnessRegistry env) (Registry._he_id e)
   modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
+
+-- | Request body for @POST \/api\/tabs\/{index}\/destroy@. @confirm_adopted@
+-- must be @true@ to destroy an 'Registry.OriginAdopted' harness — killing a
+-- window PureClaw did not create breaks the "release never kills" contract, so
+-- the server fail-closes unless the caller explicitly confirms. Defaults to
+-- 'False' (and on a missing/garbage body), so an unconfirmed adopted destroy is
+-- always rejected.
+newtype DestroyRequest = DestroyRequest
+  { _dr_confirmAdopted :: Bool
+  }
+
+instance FromJSON DestroyRequest where
+  parseJSON = Aeson.withObject "DestroyRequest" $ \o ->
+    DestroyRequest <$> o .:? "confirm_adopted" .!= False
+
+-- | @POST \/api\/tabs\/{index}\/destroy@ — terminate a harness: kill its tmux
+-- window (claude-code + the pane shell), ARCHIVE its session (transcript
+-- retained — design: destroy is reversible at the data layer), and deregister
+-- it from BOTH the registry and the legacy '_fe_harnesses' map. Distinct from
+-- Release (never kills), Dismiss (no tmux op, session stays in Recent), and
+-- Close.
+--
+-- Two guards:
+--
+--   * ADOPTED gate (server-enforced, not UI-trusted): an 'OriginAdopted' entry
+--     is rejected with @409@ and NO mutation unless the body carries
+--     @confirm_adopted: true@. Spawned\/Discovered entries (our own windows)
+--     destroy without confirmation.
+--   * SEC-3 corroborate-before-kill: the kill ('_fe_killWindow') fires ONLY
+--     when the live @\@pcl_id@ at the entry's cached @(session, window)@ still
+--     equals THIS entry's id. On a mismatch\/missing marker (window replaced or
+--     gone) we deregister + archive WITHOUT killing and log a refusal — we
+--     never kill a window we cannot confirm is ours.
+handleDestroyTab
+  :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleDestroyTab env tidxText req respond = do
+  body <- consumeBody req
+  let confirmAdopted = case Aeson.eitherDecode body of
+        Right dr -> _dr_confirmAdopted dr
+        Left _   -> False
+  withResolvedTab env tidxText respond $ \e ->
+    case Registry._he_origin e of
+      Registry.OriginAdopted | not confirmAdopted ->
+        -- Server-side enforcement of the kill-adopted confirmation: the UI gate
+        -- is not trusted. No tmux op, no deregistration.
+        respond $ jsonResponse status409
+          (object ["error" .= ("adopted harness requires confirm_adopted" :: Text)])
+      _ -> destroyHarnessEntry env e respond
+
+-- | The corroborate-then-kill core of Destroy, for an entry already cleared by
+-- the adopted gate. Re-reads the live @\@pcl_id@ BEFORE killing (SEC-3); kills
+-- only when corroborated, otherwise logs a refusal and skips the kill. Either
+-- way the session is archived (transcript retained) and the entry leaves both
+-- stores.
+destroyHarnessEntry
+  :: FrontendEnv -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+destroyHarnessEntry env e respond = do
+  let session  = Registry._he_session e
+      window   = Registry._he_windowName e
+      expected = Registry.harnessIdToText (Registry._he_id e)
+  liveMarker <- _rt_liveMarker (_fe_releaseTmux env) session window
+  killed <-
+    if liveMarker == Just expected
+      then do
+        -- Corroborated: the live window still carries THIS entry's marker, so
+        -- it is safe to kill.
+        _fe_killWindow env session window
+        pure True
+      else do
+        _lh_logWarn (_fe_logger env) $
+          "destroy: window " <> session <> ":" <> window
+            <> " no longer corroborated (live @pcl_id="
+            <> Maybe.fromMaybe "<none>" liveMarker
+            <> ", expected " <> expected
+            <> "); deregistering WITHOUT killing"
+        pure False
+  -- Archive the backing session (retain the transcript) if session-backed. A
+  -- missing/unparseable session is non-fatal: the window kill + deregistration
+  -- still stand, so we log and continue rather than fail the request.
+  case Registry._he_sessionId e of
+    Just sid -> do
+      archiveResult <- setArchived (_fe_sessionsDir env) (SessionId sid) True
+      case archiveResult of
+        Right () -> pure ()
+        Left err -> _lh_logWarn (_fe_logger env) $
+          "destroy: could not archive session " <> sid <> ": " <> T.pack (show err)
+    Nothing -> pure ()
+  deregister env e
+  broadcastLists env
+  respond $ jsonResponse status200 $ object $
+    ("destroyed" .= True)
+      : [ "note" .= ("window no longer corroborated; deregistered without killing" :: Text)
+        | not killed ]
 
 -- | @POST \/api\/tabs\/{index}\/acknowledge@ — clear the out-of-band
 -- '_he_extModified' flag (the §7 ⚠ \"edited\" pill). Uses 'Registry.modifyEntry'

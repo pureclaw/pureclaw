@@ -1361,6 +1361,176 @@ spec = do
         stillThere <- doesDirectoryExist (tmpDir </> T.unpack sid)
         stillThere `shouldBe` True
 
+  -- =========================================================================
+  -- POST /api/tabs/{index}/destroy — terminates the harness (kill-window),
+  -- archives its session (transcript retained), deregisters from both stores.
+  -- Adopted harnesses require an explicit confirm_adopted (server-enforced).
+  -- Kill is corroborated-before-mutate (SEC-3): never kill a window we cannot
+  -- confirm is ours.
+  -- =========================================================================
+  describe "POST /api/tabs/{index}/destroy" $ do
+    let destroyHid = mustParseHid "55555555-5555-4555-8555-555555555555"
+        -- A recording kill seam: records every (session, window) it is asked
+        -- to kill. A corroborating ReleaseTmux supplies the live @pcl_id probe.
+        recordingKill killedRef s w = modifyIORef' killedRef (++ [(s, w)])
+        liveMatching hid s w =
+          newIORef (Map.singleton (s, w) (Registry.harnessIdToText hid))
+
+    it "spawned + corroborated: kills the window, archives the session, deregisters from both stores" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-001"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        killedRef <- newIORef []
+        liveRef <- liveMatching destroyHid "pureclaw" "claude-code-0"
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_killWindow   = recordingKill killedRef
+              , _fe_releaseTmux  = ReleaseTmux
+                  { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                  , _rt_clearMarker = \_ _ -> pure ()
+                  }
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry destroyHid "claude-code-0" (Just mkNoOpHarnessHandle))
+            { Registry._he_label      = "claude-code-0"
+            , Registry._he_session    = "pureclaw"
+            , Registry._he_windowName = "claude-code-0"
+            , Registry._he_origin     = Registry.OriginSpawned
+            , Registry._he_sessionId  = Just sid
+            }
+        modifyIORef' (_fe_harnesses env) (Map.insert "claude-code-0" mkNoOpHarnessHandle)
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"] "{}"
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "destroyed" `shouldBe` Just (Aeson.Bool True)
+        -- The window was killed exactly once, at the right coordinate.
+        killed <- readIORef killedRef
+        killed `shouldBe` [("pureclaw", "claude-code-0")]
+        -- Gone from the registry and the legacy map.
+        gone <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+        (Registry._he_id <$> gone) `shouldBe` Nothing
+        legacy <- readIORef (_fe_harnesses env)
+        Map.member "claude-code-0" legacy `shouldBe` False
+        -- The session was ARCHIVED (transcript retained): it is no longer in
+        -- Recent, but it IS in Archived.
+        (_, recentBody) <- getJSON env ["api", "sessions", "recent"]
+        case Aeson.decode recentBody of
+          Just (Aeson.Array arr) ->
+            [ t | v <- toList' arr, Just (Aeson.String t) <- [lookupKey v "id"] ]
+              `shouldNotSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+        (_, archBody) <- getJSON env ["api", "sessions", "archived"]
+        case Aeson.decode archBody of
+          Just (Aeson.Array arr) ->
+            [ t | v <- toList' arr, Just (Aeson.String t) <- [lookupKey v "id"] ]
+              `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+
+    it "SEC-3 stale entry (live @pcl_id mismatch): deregisters and archives WITHOUT killing, logs a refusal" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-002"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        killedRef <- newIORef []
+        logRef <- newIORef []
+        liveRef <- newIORef
+          (Map.singleton ("pureclaw", "claude-code-0")
+                         "99999999-9999-4999-8999-999999999999")
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_killWindow   = recordingKill killedRef
+              , _fe_logger       = captureWarnLogger logRef
+              , _fe_releaseTmux  = ReleaseTmux
+                  { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                  , _rt_clearMarker = \_ _ -> pure ()
+                  }
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry destroyHid "claude-code-0" (Just mkNoOpHarnessHandle))
+            { Registry._he_session    = "pureclaw"
+            , Registry._he_windowName = "claude-code-0"
+            , Registry._he_origin     = Registry.OriginSpawned
+            , Registry._he_sessionId  = Just sid
+            }
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"] "{}"
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "destroyed" `shouldBe` Just (Aeson.Bool True)
+        -- The invariant: we never killed a window we could not confirm is ours.
+        killed <- readIORef killedRef
+        killed `shouldBe` []
+        warns <- readIORef logRef
+        warns `shouldSatisfy` any ("no longer corroborated" `T.isInfixOf`)
+        -- Still deregistered (we stop managing it either way).
+        gone <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+        (Registry._he_id <$> gone) `shouldBe` Nothing
+
+    it "adopted WITHOUT confirm_adopted: 409, no kill, still registered" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      killedRef <- newIORef []
+      liveRef <- liveMatching destroyHid "scratch" "win-adopted"
+      let env = env0
+            { _fe_killWindow  = recordingKill killedRef
+            , _fe_releaseTmux = ReleaseTmux
+                { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                , _rt_clearMarker = \_ _ -> pure ()
+                }
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry destroyHid "win-adopted" (Just mkNoOpHarnessHandle))
+          { Registry._he_session    = "scratch"
+          , Registry._he_windowName = "win-adopted"
+          , Registry._he_origin     = Registry.OriginAdopted
+          }
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"] "{}"
+      st `shouldBe` HTTP.status409
+      lookupKey' respBody "destroyed" `shouldBe` Nothing
+      killed <- readIORef killedRef
+      killed `shouldBe` []
+      still <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+      (Registry._he_id <$> still) `shouldBe` Just destroyHid
+
+    it "adopted WITH confirm_adopted=true + corroborated: kills the window and deregisters" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      killedRef <- newIORef []
+      liveRef <- liveMatching destroyHid "scratch" "win-adopted"
+      let env = env0
+            { _fe_killWindow  = recordingKill killedRef
+            , _fe_releaseTmux = ReleaseTmux
+                { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                , _rt_clearMarker = \_ _ -> pure ()
+                }
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry destroyHid "win-adopted" (Just mkNoOpHarnessHandle))
+          { Registry._he_session    = "scratch"
+          , Registry._he_windowName = "win-adopted"
+          , Registry._he_origin     = Registry.OriginAdopted
+          }
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"]
+                          "{\"confirm_adopted\":true}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "destroyed" `shouldBe` Just (Aeson.Bool True)
+      killed <- readIORef killedRef
+      killed `shouldBe` [("scratch", "win-adopted")]
+      gone <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+
+    it "returns 404 for an out-of-range index (no kill)" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      killedRef <- newIORef []
+      let env = env0 { _fe_killWindow = recordingKill killedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry destroyHid "claude-code-0" Nothing)
+      (st, _) <- postJSON env ["api", "tabs", "5", "destroy"] "{}"
+      st `shouldBe` HTTP.status404
+      killed <- readIORef killedRef
+      killed `shouldBe` []
+
+    it "returns 400 for a non-numeric index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, _) <- postJSON env ["api", "tabs", "notanint", "destroy"] "{}"
+      st `shouldBe` HTTP.status400
+
   describe "POST /api/tabs/{index}/acknowledge (P2-WU3 D3.2)" $ do
     it "clears the ext_modified flag (verified via a follow-up /api/tabs)" $ do
       env <- mkTestFrontendEnvWithRegistryTabs
@@ -2918,6 +3088,7 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_consentChannel = ConsentHeadless  -- fail-closed default; adopt tests override
     , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ())
+    , _fe_killWindow   = \_ _ -> pure ()
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
     , _fe_recentLimit  = 20
     , _fe_provider     = provRef
