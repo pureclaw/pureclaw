@@ -86,8 +86,11 @@ requirement (§H.4) recorded for WU5/WU7.
 **Deps:** WU0 (sanitize rule), WU1 (uuid).
 **DoD:**
 - D2.1 Value ctor unexported (mirror `SafePath`). The only way to obtain the path.
-- D2.2 Computes base root incl. `CLAUDE_CONFIG_DIR` override; derives
-  `<base>/projects/<sanitize(canonical-cwd)>/<uuid>.jsonl` using the WU0-confirmed rule.
+- D2.2 **Locate by uuid-glob (WU0 refinement):** the WU0 spike found the cwd→dir-name rule is
+  canonicalize + `[^A-Za-z0-9]→-` (version-fragile). Since the `<uuid>` is unique and
+  PureClaw-minted, resolve the file by globbing `<base>/projects/*/<uuid>.jsonl` (base from
+  `CLAUDE_CONFIG_DIR` else `~/.claude`; at most one hit) rather than reconstructing the dir
+  name. Persisted canonical cwd (§B) is a cross-check/fallback only.
 - D2.3 `canonicalizePath`es the candidate and verifies canonical containment under the
   canonical `<base>/projects` root (rejects symlink escape — cf. `Path.hs:99-105`).
 - D2.4 Opens the final component with `O_NOFOLLOW` (net-new: `unix` `openFd` with
