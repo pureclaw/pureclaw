@@ -91,6 +91,7 @@ import qualified Handles.HarnessSpec
 import qualified Harness.ClaudeCodeSpec
 import qualified Harness.ClaudeSessionSpec
 import qualified Harness.DiscoverySpec
+import qualified Harness.JsonlTailSpec
 import qualified Harness.ReconcileSpec
 import qualified Harness.RegistrySpec
 import qualified Harness.TmuxSpec
@@ -233,6 +234,7 @@ main = hspec $ do
   describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
   describe "Harness.ClaudeSession" Harness.ClaudeSessionSpec.spec
   describe "Harness.Discovery" Harness.DiscoverySpec.spec
+  describe "Harness.JsonlTail" Harness.JsonlTailSpec.spec
   describe "Harness.Reconcile" Harness.ReconcileSpec.spec
   describe "Harness.Registry" Harness.RegistrySpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec
