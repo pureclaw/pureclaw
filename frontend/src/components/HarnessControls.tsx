@@ -85,11 +85,16 @@ export function HarnessControls({
         </Field>
 
         <Field label="Associated session">
-          {session ? (
+          {/* The tab's session_id is the source of truth for the association. A
+              running harness owns a session that is excluded from the recents
+              list (active tab + empty transcript), so `session` (resolved from
+              recents) can be null even though the harness IS linked — show the
+              id regardless, enriched with the title when the metadata is loaded. */}
+          {tab.session_id ? (
             <div className="flex flex-col">
-              <span>{sessionDisplayTitle(session)}</span>
+              {session && <span>{sessionDisplayTitle(session)}</span>}
               <span className="text-xs" style={{ color: 'var(--text-faint)' }}>
-                {session.id}
+                {tab.session_id}
               </span>
             </div>
           ) : (

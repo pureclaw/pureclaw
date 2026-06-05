@@ -54,6 +54,16 @@ describe('HarnessControls', () => {
     expect(screen.getByText(/no session/i)).toBeInTheDocument()
   })
 
+  it('HC.6: surfaces the linked session id even when the session object is not loaded', () => {
+    // A running harness owns its session, but that session is excluded from the
+    // recents list (it is an active tab with an empty transcript), so the parent
+    // passes session=null. The tab's session_id is the source of truth: the view
+    // must show it as associated, NOT claim "no session".
+    render(<HarnessControls tab={harnessTab({ session_id: 'sess-h' })} session={null} onDestroy={vi.fn()} />)
+    expect(screen.queryByText(/no session/i)).not.toBeInTheDocument()
+    expect(screen.getByText('sess-h')).toBeInTheDocument()
+  })
+
   it('HC.4: a SPAWNED harness destroys immediately (no confirm step)', () => {
     const onDestroy = vi.fn()
     render(
