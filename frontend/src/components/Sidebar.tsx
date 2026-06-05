@@ -234,12 +234,13 @@ export function Sidebar({
   const harnessTabs = tabs.filter((t) => t.kind === 'harness')
   const otherTabs = tabs.filter((t) => t.kind !== 'harness')
 
-  // De-dupe: a running harness already appears in "Running Harnesses", so its
-  // backing session must not also show up in "Recent Sessions".
-  const harnessSessionIds = new Set(
-    harnessTabs.map((t) => t.session_id).filter((id): id is string => id !== null),
-  )
-  const recentSessions = sessions.filter((s) => !harnessSessionIds.has(s.id))
+  // A running harness appears under "Running Harnesses" (its status/Destroy
+  // controls) AND, intentionally, its backing session is also listed under
+  // "Recent Sessions" so the user can jump straight to the conversation. The
+  // backend recents payload already excludes non-harness tab sessions (the
+  // provider/raw-shell tabs in "Active Tabs"), so no extra de-dupe is needed
+  // here — render every session the backend sent.
+  const recentSessions = sessions
 
   return (
     <div

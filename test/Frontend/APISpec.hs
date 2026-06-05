@@ -1645,7 +1645,7 @@ spec = do
       (Registry._he_id <$> keptA) `shouldBe` Just hidA
 
   describe "GET /api/sessions/recent (registry-wired exclusion — WU8 D8.3)" $
-    it "excludes the session held by a harness tab via the wired list" $
+    it "lists the session held by a harness tab in recents (harness sessions stay reachable)" $
       withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
         let sid1 = "test-20240101-120000-001"
             sid2 = "test-20240101-120000-002"
@@ -1653,8 +1653,10 @@ spec = do
         writeTestSession tmpDir sid2 False
         env0 <- mkTestFrontendEnvWithRegistryTabs
         let env = env0 { _fe_sessionsDir = tmpDir }
-        -- Seed a harness entry that holds sid1; the wired list must surface
-        -- it in activeTabSids so the recent-sessions filter excludes sid1.
+        -- Seed a harness entry that holds sid1. A harness tab's session is NOT
+        -- de-duped out of recents (unlike a provider/raw-shell tab): the harness
+        -- keeps its controls entry under "Running Harnesses" AND its conversation
+        -- is reachable as a Recent Sessions row.
         let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
         Registry.insertEntry (_fe_harnessRegistry env)
           (baseEntry hid "claude-code-0" Nothing)
@@ -1665,7 +1667,7 @@ spec = do
           Just (Aeson.Array arr) -> do
             let ids = [ t | v <- toList' arr
                           , Just (Aeson.String t) <- [lookupKey v "id"] ]
-            ids `shouldSatisfy` notElem sid1
+            ids `shouldSatisfy` elem sid1
             ids `shouldSatisfy` elem sid2
           _ -> expectationFailure "Expected JSON array"
 

@@ -1061,7 +1061,12 @@ handleRecentSessions env respond = do
   -- the same session does not appear in both "Active Tabs" and
   -- "Recent Sessions" simultaneously.
   tabs <- _fe_listTabs env
-  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } <- tabs]
+      -- Only NON-harness tabs (provider / raw-shell, shown under "Active Tabs")
+      -- dedupe their session out of "Recent Sessions". A harness tab keeps its
+      -- controls entry under "Running Harnesses" AND, intentionally, its backing
+      -- session is also listed under "Recent Sessions" so the user can jump
+      -- straight to the conversation — so harness-kind tabs are NOT counted here.
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
       notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
       visible       = filter (\m -> not (_sm_archived m) && notInTab m) metas
   nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
@@ -1100,7 +1105,12 @@ computeListsSnapshot env = do
   -- empty transcripts, enrich with first-message snippet — same pipeline
   -- as handleRecentSessions.
   allMetas <- listSessions baseDir Nothing (limit * 3)
-  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } <- tabs]
+      -- Only NON-harness tabs (provider / raw-shell, shown under "Active Tabs")
+      -- dedupe their session out of "Recent Sessions". A harness tab keeps its
+      -- controls entry under "Running Harnesses" AND, intentionally, its backing
+      -- session is also listed under "Recent Sessions" so the user can jump
+      -- straight to the conversation — so harness-kind tabs are NOT counted here.
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
       notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
       visible       = filter (\m -> not (_sm_archived m) && notInTab m) allMetas
   nonEmpty <- filterM (hasTranscriptEntries baseDir) visible

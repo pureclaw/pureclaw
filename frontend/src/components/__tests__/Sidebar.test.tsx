@@ -173,7 +173,11 @@ describe('Sidebar lifecycle transitions', () => {
     expect(screen.getByText('plain-tab')).toBeInTheDocument()
   })
 
-  it('RH.3: a session backed by a running harness is de-duped out of Recent Sessions', () => {
+  it('RH.3: a session backed by a running harness ALSO appears in Recent Sessions', () => {
+    // A harness has a controls entry under "Running Harnesses" AND its
+    // conversation should be reachable as a normal session row, so the user can
+    // jump straight to it. The sidebar no longer de-dupes it out (the backend
+    // already keeps non-harness tab sessions out of the recents payload).
     render(
       <Sidebar
         {...defaultProps}
@@ -184,8 +188,11 @@ describe('Sidebar lifecycle transitions', () => {
         )}
       />,
     )
-    // The harness's own session must not appear a second time in Recent Sessions.
-    expect(screen.queryByText('harness session')).not.toBeInTheDocument()
+    // The harness's session is listed under Recent Sessions (clickable row).
+    expect(screen.getByText('harness session')).toBeInTheDocument()
+    // The harness controls row is still present under Running Harnesses.
+    const section = screen.getByTestId('running-harnesses-section')
+    expect(within(section).getByText('claude-code-0')).toBeInTheDocument()
     // Unrelated provider sessions are unaffected.
     expect(screen.getByText('plain session')).toBeInTheDocument()
   })
