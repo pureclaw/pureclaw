@@ -141,7 +141,8 @@ export interface MessageContent {
   codeBlock?: CodeSpan[][]
   listItems?: string[]
   orderedItems?: string[]
-  collapsedText?: string   // shown collapsed by default, expandable
+  collapsedText?: string   // System-prompt block, shown collapsed by default, expandable
+  thinkingText?: string    // claude-code "thinking" block, collapsed by default under a "Thinking" label
   rawJson?: string         // raw JSON, hidden by default, toggleable
   toolCall?: ToolCallInfo  // assistant tool invocation (with matched result when available)
 }

@@ -147,10 +147,11 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
         // Extract only the LAST message from the request — it's the new
         // one being sent. Earlier messages in the array are conversation
         // history already represented by previous transcript entries.
-        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> }> | undefined
+        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; thinking?: string; name?: string; id?: string; input?: unknown }> }> | undefined
         if (msgs && msgs.length > 0) {
           const msg = msgs[msgs.length - 1]!
           const textParts = extractTextFromContent(msg.content)
+          const thinkingParts = extractThinking(msg.content)
           const toolCalls = extractToolCalls(msg.content, toolResults)
           if (msg.role === 'user') {
             if (textParts) {
@@ -167,6 +168,8 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
             }
           } else if (msg.role === 'assistant') {
             const blocks: MessageContent[] = []
+            thinkingParts.forEach((tk, i) =>
+              blocks.push({ id: 'tk-' + e.id + '-' + i, thinkingText: tk }))
             if (textParts) blocks.push({ id: 'a-' + e.id + '-text', text: textParts })
             for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
             if (blocks.length > 0) {
@@ -197,8 +200,9 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
       // Response
       const parsed = tryParseJson(e.payload)
       if (parsed) {
-        const content = parsed.content as Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> | undefined
+        const content = parsed.content as Array<{ type: string; text?: string; thinking?: string; name?: string; id?: string; input?: unknown }> | undefined
         const textParts = extractTextFromContent(content)
+        const thinkingParts = extractThinking(content)
         const toolCalls = extractToolCalls(content, toolResults)
         const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
         const usageMeta = usage
@@ -206,6 +210,8 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           : undefined
 
         const blocks: MessageContent[] = []
+        thinkingParts.forEach((tk, i) =>
+          blocks.push({ id: 'r-' + e.id + '-tk-' + i, thinkingText: tk }))
         if (textParts) blocks.push({ id: 'r-' + e.id + '-text', text: textParts })
         for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
         if (blocks.length === 0) blocks.push({ id: 'r-' + e.id + '-empty', text: '(empty response)' })
@@ -252,6 +258,17 @@ function extractTextFromContent(content: Array<{ type: string; text?: string }> 
     .filter((b) => b.type === 'text' && b.text)
     .map((b) => b.text!)
   return texts.length > 0 ? texts.join('\n') : null
+}
+
+/** Extract claude-code `type:"thinking"` blocks. Each such block carries the
+ *  reasoning text in its `thinking` field (shape
+ *  `{type:"thinking", thinking: string, signature?: string}`). Returns the
+ *  non-empty thinking texts in document order, or [] when none are present. */
+function extractThinking(content: Array<{ type: string; thinking?: string }> | undefined): string[] {
+  if (!content) return []
+  return content
+    .filter((b) => b.type === 'thinking' && b.thinking)
+    .map((b) => b.thinking!)
 }
 
 function extractToolCalls(

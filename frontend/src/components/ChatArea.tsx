@@ -445,7 +445,14 @@ function CodeBlock({ lines }: { lines: CodeSpan[][] }) {
   )
 }
 
-function CollapsedBlock({ text, anchorId }: { text: string; anchorId?: string }) {
+/** A collapsible text block. Used for two distinct content kinds, told apart
+ *  by the optional `label`:
+ *   - the System prompt (no label \u2014 bare preview, unchanged historical look),
+ *   - a claude-code "thinking" block (label="Thinking" \u2014 a distinct pill so it
+ *     can never be mistaken for the System prompt).
+ *  Content is always rendered as React text children (escaped); there is no
+ *  `dangerouslySetInnerHTML` anywhere on this path. */
+function CollapsedBlock({ text, anchorId, label }: { text: string; anchorId?: string; label?: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
   const [expanded, setExpanded] = useState(targeted)
@@ -469,6 +476,14 @@ function CollapsedBlock({ text, anchorId }: { text: string; anchorId?: string })
     >
       <div className="flex items-center gap-1.5">
         <span style={{ fontSize: 10, opacity: 0.6 }}>{expanded ? '\u25BC' : '\u25B6'}</span>
+        {label && (
+          <span
+            className="text-xs font-semibold shrink-0"
+            style={{ color: 'var(--accent-secondary)' }}
+          >
+            {label}
+          </span>
+        )}
         {expanded ? (
           <pre className="whitespace-pre-wrap break-words flex-1" style={{ fontFamily: 'inherit', margin: 0, maxHeight: 400, overflow: 'auto' }}>
             {text}
@@ -615,6 +630,9 @@ function MessageBlock({ block }: { block: MessageContent }) {
   }
   if (block.collapsedText) {
     return <CollapsedBlock text={block.collapsedText} anchorId={block.id} />
+  }
+  if (block.thinkingText) {
+    return <CollapsedBlock text={block.thinkingText} anchorId={block.id} label="Thinking" />
   }
   if (block.codeBlock) {
     return <CodeBlock lines={block.codeBlock} />
