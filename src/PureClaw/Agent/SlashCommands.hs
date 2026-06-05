@@ -72,6 +72,7 @@ import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript
 import PureClaw.Harness.ClaudeCode
+import PureClaw.Harness.ClaudeSession (mintClaudeSessionUuid, unClaudeSessionUuid)
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Harness.Tmux
 import Data.Text.Read qualified as TR
@@ -1935,9 +1936,13 @@ executeHarnessCommand env sub ctx = do
           send ("Failed to start harness '" <> name <> "':\n  " <> detail)
           logError $ "Harness start failed: " <> T.pack (show err)
           pure ctx
-        Right (_hid, hh) -> do
+        Right (_hid, hh, _mUuid) -> do
           -- D-ADD-2: the spawn path already registered the HarnessId entry; sync
           -- the legacy name-keyed map so legacy consumers keep working. The
+          -- minted claude-code session uuid (_mUuid) is not persisted on this
+          -- CLI '/harness start' path — there is no session.json to write it
+          -- into. The optional JSONL log view (WU7) is a frontend-only feature,
+          -- so a CLI-only spawn intentionally does not correlate a log file.
           -- window is created already named harnessKey (addHarnessWindowNamed),
           -- so no separate rename is needed.
           modifyIORef' (_env_nextWindowIdx env) (+ 1)
@@ -2192,7 +2197,7 @@ executeSessionCommand env sub ctx = do
                         (SessionTypes.SkHarness (SessionTypes.HarnessSpec
                           (SessionTypes.fixedFlavourLookup name)
                           (SessionTypes.TbTmux (SessionTypes.TmuxConfig name name Nothing))
-                          Nothing [] Nothing))
+                          Nothing [] Nothing Nothing Nothing))
         _ -> createSession env ctx agentName
                (SessionTypes.SkProvider (SessionTypes.ProviderSpec
                  (SessionTypes.inferProviderId "") (ModelId "") Nothing))
@@ -2389,6 +2394,15 @@ knownHarnesses =
 -- a @Spawned@ entry in the supplied 'HarnessRegistry' (D4.2). On success it
 -- returns the generated 'HarnessId' alongside the handle so the caller can
 -- persist the identity and keep the legacy name-keyed map in sync (D-ADD-2).
+--
+-- WU6 (JSONL log correlation): for the @claude-code@ flavour we mint a fresh
+-- canonical 'ClaudeSessionUuid' and inject it as @--session-id \<uuid\>@ into
+-- the spawned @claude@ argv (via 'claudeCodeExtraArgs', through the EXISTING
+-- @[Text]@ args — the @_ccd_addWindow@ seam is not widened). The SAME minted
+-- uuid text is returned as the third tuple element so the caller can persist it
+-- into '_h_claudeSessionUuid'; this guarantees the persisted uuid matches the
+-- one claude-code writes its on-disk JSONL log under. Non-@claude-code@ spawns
+-- mint nothing and return 'Nothing'.
 startHarnessByName
   :: SecurityPolicy
   -> TranscriptHandle
@@ -2399,12 +2413,18 @@ startHarnessByName
   -> Maybe FilePath   -- ^ optional working directory
   -> Bool             -- ^ skip permission checks
   -> Registry.HarnessRegistry
-  -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle))
+  -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle, Maybe Text))
 startHarnessByName policy th session name windowName windowIdx mWorkDir skipPerms reg =
   case resolveHarnessName name of
-    Just "claude-code" ->
-      let extraArgs = ["--dangerously-skip-permissions" | skipPerms]
-      in mkClaudeCodeHarness policy th session windowName windowIdx mWorkDir extraArgs reg
+    Just "claude-code" -> do
+      -- Mint ONCE: the same value is injected into the argv (below) and
+      -- returned to the caller for persistence — they cannot diverge.
+      uuid <- mintClaudeSessionUuid
+      let uuidText  = unClaudeSessionUuid uuid
+          extraArgs = claudeCodeExtraArgs skipPerms (Just uuidText)
+      result <- mkClaudeCodeHarness policy th session windowName windowIdx
+                  mWorkDir extraArgs reg
+      pure (fmap (\(hid, hh) -> (hid, hh, Just uuidText)) result)
     _                  -> pure (Left (HarnessBinaryNotFound name))
 
 -- | Resolve an optional directory argument for harness start.

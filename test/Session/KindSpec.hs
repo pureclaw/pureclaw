@@ -214,11 +214,11 @@ spec = do
 
     describe "HarnessSpec" $ do
       it "round-trips with cwd and args" $ do
-        let hs' = HarnessSpec HClaudeCode TbLocal (Just "/tmp") ["--flag"] Nothing
+        let hs' = HarnessSpec HClaudeCode TbLocal (Just "/tmp") ["--flag"] Nothing Nothing Nothing
         Aeson.decode (Aeson.encode hs') `shouldBe` Just hs'
 
       it "round-trips without cwd, empty args" $ do
-        let hs' = HarnessSpec HClaudeCode TbLocal Nothing [] Nothing
+        let hs' = HarnessSpec HClaudeCode TbLocal Nothing [] Nothing Nothing Nothing
         Aeson.decode (Aeson.encode hs') `shouldBe` Just hs'
 
       -- D6.2: a HarnessSpec carrying a HarnessId round-trips, and the encoded
@@ -226,13 +226,13 @@ spec = do
       it "round-trips with a HarnessId (D6.2)" $ do
         let hid = parseHarnessId "11111111-1111-4111-8111-111111111111"
             tc  = TmuxConfig "pureclaw" "claude-code-0" Nothing
-            hs' = HarnessSpec HClaudeCode (TbTmux tc) Nothing [] hid
+            hs' = HarnessSpec HClaudeCode (TbTmux tc) Nothing [] hid Nothing Nothing
         Aeson.decode (Aeson.encode hs') `shouldBe` Just hs'
 
       it "encodes both harnessId and the tmux window (dual-write, D6.2)" $ do
         let hid = parseHarnessId "22222222-2222-4222-8222-222222222222"
             tc  = TmuxConfig "pureclaw" "claude-code-3" Nothing
-            hs' = HarnessSpec HClaudeCode (TbTmux tc) Nothing [] hid
+            hs' = HarnessSpec HClaudeCode (TbTmux tc) Nothing [] hid Nothing Nothing
             obj = Aeson.decode (Aeson.encode hs') :: Maybe Aeson.Object
         case obj of
           Just o -> do
@@ -262,7 +262,7 @@ spec = do
           Nothing  -> expectationFailure "legacy HarnessSpec failed to decode"
 
       it "omits the harnessId key when Nothing (emit-when-Just, D6.1)" $ do
-        let hs' = HarnessSpec HClaudeCode TbLocal Nothing [] Nothing
+        let hs' = HarnessSpec HClaudeCode TbLocal Nothing [] Nothing Nothing Nothing
             obj = Aeson.decode (Aeson.encode hs') :: Maybe Aeson.Object
         case obj of
           Just o ->
@@ -271,19 +271,71 @@ spec = do
               Just _  -> expectationFailure "harnessId key should be absent when Nothing"
           Nothing -> expectationFailure "Failed to decode HarnessSpec as Object"
 
+      -- D6.2/D6.3: a HarnessSpec carrying a claudeSessionUuid + canonicalCwd
+      -- round-trips (Just case).
+      it "round-trips with claudeSessionUuid and canonicalCwd (D6.2/D6.3)" $ do
+        let uuid = "abcdabcd-1234-4abc-8abc-abcdabcdabcd"
+            hs'  = HarnessSpec HClaudeCode TbLocal Nothing []
+                     Nothing (Just uuid) (Just "/Users/me/work")
+        Aeson.decode (Aeson.encode hs') `shouldBe` Just hs'
+
+      -- D6.2/D6.3: emit-when-Just — the encoded object carries both keys.
+      it "encodes claudeSessionUuid and canonicalCwd when Just (D6.2/D6.3)" $ do
+        let uuid = "11112222-3333-4444-8555-666677778888"
+            hs'  = HarnessSpec HClaudeCode TbLocal Nothing []
+                     Nothing (Just uuid) (Just "/canon/cwd")
+            obj  = Aeson.decode (Aeson.encode hs') :: Maybe Aeson.Object
+        case obj of
+          Just o -> do
+            (Aeson.parseMaybe (Aeson..: "claudeSessionUuid") o :: Maybe Aeson.Value)
+              `shouldBe` Just (Aeson.String uuid)
+            (Aeson.parseMaybe (Aeson..: "canonicalCwd") o :: Maybe Aeson.Value)
+              `shouldBe` Just (Aeson.String "/canon/cwd")
+          Nothing -> expectationFailure "Failed to decode HarnessSpec as Object"
+
+      -- D6.4 (critical back-compat): an old session.json HarnessSpec lacking
+      -- BOTH new keys still decodes, with Nothing for each.
+      it "decodes a legacy spec lacking claudeSessionUuid+canonicalCwd as Nothing (D6.4)" $ do
+        let json = Aeson.object
+              [ "flavour" Aeson..= ("claude-code" :: String)
+              , "backend" Aeson..= Aeson.object
+                  [ "tag"     Aeson..= ("tmux" :: String)
+                  , "session" Aeson..= ("pureclaw" :: String)
+                  , "window"  Aeson..= ("claude-code-2" :: String)
+                  ]
+              , "harnessId" Aeson..= ("99999999-9999-4999-8999-999999999999" :: String)
+              ]
+        case Aeson.parseMaybe Aeson.parseJSON json :: Maybe HarnessSpec of
+          Just hs' -> do
+            _h_claudeSessionUuid hs' `shouldBe` Nothing
+            _h_canonicalCwd hs' `shouldBe` Nothing
+          Nothing  -> expectationFailure "legacy HarnessSpec failed to decode"
+
+      -- D6.2/D6.3: emit-when-Just — both keys absent when Nothing.
+      it "omits claudeSessionUuid+canonicalCwd keys when Nothing (D6.2/D6.3)" $ do
+        let hs' = HarnessSpec HClaudeCode TbLocal Nothing [] Nothing Nothing Nothing
+            obj = Aeson.decode (Aeson.encode hs') :: Maybe Aeson.Object
+        case obj of
+          Just o -> do
+            (Aeson.parseMaybe (Aeson..: "claudeSessionUuid") o :: Maybe Aeson.Value)
+              `shouldBe` Nothing
+            (Aeson.parseMaybe (Aeson..: "canonicalCwd") o :: Maybe Aeson.Value)
+              `shouldBe` Nothing
+          Nothing -> expectationFailure "Failed to decode HarnessSpec as Object"
+
     describe "SessionKind" $ do
       it "round-trips SkProvider" $ do
         let sk = SkProvider (ProviderSpec (ProviderId "anthropic") (ModelId "claude-opus-4-7") (Just testAgentName))
         Aeson.decode (Aeson.encode sk) `shouldBe` Just sk
 
       it "round-trips SkHarness" $ do
-        let sk = SkHarness (HarnessSpec HClaudeCode TbLocal (Just "/tmp") ["--flag"] Nothing)
+        let sk = SkHarness (HarnessSpec HClaudeCode TbLocal (Just "/tmp") ["--flag"] Nothing Nothing Nothing)
         Aeson.decode (Aeson.encode sk) `shouldBe` Just sk
 
       it "round-trips SkHarness carrying a HarnessId (D6.2)" $ do
         let hid = parseHarnessId "33333333-3333-4333-8333-333333333333"
             tc  = TmuxConfig "pureclaw" "claude-code-5" Nothing
-            sk  = SkHarness (HarnessSpec HClaudeCode (TbTmux tc) Nothing [] hid)
+            sk  = SkHarness (HarnessSpec HClaudeCode (TbTmux tc) Nothing [] hid Nothing Nothing)
         Aeson.decode (Aeson.encode sk) `shouldBe` Just sk
 
   -- -----------------------------------------------------------------------
@@ -357,7 +409,7 @@ spec = do
             [ "flavour" Aeson..= ("claude-code" :: String)
             , "backend" Aeson..= Aeson.object ["tag" Aeson..= ("local" :: String)]
             ]
-          expected = HarnessSpec HClaudeCode TbLocal Nothing [] Nothing
+          expected = HarnessSpec HClaudeCode TbLocal Nothing [] Nothing Nothing Nothing
       Aeson.parseMaybe Aeson.parseJSON json `shouldBe` Just expected
 
     it "TmuxConfig with pane=Nothing omits pane key" $ do

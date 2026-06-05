@@ -674,6 +674,8 @@ placeholderHarnessSpec = HarnessSpec
   , _h_cwd       = Nothing
   , _h_args      = []
   , _h_harnessId = Nothing
+  , _h_claudeSessionUuid = Nothing
+  , _h_canonicalCwd      = Nothing
   }
 
 -- | Placeholder 'SshConfig' used when 'tabKindArgToKind' produces

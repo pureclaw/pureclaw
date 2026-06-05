@@ -13,6 +13,9 @@ module PureClaw.Harness.ClaudeCode
     -- * Injectable dependencies (D4.2 / D4.3 seam)
   , ClaudeCodeDeps (..)
   , defaultClaudeCodeDeps
+    -- * Spawn arg construction (WU6 — exported for testing)
+  , claudeCodeExtraArgs
+  , hasUnsafeFlag
     -- * Response extraction (exported for testing)
   , extractLastResponse
   , dropBaselineLines
@@ -333,6 +336,22 @@ mkClaudeCodeHarnessWith deps policy th session windowName _windowIdx mWorkDir ex
 hasUnsafeFlag :: [Text] -> Bool
 hasUnsafeFlag = elem "--dangerously-skip-permissions"
 
+-- | Build the extra CLI args for a spawned @claude-code@ harness from the
+-- two spawn-time inputs: whether to skip permission checks, and the optional
+-- minted @claude-code@ session UUID (WU6, D6.1).
+--
+-- The @--session-id \<uuid\>@ pair is appended through the EXISTING @[Text]@
+-- args that flow to 'mkClaudeCodeHarnessWith' — the @_ccd_addWindow@ signature
+-- is deliberately NOT widened. Ordering: the unsafe flag (if any) comes first,
+-- exactly as before, so 'hasUnsafeFlag' (which scans the whole list) still
+-- detects it; appending @--session-id@ afterwards cannot perturb that. When
+-- the uuid is 'Nothing' the result is identical to the legacy behaviour, so a
+-- non-correlated spawn (e.g. uuid minting elided) is byte-for-byte unchanged.
+claudeCodeExtraArgs :: Bool -> Maybe Text -> [Text]
+claudeCodeExtraArgs skipPerms mUuid =
+  ["--dangerously-skip-permissions" | skipPerms]
+    ++ maybe [] (\u -> ["--session-id", u]) mUuid
+
 -- | Pre-authorize: check that the policy would allow "claude" at all.
 preAuthorize :: SecurityPolicy -> Either CommandError ()
 preAuthorize policy = case authorize policy "claude" [] of
@@ -494,6 +513,11 @@ adoptValidated deps reg th sessionsDir session windowName = do
             , _h_cwd       = Nothing
             , _h_args      = []
             , _h_harnessId = Just hid
+            -- Adopted harnesses are NOT spawned by PureClaw, so we never minted
+            -- a --session-id for them and cannot correlate their JSONL log
+            -- (WU6: claude-code log capture is spawned-only). Both Nothing.
+            , _h_claudeSessionUuid = Nothing
+            , _h_canonicalCwd      = Nothing
             }
         , _sm_model             = ""
         , _sm_channel           = "web"

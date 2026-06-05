@@ -282,6 +282,8 @@ mkHandle env idx name state =
         , _h_cwd       = Nothing
         , _h_args      = []
         , _h_harnessId = Nothing
+        , _h_claudeSessionUuid = Nothing
+        , _h_canonicalCwd      = Nothing
         }
   in TabHandle
   { _tabHandle_index        = idx

@@ -253,6 +253,20 @@ data StartedHarness = StartedHarness
     -- registered in the 'HarnessRegistry' (WU4). 'createHarnessTab' persists it
     -- into '_sm_kind' (WU7, D7.2) so subsequent sends route by id through the
     -- registry rather than only by the dual-written window name.
+  , _shh_claudeSessionUuid :: !(Maybe Text)
+    -- ^ The canonical @claude-code@ session UUID minted at spawn time and
+    -- injected as @--session-id \<uuid\>@ into the spawned @claude@ argv (WU6).
+    -- 'createHarnessTab' persists it into the session's
+    -- 'PureClaw.Session.Kind._h_claudeSessionUuid' so a restart can re-derive
+    -- the JSONL log path. 'Nothing' for non-@claude-code@\/adopted harnesses.
+    -- The SAME minted value is injected into the argv AND returned here, so the
+    -- persisted uuid is guaranteed to match the one claude-code writes its log
+    -- under.
+  , _shh_canonicalCwd :: !(Maybe Text)
+    -- ^ The canonicalized spawn working directory used for JSONL log-path
+    -- derivation (WU6 D6.3). 'createHarnessTab' persists it into
+    -- 'PureClaw.Session.Kind._h_canonicalCwd'. 'Nothing' when not a spawned
+    -- @claude-code@ harness.
   }
 
 -- | The two tmux primitives the Release endpoint (Phase 3 WU5) needs, bundled
@@ -1620,8 +1634,10 @@ createHarnessTab env tabKind spec sk curCount respond = do
       -- '_tc_session' is the resolved session honored by '_fe_startHarness'.
       modifyIORef' (_sh_meta sh) $ \m ->
         m { _sm_kind = SkHarness
-              (spec { _h_backend   = TbTmux (_shh_tmux st)
-                    , _h_harnessId = Just (_shh_id st)
+              (spec { _h_backend           = TbTmux (_shh_tmux st)
+                    , _h_harnessId         = Just (_shh_id st)
+                    , _h_claudeSessionUuid = _shh_claudeSessionUuid st
+                    , _h_canonicalCwd      = _shh_canonicalCwd st
                     }) }
       _sh_save sh
       -- Read back the post-spawn meta so the live broadcast carries the real

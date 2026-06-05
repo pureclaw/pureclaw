@@ -78,6 +78,33 @@ data HarnessSpec = HarnessSpec
     -- window name in '_h_backend' is /dual-written/ alongside it for one
     -- release so a back-out path and the legacy name-keyed routing fallback
     -- both keep working until the registry is the sole key.
+  , _h_claudeSessionUuid :: !(Maybe Text)
+    -- ^ The canonical @claude-code@ session UUID minted at spawn time and
+    -- injected as @--session-id \<uuid\>@ into the spawned @claude@ argv
+    -- (Harness JSONL Capture, WU6 / @docs\/harness-jsonl-capture.md@). It
+    -- correlates this harness with its on-disk JSONL session log so a restart
+    -- can re-derive the log path (WU2).
+    --
+    -- NOTE — this is NOT the same identifier as @Registry._he_sessionId@:
+    -- @_he_sessionId@ is the PureClaw 'PureClaw.Session.Types.SessionId' (which
+    -- session this harness belongs to). '_h_claudeSessionUuid' is the
+    -- /claude-code/ tool's own session UUID, used purely for log-file path
+    -- derivation. The two are deliberately disambiguated.
+    --
+    -- ADDITIVE and OPTIONAL: minted ONLY for spawned @claude-code@ harnesses.
+    -- Adopted harnesses and non-@claude-code@ flavours carry 'Nothing'. Legacy
+    -- @session.json@ files written before this field decode with 'Nothing'
+    -- (tolerant @.:? "claudeSessionUuid"@); the key is emitted ONLY when 'Just'.
+  , _h_canonicalCwd :: !(Maybe Text)
+    -- ^ The canonicalized spawn working directory used to derive the
+    -- @claude-code@ JSONL log path (WU2 cross-check\/fallback). This is the
+    -- @canonicalizePath@ of the resolved spawn cwd at spawn time, persisted so
+    -- a restart can re-derive the log directory without re-resolving symlinks.
+    --
+    -- ADDITIVE and OPTIONAL, mirroring '_h_claudeSessionUuid': set ONLY for
+    -- spawned @claude-code@ harnesses; 'Nothing' for adopted\/other flavours
+    -- and for legacy @session.json@ files (tolerant @.:? "canonicalCwd"@,
+    -- emit-when-'Just').
   } deriving stock (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -350,6 +377,8 @@ instance Aeson.ToJSON HarnessSpec where
     ] ++ maybe [] (\c -> ["cwd" .= c]) (_h_cwd hs)
       ++ ["args" .= _h_args hs | not (null (_h_args hs))]
       ++ maybe [] (\hid -> ["harnessId" .= hid]) (_h_harnessId hs)
+      ++ maybe [] (\u -> ["claudeSessionUuid" .= u]) (_h_claudeSessionUuid hs)
+      ++ maybe [] (\c -> ["canonicalCwd" .= c]) (_h_canonicalCwd hs)
 
 instance Aeson.FromJSON HarnessSpec where
   parseJSON = Aeson.withObject "HarnessSpec" $ \o ->
@@ -359,6 +388,8 @@ instance Aeson.FromJSON HarnessSpec where
       <*> o .:? "cwd"
       <*> o .:? "args" .!= []
       <*> o .:? "harnessId"
+      <*> o .:? "claudeSessionUuid"
+      <*> o .:? "canonicalCwd"
 
 -- SessionKind — tag-discriminated: "provider" or "harness"
 

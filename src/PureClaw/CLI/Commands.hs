@@ -33,7 +33,7 @@ import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -792,9 +792,24 @@ runChat consentChannel opts = do
                               harnessKey windowIdx cwd skipPerms harnessReg
                   case result of
                     Left err -> pure (Left err)
-                    Right (hid, hh) -> do
+                    Right (hid, hh, mUuid) -> do
                       modifyIORef' harnessRef (Map.insert harnessKey hh)
                       modifyIORef' windowIdxRef (+ 1)
+                      -- WU6 (D6.3): persist the canonicalized spawn cwd ONLY when
+                      -- we actually minted a claude-code session uuid (mUuid is
+                      -- Just for the claude-code flavour, Nothing otherwise), so
+                      -- the JSONL log path can be re-derived after a restart. The
+                      -- canonical cwd is the resolved spawn workdir
+                      -- ('cwd' = _h_cwd) when supplied, else the process's
+                      -- current working directory (which a tmux window with no
+                      -- explicit -c inherits). 'canonicalizePath' resolves
+                      -- symlinks/.. so it matches claude-code's own sanitize(cwd).
+                      mCanonCwd <- case mUuid of
+                        Nothing -> pure Nothing
+                        Just _  -> do
+                          base <- maybe getCurrentDirectory pure cwd
+                          canon <- canonicalizePath base
+                          pure (Just (T.pack canon))
                       pure (Right (StartedHarness
                         { _shh_key  = harnessKey
                         , _shh_tmux = SessionTypes.TmuxConfig
@@ -803,6 +818,8 @@ runChat consentChannel opts = do
                             , SessionTypes._tc_pane    = Nothing
                             }
                         , _shh_id   = hid
+                        , _shh_claudeSessionUuid = mUuid
+                        , _shh_canonicalCwd      = mCanonCwd
                         }))
               , _fe_listModels   = listModelsForProvider
               , _fe_listProviders = listConfiguredProviders

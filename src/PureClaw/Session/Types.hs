@@ -257,6 +257,8 @@ parseSessionKind o model agent = do
           (TbTmux (TmuxConfig name name Nothing))
           Nothing
           []
+          Nothing
+          Nothing
           Nothing))
       Just _ ->
         -- Unknown runtime text: default to provider

@@ -194,6 +194,8 @@ defaultHarnessSpec = HarnessSpec
   , _h_cwd       = Nothing
   , _h_args      = []
   , _h_harnessId = Nothing
+  , _h_claudeSessionUuid = Nothing
+  , _h_canonicalCwd      = Nothing
   }
 
 -- | Default 'SshConfig' used by the 'KindSsh' pattern synonym.

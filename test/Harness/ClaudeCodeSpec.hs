@@ -390,6 +390,55 @@ spec = do
           confirms <- readIORef confirmRef
           confirms `shouldContain` [("pureclaw", "claude-code-0")]
 
+  -- WU6: spawn correlation — mint a claude-code session uuid and inject it as
+  -- --session-id <uuid> through the EXISTING [Text] args at the
+  -- mkClaudeCodeHarnessWith call site (D6.1).
+  describe "claudeCodeExtraArgs (pure, D6.1)" $ do
+    it "injects --session-id <uuid> when a uuid is supplied" $
+      claudeCodeExtraArgs False (Just "abcdabcd-1234-4abc-8abc-abcdabcdabcd")
+        `shouldBe` ["--session-id", "abcdabcd-1234-4abc-8abc-abcdabcdabcd"]
+
+    it "emits both the unsafe flag AND --session-id, unsafe flag first" $
+      claudeCodeExtraArgs True (Just "11112222-3333-4444-8555-666677778888")
+        `shouldBe` [ "--dangerously-skip-permissions"
+                   , "--session-id", "11112222-3333-4444-8555-666677778888" ]
+
+    it "is byte-for-byte legacy behaviour when uuid is Nothing" $ do
+      claudeCodeExtraArgs True Nothing `shouldBe` ["--dangerously-skip-permissions"]
+      claudeCodeExtraArgs False Nothing `shouldBe` []
+
+    it "hasUnsafeFlag still detects the unsafe flag with --session-id present (D6.1)" $ do
+      let args = claudeCodeExtraArgs True (Just "deadbeef-dead-4eef-8eef-deadbeefdead")
+      hasUnsafeFlag args `shouldBe` True
+      -- And False when no unsafe flag was requested, even with --session-id.
+      hasUnsafeFlag (claudeCodeExtraArgs False (Just "deadbeef-dead-4eef-8eef-deadbeefdead"))
+        `shouldBe` False
+
+  describe "spawn arg injection (D6.1, captured argv)" $ do
+    it "passes both --dangerously-skip-permissions and --session-id into _ccd_addWindow" $ do
+      argvRef <- newIORef ([] :: [Text])
+      reg <- Reg.newRegistry
+      let policy = withAutonomy Full
+                 $ allowCommand (CommandName "claude") defaultPolicy
+          uuid  = "fedcfedc-1234-4abc-8abc-fedcfedcfedc"
+          extra = claudeCodeExtraArgs True (Just uuid)
+      result <- mkClaudeCodeHarnessWith
+        okDeps { _ccd_addWindow = \_ _ _ args _ -> do
+                   writeIORef argvRef args
+                   pure (Right ()) }
+        policy mkNoOpTranscriptHandle "pureclaw" "claude-code-0" 0 Nothing
+        extra reg
+      case result of
+        Left err -> expectationFailure ("expected Right, got: " <> show err)
+        Right _ -> do
+          argv <- readIORef argvRef
+          -- The injected argv carries BOTH the unsafe flag and the
+          -- --session-id <uuid> pair (in that order).
+          argv `shouldContain` ["--dangerously-skip-permissions"]
+          argv `shouldContain` ["--session-id", uuid]
+          -- And the spawn's own unsafe-flag check still sees the flag.
+          hasUnsafeFlag argv `shouldBe` True
+
   describe "response extraction (pure)" $ do
     it "isIdle is True when the prompt is present and no busy markers" $
       isIdle "some text \x276F " `shouldBe` True
