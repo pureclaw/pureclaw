@@ -2,7 +2,7 @@
 issue: pureclaw-3oy.33
 epic: pureclaw-3oy
 design_doc: docs/harness-jsonl-capture.md
-status: in-progress — orchestrated execution; WU0 COMPLETE; next: WU1 (ClaudeSessionUuid) + WU4 (line-splitter)
+status: IN-PROGRESS — WU0,WU1,WU2,WU3,WU4,WU6,WU8 COMPLETE (committed). Next: WU5 (JsonlTailDeps + tailer loop; deps WU2,WU3,WU4 all met) -> then WU7 (capability+wiring; deps WU5,WU6) -> WU9 (frontend view; deps WU7,WU8) -> WU10 (integration+coverage sweep)
 date_drafted: 2026-06-04
 branch: feat/harness-registry-p1
 ---
