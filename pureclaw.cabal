@@ -95,6 +95,7 @@ library
     -- Harness (tmux lifecycle)
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode
+    PureClaw.Harness.ClaudeLogConvert
     PureClaw.Harness.ClaudeLogPath
     PureClaw.Harness.ClaudeSession
     PureClaw.Harness.Discovery
@@ -353,6 +354,7 @@ test-suite pureclaw-test
     -- Frontend (live transcript streaming — WU6: HTTP-API regression)
     Frontend.APISpec
     Harness.ClaudeCodeSpec
+    Harness.ClaudeLogConvertSpec
     Harness.ClaudeLogPathSpec
     Harness.ClaudeSessionSpec
     Harness.DiscoverySpec
