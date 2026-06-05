@@ -2520,6 +2520,28 @@ spec = do
           Nothing -> expectationFailure
             "expected the frontend-created harness id in the registry"
 
+    -- Bugfix: a harness created via the web form gets its own session, but the
+    -- low-level spawn (startHarnessByName) inserts the registry entry with
+    -- _he_sessionId = Nothing. createHarnessTab must link the entry back to the
+    -- session it created (as the adopt path already does), otherwise the tab's
+    -- session_id is null and the right pane shows "No session associated yet".
+    it "links the spawned harness registry entry to the created session" $ do
+      withSystemTempDirectory "pureclaw-link-sess" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        sentRef <- newIORef []
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessWith (_fe_harnesses env0) "claude-code-0"
+                    fakeStartedHid (Just (_fe_harnessRegistry env0, sentRef)) }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        mEntry <- Registry.lookupById (_fe_harnessRegistry env) fakeStartedHid
+        case mEntry of
+          Just e  -> Registry._he_sessionId e `shouldBe` Just newSid
+          Nothing -> expectationFailure
+            "expected the spawned harness entry in the registry"
+
     -- D7.2: the persisted session.json carries BOTH the harnessId (Just) AND
     -- the resolved _tc_session. Read both back from disk and assert.
     it "persists BOTH harnessId and _tc_session into session.json (D7.2)" $ do

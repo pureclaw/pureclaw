@@ -1640,6 +1640,15 @@ createHarnessTab env tabKind spec sk curCount respond = do
                     , _h_canonicalCwd      = _shh_canonicalCwd st
                     }) }
       _sh_save sh
+      -- Link the freshly-spawned harness's registry entry back to THIS session.
+      -- The low-level spawn (startHarnessByName) inserts the entry with
+      -- '_he_sessionId = Nothing' because it has no session of its own; only this
+      -- orchestrator knows both the 'HarnessId' and the 'sid'. Without the link
+      -- the tab's session_id is null and the right pane shows "No session
+      -- associated yet" (the adopt path already links via '_he_sessionId'). Set
+      -- it before 'broadcastLists' so the live lists snapshot already carries it.
+      Registry.modifyEntry (_fe_harnessRegistry env) (_shh_id st)
+        (\e -> e { Registry._he_sessionId = Just (unSessionId sid) })
       -- Read back the post-spawn meta so the live broadcast carries the real
       -- TbTmux backend (the persisted session.json above is already correct;
       -- the original 'meta' still holds the placeholder backend).
