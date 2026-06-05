@@ -43,13 +43,20 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 export function HarnessControls({
   tab,
   session,
+  onOpenSession,
   onDestroy,
 }: {
   tab: TabInfo
   session: SessionInfo | null
+  /** Navigate to the harness's backing session (jump straight to its
+   *  conversation). Called with the session id when the link is clicked. */
+  onOpenSession?: (sessionId: string) => void
   onDestroy: (index: number, confirmAdopted: boolean) => void
 }) {
   const [confirming, setConfirming] = useState(false)
+  // The tab's session_id is the source of truth for the association (see the
+  // "Associated session" Field below). Capture it so the click closure narrows.
+  const associatedSessionId = tab.session_id
   const isAdopted = tab.origin === 'adopted'
   const status = statusLabel[tab.status] ?? tab.status
 
@@ -89,14 +96,34 @@ export function HarnessControls({
               running harness owns a session that is excluded from the recents
               list (active tab + empty transcript), so `session` (resolved from
               recents) can be null even though the harness IS linked — show the
-              id regardless, enriched with the title when the metadata is loaded. */}
-          {tab.session_id ? (
-            <div className="flex flex-col">
-              {session && <span>{sessionDisplayTitle(session)}</span>}
-              <span className="text-xs" style={{ color: 'var(--text-faint)' }}>
-                {tab.session_id}
+              id regardless, enriched with the title when the metadata is loaded.
+              Rendered as a link so the user can jump straight to the session. */}
+          {associatedSessionId ? (
+            <button
+              type="button"
+              onClick={() => onOpenSession?.(associatedSessionId)}
+              className="flex flex-col items-start"
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+              title="Open this session"
+            >
+              {session && (
+                <span style={{ color: 'var(--accent)', textDecoration: 'underline' }}>
+                  {sessionDisplayTitle(session)}
+                </span>
+              )}
+              <span
+                className="text-xs"
+                style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+              >
+                {associatedSessionId}
               </span>
-            </div>
+            </button>
           ) : (
             <span style={{ color: 'var(--text-faint)' }}>No session associated yet.</span>
           )}

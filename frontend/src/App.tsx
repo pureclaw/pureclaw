@@ -1032,6 +1032,7 @@ export default function App() {
               ?? archivedSessions.find((s) => s.id === selectedHarnessTab.session_id)
               ?? null
             }
+            onOpenSession={handleSelectSession}
             onDestroy={handleDestroyHarness}
           />
         ) : (

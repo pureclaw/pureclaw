@@ -64,6 +64,20 @@ describe('HarnessControls', () => {
     expect(screen.getByText('sess-h')).toBeInTheDocument()
   })
 
+  it('HC.7: the associated session is a link that navigates to the session', () => {
+    const onOpenSession = vi.fn()
+    render(
+      <HarnessControls
+        tab={harnessTab({ session_id: 'sess-h' })}
+        session={null}
+        onOpenSession={onOpenSession}
+        onDestroy={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByText('sess-h'))
+    expect(onOpenSession).toHaveBeenCalledWith('sess-h')
+  })
+
   it('HC.4: a SPAWNED harness destroys immediately (no confirm step)', () => {
     const onDestroy = vi.fn()
     render(
