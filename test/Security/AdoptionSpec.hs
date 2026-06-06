@@ -28,8 +28,22 @@ spec = do
         Right ah -> adoptedSession ah `shouldBe` ""
         Left e   -> expectationFailure ("expected Right, got " <> show e)
 
-    -- W1.2: the LOAD-BEARING remaining control. Headless/cron/gateway runs
-    -- have no human at the confirm dialog, so adoption STILL fails closed.
+    -- W1.1b: the web/gateway UI is an authorizing consent channel. Choosing
+    -- "Existing Harness" and picking a window in the browser IS the consent, so
+    -- the gateway must mint a token for ANY session (same as interactive).
+    it "W1.1b ConsentWeb => Right for ANY session (the web UI selection is the consent)" $
+      case authorizeAdoption ConsentWeb "any-session" of
+        Right ah -> adoptedSession ah `shouldBe` "any-session"
+        Left e   -> expectationFailure ("expected Right, got " <> show e)
+
+    it "W1.1b ConsentWeb => Right for an odd session name the old allow-list would reject" $
+      case authorizeAdoption ConsentWeb "*" of
+        Right ah -> adoptedSession ah `shouldBe` "*"
+        Left e   -> expectationFailure ("expected Right, got " <> show e)
+
+    -- W1.2: the LOAD-BEARING remaining control. Truly unattended runs (tests,
+    -- bot/cron/import — no UI at all) have no human confirming, so adoption
+    -- STILL fails closed.
     it "W1.2 ConsentHeadless => Left AdoptNoConsentChannel for ANY session (headless STILL denied)" $
       authorizeAdoption ConsentHeadless "any-session"
         `shouldBe` Left AdoptNoConsentChannel

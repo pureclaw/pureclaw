@@ -319,13 +319,15 @@ runCLI = do
   cmd <- execParser cliParserInfo
   case cmd of
     -- FEAS-2 / D3 (SEC-1): the consent channel is derived from the invocation
-    -- mode here, where the 'Command' is known. ONLY the foreground interactive
-    -- TUI gets 'ConsentInteractive'; every other mode ('CmdGateway' bot server,
-    -- 'CmdImport', and any future cron\/daemon\/background mode) maps to
-    -- 'ConsentHeadless' so adoption fails closed (no human at the browser
-    -- confirm dialog).
+    -- mode here, where the 'Command' is known. The foreground TUI gets
+    -- 'ConsentInteractive' and the gateway-served web UI gets 'ConsentWeb' — in
+    -- both, a human explicitly picks the window to adopt (the New-Tab form /
+    -- "Existing Harness" selection), which IS the consent. Only a truly
+    -- unattended mode with no human picking a window ('CmdImport', and any
+    -- future cron\/daemon\/background mode) maps to 'ConsentHeadless' so
+    -- adoption fails closed.
     CmdTui opts     -> runChat ConsentInteractive opts { _co_channel = Just "cli" }
-    CmdGateway opts -> runChat ConsentHeadless opts
+    CmdGateway opts -> runChat ConsentWeb opts
     CmdImport opts mPos -> runImport opts mPos
 
 -- | Import an OpenClaw state directory.

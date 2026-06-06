@@ -15,16 +15,23 @@ import Data.Text (Text)
 -- | Where the run that is attempting an adoption is being driven from.
 --
 -- Adoption is a trust-boundary expansion (PureClaw begins managing\/capturing
--- an external, unmanaged tmux window). In the interactive path the human
--- /picking a session in the foreground New-Tab form IS the consent/, so any
--- interactive run may adopt the session it picked. Any non-interactive
--- invocation — a gateway\/bot server, an import, a future cron\/daemon\/
--- background mode — has no human at a confirm dialog, so it maps to
--- 'ConsentHeadless' and is denied (fail-closed). This headless-deny is the
--- single, load-bearing remaining control on this gate.
+-- an external, unmanaged tmux window). The consent is the human's explicit
+-- /pick/ of a window to take over:
+--
+--   * In the foreground TUI, picking a session in the New-Tab form IS the
+--     consent ('ConsentInteractive').
+--   * In the web UI served by the gateway, choosing \"Existing Harness\" and
+--     selecting a window in the browser IS the consent ('ConsentWeb'). The
+--     @POST \/api\/adopt@ request carries that selection (@consent_confirmed@).
+--
+-- Only a truly unattended invocation with NO human picking a window — a
+-- bot\/cron\/import\/daemon run, or a test default — maps to 'ConsentHeadless'
+-- and is denied (fail-closed). That headless-deny is the single, load-bearing
+-- remaining control on this gate.
 data ConsentChannel
-  = ConsentInteractive  -- ^ foreground interactive run; a human can confirm
-  | ConsentHeadless     -- ^ no human at a confirm dialog; adoption denied
+  = ConsentInteractive  -- ^ foreground interactive TUI; a human picks the window
+  | ConsentWeb          -- ^ gateway-served web UI; the browser selection is the consent
+  | ConsentHeadless     -- ^ no human picking a window (bot\/cron\/import\/test); denied
   deriving stock (Show, Eq)
 
 -- | Why an adoption attempt was refused.
@@ -61,10 +68,12 @@ adoptedSession = _unAdoptedHarness
 -- foreground New-Tab form IS the consent, so adoption is gated by consent
 -- alone:
 --
---   * 'ConsentHeadless' → 'Left' 'AdoptNoConsentChannel' (a headless\/gateway\/
---     import\/cron run has no human at the confirm dialog — fail-closed; this
---     is the single remaining control).
---   * 'ConsentInteractive' → 'Right' an 'AdoptedHarness' token for ANY session.
+--   * 'ConsentHeadless' → 'Left' 'AdoptNoConsentChannel' (a bot\/cron\/import\/
+--     test run has no human picking a window — fail-closed; the single
+--     remaining control).
+--   * 'ConsentInteractive' (foreground TUI) and 'ConsentWeb' (gateway web UI)
+--     → 'Right' an 'AdoptedHarness' token for ANY session. In both, a human
+--     explicitly picked the window to take over, which IS the consent.
 --
 -- The capability-token construction (unexported ctor) and the downstream adopt
 -- mechanism's own identifier hygiene (@send-keys -l --@ + @validateTmuxIdent@,
@@ -77,3 +86,4 @@ authorizeAdoption consent session =
   case consent of
     ConsentHeadless    -> Left AdoptNoConsentChannel
     ConsentInteractive -> Right (AdoptedHarness session)
+    ConsentWeb         -> Right (AdoptedHarness session)

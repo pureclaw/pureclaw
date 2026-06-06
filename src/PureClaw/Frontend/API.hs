@@ -136,13 +136,15 @@ data FrontendEnv = FrontendEnv
     -- the SAME underlying 'TVar' as 'AgentEnv._env_harnessRegistry' so the
     -- frontend and agent observe the same registry.
   , _fe_consentChannel :: ConsentChannel
-    -- ^ Whether the run that drives this frontend was launched as the
-    -- foreground interactive TUI ('ConsentInteractive') or anything else
-    -- ('ConsentHeadless'). The @POST \/api\/adopt@ endpoint passes this to
-    -- 'authorizeAdoption' BEFORE any tmux mutation, so a headless\/gateway\/
-    -- import run is denied even with a valid consent body (design §8 B2,
-    -- SEC-1\/FEAS-2). This is the SOLE remaining adoption gate now that the
-    -- allow-list was dropped (the foreground session pick IS the consent).
+    -- ^ How the run that drives this frontend was launched: the foreground
+    -- interactive TUI ('ConsentInteractive'), the gateway-served web UI
+    -- ('ConsentWeb'), or a truly unattended run with no human picking a window
+    -- ('ConsentHeadless' — bot\/cron\/import\/tests). The @POST \/api\/adopt@
+    -- endpoint passes this to 'authorizeAdoption' BEFORE any tmux mutation.
+    -- 'ConsentInteractive' and 'ConsentWeb' authorize (the human's New-Tab\/
+    -- "Existing Harness" window selection IS the consent); 'ConsentHeadless' is
+    -- denied even with a valid consent body (design §8 B2, SEC-1\/FEAS-2). This
+    -- is the SOLE remaining adoption gate now that the allow-list was dropped.
     -- Tests default to 'ConsentHeadless' (fail-closed).
   , _fe_adopt        :: AdoptedHarness -> Text -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle))
     -- ^ Adopt an external, discovered tmux window into the registry. The

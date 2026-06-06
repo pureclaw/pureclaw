@@ -850,6 +850,23 @@ spec = do
       calls <- readIORef adoptCalls
       calls `shouldBe` 1
 
+    it "ConsentWeb (the gateway/web UI) adopts the selected session — calls _fe_adopt once and returns 200" $ do
+      -- The web "Existing Harness" flow: the gateway runs ConsentWeb, and the
+      -- browser's window selection (consent_confirmed:true) is the consent, so
+      -- adoption succeeds — it is NOT denied like a truly-headless run.
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_consentChannel = ConsentWeb
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "an-existing-harness" "win-3")
+      st `shouldBe` HTTP.status200
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 1
+
     it "returns 400 when consent_confirmed is false/absent, and calls _fe_adopt ZERO times" $ do
       env0 <- mkTestFrontendEnv
       adoptCalls <- newIORef (0 :: Int)
