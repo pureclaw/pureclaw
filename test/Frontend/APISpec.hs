@@ -1674,7 +1674,7 @@ spec = do
       (Registry._he_id <$> goneB) `shouldBe` Nothing
       (Registry._he_id <$> keptA) `shouldBe` Just hidA
 
-  describe "GET /api/sessions/recent (registry-wired exclusion — WU8 D8.3)" $
+  describe "GET /api/sessions/recent (registry-wired exclusion — WU8 D8.3)" $ do
     it "lists the session held by a harness tab in recents (harness sessions stay reachable)" $
       withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
         let sid1 = "test-20240101-120000-001"
@@ -1699,6 +1699,32 @@ spec = do
                           , Just (Aeson.String t) <- [lookupKey v "id"] ]
             ids `shouldSatisfy` elem sid1
             ids `shouldSatisfy` elem sid2
+          _ -> expectationFailure "Expected JSON array"
+
+    it "lists a harness session with an EMPTY transcript in recents (freshly-adopted harness stays reachable)" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sidH = "test-20240101-120000-010"   -- harness-backed, EMPTY transcript
+            sidP = "test-20240101-120000-011"    -- unrelated session, EMPTY transcript
+        writeTestSession tmpDir sidH False
+        writeTestSession tmpDir sidP False
+        -- Empty BOTH transcripts. A freshly-adopted harness has no transcript
+        -- until its first turn; it must STILL be reachable (the only entry point
+        -- to its conversation), whereas a plain empty session stays filtered out.
+        LBS.writeFile (tmpDir </> T.unpack sidH </> "transcript.jsonl") ""
+        LBS.writeFile (tmpDir </> T.unpack sidP </> "transcript.jsonl") ""
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        let env = env0 { _fe_sessionsDir = tmpDir }
+            hid = mustParseHid "22222222-2222-4222-8222-222222222222"
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry hid "claude-code-0" Nothing)
+            { Registry._he_label = "claude-code", Registry._he_sessionId = Just sidH }
+        (st, respBody) <- getJSON env ["api", "sessions", "recent"]
+        st `shouldBe` HTTP.status200
+        case Aeson.decode respBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr, Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` elem sidH      -- empty-transcript harness session IS reachable
+            ids `shouldSatisfy` notElem sidP   -- a plain empty session is still hidden
           _ -> expectationFailure "Expected JSON array"
 
   -- -----------------------------------------------------------------------

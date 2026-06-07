@@ -1084,9 +1084,17 @@ handleRecentSessions env respond = do
       -- session is also listed under "Recent Sessions" so the user can jump
       -- straight to the conversation — so harness-kind tabs are NOT counted here.
   let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
+      -- A running harness's backing session is kept in "Recent Sessions" even
+      -- with an EMPTY transcript: it is the user's clickable entry point into the
+      -- harness conversation (the harness tab itself shows controls, not a chat).
+      -- Otherwise a freshly-adopted harness — whose transcript is empty until its
+      -- first turn — is unreachable/unchattable in the UI.
+      harnessSids   = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = "harness" } <- tabs]
+      isHarnessSession m = unSessionId (_sm_id m) `elem` harnessSids
       notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
       visible       = filter (\m -> not (_sm_archived m) && notInTab m) metas
-  nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
+  nonEmpty <- filterM (\m -> if isHarnessSession m then pure True
+                                                   else hasTranscriptEntries baseDir m) visible
   let chosen = take limit nonEmpty
   -- Read a first-message snippet per session (bounded read per file).
   -- This is the cheap display fallback when no user description and no
@@ -1128,9 +1136,15 @@ computeListsSnapshot env = do
       -- session is also listed under "Recent Sessions" so the user can jump
       -- straight to the conversation — so harness-kind tabs are NOT counted here.
   let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
+      -- Keep a running harness's (possibly empty-transcript) session in recents —
+      -- it is the clickable entry point to the harness conversation. See
+      -- 'handleRecentSessions' for the rationale.
+      harnessSids   = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = "harness" } <- tabs]
+      isHarnessSession m = unSessionId (_sm_id m) `elem` harnessSids
       notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
       visible       = filter (\m -> not (_sm_archived m) && notInTab m) allMetas
-  nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
+  nonEmpty <- filterM (\m -> if isHarnessSession m then pure True
+                                                   else hasTranscriptEntries baseDir m) visible
   let chosen = take limit nonEmpty
   snippets <- traverse (firstMessageSnippet baseDir) chosen
   let recentInfos = zipWith toSessionInfo chosen snippets
