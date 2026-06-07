@@ -44,6 +44,7 @@ export function HarnessControls({
   tab,
   session,
   onOpenSession,
+  onRelease,
   onDestroy,
 }: {
   tab: TabInfo
@@ -51,6 +52,11 @@ export function HarnessControls({
   /** Navigate to the harness's backing session (jump straight to its
    *  conversation). Called with the session id when the link is clicked. */
   onOpenSession?: (sessionId: string) => void
+  /** Release an ADOPTED harness: PureClaw stops managing it (unmarks the tmux
+   *  window, deregisters) but leaves the window + processes running. Only
+   *  offered for adopted harnesses (the backend rejects release of a spawned
+   *  one), so 'undefined'/absent for spawned. */
+  onRelease?: (index: number) => void
   onDestroy: (index: number, confirmAdopted: boolean) => void
 }) {
   const [confirming, setConfirming] = useState(false)
@@ -138,6 +144,25 @@ export function HarnessControls({
         )}
 
         <div className="flex flex-col gap-2" style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+          {/* Adopted harnesses: Release is the safe primary action — PureClaw
+              stops managing the window but leaves it (and its processes)
+              running. Destroy (below) is the destructive option, gated. Spawned
+              harnesses get no Release (the backend rejects it). */}
+          {isAdopted && (
+            <>
+              <button
+                className="btn"
+                style={{ alignSelf: 'flex-start' }}
+                onClick={() => onRelease?.(tab.index)}
+              >
+                Release (stop managing)
+              </button>
+              <span className="text-xs" style={{ color: 'var(--text-faint)' }}>
+                Stops managing this harness and unmarks the tmux window, but leaves it and its
+                processes running for you to use or clean up manually. The session transcript is kept.
+              </span>
+            </>
+          )}
           {!confirming ? (
             <button
               className="btn"

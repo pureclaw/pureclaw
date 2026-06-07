@@ -78,6 +78,32 @@ describe('HarnessControls', () => {
     expect(onOpenSession).toHaveBeenCalledWith('sess-h')
   })
 
+  it('HC.8: an ADOPTED harness offers Release (stop managing, leave running)', () => {
+    const onRelease = vi.fn()
+    render(
+      <HarnessControls
+        tab={harnessTab({ origin: 'adopted' })}
+        session={null}
+        onRelease={onRelease}
+        onDestroy={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /release/i }))
+    expect(onRelease).toHaveBeenCalledWith(0)
+  })
+
+  it('HC.8: a SPAWNED harness does NOT offer Release (only Destroy)', () => {
+    render(
+      <HarnessControls
+        tab={harnessTab({ origin: 'spawned' })}
+        session={null}
+        onRelease={vi.fn()}
+        onDestroy={vi.fn()}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /release/i })).not.toBeInTheDocument()
+  })
+
   it('HC.4: a SPAWNED harness destroys immediately (no confirm step)', () => {
     const onDestroy = vi.fn()
     render(

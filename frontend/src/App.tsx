@@ -1033,6 +1033,7 @@ export default function App() {
               ?? null
             }
             onOpenSession={handleSelectSession}
+            onRelease={handleReleaseTab}
             onDestroy={handleDestroyHarness}
           />
         ) : (
