@@ -43,6 +43,7 @@ import Data.Time
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import System.Directory qualified as Dir
+import System.Posix.Files qualified as PFiles
 import System.Exit
 import System.FilePath ((</>))
 import System.Process.Typed qualified as P
@@ -585,7 +586,21 @@ writeSessionMeta baseDir meta = do
   let dir    = baseDir </> T.unpack (unSessionId (_sm_id meta))
       finalP = dir </> "session.json"
       tmpP   = finalP <> ".tmp"
+      txP    = dir </> "transcript.jsonl"
   Dir.createDirectoryIfMissing True dir
+  -- Mirror the spawn path's session creation: 'mkSessionHandle' opens
+  -- @transcript.jsonl@ with @O_CREAT 0o600@ at session-creation time, so a
+  -- freshly-spawned session always has the file. The adopt path persists the
+  -- meta by hand (it does not go through 'mkSessionHandle'), so without this an
+  -- adopted session has only @session.json@ — and the FIRST
+  -- @POST /api/sessions/<sid>/send@ is rejected 404 by 'handleSend', whose
+  -- existence check is @doesFileExist transcript.jsonl@. Create the (empty)
+  -- transcript here, non-destructively (never truncates an existing one) and
+  -- with the same 0o600 mode the transcript layer uses.
+  txExists <- Dir.doesFileExist txP
+  unless txExists $ do
+    LBS.writeFile txP LBS.empty
+    PFiles.setFileMode txP 0o600
   LBS.writeFile tmpP (Aeson.encode meta)
   -- Best-effort persistence: a failed rename is SWALLOWED (swallow-and-continue),
   -- not surfaced. The adopt mechanism has already stamped identity and registered

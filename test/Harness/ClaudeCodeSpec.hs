@@ -786,6 +786,25 @@ spec = do
             other -> expectationFailure ("expected SkHarness kind, got " <> show other)
           other -> expectationFailure ("expected exactly one session.json, got " <> show (length other))
 
+    it "creates an empty transcript.jsonl (parity with spawn) so the first /send is not rejected 404" $
+      withSystemTempDirectory "pcl-adopt-tx" $ \tmp -> do
+        reg <- Reg.newRegistry
+        let deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure [adoptableRow 0 "win-sess"]
+              , _ccd_panePidOf    = \_ _ -> pure (Just 7)
+              , _ccd_captureNamed = \_ _ _ -> pure (Just "line\n")
+              }
+        _ <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-sess"
+        -- handleSend treats a session as existing iff transcript.jsonl is present;
+        -- the spawn path creates it via mkFileTranscriptHandle, so adopt must too.
+        sessionDirs <- listDirectory tmp
+        case sessionDirs of
+          [d] -> do
+            txExists <- doesFileExist (tmp </> d </> "transcript.jsonl")
+            txExists `shouldBe` True
+          other -> expectationFailure ("expected exactly one session dir, got " <> show (length other))
+
   describe "discovered handle" $ do
     it "mkDiscoveredClaudeCodeHandle threads the real session name" $ do
       let transcript = mkNoOpTranscriptHandle
