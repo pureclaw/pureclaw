@@ -278,7 +278,12 @@ instance Aeson.ToJSON TmuxConfig where
 
 instance Aeson.FromJSON TmuxConfig where
   parseJSON = Aeson.withObject "TmuxConfig" $ \o ->
-    TmuxConfig <$> o .: "session" <*> o .: "window" <*> o .:? "pane"
+    -- 'session' is OPTIONAL on decode (default ""): the New-Harness composer
+    -- omits it when the user leaves the tmux-session field blank, and an empty
+    -- session is resolved to the default ("pureclaw") at spawn time
+    -- ('resolveHarnessSession'). Encoded values always carry it, so round-trips
+    -- are unaffected.
+    TmuxConfig <$> (o .:? "session" .!= "") <*> o .: "window" <*> o .:? "pane"
 
 -- SshConfig — flat object; port optional (omitted when Nothing)
 
@@ -318,7 +323,8 @@ instance Aeson.FromJSON TerminalBackend where
     case tag of
       "local"     -> pure TbLocal
       "tmux"      -> TbTmux <$>
-        (TmuxConfig <$> o .: "session" <*> o .: "window" <*> o .:? "pane")
+        -- 'session' optional (default "") — see the 'TmuxConfig' FromJSON note.
+        (TmuxConfig <$> (o .:? "session" .!= "") <*> o .: "window" <*> o .:? "pane")
       "ssh"       -> TbSsh <$>
         (SshConfig <$> o .: "user" <*> o .: "host" <*> o .:? "port")
       "container" -> TbContainer <$>

@@ -157,6 +157,10 @@ spec = do
         let tc = TmuxConfig "main" "0" Nothing
         Aeson.decode (Aeson.encode tc) `shouldBe` Just tc
 
+      it "decodes a MISSING session as \"\" (New-Harness composer omits it when the field is blank)" $ do
+        let json = Aeson.encode (Aeson.object [ "window" Aeson..= ("" :: String) ])
+        Aeson.decode json `shouldBe` Just (TmuxConfig "" "" Nothing)
+
     describe "SshConfig" $ do
       it "round-trips with port" $ do
         let sc = SshConfig "admin" "remote.example.com" (Just 22)
@@ -173,6 +177,11 @@ spec = do
       it "round-trips TbTmux" $ do
         let tb = TbTmux (TmuxConfig "main" "0" (Just "1"))
         Aeson.decode (Aeson.encode tb) `shouldBe` Just tb
+
+      it "decodes a TbTmux with no session as session=\"\" (blank-session New Harness create)" $ do
+        let json = Aeson.encode (Aeson.object
+              [ "tag" Aeson..= ("tmux" :: String), "window" Aeson..= ("" :: String) ])
+        Aeson.decode json `shouldBe` Just (TbTmux (TmuxConfig "" "" Nothing))
 
       it "round-trips TbSsh" $ do
         let tb = TbSsh (SshConfig "admin" "remote.example.com" (Just 22))
