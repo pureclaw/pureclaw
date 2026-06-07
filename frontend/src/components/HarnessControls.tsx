@@ -151,7 +151,7 @@ export function HarnessControls({
           {isAdopted && (
             <>
               <button
-                className="btn"
+                className="btn btn-ghost px-3 py-2 rounded-lg text-sm font-medium"
                 style={{ alignSelf: 'flex-start' }}
                 onClick={() => onRelease?.(tab.index)}
               >
@@ -165,7 +165,7 @@ export function HarnessControls({
           )}
           {!confirming ? (
             <button
-              className="btn"
+              className="btn px-3 py-2 rounded-lg text-sm font-medium"
               style={{
                 alignSelf: 'flex-start',
                 background: 'var(--needs-input-bg, var(--bg-elevated))',
@@ -185,7 +185,7 @@ export function HarnessControls({
               </span>
               <div className="flex gap-2">
                 <button
-                  className="btn"
+                  className="btn px-3 py-2 rounded-lg text-sm font-medium"
                   style={{ background: 'var(--needs-input)', color: 'var(--text-primary)' }}
                   onClick={() => {
                     setConfirming(false)
@@ -194,7 +194,10 @@ export function HarnessControls({
                 >
                   Confirm destroy
                 </button>
-                <button className="btn btn-ghost" onClick={() => setConfirming(false)}>
+                <button
+                  className="btn btn-ghost px-3 py-2 rounded-lg text-sm font-medium"
+                  onClick={() => setConfirming(false)}
+                >
                   Cancel
                 </button>
               </div>
