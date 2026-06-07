@@ -285,7 +285,18 @@ data StartedHarness = StartedHarness
 data ReleaseTmux = ReleaseTmux
   { _rt_liveMarker  :: Text -> Text -> IO (Maybe Text)
   , _rt_clearMarker :: Text -> Text -> IO ()
+  , _rt_renameWindow :: Text -> Text -> Text -> IO ()
+    -- ^ @session currentName newName@: rename the released window so its tmux
+    -- title shows PureClaw has detached. Invoked ONLY on the corroborated
+    -- branch (right after '_rt_clearMarker'), so we only retitle a window we
+    -- just confirmed is ours; like clear, it NEVER kills the window.
   }
+
+-- | The new tmux window title applied when PureClaw releases a harness — the
+-- original (PureClaw-managed) name with a @\" (released)\"@ suffix so the user
+-- can see at a glance that PureClaw is no longer attached.
+releasedWindowName :: Text -> Text
+releasedWindowName current = current <> " (released)"
 
 -- | The production 'ReleaseTmux': the live-marker lookup is a 'Tmux.readMarkers'
 -- sweep of the session filtered to the target window (returning its non-empty
@@ -296,6 +307,7 @@ productionReleaseTmux = ReleaseTmux
   { _rt_liveMarker  = \session window ->
       pickLiveMarker window <$> Tmux.readMarkers session
   , _rt_clearMarker = Tmux.clearWindowMarker
+  , _rt_renameWindow = Tmux.renameWindowNamed
   }
 
 -- | The production '_fe_killWindow': 'Tmux.stopHarnessWindowNamed', which issues
@@ -846,12 +858,14 @@ instance FromJSON ReleaseRequest where
 -- SECURITY-CRITICAL ordering — re-corroboration runs BEFORE any tmux mutation:
 --
 --   1. Resolve the display index → entry (shared 'tabIndexToEntry' resolver).
---   2. The entry MUST be 'Registry.OriginAdopted'; a Spawned\/Discovered entry
---      → @409@ \"not an adopted harness\", NO mutation.
+--   2. Release applies to a harness of ANY origin (Spawned, Adopted, or
+--      Discovered) — the safety control is the corroboration in step 3, not the
+--      origin. PureClaw stops managing the window and hands it back.
 --   3. Re-read the LIVE @\@pcl_id@ of the entry's @(session, windowName)@ via
 --      the injected seam and compare to @harnessIdToText (_he_id entry)@:
 --
---        * MATCH → 'Tmux.clearWindowMarker' (the only @set-option -wu@), then
+--        * MATCH → 'Tmux.clearWindowMarker' (@set-option -wu@) + retitle the
+--          window via 'Tmux.renameWindowNamed' to @\"… (released)\"@, then
 --          deregister from the registry AND the legacy '_fe_harnesses' map;
 --          respond @200 {"released":true}@. The window is NOT killed.
 --        * MISMATCH \/ window gone (the cached coord now points at a different
@@ -878,23 +892,21 @@ handleReleaseTab env tidxText req respond = do
   when reservedPurge $
     _lh_logInfo (_fe_logger env)
       "release: purge requested but RESERVED (Phase-3 MVP retains transcript/session.json)"
-  withResolvedTab env tidxText respond $ \e ->
-    case Registry._he_origin e of
-      Registry.OriginAdopted -> releaseAdopted env e respond
-      _ ->
-        -- Release applies ONLY to adopted harnesses. A Spawned/Discovered row
-        -- is rejected with no tmux mutation (and nothing is deregistered).
-        respond $ jsonResponse status409
-          (object ["error" .= ("not an adopted harness" :: Text)])
+  -- Release applies to ANY harness (spawned OR adopted): PureClaw stops managing
+  -- it but leaves the tmux window + processes running. The corroborate-before-
+  -- mutate gate inside 'releaseHarnessEntry' is the safety control, not the
+  -- origin.
+  withResolvedTab env tidxText respond $ \e -> releaseHarnessEntry env e respond
 
--- | The corroborate-then-act core of Release, for an entry already confirmed to
--- be 'Registry.OriginAdopted'. Re-reads the live @\@pcl_id@ BEFORE any mutation
--- (SEC-3) and branches: corroborated → unmark + deregister; stale → deregister
--- only (no tmux op) + warn. Either way the entry leaves both stores, the window
--- survives, and the transcript\/@session.json@ are retained (C2).
-releaseAdopted
+-- | The corroborate-then-act core of Release, for a harness of ANY origin.
+-- Re-reads the live @\@pcl_id@ BEFORE any mutation (SEC-3) and branches:
+-- corroborated → unmark + retitle the window \"… (released)\" + deregister;
+-- stale → deregister only (no tmux op) + warn. Either way the entry leaves both
+-- stores, the window survives, and the transcript\/@session.json@ are retained
+-- (C2).
+releaseHarnessEntry
   :: FrontendEnv -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-releaseAdopted env e respond = do
+releaseHarnessEntry env e respond = do
   let session  = Registry._he_session e
       window   = Registry._he_windowName e
       expected = Registry.harnessIdToText (Registry._he_id e)
@@ -903,9 +915,12 @@ releaseAdopted env e respond = do
   if liveMarker == Just expected
     then do
       -- Corroborated: the live window still carries THIS entry's marker, so it
-      -- is safe to unmark it. clearWindowMarker is the ONLY tmux mutation, and
-      -- it NEVER kills the window.
+      -- is safe to mutate it. Unmark it (@pcl_id), then retitle it so the user
+      -- can see PureClaw has detached. Neither op kills the window. The window
+      -- name is PureClaw-managed (spawn: @claude-code-N@; adopt: @adopted-…@),
+      -- so it is dot-free and the @session:name@ rename target is unambiguous.
       _rt_clearMarker rt session window
+      _rt_renameWindow rt session window (releasedWindowName window)
       deregister env e
       broadcastLists env
       respond $ jsonResponse status200 (object ["released" .= True])

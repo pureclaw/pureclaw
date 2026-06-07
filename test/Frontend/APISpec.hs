@@ -1231,6 +1231,7 @@ spec = do
                 pure (Map.lookup (s, w) m)
             , _rt_clearMarker = \s w ->
                 modifyIORef' clearedRef (++ [(s, w)])
+            , _rt_renameWindow = \_ _ _ -> pure ()
             }
 
     it "D5.1 corroborated adopted entry: clears @pcl_id (set-option -wu via seam), removes from registry+legacy map, NO kill issued" $ do
@@ -1311,27 +1312,35 @@ spec = do
       gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
       (Registry._he_id <$> gone) `shouldBe` Nothing
 
-    it "D5.2 rejects a non-adopted (Spawned) entry with 409 and NO tmux mutation, leaving it registered" $ do
+    it "releases a SPAWNED harness too (corroborated): clears @pcl_id, retitles the window '(released)', deregisters, 200" $ do
       env0 <- mkTestFrontendEnvWithRegistryTabs
       clearedRef <- newIORef []
-      -- A corroborating live marker is present — but origin is Spawned, so the
-      -- handler must reject BEFORE consulting it.
+      renamedRef <- newIORef []
+      -- A corroborating live marker is present; origin is Spawned (baseEntry
+      -- default) — release now applies to ANY origin, gated only by corroboration.
       liveRef <- newIORef
         (Map.singleton ("pureclaw", "claude-code-0")
                        (Registry.harnessIdToText adoptedHid))
-      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
-      -- baseEntry defaults to OriginSpawned.
+      let rt = ReleaseTmux
+            { _rt_liveMarker   = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+            , _rt_clearMarker  = \s w -> modifyIORef' clearedRef (++ [(s, w)])
+            , _rt_renameWindow = \s w n -> modifyIORef' renamedRef (++ [(s, w, n)])
+            }
+          env = env0 { _fe_releaseTmux = rt }
       Registry.insertEntry (_fe_harnessRegistry env)
         (baseEntry adoptedHid "claude-code-0" (Just mkNoOpHarnessHandle))
       (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "{}"
-      st `shouldBe` HTTP.status409
-      lookupKey' respBody "error"
-        `shouldBe` Just (Aeson.String "not an adopted harness")
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      -- The window was unmarked AND retitled to show PureClaw detached — but
+      -- never killed.
       cleared <- readIORef clearedRef
-      cleared `shouldBe` []
-      -- Still registered (release never touched it).
-      still <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
-      (Registry._he_id <$> still) `shouldBe` Just adoptedHid
+      cleared `shouldBe` [("pureclaw", "claude-code-0")]
+      renamed <- readIORef renamedRef
+      renamed `shouldBe` [("pureclaw", "claude-code-0", "claude-code-0 (released)")]
+      -- Deregistered (PureClaw stops managing it); window left running.
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
 
     it "returns 404 for an out-of-range index (no tmux op)" $ do
       env0 <- mkTestFrontendEnvWithRegistryTabs
@@ -1451,6 +1460,7 @@ spec = do
               , _fe_releaseTmux  = ReleaseTmux
                   { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
                   , _rt_clearMarker = \_ _ -> pure ()
+                  , _rt_renameWindow = \_ _ _ -> pure ()
                   }
               }
         Registry.insertEntry (_fe_harnessRegistry env)
@@ -1505,6 +1515,7 @@ spec = do
               , _fe_releaseTmux  = ReleaseTmux
                   { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
                   , _rt_clearMarker = \_ _ -> pure ()
+                  , _rt_renameWindow = \_ _ _ -> pure ()
                   }
               }
         Registry.insertEntry (_fe_harnessRegistry env)
@@ -1535,6 +1546,7 @@ spec = do
             , _fe_releaseTmux = ReleaseTmux
                 { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
                 , _rt_clearMarker = \_ _ -> pure ()
+                , _rt_renameWindow = \_ _ _ -> pure ()
                 }
             }
       Registry.insertEntry (_fe_harnessRegistry env)
@@ -1560,6 +1572,7 @@ spec = do
             , _fe_releaseTmux = ReleaseTmux
                 { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
                 , _rt_clearMarker = \_ _ -> pure ()
+                , _rt_renameWindow = \_ _ _ -> pure ()
                 }
             }
       Registry.insertEntry (_fe_harnessRegistry env)
@@ -3173,7 +3186,7 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_harnessRegistry = harnessReg
     , _fe_consentChannel = ConsentHeadless  -- fail-closed default; adopt tests override
     , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
-    , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ())
+    , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ()) (\_ _ _ -> pure ())
     , _fe_killWindow   = \_ _ -> pure ()
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
     , _fe_recentLimit  = 20

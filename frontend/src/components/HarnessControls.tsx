@@ -144,25 +144,21 @@ export function HarnessControls({
         )}
 
         <div className="flex flex-col gap-2" style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-          {/* Adopted harnesses: Release is the safe primary action — PureClaw
-              stops managing the window but leaves it (and its processes)
-              running. Destroy (below) is the destructive option, gated. Spawned
-              harnesses get no Release (the backend rejects it). */}
-          {isAdopted && (
-            <>
-              <button
-                className="btn btn-ghost px-3 py-2 rounded-lg text-sm font-medium"
-                style={{ alignSelf: 'flex-start' }}
-                onClick={() => onRelease?.(tab.index)}
-              >
-                Release (stop managing)
-              </button>
-              <span className="text-xs" style={{ color: 'var(--text-faint)' }}>
-                Stops managing this harness and unmarks the tmux window, but leaves it and its
-                processes running for you to use or clean up manually. The session transcript is kept.
-              </span>
-            </>
-          )}
+          {/* Release is the safe action for ANY harness (spawned or adopted):
+              PureClaw stops managing the window but leaves it + its processes
+              running. Destroy (below) is the destructive option. */}
+          <button
+            className="btn btn-ghost px-3 py-2 rounded-lg text-sm font-medium"
+            style={{ alignSelf: 'flex-start' }}
+            onClick={() => onRelease?.(tab.index)}
+          >
+            Release (stop managing)
+          </button>
+          <span className="text-xs" style={{ color: 'var(--text-faint)' }}>
+            PureClaw stops managing this harness and unmarks its tmux window, retitling it
+            “… (released)” so you can see PureClaw has detached — but leaves the window and its
+            processes intact for you to keep using or clean up manually. The session transcript is kept.
+          </span>
           {!confirming ? (
             <button
               className="btn px-3 py-2 rounded-lg text-sm font-medium"
