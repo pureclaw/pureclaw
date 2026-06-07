@@ -50,6 +50,7 @@ okDeps = ClaudeCodeDeps
   , _ccd_addWindow    = \_ _ _ _ _ -> pure (Right ())
   , _ccd_startSession = \_ -> pure (Right ())
   , _ccd_setMarker    = \_ _ _ -> pure ()
+  , _ccd_renameWindow = \_ _ _ -> pure ()
   , _ccd_setRemain    = \_ _ -> pure ()
   , _ccd_panePidOf    = \_ _ -> pure Nothing
   , _ccd_harnessPidOf = \_ _ -> pure Nothing
@@ -597,17 +598,30 @@ spec = do
             Right tok -> tok
             Left e    -> error ("test setup: gate denied: " <> show e)
 
-    it "D4.1 stamps @pcl_id + remain-on-exit, records the shell PID, and registers an OriginAdopted entry + legacy map" $
+    -- Helper: a fake sweep row for an adoptable (unmarked) window.
+    let adoptableRow idx name = TmuxWindowRow
+          { _twr_windowIndex = idx
+          , _twr_windowName  = name
+          , _twr_pclId       = ""
+          , _twr_panePid     = Just 4242
+          , _twr_paneDead    = False
+          }
+
+    it "D4.1 stamps @pcl_id + remain-on-exit on the SAFE renamed window, records the shell PID, and registers an OriginAdopted entry" $
       withSystemTempDirectory "pcl-adopt" $ \tmp -> do
         reg <- Reg.newRegistry
         legacyRef <- newIORef (mempty :: [(Text, Text)])  -- (session, window) of registered handle
         markersRef <- newIORef ([] :: [(Text, Text, Text)])  -- (session, window, uuid)
         remainRef  <- newIORef ([] :: [(Text, Text)])
+        renamesRef <- newIORef ([] :: [(Text, Text, Text)])  -- (session, target, newName)
         -- A window with a NON-empty current scrollback so the baseline ≠ 0.
         let backlog = TE.encodeUtf8 (T.intercalate "\n"
               [ "old line 1", "old line 2", "old line 3" ])
+            safeName = "adopted-" <> T.take 8 (Reg.harnessIdToText fixedId)
             deps = okDeps
               { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure [adoptableRow 5 "win-3"]
+              , _ccd_renameWindow = \s t n -> modifyIORef' renamesRef ((s, t, n) :)
               , _ccd_setMarker    = \s w u -> modifyIORef' markersRef ((s, w, u) :)
               , _ccd_setRemain    = \s w -> modifyIORef' remainRef ((s, w) :)
               , _ccd_panePidOf    = \_ _ -> pure (Just 4242)
@@ -618,24 +632,100 @@ spec = do
         case result of
           Left e -> expectationFailure ("adopt failed: " <> show e)
           Right (hid, _hh) -> do
-            -- @pcl_id stamped with the new id, on the adopted coordinates.
+            -- The window is renamed BY INDEX (the scanned index as text) to the
+            -- safe canonical name — never addressed by the user's name.
+            renames <- readIORef renamesRef
+            renames `shouldBe` [(adoptableSession, "5", safeName)]
+            -- @pcl_id stamped with the new id, on the SAFE renamed coordinates.
             markers <- readIORef markersRef
-            markers `shouldBe` [(adoptableSession, "win-3", Reg.harnessIdToText hid)]
-            -- remain-on-exit set on the adopted coordinates.
+            markers `shouldBe` [(adoptableSession, safeName, Reg.harnessIdToText hid)]
+            -- remain-on-exit set on the SAFE renamed coordinates.
             remains <- readIORef remainRef
-            remains `shouldBe` [(adoptableSession, "win-3")]
-            -- Registry entry: OriginAdopted, shell PID recorded, with a handle.
+            remains `shouldBe` [(adoptableSession, safeName)]
+            -- Registry entry: OriginAdopted, SAFE name, shell PID recorded, with a handle.
             mEntry <- Reg.lookupById reg hid
             case mEntry of
               Nothing -> expectationFailure "expected an OriginAdopted registry entry"
               Just e  -> do
                 Reg._he_origin e     `shouldBe` Reg.OriginAdopted
                 Reg._he_session e    `shouldBe` adoptableSession
-                Reg._he_windowName e `shouldBe` "win-3"
+                Reg._he_windowName e `shouldBe` safeName
+                Reg._he_label e      `shouldBe` safeName
                 Reg._he_shellPid e   `shouldBe` Just 4242
                 Maybe.isJust (Reg._he_handle e) `shouldBe` True
             _ <- pure legacyRef  -- legacy map sync is the caller's job (endpoint); see APISpec D4.x
             pure ()
+
+    it "renames a DOTTED-name window BY INDEX and never addresses the dotted name (root-cause fix)" $
+      withSystemTempDirectory "pcl-adopt-dotted" $ \tmp -> do
+        reg <- Reg.newRegistry
+        renamesRef  <- newIORef ([] :: [(Text, Text, Text)])  -- (session, target, newName)
+        markerTgts  <- newIORef ([] :: [Text])  -- window targets seen by setMarker
+        pidTgts     <- newIORef ([] :: [Text])  -- window targets seen by panePidOf
+        captureTgts <- newIORef ([] :: [Text])  -- window targets seen by captureNamed
+        let dotted   = "2.1.163"
+            safeName = "adopted-" <> T.take 8 (Reg.harnessIdToText fixedId)
+            -- Two rows: the unmarked dotted window at index 0, plus an unrelated
+            -- window at index 2 (proves we rename by the SCANNED index, not 2).
+            rows = [ adoptableRow 0 dotted, adoptableRow 2 "other" ]
+            deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure rows
+              , _ccd_renameWindow = \s t n -> modifyIORef' renamesRef ((s, t, n) :)
+              , _ccd_setMarker    = \_ w _ -> modifyIORef' markerTgts (w :)
+              -- No shell PID: exercises adoptValidated's mShellPid = Nothing arm
+              -- (harnessPidOf must then NOT be called).
+              , _ccd_panePidOf    = \_ w -> modifyIORef' pidTgts (w :) >> pure Nothing
+              , _ccd_harnessPidOf = \_ _ -> error "harnessPidOf must not run without a shell PID"
+              , _ccd_captureNamed = \_ w _ -> modifyIORef' captureTgts (w :) >> pure (Just "")
+              }
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken dotted
+        case result of
+          Left e -> expectationFailure ("adopt of dotted window failed: " <> show e)
+          Right _ -> do
+            -- rename was called ONCE, targeting the INDEX "0" (as text), with a
+            -- safe newName starting "adopted-" — NOT the dotted name.
+            renames <- readIORef renamesRef
+            renames `shouldBe` [(adoptableSession, "0", safeName)]
+            -- Every downstream tmux op used the SAFE name; the dotted name was
+            -- NEVER used as a target after the rename.
+            mTs <- readIORef markerTgts
+            pTs <- readIORef pidTgts
+            cTs <- readIORef captureTgts
+            let allTargets = mTs <> pTs <> cTs
+            allTargets `shouldSatisfy` all (== safeName)
+            allTargets `shouldSatisfy` notElem dotted
+
+    it "returns Left HarnessTmuxNotAvailable when no unmarked window matches — and performs NO mutation" $
+      withSystemTempDirectory "pcl-adopt-missing" $ \tmp -> do
+        reg <- Reg.newRegistry
+        renamesRef <- newIORef ([] :: [(Text, Text, Text)])
+        markersRef <- newIORef ([] :: [(Text, Text, Text)])
+        let -- The session contains an ALREADY-MARKED window with the same name
+            -- (not adoptable) and an unrelated window — neither is an unmarked
+            -- match for "win-gone".
+            rows = [ (adoptableRow 0 "win-gone") { _twr_pclId = "someid" }
+                   , adoptableRow 1 "elsewhere"
+                   ]
+            deps = okDeps
+              { _ccd_sweep        = \_ -> pure rows
+              , _ccd_renameWindow = \s t n -> modifyIORef' renamesRef ((s, t, n) :)
+              , _ccd_setMarker    = \s w u -> modifyIORef' markersRef ((s, w, u) :)
+              }
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-gone"
+        case result of
+          Right _ -> expectationFailure "expected Left when the window is not found"
+          Left err -> case err of
+            HarnessTmuxNotAvailable msg -> do
+              T.isInfixOf "win-gone" msg `shouldBe` True
+              T.isInfixOf adoptableSession msg `shouldBe` True
+            other -> expectationFailure
+              ("expected HarnessTmuxNotAvailable, got " <> show other)
+        -- NO mutation: no rename, no marker, nothing registered, no session.json.
+        readIORef renamesRef >>= (`shouldBe` [])
+        readIORef markersRef >>= (`shouldBe` [])
+        Reg.snapshot reg >>= (\es -> length es `shouldBe` 0)
+        loadAllSessionMetas tmp >>= (\ms -> length ms `shouldBe` 0)
 
     it "D4.1 sets the capture baseline to the window's CURRENT scrollback line count (≠ 0 with backlog)" $
       withSystemTempDirectory "pcl-adopt" $ \tmp -> do
@@ -654,7 +744,8 @@ spec = do
             -- followed by an idle prompt. Adopt measures the backlog as baseline.
             fullScreen = TE.encodeUtf8 (T.intercalate "\n" (backlog <> postIdle))
             deps = okDeps
-              { _ccd_panePidOf    = \_ _ -> pure (Just 99)
+              { _ccd_sweep        = \_ -> pure [adoptableRow 0 "win-baseline"]
+              , _ccd_panePidOf    = \_ _ -> pure (Just 99)
               , _ccd_captureNamed = \_ _ _ -> pure (Just fullScreen)
               }
         Right (_, hh) <-
@@ -671,14 +762,17 @@ spec = do
     it "D4.1 creates a session.json carrying _h_harnessId + the adopted coords" $
       withSystemTempDirectory "pcl-adopt" $ \tmp -> do
         reg <- Reg.newRegistry
-        let deps = okDeps
-              { _ccd_panePidOf    = \_ _ -> pure (Just 7)
+        let safeName = "adopted-" <> T.take 8 (Reg.harnessIdToText fixedId)
+            deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure [adoptableRow 0 "win-sess"]
+              , _ccd_panePidOf    = \_ _ -> pure (Just 7)
               , _ccd_captureNamed = \_ _ _ -> pure (Just "line\n")
               }
         Right (hid, _) <-
           adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-sess"
         -- Exactly one session dir was created; its session.json loads and
-        -- carries the harness id + adopted tmux coordinates.
+        -- carries the harness id + adopted tmux coordinates (SAFE renamed name).
         metas <- loadAllSessionMetas tmp
         case metas of
           [meta] -> case _sm_kind meta of
@@ -687,7 +781,7 @@ spec = do
               case _h_backend hs of
                 TbTmux tc -> do
                   _tc_session tc `shouldBe` adoptableSession
-                  _tc_window tc  `shouldBe` "win-sess"
+                  _tc_window tc  `shouldBe` safeName
                 other -> expectationFailure ("expected TbTmux backend, got " <> show other)
             other -> expectationFailure ("expected SkHarness kind, got " <> show other)
           other -> expectationFailure ("expected exactly one session.json, got " <> show (length other))

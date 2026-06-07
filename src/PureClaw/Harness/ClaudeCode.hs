@@ -95,6 +95,12 @@ data ClaudeCodeDeps = ClaudeCodeDeps
   , _ccd_setMarker    :: Text -> Text -> Text -> IO ()
     -- ^ Stamp the @\@pcl_id@ marker: @session windowName uuidText@
     --   (production: 'setWindowMarker').
+  , _ccd_renameWindow :: Text -> Text -> Text -> IO ()
+    -- ^ Rename a window: @session windowTarget newName@. The target may be a
+    --   window name OR an index (e.g. @"0"@). Adopt renames the user-picked
+    --   window BY INDEX to a safe canonical name so the @session:name@ targeting
+    --   used by every other op cannot misparse a @.@\/numeric name as
+    --   @index.pane@ (production: 'renameWindowNamed').
   , _ccd_setRemain    :: Text -> Text -> IO ()
     -- ^ Set @remain-on-exit on@: @session windowName@ (production:
     --   'setRemainOnExit').
@@ -133,6 +139,7 @@ defaultClaudeCodeDeps = ClaudeCodeDeps
   , _ccd_addWindow    = addHarnessWindowNamed
   , _ccd_startSession = startTmuxSession
   , _ccd_setMarker    = setWindowMarker
+  , _ccd_renameWindow = renameWindowNamed
   , _ccd_setRemain    = setRemainOnExit
   , _ccd_panePidOf    = realPanePidOf
   , _ccd_harnessPidOf = harnessPidOf
@@ -466,72 +473,98 @@ adoptValidated
 adoptValidated deps reg th sessionsDir session windowName = do
   -- Step 1: fresh identity.
   hid <- _ccd_newId deps
-  -- Step 2: establish identity on the EXISTING window (C4 anchor at adopt time).
-  _ccd_setMarker deps session windowName (Reg.harnessIdToText hid)
-  _ccd_setRemain deps session windowName
-  -- Step 3: measure the window's current scrollback and set the baseline so the
-  -- pre-existing backlog is excluded (B3 / D5). A full capture (lineCount 0)
-  -- mirrors the receive path's full-screen capture; we count its lines.
-  fullCapture <- fromMaybe "" <$> _ccd_captureNamed deps session windowName 0
-  let baseline = countCaptureLines fullCapture
-  -- Step 4: PID provenance (both best-effort).
-  mShellPid <- _ccd_panePidOf deps session windowName
-  mHarnessPid <- case mShellPid of
-    Just shellPid -> _ccd_harnessPidOf deps shellPid claudeComm
-    Nothing       -> pure Nothing
-  -- Step 5: build the cached-coordinate handle with the adoption baseline.
-  handle <- mkClaudeCodeHandleWithBaseline deps reg hid th session baseline
-  -- Step 6: link a harness session.json (mirrors the spawn persistence;
-  -- persists the HarnessId + adopted coords like WU6 / Phase 2).
-  now <- getCurrentTime
-  let sid = newSessionId Nothing now
-      entry = Reg.HarnessEntry
-        { Reg._he_id          = hid
-        , Reg._he_session     = session
-        , Reg._he_windowName  = windowName
-        , Reg._he_shellPid    = mShellPid
-        , Reg._he_harnessPid  = mHarnessPid
-        , Reg._he_origin      = Reg.OriginAdopted
-        , Reg._he_liveness    = Reg.LivenessIdle
-        , Reg._he_extModified = False
-        , Reg._he_stale       = False
-        , Reg._he_sessionId   = Just (unSessionId sid)
-        , Reg._he_label       = windowName
-        , Reg._he_orphanedTicks = 0
-        , Reg._he_handle      = Just handle
-        }
-      meta = SessionMeta
-        { _sm_id                = sid
-        , _sm_agent             = Nothing
-        , _sm_kind              = SkHarness HarnessSpec
-            { _h_flavour   = HClaudeCode
-            , _h_backend   = TbTmux TmuxConfig
-                { _tc_session = session
-                , _tc_window  = windowName
-                , _tc_pane    = Nothing
-                }
-            , _h_cwd       = Nothing
-            , _h_args      = []
-            , _h_harnessId = Just hid
-            -- Adopted harnesses are NOT spawned by PureClaw, so we never minted
-            -- a --session-id for them and cannot correlate their JSONL log
-            -- (WU6: claude-code log capture is spawned-only). Both Nothing.
-            , _h_claudeSessionUuid = Nothing
-            , _h_canonicalCwd      = Nothing
+  -- Step 2: resolve the user-picked window to its INDEX via a fresh scan. The
+  -- scan reads @#{window_name}@ as DATA, so a name containing @.@ (or a purely
+  -- numeric name) cannot be misparsed here. We pick the FIRST UNMARKED window
+  -- whose name matches (mirrors discovery's adoptable filter — avoids grabbing
+  -- an already-ours duplicate-named window). If none matches, the window is
+  -- gone\/already adopted: refuse with NO mutation (maps to 503).
+  rows <- _ccd_sweep deps session
+  case find (\r -> _twr_windowName r == windowName && _twr_pclId r == "") rows of
+    Nothing -> pure (Left (HarnessTmuxNotAvailable
+      ("adopt: no unmarked window named " <> windowName
+        <> " in session " <> session)))
+    Just row -> do
+      let idx = _twr_windowIndex row
+          -- Step 3: a SAFE canonical name. The HarnessId UUID is hex + hyphens,
+          -- so the result never contains @.@\/@:@ and passes 'validateTmuxIdent'.
+          -- We DO NOT reuse the user's name (which may contain a @.@ that breaks
+          -- the @session:name@ targeting every downstream op relies on — the
+          -- root-cause of the §8 C4 "no corroborating PID" eviction).
+          safeName = "adopted-" <> T.take 8 (Reg.harnessIdToText hid)
+      -- Step 4: rename the window BY INDEX (@session:<int>@ resolves by window
+      -- index — unambiguous, immune to the @.@ misparse). After this, the window
+      -- name is safe and @session:safeName@ targeting is correct.
+      _ccd_renameWindow deps session (T.pack (show idx)) safeName
+      -- From here EVERYTHING addresses the window by the SAFE name.
+      -- Step 5: establish identity on the renamed window (C4 anchor at adopt time).
+      _ccd_setMarker deps session safeName (Reg.harnessIdToText hid)
+      _ccd_setRemain deps session safeName
+      -- Step 6: measure the window's current scrollback and set the baseline so
+      -- the pre-existing backlog is excluded (B3 / D5). A full capture
+      -- (lineCount 0) mirrors the receive path's full-screen capture; we count
+      -- its lines.
+      fullCapture <- fromMaybe "" <$> _ccd_captureNamed deps session safeName 0
+      let baseline = countCaptureLines fullCapture
+      -- Step 7: PID provenance (both best-effort).
+      mShellPid <- _ccd_panePidOf deps session safeName
+      mHarnessPid <- case mShellPid of
+        Just shellPid -> _ccd_harnessPidOf deps shellPid claudeComm
+        Nothing       -> pure Nothing
+      -- Step 8: build the cached-coordinate handle with the adoption baseline.
+      handle <- mkClaudeCodeHandleWithBaseline deps reg hid th session baseline
+      -- Step 9: link a harness session.json (mirrors the spawn persistence;
+      -- persists the HarnessId + adopted coords like WU6 / Phase 2).
+      now <- getCurrentTime
+      let sid = newSessionId Nothing now
+          entry = Reg.HarnessEntry
+            { Reg._he_id          = hid
+            , Reg._he_session     = session
+            , Reg._he_windowName  = safeName
+            , Reg._he_shellPid    = mShellPid
+            , Reg._he_harnessPid  = mHarnessPid
+            , Reg._he_origin      = Reg.OriginAdopted
+            , Reg._he_liveness    = Reg.LivenessIdle
+            , Reg._he_extModified = False
+            , Reg._he_stale       = False
+            , Reg._he_sessionId   = Just (unSessionId sid)
+            , Reg._he_label       = safeName
+            , Reg._he_orphanedTicks = 0
+            , Reg._he_handle      = Just handle
             }
-        , _sm_model             = ""
-        , _sm_channel           = "web"
-        , _sm_createdAt         = now
-        , _sm_lastActive        = now
-        , _sm_bootstrapConsumed = True
-        , _sm_archived          = False
-        , _sm_description       = Nothing
-        , _sm_autoSummary       = Nothing
-        , _sm_source            = Nothing
-        }
-  Reg.insertEntry reg entry
-  writeSessionMeta sessionsDir meta
-  pure (Right (hid, handle))
+          meta = SessionMeta
+            { _sm_id                = sid
+            , _sm_agent             = Nothing
+            , _sm_kind              = SkHarness HarnessSpec
+                { _h_flavour   = HClaudeCode
+                , _h_backend   = TbTmux TmuxConfig
+                    { _tc_session = session
+                    , _tc_window  = safeName
+                    , _tc_pane    = Nothing
+                    }
+                , _h_cwd       = Nothing
+                , _h_args      = []
+                , _h_harnessId = Just hid
+                -- Adopted harnesses are NOT spawned by PureClaw, so we never
+                -- minted a --session-id for them and cannot correlate their
+                -- JSONL log (WU6: claude-code log capture is spawned-only).
+                -- Both Nothing.
+                , _h_claudeSessionUuid = Nothing
+                , _h_canonicalCwd      = Nothing
+                }
+            , _sm_model             = ""
+            , _sm_channel           = "web"
+            , _sm_createdAt         = now
+            , _sm_lastActive        = now
+            , _sm_bootstrapConsumed = True
+            , _sm_archived          = False
+            , _sm_description       = Nothing
+            , _sm_autoSummary       = Nothing
+            , _sm_source            = Nothing
+            }
+      Reg.insertEntry reg entry
+      writeSessionMeta sessionsDir meta
+      pure (Right (hid, handle))
 
 -- | Count the newline-delimited lines in a raw capture, matching the splitting
 -- 'dropBaselineLines' \/ 'extractLastResponse' use (split on @0x0A@). An empty
