@@ -774,6 +774,12 @@ handleAdopt env req respond = do
                   -- D-ADD-2: sync the legacy name-keyed map so name-fallback
                   -- routing reaches the adopted handle immediately.
                   modifyIORef' (_fe_harnesses env) (Map.insert (_ar_window ar) hh)
+                  -- Surface the PureClaw session id created for this harness (it
+                  -- lives on the registry entry's '_he_sessionId') so the web
+                  -- "Existing Harness" composer can drop the user into the
+                  -- conversation and send a first message right after adopting.
+                  -- 'Nothing' -> null.
+                  mEntry <- Registry.lookupById (_fe_harnessRegistry env) hid
                   broadcastLists env
                   respond $ jsonResponse status200
                     (object
@@ -781,6 +787,7 @@ handleAdopt env req respond = do
                       , "harness_id"  .= Registry.harnessIdToText hid
                       , "session"     .= _ar_session ar
                       , "window"      .= _ar_window ar
+                      , "session_id"  .= (mEntry >>= Registry._he_sessionId)
                       ])
 
 -- | Close a tab by index via the '_fe_closeTab' callback.

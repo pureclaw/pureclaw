@@ -34,7 +34,7 @@ const sendSpy = vi.fn()
 const { dismissSpy, acknowledgeSpy, adoptSpy, scanSpy, destroySpy } = vi.hoisted(() => ({
   dismissSpy: vi.fn().mockResolvedValue(true),
   acknowledgeSpy: vi.fn().mockResolvedValue(true),
-  adoptSpy: vi.fn().mockResolvedValue(true),
+  adoptSpy: vi.fn().mockResolvedValue({ ok: true, sessionId: null }),
   scanSpy: vi.fn().mockResolvedValue(undefined),
   destroySpy: vi.fn().mockResolvedValue(true),
 }))
@@ -223,7 +223,7 @@ beforeEach(() => {
   destroySpy.mockClear()
   destroySpy.mockResolvedValue(true)
   adoptSpy.mockClear()
-  adoptSpy.mockResolvedValue(true)
+  adoptSpy.mockResolvedValue({ ok: true, sessionId: null })
   scanSpy.mockClear()
   specOverride.kind = 'provider'
   specOverride.attachSession = ''
@@ -759,9 +759,30 @@ describe('App Existing-Harness (attach) compose flow', () => {
     })
   })
 
+  it('W3.4: a successful attach with a typed message POSTs it to the adopted harness session', async () => {
+    const fetchMock = mockFetchOk('unused')
+    adoptSpy.mockResolvedValue({ ok: true, sessionId: 'sess-adopt-1' })
+    specOverride.kind = 'attach'
+    specOverride.attachSession = 'work'
+    specOverride.attachWindow = 'claude'
+    window.history.replaceState(null, '', '/')
+    const utils = render(<App />)
+    const input = await waitFor(() => utils.getByPlaceholderText('Attach to the selected session…'))
+    fireEvent.change(input, { target: { value: 'hello harness' } })
+    await act(async () => { fireEvent.click(utils.getByRole('button', { name: /^Send/ })) })
+    await waitFor(() => {
+      expect(adoptSpy).toHaveBeenCalledWith('work', 'claude')
+      // The typed first message is sent to the adopted harness's session.
+      expect(fetchMock.mock.calls.some((c) =>
+        c[0] === '/api/sessions/sess-adopt-1/send'
+        && JSON.parse((c[1] as RequestInit).body as string).message === 'hello harness',
+      )).toBe(true)
+    })
+  })
+
   it('W3.4: a failed attach surfaces an error and keeps the composer open', async () => {
     mockFetchOk('unused')
-    adoptSpy.mockResolvedValue(false)
+    adoptSpy.mockResolvedValue({ ok: false, sessionId: null })
     specOverride.kind = 'attach'
     specOverride.attachSession = 'work'
     specOverride.attachWindow = 'claude'

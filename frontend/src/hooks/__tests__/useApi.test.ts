@@ -132,10 +132,10 @@ describe('adoptWindow', () => {
   beforeEach(() => { globalThis.fetch = vi.fn() })
   afterEach(() => { globalThis.fetch = originalFetch })
 
-  it('POSTs /api/adopt with the session/window + consent_confirmed:true', async () => {
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true })
+  it('POSTs /api/adopt with the session/window + consent_confirmed:true and returns the session id', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({ session_id: 'sess-1' }) })
     const result = await adoptWindow('work', 'editor')
-    expect(result).toBe(true)
+    expect(result).toEqual({ ok: true, sessionId: 'sess-1' })
     const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(call[0]).toBe('/api/adopt')
     const init = call[1] as RequestInit
@@ -147,14 +147,19 @@ describe('adoptWindow', () => {
     })
   })
 
-  it('returns false on a non-ok response (e.g. 403 deny)', async () => {
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 403 })
-    expect(await adoptWindow('blocked', 'win')).toBe(false)
+  it('returns sessionId:null when the server omits session_id', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({ adopted: true }) })
+    expect(await adoptWindow('work', 'editor')).toEqual({ ok: true, sessionId: null })
   })
 
-  it('returns false when fetch throws', async () => {
+  it('returns ok:false on a non-ok response (e.g. 403 deny)', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 403 })
+    expect(await adoptWindow('blocked', 'win')).toEqual({ ok: false, sessionId: null })
+  })
+
+  it('returns ok:false when fetch throws', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('net'))
-    expect(await adoptWindow('work', 'editor')).toBe(false)
+    expect(await adoptWindow('work', 'editor')).toEqual({ ok: false, sessionId: null })
   })
 })
 

@@ -436,16 +436,25 @@ export async function acknowledgeTab(index: number): Promise<boolean> {
  *  acknowledged the trust consequence in the confirmation dialog. Returns
  *  true on 200; false on a denial (403 — headless run or not allow-listed) or
  *  any error. */
-export async function adoptWindow(session: string, window: string): Promise<boolean> {
+/** Adopt an existing tmux window. Returns whether it succeeded and the PureClaw
+ *  session id created for the adopted harness (so the caller can navigate into
+ *  its conversation and send a first message). `sessionId` is null on failure or
+ *  if the server didn't supply one. */
+export async function adoptWindow(
+  session: string,
+  window: string,
+): Promise<{ ok: boolean; sessionId: string | null }> {
   try {
     const res = await fetch('/api/adopt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session, window, consent_confirmed: true }),
     })
-    return res.ok
+    if (!res.ok) return { ok: false, sessionId: null }
+    const data = (await res.json().catch(() => ({}))) as { session_id?: string | null }
+    return { ok: true, sessionId: data.session_id ?? null }
   } catch {
-    return false
+    return { ok: false, sessionId: null }
   }
 }
 

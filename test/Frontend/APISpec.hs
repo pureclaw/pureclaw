@@ -867,6 +867,24 @@ spec = do
       calls <- readIORef adoptCalls
       calls `shouldBe` 1
 
+    it "surfaces the created session_id in the response (for the composer's first-message send)" $ do
+      env0 <- mkTestFrontendEnv
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          env = env0
+            { _fe_consentChannel = ConsentWeb
+            , _fe_adopt          = \_ _ -> do
+                -- Mirror the real adopt mechanism: register an OriginAdopted entry
+                -- carrying the created PureClaw session id.
+                Registry.insertEntry (_fe_harnessRegistry env0)
+                  ((baseEntry hid "adopted-x" (Just mkNoOpHarnessHandle))
+                    { Registry._he_origin    = Registry.OriginAdopted
+                    , Registry._he_sessionId = Just "20240101-000000-001" })
+                pure (Right (hid, mkNoOpHarnessHandle))
+            }
+      (st, respBody) <- postJSON env ["api", "adopt"] (adoptBody "an-existing-harness" "win-3")
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "session_id" `shouldBe` Just (Aeson.String "20240101-000000-001")
+
     it "returns 400 when consent_confirmed is false/absent, and calls _fe_adopt ZERO times" $ do
       env0 <- mkTestFrontendEnv
       adoptCalls <- newIORef (0 :: Int)

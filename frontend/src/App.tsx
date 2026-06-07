@@ -716,24 +716,49 @@ export default function App() {
     async (message: string) => {
       // Existing Harness (attach/adopt) flow. The user's pick+submit in this
       // foreground form IS the consent (adoptWindow sends
-      // consent_confirmed:true). We don't create a tab — adoption registers
-      // the running window server-side, which then surfaces as an adopted tab
-      // in the next lists snapshot. No message is sent.
+      // consent_confirmed:true). Adoption registers the running window
+      // server-side (it surfaces as an adopted tab + a Recent Sessions row).
+      // On success we drop the user INTO the adopted harness's conversation and,
+      // if they typed a first message, send it to the harness.
       if (composerSpec.kind === 'attach') {
         const session = composerSpec.attachSession.trim()
-        const window = composerSpec.attachWindow.trim()
-        const ok = await adoptWindow(session, window)
-        if (!ok) {
+        const targetWindow = composerSpec.attachWindow.trim()
+        const result = await adoptWindow(session, targetWindow)
+        if (!result.ok) {
           setAttachError(
             'Could not attach to that session — adoption was denied (a headless run can’t confirm consent) or the window no longer exists. Please try again.',
           )
           return
         }
-        // Success: dismiss the composer. The adopted window appears as a tab
-        // via the broadcast lists snapshot; we just leave compose mode.
         setAttachError(null)
         setBranchDraft(null)
         setBranchError(null)
+        const sid = result.sessionId
+        const trimmed = message.trim()
+        if (sid) {
+          // Navigate into the adopted harness's conversation (mirrors the
+          // new-session create flow), then send the typed first message.
+          if (trimmed.length > 0) {
+            streamClient().focus(sid)
+            entryCountAtSend.current = 0
+            setPendingMessageModel(null)
+            setPendingMessage(trimmed)
+          }
+          const newId = `session:${sid}`
+          setSelectedId(newId)
+          window.history.pushState(null, '', pathFromSelectedId(newId))
+          if (trimmed.length > 0) {
+            try {
+              await fetch(`/api/sessions/${encodeURIComponent(sid)}/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: trimmed }),
+              })
+            } catch {
+              // Best-effort: the conversation is open; the user can retry there.
+            }
+          }
+        }
         setComposerDismissed(true)
         return
       }
