@@ -1,63 +1,69 @@
 # Tabs-as-View Refactor — Implementation Plan
 
-> **For agentic workers:** This plan is decomposed into work units (WUs) with explicit file scope, dependencies, DoD, and TDD test strategy. Execute via the chosen execution method (metaswarm orchestrated-execution, superpowers:subagent-driven-development, or superpowers:executing-plans). Every WU is red/green TDD; commit per green step. 100% coverage gate (`.coverage-thresholds.json`) is blocking.
+> **For agentic workers:** Decomposed into work units (WUs) with explicit file scope, dependencies, DoD, and TDD test strategy. Execute via the chosen execution method. Every WU is red/green TDD; commit per green step; **every WU ends with a green `-Werror` build** (no WU leaves the tree un-buildable). Coverage gate `.coverage-thresholds.json` (**95%** lines/branches/functions/statements) is blocking.
 
 **Goal:** Re-found the tab layer as a first-class `TabRegistry` where a tab is a pure binding over ground truth (Session/Harness), with per-conversation persisted focus, chat-driven creation, and notified harness-death removal.
 
-**Architecture:** New leaf modules `PureClaw.Tabs` (+ `.Wizard`, `.Relay`) own an ordered, persisted list of `Tab` bindings and per-`ConversationKey` cursors. The dispatcher remains the sole writer of tab/cursor state; the reconcile thread hands harness-death events to it via a queue. Tabs reference ground truth; a refcounted `SessionId → SessionHandle` pool replaces the `_env_session` global. Output is fanned out per conversation by a `RelayMode` engine replacing the single-focus `ChannelOut` gate.
+**Architecture:** New leaf modules `PureClaw.Tabs` (+ `.Wizard`, `.Relay`, `.SessionPool`, `.Persist`) own an ordered, persisted list of `Tab` bindings and per-`ConversationKey` cursors. The legacy per-tab-loop (`Tab.{Ai,Harness,Backend}`, `Routing.{AutoSpawn,Dashboard,Registry}`, `Handles.Tab`) and the global `_env_focus`/`_env_session` fields and the `ChannelOut` focus gate are all retired **together** in one coordinated cutover (WU8), so the tree goes green→green. The dispatcher remains the sole writer of tab/cursor state; the reconcile thread hands harness-death events to it via a queue. A refcounted `SessionId → SessionHandle` pool replaces the `_env_session` global.
 
 **Tech Stack:** Haskell GHC 9.12.1 (GHC2021), `nix develop . --command cabal {build,test}`, hand-written Aeson codecs, IORef-by-default, Handle pattern, `-Wall -Werror`, hlint clean.
 
 **Spec:** `docs/superpowers/specs/2026-06-08-tabs-as-view-refactor-design.md` (design-review-gate PASSED). Section refs below (§N) point there.
 
-**Commands (use everywhere):**
+**Commands:**
 - Build: `nix develop . --command cabal build`
-- Test (one suite): `nix develop . --command cabal test`
-- Coverage gate: `nix develop . --command cabal test --enable-coverage`
+- Test: `nix develop . --command cabal test`
+- Coverage gate: `nix develop . --command cabal test --enable-coverage` (must meet `.coverage-thresholds.json` = 95%)
 - Lint: `nix develop . --command hlint src test`
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 
+**Sequencing principle (drives the whole plan):** WU1–WU7 are **purely additive** — they create new modules + tests and the existing tree keeps compiling and passing untouched. **WU8 is the coordinated cutover** that rewires the dispatcher onto the new model and, in the same WU, removes the global fields and deletes every legacy module that referenced them — the only point at which old code is removed. WU9–WU11 finish on top of the new model. This guarantees no intermediate WU breaks `-Werror`.
+
 ---
 
-## File Structure (decomposition locked here)
+## File Structure
 
 **New:**
-- `src/PureClaw/Tabs.hs` — re-export surface + `TabRegistry` handle.
-- `src/PureClaw/Tabs/Types.hs` — `Tab`, `TabRef`, `TabStatus`, `ConversationKey`, `ConversationId`, `RelayMode`, pure registry/cursor core.
+- `src/PureClaw/Tabs/Types.hs` — `Tab`, `TabRef`, `TabStatus`, `TabList` + pure registry ops; `ConversationKey`, `RelayMode`, `CursorState` + pure cursor ops.
+- `src/PureClaw/Tabs.hs` — `TabRegistry` handle (IORef wrapper) + re-export surface.
 - `src/PureClaw/Tabs/Persist.hs` — `state/` dir, `tabs.json` codec, boot restore/reconcile.
+- `src/PureClaw/Tabs/SessionPool.hs` — refcounted `SessionId → SessionHandle` pool.
 - `src/PureClaw/Tabs/Wizard.hs` — `/tab` attach wizard state machine.
 - `src/PureClaw/Tabs/Relay.hs` — per-conversation output relay engine.
-- `src/PureClaw/Tabs/SessionPool.hs` — refcounted `SessionId → SessionHandle` pool.
 - `test/PureClaw/Tabs/*Spec.hs` — one spec per module.
 
 **Modified:**
-- `src/PureClaw/Core/Types.hs` — add `ConversationId` to `MessageSource` (required arg).
-- `src/PureClaw/Agent/Env.hs` — replace `_env_focus`/`_env_session` with `TabRegistry` + pool refs.
-- `src/PureClaw/Routing/Dispatcher.hs` — per-conversation dispatch; lifecycle-event queue.
-- `src/PureClaw/Routing/ChannelOut.hs` — replaced by `Tabs.Relay` (gate removed).
-- `src/PureClaw/Agent/SlashCommands.hs` + `src/PureClaw/Routing/Parse.hs` — flat verbs; retire `/tab <sub>` family.
-- Channel handles (`src/PureClaw/Channels/*`, Telegram/Signal/CLI/Web) — supply `ConversationId`.
-- `src/PureClaw/Harness/Reconcile.hs` — `_rd_evict` hand-off to dispatcher queue (consume existing seam; no new event system).
-- `src/PureClaw/CLI/Config.hs` + `Routing/Config.hs` — `[tabs]` config (`notifyOnHarnessDeath`, default relay).
-- `.coverage-thresholds.json` — delete retired modules' staged waivers.
-- `test/Integration/CLISpec.hs` — end-to-end chat surface.
+- `src/PureClaw/Core/Types.hs` — define `ConversationId` (leaf home, avoids cycle); add it as a required field of `MessageSource`/`mkMessageSource`.
+- Channel ingress: `src/PureClaw/Handles/Channel.hs` (incl. `noopChannelHandle`), `src/PureClaw/Channels/*`, Telegram/Signal/Web/CLI — supply transport-derived `ConversationId`.
+- `src/PureClaw/Agent/Env.hs` — (WU8) replace `_env_focus`/`_env_session` with `TabRegistry` + `CursorState` refs + `SessionPool` + lifecycle queue.
+- `src/PureClaw/Routing/Dispatcher.hs` — (WU8) per-conversation dispatch; flat command handlers; wizard interception; lifecycle-queue drain.
+- `src/PureClaw/Agent/SlashCommands.hs` + `src/PureClaw/Routing/Parse.hs` — (WU8) flat verbs; retire `/tab <sub>` family.
+- `src/PureClaw/Agent/Loop.hs`, `src/PureClaw/CLI/Commands.hs` — (WU8) move off `_env_session`/legacy factory onto `SessionPool`/`TabRegistry`.
+- `src/PureClaw/Harness/Reconcile.hs` — (WU9) `_rd_evict` enqueues a lifecycle event (consume existing seam; no new event system).
+- `src/PureClaw/CLI/Config.hs` + `src/PureClaw/Routing/Config.hs` — (WU10) `[tabs]` config.
+- `.coverage-thresholds.json` — (WU11) delete **retired** modules' staged waivers; bring **modified** modules to threshold.
+- `test/Integration/CLISpec.hs` — (WU11) end-to-end chat surface.
 
-**Retired (deleted as superseded):** `src/PureClaw/Routing/AutoSpawn.hs`, `src/PureClaw/Routing/Registry.hs`, `src/PureClaw/Routing/Dashboard.hs`, `src/PureClaw/Tab/{Ai,Harness,Backend}.hs`, `src/PureClaw/Handles/Tab.hs` (its `TabStatus`/`TabIndex` either move to `Tabs/Types.hs` or are re-exported — see WU1).
+**Retired in WU8 (deleted, superseded):** `src/PureClaw/Routing/AutoSpawn.hs`, `src/PureClaw/Routing/Registry.hs`, `src/PureClaw/Routing/Dashboard.hs`, `src/PureClaw/Routing/ChannelOut.hs` (gate logic → `Tabs.Relay`), `src/PureClaw/Tab/{Ai,Harness,Backend}.hs`, `src/PureClaw/Handles/Tab.hs` (its `TabIndex` + `parseTabIndexChar`/`mkTabIndex` move to `Tabs/Types.hs`; keep the validated arithmetic).
 
 ---
 
 ## Dependency DAG
 
 ```
-WU1 ──► WU2 ──► WU3
-  │        │       │
-  │        ├──► WU6 ──► WU7 ──► WU8
-  │        │     │        │
-  WU5 ─────┘     ├──► WU9 ─┴──► WU10 ──► WU11 ──► WU12
-  WU4 ───────────┘
+Additive (tree stays green):
+  WU1 ─► WU2 ─► WU3
+   │      └────► WU6 (wizard pure)
+   │      └────► WU7 (relay pure)
+   WU4 (ConversationId; independent)
+   WU5 (SessionPool module; needs WU1)
+
+Cutover:
+  WU1..WU7  ─►  WU8 (CUTOVER: rewire dispatcher; remove globals; delete legacy)
+
+Finish:
+  WU8 ─► WU9 (harness death) ─► WU10 (config + WARN + docs) ─► WU11 (integration + waivers + gate)
 ```
-- WU1 (core types) and WU4 (ConversationId plumbing) have no inter-dep and may run first/parallel.
-- WU12 is the final integration + cleanup; depends on all.
 
 ---
 
@@ -65,304 +71,253 @@ WU1 ──► WU2 ──► WU3
 
 **Files:**
 - Create: `src/PureClaw/Tabs/Types.hs`, `src/PureClaw/Tabs.hs`
+- Modify: `src/PureClaw/Core/Types.hs` (define `ConversationId` here — leaf home)
 - Test: `test/PureClaw/Tabs/TypesSpec.hs`
-- Reference: `src/PureClaw/Routing/Parse.hs` (`parseTabIndexChar`, `mkTabIndex`, `TabIndex`), `src/PureClaw/Session/Kind.hs` (`SessionId`, `HarnessId`)
+- Reference: `src/PureClaw/Routing/Registry.hs` (`packAfterRemove`/`firstFree` — copy the pure arithmetic), `src/PureClaw/Handles/Tab.hs` (`TabIndex`, `mkTabIndex`), `src/PureClaw/Session/Kind.hs` (`SessionId`, `HarnessId`)
 
-**Dependencies:** none (leaf; imports `Session.Kind` only).
+**Dependencies:** none.
 
-**Interfaces to define (contract for all later WUs):**
+**Interfaces (contract for later WUs):**
 ```haskell
-newtype ConversationId = ConversationId Text                 -- opaque, server-derived
-data TabRef  = BoundSession !SessionId | BoundHarness !HarnessId
-  deriving stock (Eq, Ord, Show)
-data TabStatus = Live | Dead                                  -- Dead = harness exited, pending notify
+-- in Core.Types (leaf — so MessageSource can reference it without a cycle):
+newtype ConversationId = ConversationId Text deriving stock (Eq, Ord, Show)
+
+-- in Tabs/Types.hs:
+data TabRef  = BoundSession !SessionId | BoundHarness !HarnessId deriving stock (Eq, Ord, Show)
+data TabStatus = Live | Dead deriving stock (Eq, Show)
+data Tab = Tab { _tab_slot :: !TabIndex, _tab_ref :: !TabRef, _tab_name :: !Text, _tab_status :: !TabStatus }
   deriving stock (Eq, Show)
-data Tab = Tab { _tab_slot :: !TabIndex, _tab_ref :: !TabRef
-               , _tab_name :: !Text,    _tab_status :: !TabStatus }
-  deriving stock (Eq, Show)
--- Pure ordered core (slot == list index); registry handle wraps an IORef of this.
-newtype TabList = TabList [Tab]                               -- invariant I1: slots == [0..length)
-appendTab   :: TabRef -> Text -> TabList -> Either TabsError (TabIndex, TabList)  -- I2 dedup + I1 + 36-cap
-removeSlot  :: TabIndex -> TabList -> TabList                 -- compaction, renumber (packAfterRemove)
-lookupSlot  :: TabIndex -> TabList -> Maybe Tab
-lookupRef   :: TabRef   -> TabList -> Maybe TabIndex
-setStatus   :: TabRef -> TabStatus -> TabList -> TabList
-data TabsError = SlotsFull | AlreadyBound !TabIndex
+newtype TabList = TabList [Tab]                 -- invariant I1: slots == [0..length)
+data TabsError = SlotsFull | AlreadyBound !TabIndex deriving stock (Eq, Show)
+appendTab  :: TabRef -> Text -> TabList -> Either TabsError (TabIndex, TabList)
+removeSlot :: TabIndex -> TabList -> TabList
+lookupSlot :: TabIndex -> TabList -> Maybe Tab
+lookupRef  :: TabRef   -> TabList -> Maybe TabIndex
+setStatus  :: TabRef -> TabStatus -> TabList -> TabList
 ```
+`TabIndex` + `parseTabIndexChar`/`mkTabIndex` move from `Handles/Tab.hs` into `Tabs/Types.hs` (re-export from `Routing/Parse.hs` if needed) so the validated 0–35 arithmetic is retained.
 
 **TDD steps:**
-- [ ] **Step 1 — failing test (I1 contiguity):** in `TypesSpec.hs`, property test: for any sequence of `appendTab`/`removeSlot`, `map _tab_slot (toList tl) == [0 .. n-1]`. Run `nix develop . --command cabal test 2>&1 | tail` → expect compile/fail.
-- [ ] **Step 2 — define types + `appendTab`/`removeSlot`** in `Tabs/Types.hs` (reuse `packAfterRemove`/`firstFree` arithmetic from old `Routing/Registry.hs` — copy the pure logic, then that module is retired in WU12). Make Step 1 pass.
-- [ ] **Step 3 — failing test (I2 uniqueness/dedup):** `appendTab` of an already-bound `TabRef` returns `Left (AlreadyBound i)`; never two tabs with same ref. Run → fail.
-- [ ] **Step 4 — implement dedup** in `appendTab`. Pass.
-- [ ] **Step 5 — failing test (36-cap):** appending the 37th distinct ref returns `Left SlotsFull`. Run → fail.
-- [ ] **Step 6 — implement cap** (`TabIndex` max 35 via `mkTabIndex`). Pass.
-- [ ] **Step 7 — failing test (compaction):** removing slot 1 of `[0,1,2]` shifts slot 2 → 1, `lookupRef` of the shifted ref returns the new slot. Pass after `removeSlot`.
-- [ ] **Step 8 — `Tabs.hs` handle:** `data TabRegistry = TabRegistry (IORef TabList)`; `newTabRegistry`, `readTabs`, plus thin IO wrappers over the pure ops. Smoke test. Commit.
+- [ ] **Step 1 — failing test (I1 contiguity):** property — after any `appendTab`/`removeSlot` sequence, `map _tab_slot list == [0..n-1]`.
+- [ ] **Step 2 — define types + `appendTab`/`removeSlot`** (reuse `packAfterRemove`/`firstFree`). Pass.
+- [ ] **Step 3 — failing test (I2 dedup):** `appendTab` of an already-bound ref → `Left (AlreadyBound i)`.
+- [ ] **Step 4 — implement dedup.** Pass.
+- [ ] **Step 5 — failing test (36-cap):** 37th distinct ref → `Left SlotsFull`.
+- [ ] **Step 6 — implement cap.** Pass.
+- [ ] **Step 7 — failing test (compaction):** remove slot 1 of `[0,1,2]` → ref of old slot 2 now at slot 1 via `lookupRef`. Pass.
+- [ ] **Step 8 — `Tabs.hs` handle** (`TabRegistry = TabRegistry (IORef TabList)` + IO wrappers); `ConversationId` in Core.Types. Build clean + commit.
 
-**DoD:** I1/I2/36-cap/compaction property-tested; pure core 100% covered; `Tabs.hs` handle compiles; `-Werror`/hlint clean.
+**DoD:** I1/I2/cap/compaction property-tested; pure core ≥95%; `ConversationId` compiles in `Core.Types`; existing tree still green.
 
 ---
 
 ## WU2 — Cursors, ConversationKey, RelayMode (pure)
 
-**Files:**
-- Modify: `src/PureClaw/Tabs/Types.hs` (extend), `src/PureClaw/Tabs.hs`
-- Test: `test/PureClaw/Tabs/CursorSpec.hs`
-
-**Dependencies:** WU1. Imports `Core.Types` for `ChannelKind`.
+**Files:** Modify `src/PureClaw/Tabs/Types.hs`, `src/PureClaw/Tabs.hs`; Test `test/PureClaw/Tabs/CursorSpec.hs`
+**Dependencies:** WU1. Imports `Core.Types` (`ChannelKind`, `ConversationId`).
 
 **Interfaces:**
 ```haskell
 type ConversationKey = (ChannelKind, ConversationId)
-data RelayMode = FocusedOnly | ActivityDigest | Firehose  deriving stock (Eq, Show)
-data CursorState = CursorState
-  { _cs_cursors :: !(Map ConversationKey TabRef)
-  , _cs_relay   :: !(Map ConversationKey RelayMode) }
-setCursor    :: ConversationKey -> TabRef -> CursorState -> CursorState
-clearCursor  :: ConversationKey -> CursorState -> CursorState
+data RelayMode = FocusedOnly | ActivityDigest | Firehose deriving stock (Eq, Show)
+data CursorState = CursorState { _cs_cursors :: !(Map ConversationKey TabRef)
+                               , _cs_relay   :: !(Map ConversationKey RelayMode) }
+setCursor :: ConversationKey -> TabRef -> CursorState -> CursorState
+clearCursor :: ConversationKey -> CursorState -> CursorState
 resolveCursorSlot :: ConversationKey -> CursorState -> TabList -> Maybe TabIndex   -- I3
-conversationsOn   :: TabRef -> CursorState -> [ConversationKey]
-pruneDangling :: TabList -> CursorState -> CursorState        -- drop cursors whose ref is gone
-relayMode    :: ConversationKey -> RelayMode -> CursorState -> RelayMode  -- 2nd arg = global default
+conversationsOn :: TabRef -> CursorState -> [ConversationKey]
+pruneDangling :: TabList -> CursorState -> CursorState
+relayModeFor :: ConversationKey -> RelayMode -> CursorState -> RelayMode  -- 2nd arg = global default
 ```
 
 **TDD steps:**
-- [ ] **Step 1 — failing test:** `setCursor` then `resolveCursorSlot` returns the bound tab's current slot; after `removeSlot` shifts it, resolution returns the new slot (I3 survives compaction because cursors key by `TabRef`). Run → fail.
-- [ ] **Step 2 — implement `CursorState` + `setCursor`/`resolveCursorSlot`.** Pass.
-- [ ] **Step 3 — failing test:** `pruneDangling` clears a cursor whose ref no longer exists; keeps valid ones. Pass after impl.
-- [ ] **Step 4 — failing test:** `conversationsOn ref` returns exactly the keys focused on that ref (used by relay + death notify). Pass.
-- [ ] **Step 5 — failing test:** `relayMode` returns the per-conversation override or the supplied global default. Pass.
-- [ ] **Step 6 — commit.**
+- [ ] **Step 1 — failing test (I3 under compaction):** `setCursor` → `resolveCursorSlot` tracks the ref across `removeSlot` shifts. Pass.
+- [ ] **Step 2 — `pruneDangling`** clears cursors whose ref is gone. Test + impl.
+- [ ] **Step 3 — `conversationsOn`** returns exactly the keys on a ref. Test + impl.
+- [ ] **Step 4 — `relayModeFor`** override-or-default. Test + impl. Commit.
 
-**DoD:** I3 cursor-validity-under-compaction property-tested; `conversationsOn`, `pruneDangling`, `relayMode` covered; pure 100%.
+**DoD:** I3 property-tested; cursor helpers ≥95%; tree green.
 
 ---
 
 ## WU3 — Persistence: `state/` + `tabs.json` + boot reconcile
 
-**Files:**
-- Create: `src/PureClaw/Tabs/Persist.hs`, `test/PureClaw/Tabs/PersistSpec.hs`
-- Reference: `src/PureClaw/Security/Path.hs` (`ensureRuntimeRoot` 0700 pattern), `src/PureClaw/Harness/Registry.hs` (liveness read)
-
+**Files:** Create `src/PureClaw/Tabs/Persist.hs`, `test/PureClaw/Tabs/PersistSpec.hs`; Reference `src/PureClaw/Security/Path.hs` (`ensureRuntimeRoot` 0700), `src/PureClaw/Harness/Registry.hs`
 **Dependencies:** WU1, WU2.
 
 **Interfaces:**
 ```haskell
-data PersistDeps = PersistDeps                 -- injected for deterministic tests
-  { _pd_stateDir       :: FilePath
-  , _pd_harnessLive    :: HarnessId -> IO Bool  -- probe live registry
-  , _pd_discoveryReady :: IO ()                 -- block until one discovery pass done
-  }
-saveTabs :: FilePath -> TabList -> CursorState -> IO ()           -- writes tabs.json 0600 under state/ 0700
-loadTabs :: PersistDeps -> IO (TabList, CursorState)             -- decode-fail -> fresh; reconcile; prune
+data PersistDeps = PersistDeps { _pd_stateDir :: FilePath, _pd_harnessLive :: HarnessId -> IO Bool
+                               , _pd_discoveryReady :: IO () }
+saveTabs :: FilePath -> TabList -> CursorState -> IO ()        -- tabs.json 0600 under state/ 0700
+loadTabs :: PersistDeps -> IO (TabList, CursorState)           -- decode-fail -> fresh; await discovery; reconcile; prune
 ```
 
 **TDD steps:**
-- [ ] **Step 1 — failing test (round-trip):** `saveTabs` then `loadTabs` (with all-live probe) returns the same tabs+cursors. Hand-written Aeson `ToJSON`/`FromJSON` (no generic deriving). Run → fail.
-- [ ] **Step 2 — implement codec + `saveTabs`/`loadTabs`.** Pass.
-- [ ] **Step 3 — failing test (perms):** after `saveTabs`, `getFileMode tabs.json == 0o600` and `state/ == 0o700` (use `System.Posix.Files`). Pass via `ensureRuntimeRoot` reuse + `setFileMode`.
-- [ ] **Step 4 — failing test (decode failure → fresh):** corrupt `tabs.json` → `loadTabs` returns empty registry, no exception. Pass.
-- [ ] **Step 5 — failing test (boot reconcile):** a harness-backed tab whose `_pd_harnessLive` returns False is dropped (silent); its cursor pruned; provider tabs kept. Assert `_pd_discoveryReady` is awaited before pruning. Pass.
-- [ ] **Step 6 — commit.**
+- [ ] **Step 1 — round-trip** (hand-written Aeson). Test + impl.
+- [ ] **Step 2 — perms** (`tabs.json` 0600, `state/` 0700). Test (`System.Posix.Files`) + impl via `ensureRuntimeRoot`.
+- [ ] **Step 3 — decode failure → fresh** (no exception). Test + impl.
+- [ ] **Step 4 — boot reconcile:** drop harness tab whose `_pd_harnessLive` is False (silent), prune its cursor, keep provider tabs, await `_pd_discoveryReady` before pruning. Test + impl.
+- [ ] **Step 5 — no-secrets assertion:** serialize a tab and assert JSON keys contain no token/path fields. Commit.
 
-**DoD:** round-trip + perms + fresh-start + reconcile tested; injected deps give 100% without real tmux; no secrets/paths serialized (assert JSON keys).
+**DoD:** round-trip/perms/fresh-start/reconcile/no-secrets tested; injected deps give ≥95% without real tmux; tree green.
 
 ---
 
 ## WU4 — `ConversationId` through `MessageSource` (server-derived)
 
-**Files:**
-- Modify: `src/PureClaw/Core/Types.hs` (`MessageSource`, `mkMessageSource`), each channel in `src/PureClaw/Channels/*` and Telegram/Signal/Web/CLI ingress.
-- Test: `test/PureClaw/Core/MessageSourceSpec.hs` + per-channel derivation tests.
-
-**Dependencies:** none structurally; do early (wide `-Werror` blast radius). Needed by WU6.
+**Files:** Modify `src/PureClaw/Core/Types.hs` (`MessageSource`, `mkMessageSource`), `src/PureClaw/Handles/Channel.hs` (**incl. `noopChannelHandle`**), Telegram/Signal/Web/CLI ingress; Test `test/PureClaw/Core/MessageSourceSpec.hs`
+**Dependencies:** WU1 (for `ConversationId`). Do early — wide `-Werror` blast radius. **Additive** (does not remove any global).
 
 **TDD steps:**
-- [ ] **Step 1 — failing test (forgery):** a `MessageSource` built from a payload whose *body/fields* contain a `conversation_id` ignores it; the id comes only from the transport arg. Run → fail (field doesn't exist yet).
-- [ ] **Step 2 — add `_ms_conversation :: ConversationId` as a required positional arg to `mkMessageSource`.** Fix all call sites (compiler-driven). Pass forgery test.
-- [ ] **Step 3 — failing tests (per-channel derivation):** CLI → constant `"cli"`; Telegram → `_tm_chat` (NOT `_tm_from`/user id); Signal → contact/group; Web → server-minted token (not a client field). One test each. Pass by wiring each ingress.
-- [ ] **Step 4 — failing test (group chat shares cursor):** two different senders in one Telegram chat id produce the same `ConversationKey`. Pass.
-- [ ] **Step 5 — build + commit** (`cabal build` must be clean given `-Werror`).
+- [ ] **Step 1 — forgery test:** a `conversation_id` in message *fields/body* is ignored; the id comes only from the transport arg. Fail → add `_ms_conversation :: ConversationId` as a **required positional** arg to `mkMessageSource`; fix **every** call site (compiler-driven, incl. `noopChannelHandle`). Pass.
+- [ ] **Step 2 — per-channel derivation tests:** CLI → `"cli"`; Telegram → `_tm_chat` (NOT `_tm_from`); Signal → contact/group; Web → server-minted token. One each. Pass.
+- [ ] **Step 3 — group-chat shared cursor:** two senders, one Telegram chat id → same `ConversationKey`. Pass.
+- [ ] **Step 4 — build + commit** (clean `-Werror`).
 
-**DoD:** forgery + per-channel + group-chat tests pass; every `mkMessageSource` call site supplies a transport-derived id; no client-supplied path.
+**DoD:** forgery/per-channel/group tests pass; all `mkMessageSource` sites supply transport-derived ids; tree green.
 
 ---
 
-## WU5 — Session-handle pool; remove `_env_session` global
+## WU5 — Session-handle pool (additive module)
 
-**Files:**
-- Create: `src/PureClaw/Tabs/SessionPool.hs`, `test/PureClaw/Tabs/SessionPoolSpec.hs`
-- Modify: `src/PureClaw/Agent/Env.hs` (remove `_env_session`, add pool ref), `src/PureClaw/Routing/Dispatcher.hs` (`closeAllTabs`/`_env_runners` callers).
-
-**Dependencies:** WU1.
+**Files:** Create `src/PureClaw/Tabs/SessionPool.hs`, `test/PureClaw/Tabs/SessionPoolSpec.hs`
+**Dependencies:** WU1. **Additive** — the module is built and unit-tested here; it is **wired in** (and `_env_session` removed) in WU8.
 
 **Interfaces:**
 ```haskell
-data SessionPool = SessionPool (IORef (Map SessionId (Int, SessionHandle)))  -- refcount
-acquire :: SessionPool -> SessionId -> IO SessionHandle  -- open on first, ++refcount otherwise
-release :: SessionPool -> SessionId -> IO ()             -- --refcount, close on last
+data PoolDeps = PoolDeps { _pool_open :: SessionId -> IO SessionHandle, _pool_close :: SessionHandle -> IO () }
+data SessionPool = SessionPool (IORef (Map SessionId (Int, SessionHandle)))
+newSessionPool :: SessionPool
+acquire :: PoolDeps -> SessionPool -> SessionId -> IO SessionHandle   -- open-on-first, ++refcount
+release :: PoolDeps -> SessionPool -> SessionId -> IO ()              -- --refcount, close-on-last
 ```
 
 **TDD steps:**
-- [ ] **Step 1 — failing test:** `acquire` twice for one `SessionId` opens the handle once (injected opener counter == 1) and refcount == 2; `release` once keeps it open; second `release` closes (closer counter == 1). Run → fail.
-- [ ] **Step 2 — implement pool** with injected open/close seams. Pass.
-- [ ] **Step 3 — remove `_env_session :: IORef SessionHandle`** from `Agent/Env.hs`; route the AI tab loop through `acquire`/`release`. Fix `Dispatcher.hs:887-893` L7 path (delete the snapshot swap). Build clean.
-- [ ] **Step 4 — failing test:** two tabs bound to the same `SessionId` resolve the *same* `SessionHandle`. Pass.
-- [ ] **Step 5 — commit.**
+- [ ] **Step 1 — refcount:** two `acquire` of one id → injected open counter == 1, refcount 2; one `release` keeps open; second closes (close counter == 1). Test + impl.
+- [ ] **Step 2 — shared handle:** two ids... two tabs same id resolve same handle. Test + impl. Commit.
 
-**DoD:** refcount open/close + shared-handle tested; `_env_session` global gone; build green.
+**DoD:** refcount + shared-handle tested via injected seams; ≥95%; tree green (module not yet wired).
 
 ---
 
-## WU6 — Per-conversation dispatch (replace global `_env_focus`)
+## WU6 — Attach wizard state machine (additive, pure)
 
-**Files:**
-- Modify: `src/PureClaw/Routing/Dispatcher.hs`, `src/PureClaw/Agent/Env.hs` (swap `_env_focus` → `TabRegistry`+`CursorState` refs + lifecycle queue), `src/PureClaw/Routing/Parse.hs` (unchanged grammar; confirm).
-- Test: `test/PureClaw/Routing/DispatchSpec.hs`
-
-**Dependencies:** WU1, WU2, WU4, WU5.
-
-**TDD steps:**
-- [ ] **Step 1 — failing test (switch):** `/2` from conversation A sets A's cursor to slot-2's ref; conversation B's cursor unchanged (per-conversation isolation of focus). Run → fail.
-- [ ] **Step 2 — replace `_env_focus` reads/writes** with `setCursor`/`resolveCursorSlot` keyed by the inbound `ConversationKey`; dispatcher stays sole writer. Pass.
-- [ ] **Step 3 — failing test (default routing):** plain text routes to the conversation's active tab; empty cursor emits §14 copy `no active tab — /new to start one or /tab to attach`. Pass.
-- [ ] **Step 4 — failing test (out of range):** `/5` with 3 tabs emits `/5: out of range — you have 3 tabs (/0–/2); /tabs to list`. Pass.
-- [ ] **Step 5 — failing test (tombstone deferred warning):** with cursor on a `Dead` tab, plain text emits the deferred warning, **drops** the message, and **zero bytes reach the harness send seam** (assert via injected sink), then clears cursor. Pass.
-- [ ] **Step 6 — add lifecycle-event queue** (`TQueue`/`Chan`) field to `AgentEnv`, drained on the dispatcher thread (consumer wired in WU10). Stub producer. Pass smoke. Commit.
-
-**DoD:** per-conversation switch/default/out-of-range/tombstone routing tested; dispatcher sole writer preserved; lifecycle queue plumbed.
-
----
-
-## WU7 — Command surface: `/new`, `/nt`, `/close`, `/tabs`, `/rename`, `/relay`
-
-**Files:**
-- Modify: `src/PureClaw/Agent/SlashCommands.hs` (retire `TabSlashCommand` `/tab <sub>`; add flat verbs), `src/PureClaw/Routing/Parse.hs`, `src/PureClaw/Routing/Dispatcher.hs` (handlers).
-- Test: `test/PureClaw/Routing/TabCommandsSpec.hs`
-
-**Dependencies:** WU1, WU2, WU6.
-
-**TDD steps (one red/green per verb — show test, then handler):**
-- [ ] **Step 1 — `/new` reset:** test — `/new` with active tab on session S rebinds the *same slot* to a new session S'; S still on disk (I4); cursor follows. With no active tab, `/new` creates one. Implement. Pass.
-- [ ] **Step 2 — `/nt` new tab:** test — appends at next slot, switches cursor; at 36 slots returns `all 36 tab slots in use — /close one first` with no state change. Implement. Pass.
-- [ ] **Step 3 — `/close [N]`:** test — closes active tab by default; provider session persists, harness keeps running (I4); compaction applies. `--force` → `/close has no --force (tabs never destroy sessions or harnesses)`. Implement. Pass.
-- [ ] **Step 4 — `/tabs`:** test — lists slot/name/kind/status **and this conversation's relay mode**; Dead tombstones shown. Implement. Pass.
-- [ ] **Step 5 — `/rename [N] <name>`:** test — relabels; name passed through `normalizeText`/`maxSourceLen`; ESC/CSI bytes stripped. Implement. Pass.
-- [ ] **Step 6 — `/relay <mode>`:** test — sets per-conversation mode; no-arg emits `relay mode: focused (focused | activity | all)`. Implement. Pass.
-- [ ] **Step 7 — retire `/tab <sub>` family:** delete `TabSlashCommand` constructors + parsers (`/tab list/new/close/focus/resume/rename`); `/tab` bare now routes to the wizard stub (WU8). Build clean. Commit.
-
-**DoD:** every verb tested incl. §14 copy assertions, `/new` session-preservation, slot exhaustion, sanitization; old `/tab <sub>` removed.
-
----
-
-## WU8 — Attach wizard (`/tab`)
-
-**Files:**
-- Create: `src/PureClaw/Tabs/Wizard.hs`, `test/PureClaw/Tabs/WizardSpec.hs`
-- Modify: `src/PureClaw/Routing/Dispatcher.hs` (wizard interception before `parseInput`).
-
-**Dependencies:** WU6, WU7. Reads `Harness.Registry` (running harnesses) + `Session.Handle` (recent sessions).
+**Files:** Create `src/PureClaw/Tabs/Wizard.hs`, `test/PureClaw/Tabs/WizardSpec.hs`
+**Dependencies:** WU1, WU2. **Additive** — interception into the dispatcher happens in WU8.
 
 **Interfaces:**
 ```haskell
-data WizardState = WizardState { _wz_options :: [(Char, WizardTarget)] }  -- snapshot, stable numbering
-data WizardTarget = AttachHarness !HarnessId | ReopenSession !SessionId
-data WizardStep = Prompt !Text | Done !TabRef | Cancelled | Reprompt !Text
-stepWizard :: WizardEnv -> Maybe WizardState -> Text -> IO (Maybe WizardState, WizardStep)
+data WizardTarget = AttachHarness !HarnessId | ReopenSession !SessionId deriving stock (Eq, Show)
+data WizardState  = WizardState { _wz_options :: [(Char, WizardTarget)] }   -- snapshot, stable numbering
+data WizardStep   = Prompt !Text | Done !WizardTarget | Cancelled | Reprompt !Text | RunCommand !Text
+data WizardEnv = WizardEnv { _wz_live :: HarnessId -> IO Bool }
+stepWizard :: WizardEnv -> WizardState -> Text -> IO (Maybe WizardState, WizardStep)
+mkWizardSnapshot :: [(HarnessId, Text)] -> [(SessionId, Text)] -> WizardState   -- cap at [0-9a-z]
 ```
 
 **TDD steps:**
-- [ ] **Step 1 — failing test (snapshot + valid pick):** `/tab` snapshots `[harnesses ++ recent sessions]`, numbers them; reply `1` binds the **exact** id captured (not position-re-resolved) → `Done (BoundHarness h)`. Run → fail. Implement. Pass.
-- [ ] **Step 2 — vanished target:** reply selects a harness whose liveness probe now returns False → `Reprompt "that target is gone — list refreshed"` with a refreshed snapshot. Pass.
-- [ ] **Step 3 — cancel paths:** `0` → `Cancelled`; a `/`-prefixed reply → `Cancelled` + the command runs (dispatcher); invalid reply → `Reprompt`. Pass.
-- [ ] **Step 4 — interception:** test that while `WizardState` is set for a conversation, its next message is consumed by `stepWizard` **before** `parseInput` (a bare `1` is a menu choice, not `Default` text). Wire in dispatcher. Pass.
-- [ ] **Step 5 — overflow/query:** `>36` candidates capped; `/tab <query>` filters by sanitized substring on name/id. Pass.
-- [ ] **Step 6 — reopen continue:** `ReopenSession s` binds a tab to the same `SessionId` (continue/append), dedups if already open (I2). Pass. Commit.
+- [ ] **Step 1 — valid pick binds snapshot id** (not position re-resolved) → `Done`. Test + impl.
+- [ ] **Step 2 — vanished target** (`_wz_live` False) → `Reprompt "that target is gone — list refreshed"`. Test + impl.
+- [ ] **Step 3 — cancel paths:** `0` → `Cancelled`; `/`-prefixed → `RunCommand`; invalid → `Reprompt`. Test + impl.
+- [ ] **Step 4 — overflow/query cap** at `[0-9a-z]`; `/tab <query>` sanitized substring filter. Test + impl. Commit.
 
-**DoD:** full wizard state-machine matrix tested; replies bind snapshot ids; interception ordering proven; wizard state runtime-only.
+**DoD:** full state-machine matrix tested; ≥95%; tree green.
 
 ---
 
-## WU9 — Relay engine (replace `ChannelOut` gate)
+## WU7 — Relay engine (additive, pure with injected sink)
 
-**Files:**
-- Create: `src/PureClaw/Tabs/Relay.hs`, `test/PureClaw/Tabs/RelaySpec.hs`
-- Modify: `src/PureClaw/Routing/ChannelOut.hs` (remove single-focus gate), channel handle for a conversation-addressable sink.
-
-**Dependencies:** WU2, WU6. (Conversation-addressable sink is the largest rewire — keep it a labeled sub-step with its own coverage entry.)
+**Files:** Create `src/PureClaw/Tabs/Relay.hs`, `test/PureClaw/Tabs/RelaySpec.hs`
+**Dependencies:** WU2. **Additive** — replaces `ChannelOut` gate in WU8.
 
 **Interfaces:**
 ```haskell
-data RelayDeps = RelayDeps { _rl_sink :: ConversationKey -> Text -> IO () }   -- injected for tests
-relayOutput :: RelayDeps -> CursorState -> RelayMode -> TabRef -> Text -> IO ()  -- single writer, fans out
+data RelayDeps = RelayDeps { _rl_sink :: ConversationKey -> Text -> IO () }   -- injected sink
+relayOutput :: RelayDeps -> CursorState -> RelayMode -> TabList -> TabRef -> Text -> IO ()  -- single writer, fans out
 ```
 
 **TDD steps:**
-- [ ] **Step 1 — failing test (FocusedOnly):** output from tab T reaches only conversations whose cursor == T; background conversations get nothing. Inject `_rl_sink` recorder. Run → fail. Implement single-writer fan-out. Pass.
-- [ ] **Step 2 — ActivityDigest:** focused conversation gets full content; a conversation focused elsewhere gets a name-first activity ping (once per burst) for T. Pass.
-- [ ] **Step 3 — Firehose:** a Firehose conversation gets full content from all live tabs. Pass.
-- [ ] **Step 4 — ordering:** a single writer thread preserves emission order across sinks (assert recorder order). Pass.
-- [ ] **Step 5 — remove `ChannelOut.shouldEmit` global-focus gate**; route tab output through `relayOutput`. Build clean. Commit.
+- [ ] **Step 1 — FocusedOnly:** output from T reaches only conversations whose cursor == T. Test (recorder sink) + impl.
+- [ ] **Step 2 — ActivityDigest:** focused gets full content; others get a name-first activity ping for T (once per burst). Test + impl.
+- [ ] **Step 3 — Firehose:** Firehose conversation gets full content from all live tabs. Test + impl.
+- [ ] **Step 4 — ordering:** single writer preserves emission order across sinks. Test + impl. Commit.
 
-**DoD:** RelayMode × foreground/background × multi-conversation matrix tested via injected sink; ordering preserved; old gate removed.
+**DoD:** RelayMode × fg/bg × multi-conversation matrix + ordering tested via injected sink; ≥95%; tree green.
 
 ---
 
-## WU10 — Harness-death notified two-phase removal
+## WU8 — CUTOVER: rewire dispatcher; remove globals; delete legacy
+
+> **This is the one large, coordinated WU.** It is the only place old code is removed. The tree is green before (old model) and green after (new model). Recommended to execute with extra checkpoints. Internal steps are TDD for the new behavior; the `-Werror` build is re-green at the **end** of the WU.
 
 **Files:**
-- Modify: `src/PureClaw/Harness/Reconcile.hs` (`_rd_evict` → enqueue lifecycle event), `src/PureClaw/Routing/Dispatcher.hs` (drain queue, apply), `src/PureClaw/Tabs/Types.hs` (status transitions).
-- Test: `test/PureClaw/Tabs/DeathSpec.hs`
+- Modify: `src/PureClaw/Agent/Env.hs` (remove `_env_focus`, `_env_session`; add `TabRegistry`, `CursorState` ref, `SessionPool`, lifecycle `TQueue`), `src/PureClaw/Routing/Dispatcher.hs` (per-conversation dispatch + flat command handlers + wizard interception + queue drain stub), `src/PureClaw/Agent/SlashCommands.hs` + `src/PureClaw/Routing/Parse.hs` (flat verbs; retire `/tab <sub>`), `src/PureClaw/Agent/Loop.hs` + `src/PureClaw/CLI/Commands.hs` (onto `SessionPool`/`TabRegistry`), `*.cabal` (drop deleted modules).
+- Delete: `src/PureClaw/Routing/{AutoSpawn,Registry,Dashboard,ChannelOut}.hs`, `src/PureClaw/Tab/{Ai,Harness,Backend}.hs`, `src/PureClaw/Handles/Tab.hs` (after moving `TabIndex` in WU1).
+- Test: `test/PureClaw/Routing/DispatchSpec.hs`, `test/PureClaw/Routing/TabCommandsSpec.hs`
 
-**Dependencies:** WU3, WU6, WU7, WU9.
+**Dependencies:** WU1–WU7.
 
 **TDD steps:**
-- [ ] **Step 1 — failing test (notify enabled):** evict event for harness H whose tab is /N → emit `⚠ "<name>" (harness, was /N) exited — tab closed` (slot snapshotted at notify) to focused conversations, then remove + compact + clear cursors. Drive via the queue (no real tmux). Run → fail. Implement: `_rd_evict` enqueues; dispatcher applies. Pass.
-- [ ] **Step 2 — notify disabled:** tab → `Dead` tombstone, no immediate emit; next message while focused emits `⚠ "<name>" exited while you were away — message not sent; resend when ready`, **drops** the message (zero bytes to harness sink), then removes. Pass.
-- [ ] **Step 3 — per-channel override:** `notifyOnHarnessDeath` global vs per-`ChannelKind` resolves correctly (config read in WU11; stub the value here). Pass.
-- [ ] **Step 4 — tombstone visibility:** a `Dead` tab appears in `/tabs` until removed. Pass.
-- [ ] **Step 5 — background tombstone via ActivityDigest:** a background tab that goes `Dead` still delivers the single death notification through the ping path. Pass.
-- [ ] **Step 6 — no double-delete:** assert the tab layer does NOT call `Reg.deleteEntry` (reconcile already did). Commit.
+- [ ] **Step 1 — `AgentEnv` swap:** replace `_env_focus`/`_env_session` with the new refs + pool + lifecycle queue; wire `Tabs.Relay` as the output path replacing `ChannelOut.shouldEmit`; wire `SessionPool.acquire/release` into the AI tab loop. (Red until the legacy modules are deleted in Step 2.)
+- [ ] **Step 2 — delete legacy modules** (`Routing.{AutoSpawn,Registry,Dashboard,ChannelOut}`, `Tab.{Ai,Harness,Backend}`, `Handles.Tab`) + remove from `.cabal` + drop their test specs; fix every dangling import in `Dispatcher.hs:137,149-151`, `Agent/Loop.hs`, `CLI/Commands.hs`, `SlashCommands.hs`. Build must be clean here.
+- [ ] **Step 3 — per-conversation dispatch tests:** `/2` from conversation A sets A's cursor only (B unchanged); plain text → active tab; empty cursor → `no active tab — /new to start one or /tab to attach`; `/5` of 3 tabs → `/5: out of range — you have 3 tabs (/0–/2); /tabs to list`. Implement against `CursorState`. Pass.
+- [ ] **Step 4 — `/new` reset (+ no-default + at-36):** `/new` rebinds the active tab's slot to a fresh session, prior session persists (I4); with no active tab it creates one; **`/new` still works at 36 slots**; with no default provider configured → `no default provider configured — set one with /target default <name> (or config.toml)`. Tests for each. Implement. Pass.
+- [ ] **Step 5 — `/nt` (+ exhaustion):** appends + switches; at 36 → `all 36 tab slots in use — /close one first`, no state change; no-default-provider hint as in Step 4. Tests + impl. Pass.
+- [ ] **Step 6 — `/close` / `/tabs` / `/rename` / `/relay`:** `/close` default active, preserves ground truth (I4), `--force` → `/close has no --force (...)`; `/tabs` lists incl. relay mode + Dead tombstones; `/rename` sanitized (ESC/CSI stripped — round-trip assert); `/relay` sets mode, no-arg → `relay mode: focused (focused | activity | all)`. Tests + impl. Pass.
+- [ ] **Step 7 — wizard interception:** while a conversation has `WizardState`, its next message goes to `stepWizard` **before** `parseInput` (bare `1` is a menu choice); `RunCommand`/`Cancelled`/`Reprompt`/`Done` handled; `Done` binds the tab + switches (reopen = continue/append, dedups per I2). Tests + impl. Pass.
+- [ ] **Step 8 — Dead-tombstone deferred routing:** plain text with cursor on a `Dead` tab → deferred warning, **drop** the message, **zero bytes reach the harness send seam** (assert injected sink), clear cursor. Test + impl.
+- [ ] **Step 9 — concurrency (spec §6.5/§15):** two `ConversationKey`s sending to the same `TabRef` both reach the tab input queue, none dropped. Test + impl.
+- [ ] **Step 10 — full green:** `cabal build` `-Werror` clean; the per-conversation focus model fully replaces `_env_focus`. Commit.
 
-**DoD:** enabled/disabled/per-channel/no-misroute/tombstone-visible/background-notify tested; thread-safe hand-off (reconcile→queue→dispatcher); exactly-one-notification guaranteed.
+**DoD:** legacy modules deleted; globals removed; all routing + command + wizard-interception + tombstone + concurrency tests pass; §14 copy asserted; tree green at WU end.
 
 ---
 
-## WU11 — Config (`[tabs]`) + `AllowAll` boot WARN + `.gitignore`
+## WU9 — Harness-death notified two-phase removal
 
-**Files:**
-- Modify: `src/PureClaw/CLI/Config.hs`, `src/PureClaw/Routing/Config.hs` (parse `[tabs]`), boot path (`src/PureClaw/CLI/Commands.hs`), allow-list warning seam (per `channel-allowlist-warning`).
-- Create/append: `.gitignore` guidance for `state/`.
-- Test: `test/PureClaw/CLI/TabsConfigSpec.hs`
-
-**Dependencies:** WU9, WU10.
+**Files:** Modify `src/PureClaw/Harness/Reconcile.hs` (`_rd_evict` → enqueue lifecycle event), `src/PureClaw/Routing/Dispatcher.hs` (drain queue, apply), `src/PureClaw/Tabs/Types.hs` (status transitions); Test `test/PureClaw/Tabs/DeathSpec.hs`
+**Dependencies:** WU8.
 
 **TDD steps:**
-- [ ] **Step 1 — failing test (config parse):** `[tabs] notify_on_harness_death = true`, per-channel overrides, and `default_relay = "focused"` parse into the typed config; defaults applied when absent (notify ON, relay FocusedOnly). Implement. Pass.
-- [ ] **Step 2 — failing test (AllowAll WARN):** when any active channel resolves to `AllowAll` and tabs are shared-global, boot emits a WARN to stderr (reuse the PR #73 allow-list-warning seam). Assert via captured logger. Pass.
-- [ ] **Step 3 — `.gitignore` guidance:** add `state/` exclusion guidance; test asserts the shipped guidance file/section names `state/`. Commit.
+- [ ] **Step 1 — notify enabled:** evict event → `⚠ "<name>" (harness, was /N) exited — tab closed` (slot snapshotted at notify) to focused conversations, then remove + compact + clear cursors. Drive via queue (no real tmux). Test + impl.
+- [ ] **Step 2 — notify disabled:** tab → `Dead`; next focused message → `⚠ "<name>" exited while you were away — message not sent; resend when ready`, **drops** message (zero bytes to harness sink), then removes. Test + impl.
+- [ ] **Step 3 — per-channel override** resolves global vs per-`ChannelKind` (config value stubbed; real read in WU10). Test + impl.
+- [ ] **Step 4 — tombstone visible in `/tabs`** until removed. Test.
+- [ ] **Step 5 — background tombstone via ActivityDigest** still delivers the single death notification. Test + impl.
+- [ ] **Step 6 — no double-delete:** assert the tab layer does NOT call `Reg.deleteEntry` (reconcile already did). Test.
+- [ ] **Step 7 — boot-drop emits zero death notices** (the documented I5 exception): the WU3 boot reconcile path triggers NO `⚠` notice. Test. Commit.
 
-**DoD:** config parse + defaults tested; boot WARN tested; `state/` gitignore guidance shipped.
+**DoD:** enabled/disabled/per-channel/no-misroute/tombstone/background/no-double-delete/boot-silent tested; exactly-one-notification for live deaths guaranteed; thread-safe hand-off; tree green.
 
 ---
 
-## WU12 — CLI integration, waiver cleanup, final gate
+## WU10 — Config `[tabs]` + AllowAll boot WARN + §2 docs + `.gitignore`
 
-**Files:**
-- Modify: `test/Integration/CLISpec.hs`, `.coverage-thresholds.json`.
-- Delete: retired modules (see File Structure).
+**Files:** Modify `src/PureClaw/CLI/Config.hs`, `src/PureClaw/Routing/Config.hs`, boot path `src/PureClaw/CLI/Commands.hs`, allow-list warning seam (per `channel-allowlist-warning`); doc/code comment for §2; `.gitignore` guidance; Test `test/PureClaw/CLI/TabsConfigSpec.hs`
+**Dependencies:** WU8, WU9.
 
+**TDD steps:**
+- [ ] **Step 1 — config parse:** `[tabs] notify_on_harness_death`, per-channel overrides, `default_relay`; defaults (notify ON, FocusedOnly) when absent. Test + impl.
+- [ ] **Step 2 — AllowAll WARN:** any active channel resolving to `AllowAll` while tabs are shared-global → boot WARN to stderr (reuse PR #73 seam). Test (captured logger) + impl.
+- [ ] **Step 3 — §2 trust-model docs:** write the single-operator / multi-tenant-out-of-scope statement into module haddock on `PureClaw.Tabs` and a short note in `docs/` (or CLAUDE.md security section); `.gitignore` guidance names `state/`. Test asserts the gitignore guidance names `state/`. Commit.
+
+**DoD:** config parse + defaults + WARN tested; §2 documented in code/docs; `state/` gitignore guidance shipped; tree green.
+
+---
+
+## WU11 — CLI integration, waiver cleanup, final gate
+
+**Files:** Modify `test/Integration/CLISpec.hs`, `.coverage-thresholds.json`
 **Dependencies:** all.
 
 **TDD steps:**
-- [ ] **Step 1 — CLI integration tests:** spawn the real `pureclaw` binary; drive `/new`, `/nt`, `/tab` (wizard happy path), `/close`, `/0`, `/relay`, asserting on the §14 pinned copy and on tab-list output. Run `nix develop . --command cabal test`.
-- [ ] **Step 2 — delete retired modules** (`Routing/AutoSpawn.hs`, `Routing/Registry.hs`, `Routing/Dashboard.hs`, `Tab/{Ai,Harness,Backend}.hs`, `Handles/Tab.hs`); remove from `.cabal`; fix dangling imports. Build clean.
-- [ ] **Step 3 — staged-waiver cleanup:** remove the retired modules' entries from `stagedWaivers.modules` in `.coverage-thresholds.json`; ensure remaining entries are empty or justified per the protocol.
-- [ ] **Step 4 — full gate:** `nix develop . --command cabal test --enable-coverage` meets thresholds; `nix develop . --command hlint src test` clean; `cabal build` `-Wall -Werror` clean.
-- [ ] **Step 5 — file frontend-parity follow-up issue** in the epic; reference #79. Commit.
+- [ ] **Step 1 — CLI integration:** spawn the real `pureclaw` binary; drive `/new`, `/nt`, `/tab` (wizard happy path), `/close`, `/0`, `/relay`, asserting §14 copy + tab-list output. Run `nix develop . --command cabal test`.
+- [ ] **Step 2 — staged-waiver cleanup (precise):** in `.coverage-thresholds.json`, **delete** waivers for the **retired** modules (`Routing.AutoSpawn`, `Routing.Dashboard`, `Routing.Registry`, `Tab.{Ai,Harness,Backend}`, `Handles.Tab`). For **modified-not-retired** modules (`Routing.Dispatcher`, `Harness.Reconcile`) bring them to ≥95% as a blocking gate **or** keep/extend a justified waiver — do NOT silently delete. Leave unrelated survivors (`Frontend.*`, `Harness.Tmux`, `Harness.ClaudeCode`) untouched. New `Tabs.*` modules carry **no** waivers (injected seams make them reachable).
+- [ ] **Step 3 — full gate:** `cabal test --enable-coverage` meets `.coverage-thresholds.json` (95%); `hlint src test` clean; `cabal build` `-Werror` clean.
+- [ ] **Step 4 — file frontend-parity follow-up issue** in the epic, referencing #79. Commit.
 
-**DoD:** end-to-end chat surface green against the real binary; retired modules gone + waivers cleaned; coverage/lint/build gates pass; follow-up filed.
+**DoD:** end-to-end chat surface green against the real binary; retired waivers removed, modified-module coverage satisfied, survivors intact; coverage/lint/build gates pass; follow-up filed.
 
 ---
 
@@ -370,20 +325,21 @@ relayOutput :: RelayDeps -> CursorState -> RelayMode -> TabRef -> Text -> IO () 
 
 | Spec § | WU |
 |---|---|
-| §2 trust model + AllowAll WARN | WU11 (+ docs) |
+| §2 trust model + AllowAll WARN + docs | WU10 |
 | §4 Tab/TabRef/TabRegistry | WU1 |
-| §5 I1–I5 | WU1 (I1,I2), WU2 (I3), WU7 (I4), WU10 (I5) |
-| §6.1 `/new` vs `/nt`, §6.2 exhaustion, §6.4 compaction | WU7, WU1 |
-| §7 command surface | WU7 |
-| §8 harness death | WU10 |
+| §5 I1–I5 | WU1 (I1,I2), WU2 (I3), WU8 (I4 via `/new`,`/close`), WU9 (I5) |
+| §6.1 `/new` vs `/nt`, §6.2 exhaustion (+`/new`@36), §6.4 compaction | WU8, WU1 |
+| §6.5 concurrency shared-tab | WU8 Step 9 |
+| §7 command surface | WU8 |
+| §8 harness death | WU9 |
 | §9.1 ConversationId | WU4 |
-| §9.2 inbound routing | WU6 |
-| §9.3 relay engine | WU9 |
-| §10 persistence/perms/boot | WU3 |
-| §11 wizard | WU8 |
-| §12 reuse/rebuild + waivers | WU1 (reuse arithmetic), WU12 (delete/waivers) |
-| §13 session-handle pool + test seams | WU5 (pool); injected deps in WU3/WU9/WU10 |
-| §14 message copy | WU6, WU7, WU10 (asserted), WU12 (CLI) |
-| §15 tests / DoD | every WU |
+| §9.2 inbound routing | WU8 |
+| §9.3 relay engine | WU7 (engine), WU8 (wired) |
+| §10 persistence/perms/boot (+boot-drop-zero-notices) | WU3, WU9 Step 7 |
+| §11 wizard | WU6 (engine), WU8 (interception) |
+| §12 reuse/rebuild + waivers | WU1 (reuse), WU8 (delete legacy), WU11 (waivers) |
+| §13 session-handle pool + test seams | WU5 (pool), WU8 (wired); injected deps in WU3/WU5/WU7/WU9 |
+| §14 message copy (incl. no-default-provider) | WU8, WU9 (asserted), WU11 (CLI) |
+| §15 tests / DoD | every WU (concurrency WU8.9; boot-drop WU9.7) |
 
-**Notes:** WU4 and WU1 can start in parallel. The conversation-addressable sink (WU9) and `_env_session` removal (WU5) are the two highest-risk rewires — sequence them before WU10. Each WU ends green + committed; no WU leaves the tree un-buildable.
+**Risk notes:** WU8 is the large coordinated cutover — the only un-removable concentration of risk, justified because `-Werror` forbids leaving legacy code half-wired. It is sequenced after all additive modules exist, so it is purely "swap the wiring + delete the dead." WU4's `-Werror` blast radius is contained by being additive and compiler-driven. Coverage gate is **95%** (`.coverage-thresholds.json`), the authoritative source per CLAUDE.md.
