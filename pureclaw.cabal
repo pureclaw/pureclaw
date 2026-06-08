@@ -77,6 +77,9 @@ library
     PureClaw.Routing.Dashboard
     PureClaw.Routing.PromptRenderer
     PureClaw.Routing.Onboarding
+    -- Tabs-as-View (GitHub #79) — first-class tab registry
+    PureClaw.Tabs
+    PureClaw.Tabs.Types
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
     PureClaw.Tab.Ai
     PureClaw.Tab.Harness
@@ -378,6 +381,8 @@ test-suite pureclaw-test
     Coexistence.SlashCmdSpec
     Security.TabSpec
     Onboarding.StartSpec
+    -- Tabs-as-View (GitHub #79) WU1
+    Tabs.TypesSpec
     -- WU9 (HPureClaw depth limit)
     Routing.DepthLimitSpec
     -- WU2 (Session.Kind leaf module)

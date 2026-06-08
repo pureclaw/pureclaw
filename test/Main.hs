@@ -126,6 +126,8 @@ import qualified Tab.BackendSpec
 import qualified Coexistence.SlashCmdSpec
 import qualified Security.TabSpec
 import qualified Onboarding.StartSpec
+-- Tabs-as-View (GitHub #79) WU1
+import qualified Tabs.TypesSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -267,6 +269,8 @@ main = hspec $ do
   describe "Coexistence.SlashCmd" Coexistence.SlashCmdSpec.spec
   describe "Security.Tab"         Security.TabSpec.spec
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
+  -- Tabs-as-View (GitHub #79) WU1
+  describe "Tabs.Types"           Tabs.TypesSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)

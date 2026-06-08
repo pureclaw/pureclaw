@@ -15,6 +15,11 @@ module PureClaw.Core.Types
   , parseSessionId
     -- * Message target
   , MessageTarget (..)
+    -- * Conversation ID
+    -- A server-derived, transport-scoped conversation identifier. Lives here
+    -- (leaf module) so 'MessageSource' and the tab layer can reference it
+    -- without an import cycle. See the Tabs-as-View refactor (GitHub #79).
+  , ConversationId (..)
     -- * Message source / origin
   , ChannelKind (..)
   , MessageSource (..)
@@ -88,6 +93,17 @@ instance Aeson.FromJSON SessionId where
 -- symmetry with smart constructors elsewhere; performs no validation.
 parseSessionId :: Text -> SessionId
 parseSessionId = SessionId
+
+-- | A server-derived, transport-scoped conversation identifier.
+--
+-- The value is always minted by the server from transport metadata (e.g. the
+-- CLI channel name, a Telegram chat id, a Signal contact/group) — never
+-- accepted from the body of an inbound message — so it cannot be forged by a
+-- sender. Two messages that share a 'ConversationId' (within the same
+-- 'ChannelKind') belong to the same conversation and therefore share a tab
+-- cursor.
+newtype ConversationId = ConversationId Text
+  deriving stock (Eq, Ord, Show)
 
 -- | Where incoming user messages are routed. Lives in 'Core.Types'
 -- (rather than 'PureClaw.Agent.Env') so that 'PureClaw.Session.Types'
