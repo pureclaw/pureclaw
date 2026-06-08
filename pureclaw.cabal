@@ -383,6 +383,8 @@ test-suite pureclaw-test
     Onboarding.StartSpec
     -- Tabs-as-View (GitHub #79) WU1
     Tabs.TypesSpec
+    -- Tabs-as-View (GitHub #79) WU2
+    Tabs.CursorSpec
     -- WU9 (HPureClaw depth limit)
     Routing.DepthLimitSpec
     -- WU2 (Session.Kind leaf module)

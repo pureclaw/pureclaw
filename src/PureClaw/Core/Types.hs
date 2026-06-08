@@ -124,7 +124,7 @@ data ChannelKind
   | CkTelegram
   | CkBackground
   | CkOther !Text
-  deriving stock (Show, Eq, Generic)
+  deriving stock (Show, Eq, Ord, Generic)
 
 -- | Render a 'ChannelKind' as a flat lowercase tag. 'CkOther' carries its
 -- own name verbatim. Mirrors the @flavourToText@ precedent.

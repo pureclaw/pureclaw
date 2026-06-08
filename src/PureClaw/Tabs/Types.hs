@@ -40,13 +40,26 @@ module PureClaw.Tabs.Types
   , setStatus
     -- * Cap
   , maxTabSlots
+    -- * Per-conversation cursors & relay (I3)
+  , ConversationKey
+  , RelayMode (..)
+  , CursorState (..)
+  , emptyCursors
+  , setCursor
+  , clearCursor
+  , resolveCursorSlot
+  , conversationsOn
+  , pruneDangling
+  , relayModeFor
   ) where
 
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 
-import PureClaw.Core.Types (SessionId)
+import PureClaw.Core.Types (ChannelKind, ConversationId, SessionId)
 import PureClaw.Handles.Tab (TabIndex, mkTabIndex, unTabIndex)
 import PureClaw.Harness.Registry (HarnessId)
 
@@ -192,3 +205,84 @@ setStatus ref status (TabList ts) =
       if _tab_ref t == ref
         then t { _tab_status = status }
         else t
+
+-- ---------------------------------------------------------------------------
+-- Per-conversation cursors & relay (I3)
+-- ---------------------------------------------------------------------------
+
+-- | The identity of a conversation: its originating 'ChannelKind' paired with
+-- a server-derived 'ConversationId'. Two messages sharing a key belong to the
+-- same conversation and therefore share a tab cursor and a 'RelayMode'.
+type ConversationKey = (ChannelKind, ConversationId)
+
+-- | How a conversation's output relay fans tab output out to it. Persisted
+-- per 'ConversationKey'; the global default lives in config (see the
+-- Tabs-as-View design §9.3).
+--
+-- * 'FocusedOnly' (default) — only the conversation's focused tab is relayed.
+-- * 'ActivityDigest' — focused tab full; other live tabs get an activity ping.
+-- * 'Firehose' — full content from all live tabs.
+data RelayMode
+  = FocusedOnly
+  | ActivityDigest
+  | Firehose
+  deriving stock (Eq, Show)
+
+-- | The per-conversation routing state the dispatcher owns: which 'TabRef'
+-- each conversation is focused on ('_cs_cursors'), and any per-conversation
+-- 'RelayMode' override ('_cs_relay'). Both maps are keyed by 'ConversationKey'.
+--
+-- Cursors key by 'TabRef', not by slot — this is invariant __I3__: a cursor
+-- survives slot compaction ('removeSlot') because it names ground truth, not a
+-- position. 'resolveCursorSlot' resolves the ref to its /current/ slot at read
+-- time.
+data CursorState = CursorState
+  { _cs_cursors :: !(Map ConversationKey TabRef)
+    -- ^ The 'TabRef' each conversation is currently focused on.
+  , _cs_relay   :: !(Map ConversationKey RelayMode)
+    -- ^ Per-conversation 'RelayMode' overrides (absent ⇒ use the global default).
+  }
+  deriving stock (Eq, Show)
+
+-- | The empty cursor state: no cursors, no relay overrides.
+emptyCursors :: CursorState
+emptyCursors = CursorState Map.empty Map.empty
+
+-- | Focus a conversation on a 'TabRef', replacing any prior cursor for that key.
+-- The relay map is untouched.
+setCursor :: ConversationKey -> TabRef -> CursorState -> CursorState
+setCursor k ref cs = cs { _cs_cursors = Map.insert k ref (_cs_cursors cs) }
+
+-- | Drop a conversation's cursor (a no-op if it had none). The relay map is
+-- untouched.
+clearCursor :: ConversationKey -> CursorState -> CursorState
+clearCursor k cs = cs { _cs_cursors = Map.delete k (_cs_cursors cs) }
+
+-- | Resolve a conversation's cursor to the slot its bound 'TabRef' currently
+-- occupies (__I3__). Returns 'Nothing' when the key has no cursor or when the
+-- cursor's ref is no longer present in the 'TabList' (a dangling cursor).
+resolveCursorSlot :: ConversationKey -> CursorState -> TabList -> Maybe TabIndex
+resolveCursorSlot k cs tl =
+  case Map.lookup k (_cs_cursors cs) of
+    Nothing  -> Nothing
+    Just ref -> lookupRef ref tl
+
+-- | All conversation keys whose cursor is focused on the given 'TabRef'.
+conversationsOn :: TabRef -> CursorState -> [ConversationKey]
+conversationsOn ref cs =
+  [ k | (k, r) <- Map.toList (_cs_cursors cs), r == ref ]
+
+-- | Drop every cursor whose 'TabRef' is no longer present in the 'TabList'.
+-- Valid cursors and the entire relay map are preserved.
+pruneDangling :: TabList -> CursorState -> CursorState
+pruneDangling tl cs =
+  cs { _cs_cursors = Map.filter present (_cs_cursors cs) }
+  where
+    present ref = case lookupRef ref tl of
+      Just _  -> True
+      Nothing -> False
+
+-- | The 'RelayMode' for a conversation: its per-conversation override if one is
+-- set, otherwise the supplied global default.
+relayModeFor :: ConversationKey -> RelayMode -> CursorState -> RelayMode
+relayModeFor k def cs = Map.findWithDefault def k (_cs_relay cs)

@@ -128,6 +128,8 @@ import qualified Security.TabSpec
 import qualified Onboarding.StartSpec
 -- Tabs-as-View (GitHub #79) WU1
 import qualified Tabs.TypesSpec
+-- Tabs-as-View (GitHub #79) WU2
+import qualified Tabs.CursorSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -271,6 +273,8 @@ main = hspec $ do
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
   -- Tabs-as-View (GitHub #79) WU1
   describe "Tabs.Types"           Tabs.TypesSpec.spec
+  -- Tabs-as-View (GitHub #79) WU2
+  describe "Tabs.Cursor"          Tabs.CursorSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)
