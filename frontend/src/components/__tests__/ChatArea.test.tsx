@@ -267,7 +267,7 @@ describe('ChatArea raw-JSON modal', () => {
     expect(document.activeElement).toBe(getByLabelText('Close raw JSON view'))
   })
 
-  it('copies the pretty-printed JSON to the clipboard', () => {
+  it('copies the exact verbatim bytes (not the expanded/pretty form)', () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     const originalClipboard = navigator.clipboard
     Object.defineProperty(navigator, 'clipboard', {
@@ -275,7 +275,12 @@ describe('ChatArea raw-JSON modal', () => {
       configurable: true,
     })
     try {
-      const raw = '{"model":"sonnet"}'
+      // A verbatim line whose _te_payload is an escaped JSON string — the
+      // display expands it, but Copy must yield the exact on-disk bytes.
+      const raw = JSON.stringify({
+        _te_id: 'te-1',
+        _te_payload: JSON.stringify({ model: 'sonnet' }),
+      })
       const { getByLabelText } = render(
         <ChatArea
           selectedAgent={makeAgent()}
@@ -284,8 +289,8 @@ describe('ChatArea raw-JSON modal', () => {
       )
       fireEvent.click(getByLabelText('View raw JSON (message)'))
       fireEvent.click(getByLabelText('Copy raw JSON to clipboard'))
-      const pretty = JSON.stringify(JSON.parse(raw), null, 2)
-      expect(writeText).toHaveBeenCalledWith(pretty)
+      // Exact bytes: the unmodified verbatim line, payload still escaped.
+      expect(writeText).toHaveBeenCalledWith(raw)
     } finally {
       Object.defineProperty(navigator, 'clipboard', {
         value: originalClipboard,
@@ -323,8 +328,77 @@ describe('ChatArea raw-JSON modal', () => {
     expect(body).toContain('_te_durationMs')
     expect(body).toContain('1234')
     expect(body).toContain('source')
-    // The payload remains an escaped JSON string inside the verbatim line.
     expect(body).toContain('_te_payload')
+  })
+
+  // pureclaw-4fv — _te_payload is itself a stringified JSON blob. For
+  // readability the DISPLAY expands any string value that is valid JSON
+  // (object/array) into nested structure; the exact bytes stay on Copy.
+  it('expands embedded JSON in _te_payload for readable display (Raw tab)', () => {
+    const payloadObj = { model: 'sonnet', messages: [{ role: 'user', content: 'hi' }] }
+    const fullLine = JSON.stringify({
+      _te_id: 'te-1',
+      _te_payload: JSON.stringify(payloadObj),
+    })
+    const { getByLabelText, getByTestId, getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    fireEvent.click(getByRole('tab', { name: 'Raw' }))
+    const body = getByTestId('raw-json-body').textContent ?? ''
+    // Expanded into nested, pretty-printed structure...
+    expect(body).toContain('"model": "sonnet"')
+    expect(body).toContain('"role": "user"')
+    // ...not the escaped one-string blob.
+    expect(body).not.toContain('\\"model\\"')
+  })
+
+  it('expands embedded JSON in _te_payload in the Formatted tree', () => {
+    const fullLine = JSON.stringify({
+      _te_id: 'te-1',
+      _te_payload: JSON.stringify({ model: 'sonnet' }),
+    })
+    const { getByLabelText, getByTestId } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    const body = getByTestId('formatted-json-body').textContent ?? ''
+    expect(body).toContain('model')
+    expect(body).toContain('sonnet')
+    // The payload is a real nested node — NOT a single string value still
+    // containing the whole JSON blob.
+    expect(body).not.toContain('{"model":"sonnet"}')
+  })
+
+  it('does not over-expand scalar-valued strings (numbers/bools/plain text)', () => {
+    const fullLine = JSON.stringify({
+      num: '42',
+      bool: 'true',
+      text: 'plain text',
+      obj: JSON.stringify({ x: 1 }),
+    })
+    const { getByLabelText, getByTestId, getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    fireEvent.click(getByRole('tab', { name: 'Raw' }))
+    const body = getByTestId('raw-json-body').textContent ?? ''
+    // Scalar-looking strings stay quoted strings (NOT coerced to 42 / true).
+    expect(body).toContain('"num": "42"')
+    expect(body).toContain('"bool": "true"')
+    expect(body).toContain('"text": "plain text"')
+    // Only the object-valued string expands.
+    expect(body).toContain('"x": 1')
+    expect(body).not.toContain('"obj": "{')
   })
 })
 
