@@ -267,9 +267,45 @@ function BranchButton({ onClick, disabled }: { onClick: () => void; disabled?: b
   )
 }
 
+// Recursively expand string values that are THEMSELVES valid JSON
+// objects/arrays into nested structure — chiefly `_te_payload`, which is a
+// stringified JSON blob. This is for READABILITY of the displayed form only;
+// the exact on-disk bytes remain available verbatim via the Copy button.
+// Scalar-looking strings ("42", "true", plain prose) are deliberately left
+// untouched so we never coerce `"42"` into `42`. Depth-guarded against
+// pathologically nested payloads.
+function expandEmbeddedJson(value: unknown, depth = 0): unknown {
+  if (depth > 8) return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const parsed: unknown = JSON.parse(value)
+        if (parsed !== null && typeof parsed === 'object') {
+          return expandEmbeddedJson(parsed, depth + 1)
+        }
+      } catch {
+        // Not JSON — leave the string as-is.
+      }
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => expandEmbeddedJson(v, depth + 1))
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = expandEmbeddedJson(v, depth + 1)
+    }
+    return out
+  }
+  return value
+}
+
 function prettyJsonOrRaw(payload: string): string {
   try {
-    return JSON.stringify(JSON.parse(payload), null, 2)
+    return JSON.stringify(expandEmbeddedJson(JSON.parse(payload)), null, 2)
   } catch {
     return payload
   }
@@ -379,7 +415,7 @@ function RawJsonModal({ title, body, onClose }: { title: string; body: string; o
               Raw
             </button>
           </div>
-          <CopyJsonButton text={pretty} />
+          <CopyJsonButton text={body} />
           <button
             ref={closeBtnRef}
             className="raw-json-close"
@@ -393,7 +429,7 @@ function RawJsonModal({ title, body, onClose }: { title: string; body: string; o
         {tab === 'formatted' ? (
           parsed.ok ? (
             <div className="raw-json-body raw-json-body-tree">
-              <JsonTree value={parsed.value} />
+              <JsonTree value={expandEmbeddedJson(parsed.value)} />
             </div>
           ) : (
             <div
