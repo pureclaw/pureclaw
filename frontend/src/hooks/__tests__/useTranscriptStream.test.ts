@@ -12,6 +12,7 @@ function mkEntry(id: string, timestamp: string, payload = ''): TranscriptEntry {
     payload,
     harness: null,
     model: null,
+    raw: JSON.stringify({ _te_id: id, _te_payload: payload }),
   }
 }
 
@@ -321,7 +322,7 @@ describe('useTranscriptStream reconciliation latency (D15 simulated)', () => {
       // Each entry's timestamp is 10 ms after the previous; reconciliation is O(n)
       // because the test inserts in order, so this is the happy path.
       const ts = new Date(1758000000000 + i * 10).toISOString()
-      entries = reconcileEntries(entries, { id, timestamp: ts, direction: 'response', payload: '', harness: null, model: null })
+      entries = reconcileEntries(entries, { id, timestamp: ts, direction: 'response', payload: '', harness: null, model: null, raw: '' })
     }
     const elapsed = performance.now() - start
     // p50 budget per design D15 is 50 ms across the whole burst when running

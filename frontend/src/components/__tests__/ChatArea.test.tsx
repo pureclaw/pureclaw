@@ -465,6 +465,7 @@ describe('transcriptToMessages entryId plumbing (D8)', () => {
       payload: JSON.stringify(payload),
       harness: null,
       model: 'sonnet',
+      raw: JSON.stringify({ _te_id: id, _te_payload: JSON.stringify(payload) }),
     }
   }
 
@@ -476,6 +477,7 @@ describe('transcriptToMessages entryId plumbing (D8)', () => {
       payload: JSON.stringify({ content: [{ type: 'text', text }] }),
       harness: null,
       model: 'sonnet',
+      raw: JSON.stringify({ _te_id: id, _te_payload: text }),
     }
   }
 
@@ -497,6 +499,7 @@ describe('transcriptToMessages entryId plumbing (D8)', () => {
       }),
       harness: null,
       model: 'sonnet',
+      raw: JSON.stringify({ _te_id: 'te-2', _te_payload: 'prior turn' }),
     }
     const msgs = transcriptToMessages([reqWithAsst])
     const asst = msgs.find((m) => m.id === 'te-2-asst')
@@ -868,6 +871,7 @@ describe('transcriptToMessages thinking extraction (WU8)', () => {
       payload: JSON.stringify({ content }),
       harness: 'claude-code',
       model: 'claude-sonnet-4',
+      raw: JSON.stringify({ _te_id: 'e1', _te_payload: JSON.stringify({ content }) }),
     }
   }
 

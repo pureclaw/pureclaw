@@ -123,7 +123,11 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
 
   for (const e of entries) {
     const ts = formatTimestamp(e.timestamp)
-    const rawJson = e.payload
+    // Use the full verbatim on-disk transcript line (all 9 _te_* fields incl.
+    // _te_metadata), not just the payload body — the "View raw JSON (message)"
+    // modal must show everything (pureclaw-1xd). Governing principle: PureClaw
+    // always makes EVERYTHING visible to the user.
+    const rawJson = e.raw
 
     if (e.direction === 'request') {
       const parsed = tryParseJson(e.payload)
