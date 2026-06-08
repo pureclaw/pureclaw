@@ -27,6 +27,7 @@ User-facing behavior we are completing:
 - **ConversationId is always derived server-side** from the authenticated channel transport — **never** read from message body or any client-supplied field (see §9.1). A forged or stray id must not be able to mint or hijack a cursor.
 - **`state/tabs.json` holds no secrets** — no tokens, API keys, or absolute filesystem paths; only tab refs, names, cursors, relay modes. File mode `0600`, directory `state/` mode `0700` (§10).
 - **User-supplied text is sanitized** (`/rename`, `/tab <query>`) before it is persisted or echoed, reusing `normalizeText` / `maxSourceLen` from `Core.Types`, to prevent terminal-escape injection into the CLI/transcript and oversized-entry DoS on the JSON file.
+- **The allow-list boundary is made loud.** Because §2's entire safety argument rests on the allow-list, boot emits a WARN (reusing the PR #73 allow-list-warning seam) if any active channel resolves to `AllowAll` while tabs are a shared global workspace — a permissive channel would turn `Firehose` into a cross-principal exfil surface.
 
 ## 3. Goals / Non-Goals
 
@@ -124,13 +125,13 @@ Deliberate split: **`/tab` = make/attach one** (wizard); **`/tabs` = list them a
 
 ## 8. Harness death — notified two-phase removal
 
-`TabStatus` carries a `Dead` (tombstone) state. The "death event" the tab layer consumes is the existing reconcile loop's injectable **`_rd_evict :: HarnessId -> Text -> IO ()`** seam (`Harness/Reconcile.hs`), which fires from the **reconcile thread** after `defaultOrphanGraceTicks` consecutive orphaned/exited ticks. Because that thread is **not** the dispatcher thread, the tab layer must not mutate cursor/registry state directly from the callback — it **enqueues a lifecycle event onto a dispatcher-owned queue** (or an STM hand-off), and the dispatcher applies it on its single thread (§9.3). This keeps the dispatcher the sole writer of tabs/cursors.
+`TabStatus` carries a `Dead` (tombstone) state. The "death event" the tab layer consumes is the existing reconcile loop's injectable **`_rd_evict :: HarnessId -> Text -> IO ()`** seam (`Harness/Reconcile.hs`), which fires from the **reconcile thread** after `defaultOrphanGraceTicks` consecutive orphaned/exited ticks. Because that thread is **not** the dispatcher thread, the tab layer must not mutate cursor/registry state directly from the callback — it **enqueues a lifecycle event onto a dispatcher-owned queue** (or an STM hand-off), and the dispatcher applies it on its single thread (§9.3). This keeps the dispatcher the sole writer of tabs/cursors. The reconcile loop already performs the registry `deleteEntry` on its own thread, so the `_rd_evict` seam the tab layer consumes is the **notification hand-off only** — the tab layer must not also delete the registry entry (no double-delete) nor mutate registry state off-dispatcher.
 
 When the event is applied and a tab tracks the dead harness:
 
 1. The tab transitions to **`Dead`** (tombstone); it is **not** immediately compacted — retained as a stable referent.
 2. **Notification (configurable):**
-   - **Enabled** → immediately emit a death notice (named by **tab name** first, slot second, since slots renumber — §14) to every conversation focused on that tab, then remove + compact + clear those cursors.
+   - **Enabled** → immediately emit a death notice (named by **tab name** first, slot second, since slots renumber — §14; the `was /N` slot is snapshotted at notify time) to every conversation focused on that tab, then remove + compact + clear those cursors.
    - **Disabled** → retain the tombstone silently; on the user's **next message** while focused on that tab, emit the warning *first*, **drop** that triggering message (do **not** misroute it into the dead harness; the user re-sends after seeing the warning — §14), then remove + compact.
 3. Either path guarantees **exactly one** death notification before the tab disappears (the single exception is the boot-reconcile drop, §10.2).
 
@@ -148,7 +149,7 @@ Tombstones are visible in `/tabs` (everything-visible principle) until removed. 
 | Signal | contact/group id from `signal-cli` | server-derived |
 | Web | **server-minted** session/client id bound to the authenticated session | **never** read from a client-supplied field; a forged id must not steal a cursor |
 
-Threading this is a `Core.Types`/`MessageSource` change with wide (compile-time, `-Werror`) blast radius — flagged as a deliberate plumbing cost.
+Threading this is a `Core.Types`/`MessageSource` change with wide (compile-time, `-Werror`) blast radius — flagged as a deliberate plumbing cost. `mkMessageSource` gains `ConversationId` as a **required positional argument**, so any call site that omits it fails to compile — structurally enforcing "server-derived, never client-supplied".
 
 ### 9.2 Inbound
 Every inbound message carries its `ConversationKey`. Parsing uses the existing grammar; resolution is against *this* conversation's cursor + the global `Tabs`:
@@ -161,11 +162,11 @@ Every inbound message carries its `ConversationKey`. Parsing uses the existing g
 ### 9.3 Output relay
 A tab can be foreground for conversation A and background for B at once, so the single-focus gate in `ChannelOut` (`shouldEmit :: Maybe TabIndex -> OutputSource -> Bool`) is replaced by a **per-conversation relay engine** (`PureClaw.Tabs.Relay`). Per output event it enumerates conversations and, for each, reads `(cursor, RelayMode)` from the same `IORef`-held snapshot the dispatcher writes, then targets that conversation's output sink.
 
-> **Plumbing note (largest concrete change):** `_env_channel` is a single `ChannelHandle` with no conversation-addressed send. The relay engine needs a **conversation-addressable output sink** (a map of `ConversationKey → send`, or a `ChannelHandle` extended with a conversation parameter). This is the biggest rewire and is called out as its own work unit.
+> **Plumbing note (largest concrete change):** `_env_channel` is a single `ChannelHandle` with no conversation-addressed send. The relay engine needs a **conversation-addressable output sink** (a map of `ConversationKey → send`, or a `ChannelHandle` extended with a conversation parameter). This is the biggest rewire and is called out as its own work unit. The relay engine stays a **single writer thread fanning out** to the per-conversation sinks (preserving `ChannelOut`'s existing ordering guarantees) — not one writer per conversation.
 
 Per-conversation **`RelayMode`** (persisted per `ConversationKey` in `state/tabs.json`; global default in `config.toml`, default **`FocusedOnly`**):
 1. **`FocusedOnly`** (`/relay focused`, *default*) — deliver output **only** from the conversation's focused tab. No background pings.
-2. **`ActivityDigest`** (`/relay activity`) — full content from the focused tab; a small activity ping for any *other* live tab that produces output (once per background-output burst; the ping's slot is that conversation's current display slot for the tab).
+2. **`ActivityDigest`** (`/relay activity`) — full content from the focused tab; a small activity ping (named **by tab name** first, slot secondary, for consistency with §8 since a burst can arrive as slots compact) for any *other* live tab that produces output (once per background-output burst). If that other tab is a `Dead` tombstone, the ping path still delivers the guaranteed single death notification (§8).
 3. **`Firehose`** (`/relay all`) — full content from all live tabs.
 
 "Focused tab" = the conversation's cursor; "live tabs" = all tabs in the registry. (Under §2 single-operator trust, `Firehose`/`ActivityDigest` spanning all tabs is intended, not a leak.)
@@ -216,7 +217,7 @@ Attach a tab — reply with a number:
 ```
 
 - The option list is snapshotted when shown; a reply binds to the **exact harness/session id captured in the snapshot**, never re-resolved by list position. If the chosen target has vanished since the snapshot (harness exited, session gone), the wizard **re-prompts** with a refreshed list and a one-line notice (§14) rather than attaching to nothing.
-- **No modal lock-in:** an invalid reply re-prompts; `0`/`cancel` exits; any `/`-prefixed command cancels the wizard and runs that command (§9.2).
+- **No modal lock-in:** an invalid reply re-prompts; `0`/`cancel` exits; any `/`-prefixed command cancels the wizard and runs that command (§9.2). (Wizard replies are wizard-scoped — a bare `0`/`1`/… is a menu choice, **not** a tab switch.)
 - **Overflow:** show all running harnesses + the *N* most-recent sessions (N=8); older sessions reachable by `/tab <query>` (sanitized substring match on name/id).
 
 ## 12. Reuse vs rebuild
@@ -246,7 +247,7 @@ New, small, single-purpose modules (leaf discipline — depend on `Session.Kind`
 
 **Test seams (to hit 100% / the `.coverage-thresholds.json` gate without a live tmux server):** `PureClaw.Tabs` and `PureClaw.Tabs.Relay` take an **injected deps record** (harness-liveness probe, death-event source, clock, output sink) — mirroring the existing `ReconcileDeps`/`ClaudeCodeDeps` pattern — so the relay engine, two-phase harness-death removal, and boot reconcile are driven deterministically in unit tests.
 
-**Session-handle lifecycle (resolved ground truth):** since tabs no longer own handles and §6.5 sharing means two cursors may resolve the same `SessionId`, there is exactly **one** resolved `SessionHandle` per live `SessionId`, held in a `Map SessionId SessionHandle` resource pool owned by the tab layer (not the tab). The pool opens a handle when a tab first binds a session and closes it when the last tab unbinds — superseding the old one-handle-per-tab assumption in `closeAllTabs`/`_env_runners`. The L7 resume snapshot limitation (`Dispatcher.hs:887-893`) is removed by this pooling.
+**Session-handle lifecycle (resolved ground truth):** since tabs no longer own handles and §6.5 sharing means two cursors may resolve the same `SessionId`, there is exactly **one** resolved `SessionHandle` per live `SessionId`, held in a `Map SessionId SessionHandle` resource pool owned by the tab layer (not the tab). The pool refcounts: it opens a handle when a tab first binds a session and closes it when the last tab unbinds — superseding the old one-handle-per-tab assumption in `closeAllTabs`/`_env_runners`. The WU that introduces the pool also **removes the `_env_session :: IORef SessionHandle` single-session global** so the two ownership models do not coexist; this removes the L7 resume snapshot limitation (`Dispatcher.hs:887-893`).
 
 **Plumbing:** each channel handle is touched to supply its `ConversationId` (§9.1).
 
@@ -262,6 +263,7 @@ These strings are the primary teaching surface and are asserted by CLI integrati
 - Deferred death warning (notify disabled, on next send): `⚠ "<tab name>" exited while you were away — message not sent; resend when ready`
 - Wizard target vanished: `that target is gone — list refreshed`
 - `--force` on `/close`: `/close has no --force (tabs never destroy sessions or harnesses)`
+- `/relay` with no arg (shows current): `relay mode: focused (focused | activity | all)`
 
 (Copy may be refined in spec review; the *contracts* — actionable, names-before-slots, no silent no-ops — are fixed.)
 
@@ -276,6 +278,9 @@ TDD throughout; coverage gate per `.coverage-thresholds.json`.
 - **`RelayMode` matrix:** `FocusedOnly`/`ActivityDigest`/`Firehose` × foreground/background output × multiple conversations, via the injected output sink.
 - **Harness death:** notify-enabled (immediate notice + removal) and notify-disabled (tombstone + deferred warning **+ assert zero bytes reach the harness send seam** + message dropped); per-channel override; tombstone visible in `/tabs`.
 - **ConversationId provenance:** a forged conversation id in message *content* cannot set or steal a cursor (server-derived id only); group-chat senders share one cursor.
+- **Input sanitization:** a `/rename`/`/tab <query>` containing ESC/CSI bytes round-trips to its sanitized form in both the transcript and `tabs.json` (no escape sequences survive `normalizeText`).
+- **Session-handle pool:** refcount opens on first bind, closes exactly on last unbind; two tabs sharing a `SessionId` resolve the same handle.
+- **Background tombstone notification:** under `ActivityDigest`, a background tab that becomes `Dead` still delivers the guaranteed single death notification via the ping path.
 - **Persistence:** `tabs.json` round-trip; mode 0600 / `state/` 0700; decode-failure → fresh start; boot reconcile waits for a discovery pass, drops dead-harness tabs silently, clears dangling cursors.
 - **Concurrency:** two conversations sending into one shared tab — both delivered, none dropped.
 - **CLI integration** (`test/Integration/CLISpec.hs`): drive the real binary through `/new`, `/nt`, `/tab`, `/close`, `/N`, `/relay`, asserting on the §14 copy.
@@ -286,7 +291,7 @@ TDD throughout; coverage gate per `.coverage-thresholds.json`.
 - [ ] `ConversationId` threaded through `MessageSource`, server-derived per channel (§9.1); forgery test passes.
 - [ ] Chat surface `/new`, `/nt`, `/tab` (wizard), `/close`, `/tabs`, `/rename`, `/relay` over CLI; `/N`, `/N <text>`, default routed per conversation; §14 copy asserted.
 - [ ] Harness-death notified two-phase removal via the reconcile `_rd_evict` seam with a thread-safe hand-off; global + per-channel `notifyOnHarnessDeath`.
-- [ ] Single-operator trust model + "multi-tenant out of scope" documented in code/docs (§2).
+- [ ] Single-operator trust model + "multi-tenant out of scope" documented in code/docs (§2); boot WARN when an active channel resolves to `AllowAll` while tabs are shared-global.
 - [ ] `~/.pureclaw/state/` introduced with `.gitignore` guidance; no VCS churn from tab state.
 - [ ] Retired modules' `stagedWaivers` deleted or justified; coverage gate green; `-Wall -Werror` clean; hlint clean.
 - [ ] Keystroke-minimization preserved (`/new`, `/nt` are single tokens; attach is one token + one digit).
