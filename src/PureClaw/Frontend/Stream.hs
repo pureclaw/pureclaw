@@ -105,7 +105,7 @@ import PureClaw.Frontend.StreamBroker
   )
 import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Session.Types (SessionMeta (..))
-import PureClaw.Transcript.Types (Direction (..), TranscriptEntry (..))
+import PureClaw.Transcript.Types (Direction (..), TranscriptEntry (..), encodeEntryRaw)
 
 -- ---------------------------------------------------------------------------
 -- Wire types
@@ -167,6 +167,11 @@ toEntryInfo e = TranscriptEntryInfo
   , _tei_payload   = _te_payload e
   , _tei_harness   = _te_harness e
   , _tei_model     = _te_model e
+    -- Everything-visible: carry the byte-faithful disk line. For an
+    -- over-cap (capPayload-truncated) entry this is the truncated line
+    -- WITH @"truncated": true@ plainly visible; reload (REST → disk)
+    -- yields the full line. Nothing is hidden silently.
+  , _tei_raw       = encodeEntryRaw e
   }
 
 encodeActivity :: ActivityKind -> Value

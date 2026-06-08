@@ -7,6 +7,7 @@
     "direction": "response",
     "payload": "hello world",
     "harness": null,
-    "model": null
+    "model": null,
+    "raw": "{\"_te_correlationId\":\"corr-1\",\"_te_direction\":\"Response\",\"_te_durationMs\":null,\"_te_harness\":null,\"_te_id\":\"te-uuid-1\",\"_te_metadata\":{},\"_te_model\":null,\"_te_payload\":\"hello world\",\"_te_timestamp\":\"2026-05-23T18:00:01Z\"}"
   }
 }
