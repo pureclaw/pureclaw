@@ -293,6 +293,39 @@ describe('ChatArea raw-JSON modal', () => {
       })
     }
   })
+
+  // pureclaw-1xd — when rawJson is the full verbatim transcript line, the modal
+  // must surface every _te_* field, including _te_metadata / _te_correlationId /
+  // _te_durationMs. Governing principle: everything is visible to the user.
+  it('displays the full verbatim line fields (metadata, correlationId, durationMs)', () => {
+    const fullLine = JSON.stringify({
+      _te_correlationId: 'corr-xyz',
+      _te_direction: 'Response',
+      _te_durationMs: 1234,
+      _te_harness: null,
+      _te_id: 'te-9',
+      _te_metadata: { source: 'sender-1' },
+      _te_model: 'sonnet',
+      _te_payload: JSON.stringify({ content: [{ type: 'text', text: 'hi' }] }),
+      _te_timestamp: '2024-01-01T00:00:00Z',
+    })
+    const { getByLabelText, getByTestId, getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    fireEvent.click(getByRole('tab', { name: 'Raw' }))
+    const body = getByTestId('raw-json-body').textContent ?? ''
+    expect(body).toContain('_te_metadata')
+    expect(body).toContain('_te_correlationId')
+    expect(body).toContain('_te_durationMs')
+    expect(body).toContain('1234')
+    expect(body).toContain('source')
+    // The payload remains an escaped JSON string inside the verbatim line.
+    expect(body).toContain('_te_payload')
+  })
 })
 
 describe('ChatArea permalink highlight', () => {
