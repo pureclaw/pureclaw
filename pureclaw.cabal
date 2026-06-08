@@ -80,6 +80,7 @@ library
     -- Tabs-as-View (GitHub #79) — first-class tab registry
     PureClaw.Tabs
     PureClaw.Tabs.Types
+    PureClaw.Tabs.Persist
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
     PureClaw.Tab.Ai
     PureClaw.Tab.Harness
@@ -385,6 +386,8 @@ test-suite pureclaw-test
     Tabs.TypesSpec
     -- Tabs-as-View (GitHub #79) WU2
     Tabs.CursorSpec
+    -- Tabs-as-View (GitHub #79) WU3
+    Tabs.PersistSpec
     -- WU9 (HPureClaw depth limit)
     Routing.DepthLimitSpec
     -- WU2 (Session.Kind leaf module)
