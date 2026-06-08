@@ -267,7 +267,7 @@ describe('ChatArea raw-JSON modal', () => {
     expect(document.activeElement).toBe(getByLabelText('Close raw JSON view'))
   })
 
-  it('copies the pretty-printed JSON to the clipboard', () => {
+  it('copies the exact verbatim bytes (not the expanded/pretty form)', () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     const originalClipboard = navigator.clipboard
     Object.defineProperty(navigator, 'clipboard', {
@@ -275,7 +275,12 @@ describe('ChatArea raw-JSON modal', () => {
       configurable: true,
     })
     try {
-      const raw = '{"model":"sonnet"}'
+      // A verbatim line whose _te_payload is an escaped JSON string — the
+      // display expands it, but Copy must yield the exact on-disk bytes.
+      const raw = JSON.stringify({
+        _te_id: 'te-1',
+        _te_payload: JSON.stringify({ model: 'sonnet' }),
+      })
       const { getByLabelText } = render(
         <ChatArea
           selectedAgent={makeAgent()}
@@ -284,14 +289,116 @@ describe('ChatArea raw-JSON modal', () => {
       )
       fireEvent.click(getByLabelText('View raw JSON (message)'))
       fireEvent.click(getByLabelText('Copy raw JSON to clipboard'))
-      const pretty = JSON.stringify(JSON.parse(raw), null, 2)
-      expect(writeText).toHaveBeenCalledWith(pretty)
+      // Exact bytes: the unmodified verbatim line, payload still escaped.
+      expect(writeText).toHaveBeenCalledWith(raw)
     } finally {
       Object.defineProperty(navigator, 'clipboard', {
         value: originalClipboard,
         configurable: true,
       })
     }
+  })
+
+  // pureclaw-1xd — when rawJson is the full verbatim transcript line, the modal
+  // must surface every _te_* field, including _te_metadata / _te_correlationId /
+  // _te_durationMs. Governing principle: everything is visible to the user.
+  it('displays the full verbatim line fields (metadata, correlationId, durationMs)', () => {
+    const fullLine = JSON.stringify({
+      _te_correlationId: 'corr-xyz',
+      _te_direction: 'Response',
+      _te_durationMs: 1234,
+      _te_harness: null,
+      _te_id: 'te-9',
+      _te_metadata: { source: 'sender-1' },
+      _te_model: 'sonnet',
+      _te_payload: JSON.stringify({ content: [{ type: 'text', text: 'hi' }] }),
+      _te_timestamp: '2024-01-01T00:00:00Z',
+    })
+    const { getByLabelText, getByTestId, getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    fireEvent.click(getByRole('tab', { name: 'Raw' }))
+    const body = getByTestId('raw-json-body').textContent ?? ''
+    expect(body).toContain('_te_metadata')
+    expect(body).toContain('_te_correlationId')
+    expect(body).toContain('_te_durationMs')
+    expect(body).toContain('1234')
+    expect(body).toContain('source')
+    expect(body).toContain('_te_payload')
+  })
+
+  // pureclaw-4fv — _te_payload is itself a stringified JSON blob. For
+  // readability the DISPLAY expands any string value that is valid JSON
+  // (object/array) into nested structure; the exact bytes stay on Copy.
+  it('expands embedded JSON in _te_payload for readable display (Raw tab)', () => {
+    const payloadObj = { model: 'sonnet', messages: [{ role: 'user', content: 'hi' }] }
+    const fullLine = JSON.stringify({
+      _te_id: 'te-1',
+      _te_payload: JSON.stringify(payloadObj),
+    })
+    const { getByLabelText, getByTestId, getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    fireEvent.click(getByRole('tab', { name: 'Raw' }))
+    const body = getByTestId('raw-json-body').textContent ?? ''
+    // Expanded into nested, pretty-printed structure...
+    expect(body).toContain('"model": "sonnet"')
+    expect(body).toContain('"role": "user"')
+    // ...not the escaped one-string blob.
+    expect(body).not.toContain('\\"model\\"')
+  })
+
+  it('expands embedded JSON in _te_payload in the Formatted tree', () => {
+    const fullLine = JSON.stringify({
+      _te_id: 'te-1',
+      _te_payload: JSON.stringify({ model: 'sonnet' }),
+    })
+    const { getByLabelText, getByTestId } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    const body = getByTestId('formatted-json-body').textContent ?? ''
+    expect(body).toContain('model')
+    expect(body).toContain('sonnet')
+    // The payload is a real nested node — NOT a single string value still
+    // containing the whole JSON blob.
+    expect(body).not.toContain('{"model":"sonnet"}')
+  })
+
+  it('does not over-expand scalar-valued strings (numbers/bools/plain text)', () => {
+    const fullLine = JSON.stringify({
+      num: '42',
+      bool: 'true',
+      text: 'plain text',
+      obj: JSON.stringify({ x: 1 }),
+    })
+    const { getByLabelText, getByTestId, getByRole } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[makeMessageWithRawJson('m1', 'hi', fullLine)]}
+      />,
+    )
+    fireEvent.click(getByLabelText('View raw JSON (message)'))
+    fireEvent.click(getByRole('tab', { name: 'Raw' }))
+    const body = getByTestId('raw-json-body').textContent ?? ''
+    // Scalar-looking strings stay quoted strings (NOT coerced to 42 / true).
+    expect(body).toContain('"num": "42"')
+    expect(body).toContain('"bool": "true"')
+    expect(body).toContain('"text": "plain text"')
+    // Only the object-valued string expands.
+    expect(body).toContain('"x": 1')
+    expect(body).not.toContain('"obj": "{')
   })
 })
 
@@ -432,6 +539,7 @@ describe('transcriptToMessages entryId plumbing (D8)', () => {
       payload: JSON.stringify(payload),
       harness: null,
       model: 'sonnet',
+      raw: JSON.stringify({ _te_id: id, _te_payload: JSON.stringify(payload) }),
     }
   }
 
@@ -443,6 +551,7 @@ describe('transcriptToMessages entryId plumbing (D8)', () => {
       payload: JSON.stringify({ content: [{ type: 'text', text }] }),
       harness: null,
       model: 'sonnet',
+      raw: JSON.stringify({ _te_id: id, _te_payload: text }),
     }
   }
 
@@ -464,6 +573,7 @@ describe('transcriptToMessages entryId plumbing (D8)', () => {
       }),
       harness: null,
       model: 'sonnet',
+      raw: JSON.stringify({ _te_id: 'te-2', _te_payload: 'prior turn' }),
     }
     const msgs = transcriptToMessages([reqWithAsst])
     const asst = msgs.find((m) => m.id === 'te-2-asst')
@@ -835,6 +945,7 @@ describe('transcriptToMessages thinking extraction (WU8)', () => {
       payload: JSON.stringify({ content }),
       harness: 'claude-code',
       model: 'claude-sonnet-4',
+      raw: JSON.stringify({ _te_id: 'e1', _te_payload: JSON.stringify({ content }) }),
     }
   }
 

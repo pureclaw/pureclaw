@@ -180,6 +180,7 @@ function userEntry(id: string, text: string): TranscriptEntry {
     payload: JSON.stringify({ model: 'sonnet', messages: [{ role: 'user', content: [{ type: 'text', text }] }] }),
     harness: null,
     model: 'sonnet',
+    raw: JSON.stringify({ _te_id: id, _te_payload: text }),
   }
 }
 
@@ -192,6 +193,7 @@ function assistantEntry(id: string, text: string): TranscriptEntry {
     payload: JSON.stringify({ content: [{ type: 'text', text }] }),
     harness: null,
     model: 'sonnet',
+    raw: JSON.stringify({ _te_id: id, _te_payload: text }),
   }
 }
 

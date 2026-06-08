@@ -2,9 +2,11 @@ module Transcript.TypesSpec (spec) where
 
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict qualified as Map
 import Data.Text (Text, pack)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Time
 import Data.Word (Word8)
 import Test.Hspec
@@ -79,6 +81,32 @@ spec = do
 
     it "decodePayload always returns Just" $
       decodePayload "any text at all!" `shouldBe` Just "any text at all!"
+
+  ---------------------------------------------------------------------------
+  -- encodeEntryRaw: the byte-faithful on-disk transcript line.
+  --
+  -- Governing principle: PureClaw always makes EVERYTHING visible to the
+  -- user. 'encodeEntryRaw' must equal the on-disk line written by
+  -- 'PureClaw.Handles.Transcript' (which is @Aeson.encode entry@, modulo
+  -- the trailing newline), so the frontend "View raw JSON" can show all 9
+  -- '_te_*' fields verbatim.
+  ---------------------------------------------------------------------------
+  describe "encodeEntryRaw" $ do
+    it "equals the lenient-UTF-8 decode of Aeson.encode (disk format)" $ do
+      let entry = (mkEntry "raw-1" t0 "ollama/llama3" Request)
+            { _te_durationMs = Just 7
+            , _te_metadata   = Map.fromList [("source", Aeson.String "+15551234567")]
+            }
+      encodeEntryRaw entry
+        `shouldBe` TE.decodeUtf8Lenient (LBS.toStrict (Aeson.encode entry))
+
+    it "round-trips: decode (encodeEntryRaw e) == Just e (disk-format identity)" $ do
+      let entry = (mkEntry "raw-2" t1 "test-model" Response)
+            { _te_durationMs = Just 42
+            , _te_metadata   = Map.fromList [("key", Aeson.String "val")]
+            }
+      Aeson.decode (LBS.fromStrict (TE.encodeUtf8 (encodeEntryRaw entry)))
+        `shouldBe` Just entry
 
   ---------------------------------------------------------------------------
   -- DoD 4: emptyFilter matches all entries

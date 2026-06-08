@@ -1323,6 +1323,11 @@ data TranscriptEntryInfo = TranscriptEntryInfo
   , _tei_payload   :: Text
   , _tei_harness   :: Maybe Text
   , _tei_model     :: Maybe Text
+    -- | The full, verbatim on-disk transcript line ('encodeEntryRaw') —
+    -- all 9 '_te_*' fields incl. '_te_metadata'. Per the everything-visible
+    -- principle, "View raw JSON" shows this byte-faithful line; the other
+    -- (projected) fields are kept only so the frontend can /build/ messages.
+  , _tei_raw       :: Text
   }
   deriving stock (Show, Eq)
 
@@ -1334,6 +1339,7 @@ instance ToJSON TranscriptEntryInfo where
     , "payload"   .= _tei_payload e
     , "harness"   .= _tei_harness e
     , "model"     .= _tei_model e
+    , "raw"       .= _tei_raw e
     ]
 
 toTranscriptEntryInfo :: TranscriptEntry -> TranscriptEntryInfo
@@ -1346,6 +1352,7 @@ toTranscriptEntryInfo e = TranscriptEntryInfo
   , _tei_payload   = _te_payload e
   , _tei_harness   = _te_harness e
   , _tei_model     = _te_model e
+  , _tei_raw       = encodeEntryRaw e
   }
 
 -- | Read transcript entries from a session's @transcript.jsonl@ file.

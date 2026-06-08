@@ -26,6 +26,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding qualified as TE
 import PureClaw.Core.Types
@@ -38,7 +39,7 @@ import PureClaw.Core.Types
   , mkMessageSource
   , parseSessionId
   )
-import PureClaw.Frontend.API (toTranscriptEntryInfo)
+import PureClaw.Frontend.API (TranscriptEntryInfo (..), toTranscriptEntryInfo)
 import PureClaw.Frontend.Stream (toEntryInfo)
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript
@@ -51,7 +52,8 @@ import PureClaw.Frontend.BroadcastingTranscript
   , mkBroadcastingTranscriptHandle
   )
 import PureClaw.Frontend.StreamBroker
-  ( BrokerEvent (..)
+  ( BrokerConfig (..)
+  , BrokerEvent (..)
   , SessionActivity (..)
   , StreamBroker (..)
   , Subscription (..)
@@ -78,6 +80,7 @@ import PureClaw.Transcript.Types
   ( Direction (..)
   , TranscriptEntry (..)
   , emptyFilter
+  , encodeEntryRaw
   )
 
 -- ---------------------------------------------------------------------------
@@ -428,13 +431,19 @@ spec = do
         all (`elem` diskSet) brokerSet `shouldBe` True
 
   -- -------------------------------------------------------------------------
-  -- WU4 — the per-message sender id lives in _te_metadata only and is
-  -- DROPPED by both broadcast projections. These tests pin the privacy
-  -- invariant: the sender id must not appear in the WS @entry@ event
-  -- (toEntryInfo) nor the HTTP GET /transcript response
-  -- (toTranscriptEntryInfo / its ToJSON).
+  -- WU4 (INVERTED per pureclaw-6nr / pureclaw-1xd) — _te_metadata (incl.
+  -- source) is now intentionally exposed in the `raw` field per the
+  -- everything-visible principle: PureClaw always makes EVERYTHING visible
+  -- to the user, so raw-data views must never silently drop fields. The
+  -- prior privacy projection that dropped the sender id is deliberately
+  -- inverted; the frontend sits behind VPN-style network auth.
+  --
+  -- These tests therefore now assert the sender id IS PRESENT in the
+  -- `raw`-bearing projection encodings (both the WS @entry@ event via
+  -- toEntryInfo and the HTTP GET /transcript response via
+  -- toTranscriptEntryInfo / its ToJSON).
   -- -------------------------------------------------------------------------
-  describe "WU4 source omitted from broadcast projections" $ do
+  describe "WU4 source exposed in broadcast projections (raw field)" $ do
     let senderId = "+15551234567" :: Text
         taggedEntry =
           (mkEntry "src")
@@ -443,17 +452,93 @@ spec = do
                   (Aeson.toJSON (sourceWith senderId))
             }
 
-    it "WS projection (toEntryInfo) omits the sender id" $ do
+    it "WS projection (toEntryInfo) exposes the sender id via raw" $ do
       let info = toEntryInfo taggedEntry
           encoded = TE.decodeUtf8Lenient
                       (LBS.toStrict (Aeson.encode info))
-      (senderId `T.isInfixOf` encoded) `shouldBe` False
+      (senderId `T.isInfixOf` encoded) `shouldBe` True
 
-    it "HTTP projection (toTranscriptEntryInfo) omits the sender id" $ do
+    it "HTTP projection (toTranscriptEntryInfo) exposes the sender id via raw" $ do
       let info = toTranscriptEntryInfo taggedEntry
           encoded = TE.decodeUtf8Lenient
                       (LBS.toStrict (Aeson.encode info))
-      (senderId `T.isInfixOf` encoded) `shouldBe` False
+      (senderId `T.isInfixOf` encoded) `shouldBe` True
+
+  -- -------------------------------------------------------------------------
+  -- _tei_raw — the verbatim disk line carried for "View raw JSON".
+  --
+  -- Governing principle: PureClaw always makes EVERYTHING visible to the
+  -- user. The `raw` field is the byte-faithful on-disk transcript line
+  -- (Aeson.encode entry); REST (toTranscriptEntryInfo) and live
+  -- (toEntryInfo) must agree for under-cap entries, and the ToJSON
+  -- instance must surface a `raw` key whose parse carries all 9 _te_*
+  -- fields including a populated _te_metadata. When a value is capped for
+  -- a live broadcast the omission is explicitly MARKED (truncated=true)
+  -- and the full value remains reachable on reload (REST/disk).
+  -- -------------------------------------------------------------------------
+  describe "_tei_raw verbatim transcript line" $ do
+    it "REST and live projections agree on raw for an under-cap entry" $ do
+      let entry = (mkEntry "agree")
+            { _te_metadata =
+                Map.singleton "source"
+                  (Aeson.toJSON (sourceWith "+15550001111"))
+            }
+      _tei_raw (toTranscriptEntryInfo entry)
+        `shouldBe` _tei_raw (toEntryInfo entry)
+
+    it "raw equals encodeEntryRaw (byte-faithful disk line)" $ do
+      let entry = mkEntry "faithful"
+      _tei_raw (toTranscriptEntryInfo entry) `shouldBe` encodeEntryRaw entry
+
+    it "ToJSON includes a `raw` key whose parse has all 9 _te_* fields incl. populated _te_metadata" $ do
+      let senderId = "+15559998888" :: Text
+          entry = (mkEntry "json")
+            { _te_durationMs    = Just 99
+            , _te_correlationId = "corr-json"
+            , _te_metadata      =
+                Map.singleton "source" (Aeson.toJSON (sourceWith senderId))
+            }
+          encoded = Aeson.encode (toTranscriptEntryInfo entry)
+      -- The top-level object must carry a "raw" string.
+      rawStr <- case Aeson.decode encoded of
+        Just (Aeson.Object o)
+          | Just (Aeson.String s) <- KM.lookup "raw" o -> pure s
+        _ -> expectationFailure "expected a top-level `raw` string key" >> pure ""
+      -- That raw string is itself the full transcript line: parse it back
+      -- into a TranscriptEntry and confirm round-trip identity (all 9
+      -- fields, incl. populated metadata, survive).
+      Aeson.decode (LBS.fromStrict (TE.encodeUtf8 rawStr))
+        `shouldBe` Just entry
+      -- And the sender id (living only in _te_metadata) is visible in raw.
+      (senderId `T.isInfixOf` rawStr) `shouldBe` True
+
+    it "over-cap live entry: raw marks truncated=true while disk/REST raw is full" $ do
+      -- Drive an over-cap entry through the broadcasting decorator with a
+      -- tiny per-event cap; the broker observes the capPayload-truncated
+      -- entry. Its live raw must plainly show "truncated": true (marker
+      -- visible), while the ORIGINAL entry's REST/disk raw is full and
+      -- lacks the marker (full reachable on reload).
+      let bigPayload = T.replicate 100 "X"
+          original   = (mkEntry "big") { _te_payload = bigPayload }
+          smallCap   = defaultBrokerConfig { _bc_maxEventBytes = 10 }
+      broker <- mkInProcessBroker smallCap
+      Right sub <- _streamBroker_subscribe broker
+      (inner, _) <- mkMockTranscript
+      let th = mkBroadcastingTranscriptHandle broker sid1 mkNoOpLogHandle inner
+      _th_record th original
+      evs <- drainN 2 sub
+      broadcast <- case [ e | EntryRecorded _ e <- evs ] of
+        (e : _) -> pure e
+        []      -> expectationFailure "expected an EntryRecorded event"
+                     >> pure original
+      let liveRaw = _tei_raw (toEntryInfo broadcast)
+          restRaw = _tei_raw (toTranscriptEntryInfo original)
+      -- Marker visible in the live (capped) raw line.
+      ("\"truncated\":true" `T.isInfixOf` liveRaw) `shouldBe` True
+      -- Full value reachable: the REST/disk raw is the untruncated line
+      -- and carries no truncated marker.
+      ("truncated" `T.isInfixOf` restRaw) `shouldBe` False
+      (bigPayload `T.isInfixOf` restRaw) `shouldBe` True
 
 -- | A 'MessageSource' carrying the given user id, used to plant a
 -- recognizable sender id inside @_te_metadata@.

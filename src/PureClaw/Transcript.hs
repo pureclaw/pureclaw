@@ -12,6 +12,7 @@ module PureClaw.Transcript
     -- * Base64 payload helpers
   , encodePayload
   , decodePayload
+  , encodeEntryRaw
   ) where
 
 import PureClaw.Transcript.Types

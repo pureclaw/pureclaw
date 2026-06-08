@@ -120,6 +120,12 @@ export interface TranscriptEntry {
   payload: string
   harness: string | null
   model: string | null
+  /** The full, verbatim on-disk transcript.jsonl line for this entry — all 9
+   *  `_te_*` fields including `_te_metadata`, byte-faithful to disk. Surfaced in
+   *  the "View raw JSON (message)" modal. Required, never optional, per the
+   *  governing principle: PureClaw always makes EVERYTHING visible to the user;
+   *  raw views must never silently hide fields. */
+  raw: string
 }
 
 export interface CodeSpan {

@@ -11,10 +11,12 @@ module PureClaw.Transcript.Types
     -- * Payload helpers
   , encodePayload
   , decodePayload
+  , encodeEntryRaw
   ) where
 
-import Data.Aeson (FromJSON, ToJSON, Value)
+import Data.Aeson (FromJSON, ToJSON, Value, encode)
 import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
@@ -90,3 +92,21 @@ encodePayload = TE.decodeUtf8Lenient
 -- | Encode text payload back to raw bytes.
 decodePayload :: Text -> Maybe ByteString
 decodePayload = Just . TE.encodeUtf8
+
+-- | The byte-faithful, verbatim on-disk transcript line for an entry.
+--
+-- Governing principle: PureClaw always makes EVERYTHING visible to the
+-- user. Raw-data views must never silently hide fields. This is the exact
+-- line written to @transcript.jsonl@ by "PureClaw.Handles.Transcript"
+-- (whose on-disk format is @Aeson.encode entry@; see
+-- @Handles/Transcript.hs@ — the @_th_record@ field appends
+-- @LBS.toStrict (Aeson.encode entry) <> "\\n"@). Re-encoding a decoded
+-- 'TranscriptEntry' via 'Data.Aeson.encode' is byte-identical to the file
+-- line by construction (modulo the trailing newline), so the frontend's
+-- "View raw JSON" can show all 9 '_te_*' fields — including '_te_metadata'
+-- — verbatim.
+--
+-- Uses 'TE.decodeUtf8Lenient' to mirror 'encodePayload'\'s style;
+-- 'Data.Aeson.encode' always emits valid UTF-8 so no replacement occurs.
+encodeEntryRaw :: TranscriptEntry -> Text
+encodeEntryRaw = TE.decodeUtf8Lenient . LBS.toStrict . encode
