@@ -10,6 +10,7 @@ import Test.Hspec
 import Data.Map.Strict qualified as Map
 
 import PureClaw.Agent.Env
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
@@ -72,6 +73,7 @@ mkTestEnv mProvider = do
   modelRef    <- newIORef (Just (ModelId "mock-model"))
   vaultRef    <- newIORef Nothing
   harnessRef  <- newIORef Map.empty
+  harnessReg     <- Registry.newRegistry
   targetRef   <- newIORef TargetProvider
   windowIdxRef <- newIORef 0
   noOpSession <- mkNoOpSessionHandle
@@ -96,6 +98,7 @@ mkTestEnv mProvider = do
     , _env_pluginHandle     = mkPluginHandle
     , _env_policy           = defaultPolicy
     , _env_harnesses        = harnessRef
+    , _env_harnessRegistry  = harnessReg
     , _env_target           = targetRef
     , _env_nextWindowIdx    = windowIdxRef
     , _env_agentDef         = Nothing

@@ -33,7 +33,7 @@ import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
 import Options.Applicative
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -61,15 +61,17 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Frontend.API (mkStreamGuard)
+import PureClaw.Frontend.API (mkStreamGuard, harnessEntriesToTabs, productionReleaseTmux, productionKillWindow)
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
   , defaultBrokerConfig
   , mkInProcessBroker
   )
-import PureClaw.Frontend.ActivityProbe (runActivityProbeLoop)
-import PureClaw.Harness.Tmux (renameWindow)
+import PureClaw.Harness.ClaudeCode (adoptExternalWindow, defaultClaudeCodeDeps)
+import PureClaw.Harness.Reconcile qualified as Reconcile
+import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Handles.Transcript (mkNoOpTranscriptHandle)
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -96,6 +98,7 @@ import PureClaw.Providers.Class
 import PureClaw.Providers.Ollama
 import PureClaw.Providers.OpenAI
 import PureClaw.Providers.OpenRouter
+import PureClaw.Security.Adoption (ConsentChannel (..))
 import PureClaw.Security.Policy
 import PureClaw.Security.Secrets
 import PureClaw.Security.Vault
@@ -315,8 +318,16 @@ runCLI :: IO ()
 runCLI = do
   cmd <- execParser cliParserInfo
   case cmd of
-    CmdTui opts     -> runChat opts { _co_channel = Just "cli" }
-    CmdGateway opts -> runChat opts
+    -- FEAS-2 / D3 (SEC-1): the consent channel is derived from the invocation
+    -- mode here, where the 'Command' is known. The foreground TUI gets
+    -- 'ConsentInteractive' and the gateway-served web UI gets 'ConsentWeb' — in
+    -- both, a human explicitly picks the window to adopt (the New-Tab form /
+    -- "Existing Harness" selection), which IS the consent. Only a truly
+    -- unattended mode with no human picking a window ('CmdImport', and any
+    -- future cron\/daemon\/background mode) maps to 'ConsentHeadless' so
+    -- adoption fails closed.
+    CmdTui opts     -> runChat ConsentInteractive opts { _co_channel = Just "cli" }
+    CmdGateway opts -> runChat ConsentWeb opts
     CmdImport opts mPos -> runImport opts mPos
 
 -- | Import an OpenClaw state directory.
@@ -390,8 +401,14 @@ runImport opts mPositional = do
       putStrLn "  3. Run: pureclaw tui"
 
 -- | Run an interactive chat session.
-runChat :: ChatOptions -> IO ()
-runChat opts = do
+--
+-- The 'ConsentChannel' is supplied by 'runCLI' from the invocation mode
+-- (FEAS-2): the foreground interactive TUI passes 'ConsentInteractive'; the
+-- gateway\/headless modes pass 'ConsentHeadless'. It is stored on the
+-- 'FrontendEnv' as '_fe_consentChannel' so the @POST \/api\/adopt@ endpoint can
+-- fail closed for non-interactive runs (design §8 B2 / SEC-1).
+runChat :: ConsentChannel -> ChatOptions -> IO ()
+runChat consentChannel opts = do
   logger <- mkStderrLogHandle
 
   -- --session and --prefix are mutually exclusive. We enforce this
@@ -628,6 +645,11 @@ runChat opts = do
           _lh_logInfo logger $ "Discovered " <> T.pack (show (Map.size discoveredHarnesses))
             <> " running harness(es) from previous session"
         harnessRef  <- newIORef discoveredHarnesses
+        -- One shared HarnessId registry (TVar) for the whole process: the
+        -- agent ('_env_harnessRegistry') and the frontend
+        -- ('_fe_harnessRegistry') MUST observe the same registry, so both
+        -- fields are set to this single value below.
+        harnessReg  <- Registry.newRegistry
         vaultRef    <- newIORef vaultOpt
         providerRef <- newIORef mProvider
         modelRef    <- newIORef (Just model)
@@ -678,6 +700,7 @@ runChat opts = do
               , _env_pluginHandle = mkPluginHandle
               , _env_policy       = policy
               , _env_harnesses    = harnessRef
+              , _env_harnessRegistry = harnessReg
               , _env_target       = targetRef
               , _env_nextWindowIdx = windowIdxRef
               , _env_agentDef     = mAgentDef
@@ -733,6 +756,13 @@ runChat opts = do
                 keepers
         let frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
+              , _fe_harnessRegistry = harnessReg
+              , _fe_consentChannel = consentChannel
+              , _fe_adopt        =
+                  adoptExternalWindow defaultClaudeCodeDeps harnessReg
+                    mkNoOpTranscriptHandle sessionsDir
+              , _fe_releaseTmux  = productionReleaseTmux
+              , _fe_killWindow   = productionKillWindow
               , _fe_sessionsDir  = sessionsDir
               , _fe_recentLimit  = 50
               , _fe_provider     = providerRef
@@ -745,7 +775,7 @@ runChat opts = do
               , _fe_streamGuard  = Just streamGuard
               , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
               , _fe_tabCount     = feTabCountRef
-              , _fe_listTabs     = pure []
+              , _fe_listTabs     = harnessEntriesToTabs <$> Registry.snapshot harnessReg
               , _fe_closeTab     = \_ -> pure (Left "not wired")
               , _fe_startHarness = \spec transcript -> do
                   windowIdx <- readIORef windowIdxRef
@@ -755,28 +785,75 @@ runChat opts = do
                       cwd       = fmap T.unpack (SessionTypes._h_cwd spec)
                       canonical = fromMaybe name (resolveHarnessName name)
                       harnessKey = canonical <> "-" <> T.pack (show windowIdx)
-                  result <- startHarnessByName policy transcript windowIdx name cwd skipPerms
+                      -- WU7 (epic core fix): honor the requested tmux session
+                      -- (default "pureclaw"). The window is still auto-assigned
+                      -- (harnessKey = canonical-<idx>); honoring a caller's
+                      -- _tc_window for placement is deferred (pureclaw-jlc).
+                      session = resolveHarnessSession spec
+                  result <- startHarnessByName policy transcript session name
+                              harnessKey windowIdx cwd skipPerms harnessReg
                   case result of
                     Left err -> pure (Left err)
-                    Right hh -> do
-                      renameWindow "pureclaw" windowIdx harnessKey
+                    Right (hid, hh, mUuid) -> do
                       modifyIORef' harnessRef (Map.insert harnessKey hh)
                       modifyIORef' windowIdxRef (+ 1)
-                      pure (Right (StartedHarness harnessKey
-                        (SessionTypes.TmuxConfig
-                          { SessionTypes._tc_session = "pureclaw"
-                          , SessionTypes._tc_window  = harnessKey
-                          , SessionTypes._tc_pane    = Nothing
-                          })))
+                      -- WU6 (D6.3): persist the canonicalized spawn cwd ONLY when
+                      -- we actually minted a claude-code session uuid (mUuid is
+                      -- Just for the claude-code flavour, Nothing otherwise), so
+                      -- the JSONL log path can be re-derived after a restart. The
+                      -- canonical cwd is the resolved spawn workdir
+                      -- ('cwd' = _h_cwd) when supplied, else the process's
+                      -- current working directory (which a tmux window with no
+                      -- explicit -c inherits). 'canonicalizePath' resolves
+                      -- symlinks/.. so it matches claude-code's own sanitize(cwd).
+                      mCanonCwd <- case mUuid of
+                        Nothing -> pure Nothing
+                        Just _  -> do
+                          base <- maybe getCurrentDirectory pure cwd
+                          canon <- canonicalizePath base
+                          pure (Just (T.pack canon))
+                      pure (Right (StartedHarness
+                        { _shh_key  = harnessKey
+                        , _shh_tmux = SessionTypes.TmuxConfig
+                            { SessionTypes._tc_session = session
+                            , SessionTypes._tc_window  = harnessKey
+                            , SessionTypes._tc_pane    = Nothing
+                            }
+                        , _shh_id   = hid
+                        , _shh_claudeSessionUuid = mUuid
+                        , _shh_canonicalCwd      = mCanonCwd
+                        }))
               , _fe_listModels   = listModelsForProvider
               , _fe_listProviders = listConfiguredProviders
               , _fe_registry     = fullRegistry
               , _fe_maxToolIterations = 90
               }
+        -- Boot reconstruction (WU5, D5.6): one tmux sweep builds the registry
+        -- from windows carrying our @pcl_id (PCL-restart reconnect) and lazily
+        -- stamps legacy claude-code-<idx> windows. The legacy '_env_harnesses'
+        -- map was already seeded in parallel by 'discoverHarnesses' above.
+        Reconcile.bootReconstruct Reconcile.defaultReconcileDeps harnessReg logger
+        -- Orphan grace policy (WU2): run the reconcile loop with an eviction
+        -- seam that, once an entry has been Orphaned for
+        -- 'Reconcile.defaultOrphanGraceTicks' consecutive ticks, drops it from
+        -- the legacy '_env_harnesses' map (keyed by the window-name label). The
+        -- reconcile LOOP owns the registry delete (it calls
+        -- 'Registry.deleteEntry' inside 'reconcileTick'); per the '_rd_evict'
+        -- seam contract this callback is responsible ONLY for the legacy map, so
+        -- it does NOT delete the registry entry again (that would be a redundant
+        -- double-delete — idempotent, but contradicting the seam's contract).
+        -- Neither path touches 'session.json', so the session reappears in
+        -- Recent Sessions.
+        let reconcileDeps = Reconcile.defaultReconcileDeps
+              { Reconcile._rd_evict = \_hid label ->
+                  modifyIORef' harnessRef (Map.delete label)
+              }
         Async.withAsync
           (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
           Async.withAsync
-            (runActivityProbeLoop broker harnessRef logger) $ \_probeAsync ->
+            (Reconcile.runReconcileLoopWith
+               Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
+            $ \_probeAsync ->
             runAgentLoopWith env reloadedMessages
 
   case effectiveChannel of

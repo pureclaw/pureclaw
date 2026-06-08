@@ -253,15 +253,38 @@ describe('streamClient', () => {
     expect(client.status).toBe('reconnecting')
   })
 
-  it('stops reconnecting after maxAttempts and transitions to closed', () => {
-    // Drive 5+ unclean closes in a row.
-    for (let i = 0; i < 6; i++) {
+  it('keeps reconnecting indefinitely after many unclean closes (never permanently closed)', () => {
+    // A long gateway outage (e.g. a dev restart/rebuild) must NOT make the
+    // client give up permanently — otherwise live updates freeze until the
+    // user manually reloads the page. Drive far more closes than any fixed
+    // attempt cap and assert it is still trying.
+    const before = ref.instances.length
+    for (let i = 0; i < 12; i++) {
       const sock = ref.instances[ref.instances.length - 1]!
       sock.simulateOpen()
       sock.simulateClose(1006, 'flaky', false)
       vi.advanceTimersByTime(6000)
     }
-    expect(client.status).toBe('closed')
+    // Still reconnecting (not 'closed'), and it kept opening fresh sockets.
+    expect(client.status).toBe('reconnecting')
+    expect(ref.instances.length).toBeGreaterThan(before + 6)
+  })
+
+  it('recovers to live when the gateway returns after a long outage', () => {
+    // Exhaust well past the old 5-attempt cap...
+    for (let i = 0; i < 10; i++) {
+      const sock = ref.instances[ref.instances.length - 1]!
+      sock.simulateOpen()
+      sock.simulateClose(1006, 'down', false)
+      vi.advanceTimersByTime(6000)
+    }
+    expect(client.status).toBe('reconnecting')
+    // ...then the gateway comes back: the latest reconnect socket opens and
+    // delivers its first frame. The client must go live again on its own.
+    const sock = ref.instances[ref.instances.length - 1]!
+    sock.simulateOpen()
+    sock.simulateMessage({ type: 'hello', serverStartedAt: '2026-06-05T18:00:00Z' })
+    expect(client.status).toBe('live')
   })
 
   it('re-sends the last focus on reconnect (so reconnect-with-since works)', () => {

@@ -72,6 +72,8 @@ import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript
 import PureClaw.Harness.ClaudeCode
+import PureClaw.Harness.ClaudeSession (mintClaudeSessionUuid, unClaudeSessionUuid)
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Harness.Tmux
 import Data.Text.Read qualified as TR
 import PureClaw.Providers.Class
@@ -1911,11 +1913,15 @@ executeHarnessCommand env sub ctx = do
       logInfo $ "Harness start: policy autonomy = " <> T.pack (show (_sp_autonomy (_env_policy env)))
       -- Resolve optional working directory
       resolvedDir <- resolveHarnessDir mDir
-      -- Assign a window index and build the unique harness key
+      -- Assign a window index and build the unique harness key (display-only).
+      -- The durable identity is the @pcl_id stamped by the spawn path; the
+      -- window name (harnessKey) stays the legacy canonical-<idx> convention.
       windowIdx <- readIORef (_env_nextWindowIdx env)
-      let canonical = Data.Maybe.fromMaybe name (resolveHarnessName name)
+      let canonical  = Data.Maybe.fromMaybe name (resolveHarnessName name)
           harnessKey = canonical <> "-" <> T.pack (show windowIdx)
-      result <- startHarnessByName (_env_policy env) th windowIdx name resolvedDir skipPerms
+          harnessSession = "pureclaw"
+      result <- startHarnessByName (_env_policy env) th harnessSession name
+                  harnessKey windowIdx resolvedDir skipPerms (_env_harnessRegistry env)
       case result of
         Left err -> do
           let detail = case err of
@@ -1930,9 +1936,15 @@ executeHarnessCommand env sub ctx = do
           send ("Failed to start harness '" <> name <> "':\n  " <> detail)
           logError $ "Harness start failed: " <> T.pack (show err)
           pure ctx
-        Right hh -> do
-          -- Label the tmux window so discovery can reconstruct on restart
-          renameWindow "pureclaw" windowIdx harnessKey
+        Right (_hid, hh, _mUuid) -> do
+          -- D-ADD-2: the spawn path already registered the HarnessId entry; sync
+          -- the legacy name-keyed map so legacy consumers keep working. The
+          -- minted claude-code session uuid (_mUuid) is not persisted on this
+          -- CLI '/harness start' path — there is no session.json to write it
+          -- into. The optional JSONL log view (WU7) is a frontend-only feature,
+          -- so a CLI-only spawn intentionally does not correlate a log file.
+          -- window is created already named harnessKey (addHarnessWindowNamed),
+          -- so no separate rename is needed.
           modifyIORef' (_env_nextWindowIdx env) (+ 1)
           modifyIORef' (_env_harnesses env) (Map.insert harnessKey hh)
           send ("Harness '" <> harnessKey <> "' started (window " <> T.pack (show windowIdx) <> "). Attach with: tmux attach -t pureclaw")
@@ -2185,7 +2197,7 @@ executeSessionCommand env sub ctx = do
                         (SessionTypes.SkHarness (SessionTypes.HarnessSpec
                           (SessionTypes.fixedFlavourLookup name)
                           (SessionTypes.TbTmux (SessionTypes.TmuxConfig name name Nothing))
-                          Nothing []))
+                          Nothing [] Nothing Nothing Nothing))
         _ -> createSession env ctx agentName
                (SessionTypes.SkProvider (SessionTypes.ProviderSpec
                  (SessionTypes.inferProviderId "") (ModelId "") Nothing))
@@ -2375,19 +2387,44 @@ knownHarnesses =
   ]
 
 -- | Start a harness by name or alias.
+--
+-- Threads the tmux @session@ and the @windowName@ (display-only, the
+-- @canonical-\<idx\>@ convention) through to 'mkClaudeCodeHarness', which stamps
+-- the durable @\@pcl_id@ identity, records the shell+harness PIDs, and registers
+-- a @Spawned@ entry in the supplied 'HarnessRegistry' (D4.2). On success it
+-- returns the generated 'HarnessId' alongside the handle so the caller can
+-- persist the identity and keep the legacy name-keyed map in sync (D-ADD-2).
+--
+-- WU6 (JSONL log correlation): for the @claude-code@ flavour we mint a fresh
+-- canonical 'ClaudeSessionUuid' and inject it as @--session-id \<uuid\>@ into
+-- the spawned @claude@ argv (via 'claudeCodeExtraArgs', through the EXISTING
+-- @[Text]@ args — the @_ccd_addWindow@ seam is not widened). The SAME minted
+-- uuid text is returned as the third tuple element so the caller can persist it
+-- into '_h_claudeSessionUuid'; this guarantees the persisted uuid matches the
+-- one claude-code writes its on-disk JSONL log under. Non-@claude-code@ spawns
+-- mint nothing and return 'Nothing'.
 startHarnessByName
   :: SecurityPolicy
   -> TranscriptHandle
-  -> Int              -- ^ tmux window index
-  -> Text
+  -> Text             -- ^ tmux session name (default @"pureclaw"@)
+  -> Text             -- ^ harness name or alias (for flavour resolution, e.g. @cc@)
+  -> Text             -- ^ tmux window name (display-only, e.g. @claude-code-0@)
+  -> Int              -- ^ tmux window index (placement hint)
   -> Maybe FilePath   -- ^ optional working directory
   -> Bool             -- ^ skip permission checks
-  -> IO (Either HarnessError HarnessHandle)
-startHarnessByName policy th windowIdx name mWorkDir skipPerms =
+  -> Registry.HarnessRegistry
+  -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle, Maybe Text))
+startHarnessByName policy th session name windowName windowIdx mWorkDir skipPerms reg =
   case resolveHarnessName name of
-    Just "claude-code" ->
-      let extraArgs = ["--dangerously-skip-permissions" | skipPerms]
-      in mkClaudeCodeHarness policy th windowIdx mWorkDir extraArgs
+    Just "claude-code" -> do
+      -- Mint ONCE: the same value is injected into the argv (below) and
+      -- returned to the caller for persistence — they cannot diverge.
+      uuid <- mintClaudeSessionUuid
+      let uuidText  = unClaudeSessionUuid uuid
+          extraArgs = claudeCodeExtraArgs skipPerms (Just uuidText)
+      result <- mkClaudeCodeHarness policy th session windowName windowIdx
+                  mWorkDir extraArgs reg
+      pure (fmap (\(hid, hh) -> (hid, hh, Just uuidText)) result)
     _                  -> pure (Left (HarnessBinaryNotFound name))
 
 -- | Resolve an optional directory argument for harness start.
@@ -2443,8 +2480,8 @@ discoverHarnessesIn session th = do
         , Just (canonical, winIdx) <- [parseHarnessWindowName name]
         , winIdx == idx  -- sanity: name encodes the same index
         ]
-  handles <- mapM (\(name, idx, canonical) -> do
-    hh <- mkHandle canonical idx
+  handles <- mapM (\(name, _idx, canonical) -> do
+    hh <- mkHandle canonical name
     pure (name, hh)) discovered
   let harnessMap = Map.fromList handles
       nextIdx = if null discovered
@@ -2452,11 +2489,14 @@ discoverHarnessesIn session th = do
         else maximum [idx | (_, idx, _) <- discovered] + 1
   pure (harnessMap, nextIdx)
   where
-    mkHandle :: Text -> Int -> IO HarnessHandle
-    mkHandle canonical idx = case canonical of
-      "claude-code" -> mkDiscoveredClaudeCodeHandle th idx
+    -- Reconstruct a name-targeting handle for an existing window. The window
+    -- name (e.g. @claude-code-0@) is the durable target now that the harness
+    -- ops address @(session, windowName)@ (WU1/WU4).
+    mkHandle :: Text -> Text -> IO HarnessHandle
+    mkHandle canonical windowName = case canonical of
+      "claude-code" -> mkDiscoveredClaudeCodeHandle th session windowName
       -- Future harness types go here
-      _             -> mkDiscoveredClaudeCodeHandle th idx  -- fallback
+      _             -> mkDiscoveredClaudeCodeHandle th session windowName  -- fallback
 
     -- | Parse a window name like "claude-code-0" into (canonical, index).
     parseHarnessWindowName :: Text -> Maybe (Text, Int)

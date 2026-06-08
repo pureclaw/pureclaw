@@ -16,6 +16,7 @@ import System.Timeout (timeout)
 import Test.Hspec
 
 import PureClaw.Agent.Env
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Agent.Loop
 import PureClaw.Channels.Class
 import PureClaw.Channels.Signal
@@ -58,6 +59,7 @@ mkTestEnv p ch = do
   providerRef   <- newIORef (Just (MkProvider p))
   modelRef      <- newIORef (Just (ModelId "mock"))
   harnessRef    <- newIORef Map.empty
+  harnessReg     <- Registry.newRegistry
   targetRef     <- newIORef TargetProvider
   windowIdxRef  <- newIORef 0
   sessionRef <- newIORef =<< mkNoOpSessionHandle
@@ -80,6 +82,7 @@ mkTestEnv p ch = do
     , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
     , _env_policy       = defaultPolicy
     , _env_harnesses    = harnessRef
+    , _env_harnessRegistry  = harnessReg
     , _env_target       = targetRef
     , _env_nextWindowIdx = windowIdxRef
     , _env_agentDef      = Nothing

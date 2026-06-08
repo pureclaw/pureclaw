@@ -14,6 +14,14 @@ const PROVIDER_LABELS: Record<string, string> = {
   ollama: 'Ollama',
 }
 
+// Human labels for each tab kind. 'harness' is the spawn-a-new-harness flow
+// (renamed from "AI Harness"); 'attach' is the adopt-a-running-harness flow.
+const KIND_LABELS: Record<NewTabKind, string> = {
+  provider: 'AI Provider',
+  harness: 'New Harness',
+  attach: 'Existing Harness',
+}
+
 // ── Props ─────────────────────────────────────────────────────────────
 
 interface NewTabComposerProps {
@@ -41,7 +49,7 @@ export function NewTabComposer({ spec }: NewTabComposerProps) {
 
       {/* Kind pills */}
       <div role="radiogroup" aria-label="Tab kind" style={{ display: 'flex', gap: 6 }}>
-        {(['provider', 'harness'] as NewTabKind[]).map((k) => (
+        {(['provider', 'harness', 'attach'] as NewTabKind[]).map((k) => (
           <button
             key={k}
             type="button"
@@ -56,7 +64,7 @@ export function NewTabComposer({ spec }: NewTabComposerProps) {
               border: '1px solid var(--border)',
             }}
           >
-            {k === 'provider' ? 'AI Provider' : 'AI Harness'}
+            {KIND_LABELS[k]}
           </button>
         ))}
       </div>
@@ -225,6 +233,9 @@ export function NewTabComposer({ spec }: NewTabComposerProps) {
         </div>
       )}
 
+      {/* Existing Harness (attach / adoption) config */}
+      {spec.kind === 'attach' && <ExistingHarnessSection spec={spec} />}
+
       {/* Inline validation hint. Helps the user understand why the
           bottom send button is disabled (and what to fix). */}
       {spec.validationError && (
@@ -234,6 +245,112 @@ export function NewTabComposer({ spec }: NewTabComposerProps) {
         >
           {spec.validationError}
         </div>
+      )}
+    </div>
+  )
+}
+
+// ── Existing Harness (attach) section ─────────────────────────────────
+
+/** Encode a detected window as a single <option> value so a dropdown
+ *  selection round-trips BOTH the session and window name. The NUL
+ *  separator can't appear in a tmux name. */
+const ATTACH_SEP = ' '
+function encodeWindow(w: { session: string; windowName: string }): string {
+  return `${w.session}${ATTACH_SEP}${w.windowName}`
+}
+
+function ExistingHarnessSection({ spec }: { spec: NewTabSpec }) {
+  const windows = spec.discoverableWindows
+  const hasWindows = windows.length > 0
+  // Fall back to manual entry automatically when there's nothing to pick
+  // (empty scan or a scan error), or when the user opted in explicitly.
+  const showManual = spec.attachManual || (!hasWindows)
+  const selectedValue =
+    spec.attachSession && windows.some((w) => w.session === spec.attachSession && w.windowName === spec.attachWindow)
+      ? encodeWindow({ session: spec.attachSession, windowName: spec.attachWindow })
+      : ''
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Consent note: submitting the form IS the consent. Name the trust
+          consequence explicitly so the user understands what attaching does. */}
+      <div
+        data-testid="attach-consent-note"
+        style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.4 }}
+      >
+        PureClaw will manage this window and capture its output from now on.
+      </div>
+
+      {spec.discoveryError && (
+        <div style={{ fontSize: 12, color: 'var(--needs-input)' }}>
+          Could not scan for running sessions — enter one manually below.
+        </div>
+      )}
+
+      {hasWindows && !spec.attachManual && (
+        <Row label="Detected Session" htmlFor="attach-detected">
+          <select
+            id="attach-detected"
+            value={selectedValue}
+            onChange={(e) => {
+              const [session, windowName] = e.target.value.split(ATTACH_SEP)
+              spec.setAttachSession(session ?? '')
+              spec.setAttachWindow(windowName ?? '')
+            }}
+            style={inputStyle}
+          >
+            <option value="">(pick a detected session)</option>
+            {windows.map((w) => (
+              <option key={encodeWindow(w)} value={encodeWindow(w)}>
+                {w.session}:{w.windowName}
+              </option>
+            ))}
+          </select>
+        </Row>
+      )}
+
+      {!hasWindows && !spec.discoveryError && (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          No running sessions detected — enter one manually below.
+        </div>
+      )}
+
+      {hasWindows && (
+        <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            type="checkbox"
+            aria-label="Enter manually"
+            checked={spec.attachManual}
+            onChange={(e) => spec.setAttachManual(e.target.checked)}
+          />
+          Enter manually
+        </label>
+      )}
+
+      {showManual && (
+        <>
+          <Row label="Session" htmlFor="attach-session">
+            <input
+              id="attach-session"
+              type="text"
+              value={spec.attachSession}
+              onChange={(e) => spec.setAttachSession(e.target.value)}
+              style={inputStyle}
+              placeholder="tmux session name"
+            />
+          </Row>
+          <Row label="Window" htmlFor="attach-window">
+            <input
+              id="attach-window"
+              type="text"
+              value={spec.attachWindow}
+              onChange={(e) => spec.setAttachWindow(e.target.value)}
+              style={inputStyle}
+              placeholder="tmux window name"
+            />
+          </Row>
+        </>
       )}
     </div>
   )
@@ -285,6 +402,10 @@ function BackendFields({
     <>
       {tag === 'tmux' && (
         <>
+          {/* No Window input: the tmux window is auto-assigned by the
+              backend (`canonical-<idx>`) and ignored for placement, so the
+              user only picks the session. buildBackendPayload still sends
+              `window: ''` to satisfy the backend's required decode. */}
           <Row label="Session Name" htmlFor="backend-session">
             <input
               id="backend-session"
@@ -293,16 +414,6 @@ function BackendFields({
               onChange={(e) => onConfigUpdate({ session: e.target.value })}
               style={inputStyle}
               placeholder="e.g. main"
-            />
-          </Row>
-          <Row label="Window" htmlFor="backend-window">
-            <input
-              id="backend-window"
-              type="text"
-              value={config.window ?? ''}
-              onChange={(e) => onConfigUpdate({ window: e.target.value })}
-              style={inputStyle}
-              placeholder="e.g. 0"
             />
           </Row>
         </>

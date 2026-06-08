@@ -26,6 +26,7 @@ import PureClaw.Session.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
+import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux
 import PureClaw.Handles.Transcript
 import PureClaw.Providers.Class
@@ -344,6 +345,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -381,6 +383,28 @@ spec = do
       env <- mkEnv sentRef
       ctx' <- executeSlashCommand env CmdNew ctx
       contextTotalInputTokens ctx' `shouldBe` 100
+
+    -- D4.4 — /harness start wiring regression. With the default Deny policy the
+    -- spawn path short-circuits at pre-authorization (no tmux IO), exercising
+    -- the new session/windowName/registry-threaded signature end-to-end and
+    -- confirming the failure surfaces a status message without mutating the
+    -- legacy map or the registry.
+    it "/harness start surfaces a failure status and leaves the maps untouched" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env0 <- mkEnv sentRef
+      reg <- Reg.newRegistry
+      let env = env0 { _env_harnessRegistry = reg }
+      _ <- executeSlashCommand env
+             (CmdHarness (HarnessStart "claude" Nothing False)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "Failed to start harness 'claude'"
+        Nothing -> expectationFailure "Expected a harness-start failure message"
+      -- Legacy name-keyed map and the registry both stay empty on failure.
+      harnesses <- readIORef (_env_harnesses env)
+      Map.null harnesses `shouldBe` True
+      entries <- Reg.snapshot reg
+      length entries `shouldBe` 0
 
     it "/status shows session info" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
@@ -483,6 +507,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -532,6 +557,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -577,6 +603,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -622,6 +649,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -679,6 +707,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -727,6 +756,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -771,6 +801,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -826,6 +857,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -883,6 +915,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -931,6 +964,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -979,6 +1013,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1022,6 +1057,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1080,6 +1116,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1134,6 +1171,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1181,6 +1219,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1219,6 +1258,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1268,6 +1308,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [yubikey] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1323,6 +1364,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1380,6 +1422,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1426,6 +1469,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1538,6 +1582,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1587,6 +1632,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1637,6 +1683,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1723,6 +1770,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1777,6 +1825,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1824,6 +1873,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1866,6 +1916,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -1931,7 +1982,7 @@ spec = do
           let sName = "pureclaw-test-discover"
           -- Start the session and rename window 0 to look like a harness
           _ <- startTmuxSession sName
-          renameWindow sName 0 "claude-code-0"
+          renameWindowNamed sName "0" "claude-code-0"
           let th = mkNoOpTranscriptHandle
           (harnesses, nextIdx) <- discoverHarnessesIn sName th
           -- Should discover the harness
@@ -1989,6 +2040,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2036,6 +2088,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2095,6 +2148,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2145,6 +2199,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2217,6 +2272,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2266,6 +2322,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2312,6 +2369,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2356,6 +2414,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2415,6 +2474,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2491,6 +2551,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2554,6 +2615,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing
@@ -2715,6 +2777,7 @@ spec = do
             , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
             , _env_policy       = defaultPolicy
             , _env_harnesses    = harnessRef
+            , _env_harnessRegistry = error "WU2b stub: _env_harnessRegistry not exercised in this test"
             , _env_target       = targetRef
             , _env_nextWindowIdx = windowIdxRef
             , _env_agentDef      = Nothing

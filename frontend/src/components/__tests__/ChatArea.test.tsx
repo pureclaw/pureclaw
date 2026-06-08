@@ -722,3 +722,149 @@ describe('ChatArea model dropdown (U1, U2)', () => {
     expect(queryByLabelText(MODEL_LABEL)).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// WU8 — claude-code "thinking" content block rendering
+// ---------------------------------------------------------------------------
+describe('ChatArea thinking block (WU8)', () => {
+  beforeEach(() => {
+    HTMLElement.prototype.scrollIntoView = vi.fn() as unknown as HTMLElement['scrollIntoView']
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function thinkingMessage(id: string, thinkingText: string): Message {
+    return {
+      id,
+      agentName: 'Assistant',
+      agentStatus: 'idle',
+      timestamp: '12:00',
+      blocks: [{ id: 'tk-' + id, thinkingText }],
+    }
+  }
+
+  it('D8.2: renders the thinking block collapsed by default with a distinct "Thinking" label', () => {
+    const { getByText, container } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[thinkingMessage('m1', 'let me reason about this')]} />,
+    )
+    // Distinct "Thinking" label is visible.
+    expect(getByText('Thinking')).toBeTruthy()
+    // Collapsed by default: full text is not rendered as expanded content.
+    // The preview is shown, but the expanded <pre> is absent until clicked.
+    expect(container.querySelector('pre')).toBeNull()
+  })
+
+  it('D8.2: expands to show the thinking text when clicked', () => {
+    const { getByText, container } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[thinkingMessage('m1', 'detailed chain of thought here')]} />,
+    )
+    fireEvent.click(getByText('Thinking'))
+    const pre = container.querySelector('pre')
+    expect(pre).not.toBeNull()
+    expect(pre!.textContent).toContain('detailed chain of thought here')
+  })
+
+  it('D8.2: escapes thinking content as React text — no HTML injection', () => {
+    const xss = '<img src=x onerror=alert(1)>'
+    const { getByText, container } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[thinkingMessage('m1', xss)]} />,
+    )
+    // Expand so the full payload is in the DOM.
+    fireEvent.click(getByText('Thinking'))
+    // The payload must NOT have produced a real <img> element.
+    expect(container.querySelector('img')).toBeNull()
+    // It must appear verbatim as text instead.
+    const pre = container.querySelector('pre')
+    expect(pre).not.toBeNull()
+    expect(pre!.textContent).toContain(xss)
+  })
+
+  it('D8.2: the Thinking label is distinct from the System collapsed block', () => {
+    const thinkingRow = thinkingMessage('m1', 'inner reasoning')
+    const sysRow: Message = {
+      id: 'te-1-sys',
+      agentName: 'System',
+      agentStatus: 'idle',
+      timestamp: '12:00',
+      blocks: [{ collapsedText: 'You are helpful.' }],
+    }
+    const { getByText, queryAllByText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[sysRow, thinkingRow]} />,
+    )
+    // "Thinking" label appears for the thinking block only.
+    expect(queryAllByText('Thinking')).toHaveLength(1)
+    // The System collapsed block does not borrow the Thinking label — its
+    // preview text is shown plainly.
+    expect(getByText('You are helpful.')).toBeTruthy()
+  })
+
+  it('D8.3 regression: System collapsedText block still renders its preview unchanged', () => {
+    const sysRow: Message = {
+      id: 'te-1-sys',
+      agentName: 'System',
+      agentStatus: 'idle',
+      timestamp: '12:00',
+      blocks: [{ collapsedText: 'You are a helpful assistant.' }],
+    }
+    const { getByText, queryByText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[sysRow]} />,
+    )
+    expect(getByText('You are a helpful assistant.')).toBeTruthy()
+    // The System block must NOT acquire a "Thinking" label.
+    expect(queryByText('Thinking')).toBeNull()
+  })
+
+  it('D8.3 regression: plain text blocks render unchanged', () => {
+    const { getByText } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[makeMessage('m1', 'a plain text message')]} />,
+    )
+    expect(getByText('a plain text message')).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// WU8 — transcript extractor maps type:"thinking" blocks into thinkingText
+// ---------------------------------------------------------------------------
+describe('transcriptToMessages thinking extraction (WU8)', () => {
+  function responseEntry(content: unknown[]): TranscriptEntry {
+    return {
+      id: 'e1',
+      timestamp: '2025-01-01T00:00:00Z',
+      direction: 'response',
+      payload: JSON.stringify({ content }),
+      harness: 'claude-code',
+      model: 'claude-sonnet-4',
+    }
+  }
+
+  it('D8.1: extracts a type:"thinking" block into a thinkingText MessageContent', () => {
+    const msgs = transcriptToMessages([
+      responseEntry([{ type: 'thinking', thinking: 'pondering the problem', signature: 'sig123' }]),
+    ])
+    const block = msgs.flatMap((m) => m.blocks).find((b) => b.thinkingText !== undefined)
+    expect(block).toBeTruthy()
+    expect(block!.thinkingText).toBe('pondering the problem')
+    // It must NOT be conflated with collapsedText (the System-prompt block).
+    expect(block!.collapsedText).toBeUndefined()
+  })
+
+  it('D8.1: thinking and text blocks coexist on the same assistant response', () => {
+    const msgs = transcriptToMessages([
+      responseEntry([
+        { type: 'thinking', thinking: 'first I think' },
+        { type: 'text', text: 'then I answer' },
+      ]),
+    ])
+    const blocks = msgs.flatMap((m) => m.blocks)
+    expect(blocks.some((b) => b.thinkingText === 'first I think')).toBe(true)
+    expect(blocks.some((b) => b.text === 'then I answer')).toBe(true)
+  })
+
+  it('D8.3 regression: a plain text-only response carries no thinkingText', () => {
+    const msgs = transcriptToMessages([responseEntry([{ type: 'text', text: 'hello' }])])
+    const blocks = msgs.flatMap((m) => m.blocks)
+    expect(blocks.some((b) => b.text === 'hello')).toBe(true)
+    expect(blocks.every((b) => b.thinkingText === undefined)).toBe(true)
+  })
+})

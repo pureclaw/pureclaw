@@ -44,6 +44,7 @@ library
     -- Security (pure where possible)
     PureClaw.Security.Path
     PureClaw.Security.Command
+    PureClaw.Security.Adoption
     PureClaw.Security.Policy
     PureClaw.Security.Secrets
     PureClaw.Security.Crypto
@@ -94,6 +95,13 @@ library
     -- Harness (tmux lifecycle)
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode
+    PureClaw.Harness.ClaudeLogConvert
+    PureClaw.Harness.ClaudeLogPath
+    PureClaw.Harness.ClaudeSession
+    PureClaw.Harness.Discovery
+    PureClaw.Harness.JsonlTail
+    PureClaw.Harness.Reconcile
+    PureClaw.Harness.Registry
     PureClaw.Harness.Tmux
     -- Tools (take handles, return IO results)
     PureClaw.Tools.Registry
@@ -248,6 +256,7 @@ test-suite pureclaw-test
     Security.PolicySpec
     Security.PathSpec
     Security.CommandSpec
+    Security.AdoptionSpec
     Core.ConfigSpec
     Handles.LogSpec
     Handles.FileSpec
@@ -345,6 +354,13 @@ test-suite pureclaw-test
     -- Frontend (live transcript streaming — WU6: HTTP-API regression)
     Frontend.APISpec
     Harness.ClaudeCodeSpec
+    Harness.ClaudeLogConvertSpec
+    Harness.ClaudeLogPathSpec
+    Harness.ClaudeSessionSpec
+    Harness.DiscoverySpec
+    Harness.JsonlTailSpec
+    Harness.ReconcileSpec
+    Harness.RegistrySpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs
     Routing.ParseSpec

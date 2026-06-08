@@ -120,7 +120,7 @@ spec = do
 
     it "round-trips a harness kind" $ do
       let s = sample
-            { _sm_kind = SkHarness (HarnessSpec HClaudeCode (TbTmux (TmuxConfig "claude-code" "claude-code" Nothing)) Nothing [])
+            { _sm_kind = SkHarness (HarnessSpec HClaudeCode (TbTmux (TmuxConfig "claude-code" "claude-code" Nothing)) Nothing [] Nothing Nothing Nothing)
             }
       Aeson.decode (Aeson.encode s) `shouldBe` Just s
 
@@ -171,7 +171,7 @@ spec = do
       defaultTarget (SkProvider (ProviderSpec (ProviderId "anthropic") (ModelId "m") Nothing)) `shouldBe` TargetProvider
 
     it "defaultTarget SkHarness uses flavour name as harness target" $
-      defaultTarget (SkHarness (HarnessSpec HClaudeCode TbLocal Nothing []))
+      defaultTarget (SkHarness (HarnessSpec HClaudeCode TbLocal Nothing [] Nothing Nothing Nothing))
         `shouldBe` TargetHarness "claude-code"
 
   -- -----------------------------------------------------------------------

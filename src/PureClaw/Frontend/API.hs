@@ -4,9 +4,14 @@ module PureClaw.Frontend.API
     -- * Environment
   , FrontendEnv (..)
   , StartedHarness (..)
+  , ReleaseTmux (..)
+  , productionReleaseTmux
+  , productionKillWindow
+  , pickLiveMarker
     -- * Harness routing helpers
   , harnessKeyFromKind
   , shouldRouteToHarness
+  , resolveHarnessSession
     -- * Stream connection guard (per-origin cap)
   , StreamGuard (..)
   , mkStreamGuard
@@ -25,6 +30,10 @@ module PureClaw.Frontend.API
   , AgentInfo (..)
   , ProviderInfo (..)
   , TabSnapshot (..)
+    -- * Harness → tab snapshot mapping (WU8, exported for testing)
+  , livenessToTabStatus
+  , harnessOriginToText
+  , harnessEntriesToTabs
     -- * New tab request/response (exported for testing)
   , NewTabRequest (..)
   , NewTabResponse (..)
@@ -35,7 +44,7 @@ import Control.Concurrent.STM (TVar, newTVarIO)
 import Control.Exception (IOException, SomeException, bracket, bracket_, try)
 import Control.Monad (filterM, unless, when)
 import Data.Aeson qualified as Aeson
-import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
+import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?), (.!=))
 import Data.Aeson.Types qualified as AesonTypes
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
@@ -44,6 +53,7 @@ import Data.Vector qualified as V
 import System.IO (IOMode (..), withFile)
 import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
+import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe qualified as Maybe
@@ -78,8 +88,16 @@ import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Handles.Tab (TabKind (..))
-import PureClaw.Harness.ClaudeCode (isIdle)
-import PureClaw.Harness.Tmux (captureWindow)
+import PureClaw.Harness.Discovery (DiscoverableWindow, scanDiscoverableIO)
+import PureClaw.Harness.Reconcile (livenessToActivity)
+import PureClaw.Harness.Tmux qualified as Tmux
+import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Security.Adoption
+  ( AdoptError (..)
+  , AdoptedHarness
+  , ConsentChannel (..)
+  , authorizeAdoption
+  )
 import PureClaw.Providers.Class
 import PureClaw.Session.Handle
   ( BranchError (..)
@@ -109,6 +127,54 @@ import PureClaw.Transcript.Types
 data FrontendEnv = FrontendEnv
   { _fe_harnesses    :: IORef (Map.Map Text HarnessHandle)
     -- ^ Live harness handles from AgentEnv.
+  , _fe_harnessRegistry :: Registry.HarnessRegistry
+    -- ^ The durable 'HarnessId' registry — the source of truth for harness
+    -- identity and health (design @docs\/harness-registry.md@). ADDITIVE
+    -- alongside the legacy '_fe_harnesses' map: the map keys by mutable
+    -- window name, whereas the registry keys by a UUID-backed
+    -- 'Registry.HarnessId' that survives tmux rename\/move and restart. Shares
+    -- the SAME underlying 'TVar' as 'AgentEnv._env_harnessRegistry' so the
+    -- frontend and agent observe the same registry.
+  , _fe_consentChannel :: ConsentChannel
+    -- ^ How the run that drives this frontend was launched: the foreground
+    -- interactive TUI ('ConsentInteractive'), the gateway-served web UI
+    -- ('ConsentWeb'), or a truly unattended run with no human picking a window
+    -- ('ConsentHeadless' — bot\/cron\/import\/tests). The @POST \/api\/adopt@
+    -- endpoint passes this to 'authorizeAdoption' BEFORE any tmux mutation.
+    -- 'ConsentInteractive' and 'ConsentWeb' authorize (the human's New-Tab\/
+    -- "Existing Harness" window selection IS the consent); 'ConsentHeadless' is
+    -- denied even with a valid consent body (design §8 B2, SEC-1\/FEAS-2). This
+    -- is the SOLE remaining adoption gate now that the allow-list was dropped.
+    -- Tests default to 'ConsentHeadless' (fail-closed).
+  , _fe_adopt        :: AdoptedHarness -> Text -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle))
+    -- ^ Adopt an external, discovered tmux window into the registry. The
+    -- 'AdoptedHarness' argument is the capability token from 'authorizeAdoption'
+    -- (its value constructor is unexported, so this seam is impossible to call
+    -- without first passing the consent + allow-list gate — D4.3, type-enforced).
+    -- The 'Text' is the window name to adopt; the session rides in the token.
+    -- The dispatcher wires the real 'adoptExternalWindow' mechanism (which
+    -- stamps @\@pcl_id@, sets the capture baseline to the current scrollback
+    -- end, registers an @OriginAdopted@ entry, and links a @session.json@); the
+    -- default test stub returns @Left@. The endpoint additionally syncs the
+    -- legacy '_fe_harnesses' map on success (D-ADD-2).
+  , _fe_releaseTmux  :: ReleaseTmux
+    -- ^ The two tmux primitives the @POST \/api\/tabs\/{index}\/release@
+    -- endpoint needs, bundled so they can be injected as a single seam (Phase 3
+    -- WU5). 'productionReleaseTmux' wires them to the real
+    -- 'Tmux.readMarkers'-based live-@\@pcl_id@ lookup and 'Tmux.clearWindowMarker'.
+    -- The endpoint re-corroborates the live marker BEFORE issuing any
+    -- @set-option@ (SEC-3 anti-spoof): it NEVER calls @_rt_clearMarker@ unless
+    -- the live marker still equals THIS entry's id. Tests inject a recording
+    -- 'ReleaseTmux' to assert the @set-option -wu@ argv (D5.1) and to prove no
+    -- tmux mutation happens on a stale\/uncorroborated entry (D5.2).
+  , _fe_killWindow   :: Text -> Text -> IO ()
+    -- ^ Kill the tmux window at @(session, windowName)@ — terminates the
+    -- harness's claude-code process and the pane's shell. Used ONLY by
+    -- @POST \/api\/tabs\/{index}\/destroy@, and ONLY after the handler
+    -- re-corroborates (via '_fe_releaseTmux'\'s @_rt_liveMarker@) that the live
+    -- @\@pcl_id@ still equals THIS entry's id (SEC-3): we never kill a window we
+    -- cannot confirm is ours. Production wires 'Tmux.stopHarnessWindowNamed'
+    -- (@kill-window@); the default test stub is a no-op.
   , _fe_sessionsDir  :: FilePath
     -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
   , _fe_recentLimit  :: Int
@@ -184,19 +250,144 @@ data FrontendEnv = FrontendEnv
 data StartedHarness = StartedHarness
   { _shh_key  :: !Text        -- ^ harness map key = canonical <> "-" <> show windowIdx (also the tmux window name)
   , _shh_tmux :: !TmuxConfig  -- ^ coordinates to persist in the session's _sm_kind HarnessSpec._h_backend
+  , _shh_id   :: !Registry.HarnessId
+    -- ^ The durable 'Registry.HarnessId' generated for the spawned harness and
+    -- registered in the 'HarnessRegistry' (WU4). 'createHarnessTab' persists it
+    -- into '_sm_kind' (WU7, D7.2) so subsequent sends route by id through the
+    -- registry rather than only by the dual-written window name.
+  , _shh_claudeSessionUuid :: !(Maybe Text)
+    -- ^ The canonical @claude-code@ session UUID minted at spawn time and
+    -- injected as @--session-id \<uuid\>@ into the spawned @claude@ argv (WU6).
+    -- 'createHarnessTab' persists it into the session's
+    -- 'PureClaw.Session.Kind._h_claudeSessionUuid' so a restart can re-derive
+    -- the JSONL log path. 'Nothing' for non-@claude-code@\/adopted harnesses.
+    -- The SAME minted value is injected into the argv AND returned here, so the
+    -- persisted uuid is guaranteed to match the one claude-code writes its log
+    -- under.
+  , _shh_canonicalCwd :: !(Maybe Text)
+    -- ^ The canonicalized spawn working directory used for JSONL log-path
+    -- derivation (WU6 D6.3). 'createHarnessTab' persists it into
+    -- 'PureClaw.Session.Kind._h_canonicalCwd'. 'Nothing' when not a spawned
+    -- @claude-code@ harness.
   }
 
--- | The harness map key for a session kind, if it is a tmux-backed harness.
--- @Just k@  => route this session to harness handle @k@; @Nothing@ => provider session.
+-- | The two tmux primitives the Release endpoint (Phase 3 WU5) needs, bundled
+-- as one injectable seam so the security-critical /corroborate-before-mutate/
+-- ordering lives in the handler (not hidden behind the seam) while still being
+-- fully testable.
+--
+-- @_rt_liveMarker session window@ re-reads the LIVE @\@pcl_id@ of the window at
+-- the entry's cached @(session, window)@ coordinate, returning 'Nothing' when
+-- the window is gone or carries no (non-empty) marker. @_rt_clearMarker session
+-- window@ unsets @\@pcl_id@ (@set-option -wu@) — it is invoked ONLY after the
+-- handler confirms the live marker still equals THIS entry's id (SEC-3), and it
+-- NEVER kills the window.
+data ReleaseTmux = ReleaseTmux
+  { _rt_liveMarker  :: Text -> Text -> IO (Maybe Text)
+  , _rt_clearMarker :: Text -> Text -> IO ()
+  , _rt_renameWindow :: Text -> Text -> Text -> IO ()
+    -- ^ @session currentName newName@: rename the released window so its tmux
+    -- title shows PureClaw has detached. Invoked ONLY on the corroborated
+    -- branch (right after '_rt_clearMarker'), so we only retitle a window we
+    -- just confirmed is ours; like clear, it NEVER kills the window.
+  }
+
+-- | The new tmux window title applied when PureClaw releases a harness — the
+-- original (PureClaw-managed) name with a @\" (released)\"@ suffix so the user
+-- can see at a glance that PureClaw is no longer attached.
+releasedWindowName :: Text -> Text
+releasedWindowName current = current <> " (released)"
+
+-- | The production 'ReleaseTmux': the live-marker lookup is a 'Tmux.readMarkers'
+-- sweep of the session filtered to the target window (returning its non-empty
+-- @\@pcl_id@), and the clear is 'Tmux.clearWindowMarker' (@set-option -wu@).
+-- Both route through the authorized tmux seam ('Tmux.tmuxProc').
+productionReleaseTmux :: ReleaseTmux
+productionReleaseTmux = ReleaseTmux
+  { _rt_liveMarker  = \session window ->
+      pickLiveMarker window <$> Tmux.readMarkers session
+  , _rt_clearMarker = Tmux.clearWindowMarker
+  , _rt_renameWindow = Tmux.renameWindowNamed
+  }
+
+-- | The production '_fe_killWindow': 'Tmux.stopHarnessWindowNamed', which issues
+-- @kill-window -t session:window@ through the authorized tmux seam. Terminates
+-- the harness's claude-code process and the pane shell. Invoked by Destroy ONLY
+-- after the handler re-corroborates the window is ours (SEC-3).
+productionKillWindow :: Text -> Text -> IO ()
+productionKillWindow = Tmux.stopHarnessWindowNamed
+
+-- | Pure core of the production live-@\@pcl_id@ lookup: from a session's
+-- 'Tmux.readMarkers' sweep, return the non-empty @\@pcl_id@ of the row whose
+-- window name matches @window@, or 'Nothing' when the window is absent or its
+-- marker is empty\/unset. Empty markers are treated as \"no marker\" so an
+-- unmarked\/cleared window never spuriously corroborates.
+pickLiveMarker :: Text -> [Tmux.TmuxWindowRow] -> Maybe Text
+pickLiveMarker window rows =
+  Maybe.listToMaybe
+    [ Tmux._twr_pclId r
+    | r <- rows
+    , Tmux._twr_windowName r == window
+    , not (T.null (Tmux._twr_pclId r))
+    ]
+
+-- | The default tmux session name a frontend-spawned harness lands in when the
+-- requested 'HarnessSpec' does not specify one (WU7, D7.3).
+defaultHarnessSession :: Text
+defaultHarnessSession = "pureclaw"
+
+-- | Resolve the tmux session name a harness should be spawned into from the
+-- requested 'HarnessSpec' (WU7, the epic's core fix). The session is read from
+-- the spec's 'TbTmux' backend '_tc_session' when it is non-empty; otherwise it
+-- falls back to 'defaultHarnessSession' (@"pureclaw"@). A non-tmux backend
+-- (the frontend's placeholder @local@ request backend) likewise resolves to the
+-- default. The WINDOW is auto-assigned by the spawn path (@canonical-\<idx\>@);
+-- honoring a caller-specified '_tc_window' for placement is deferred
+-- (pureclaw-jlc), so this reads only the session, never the window.
+resolveHarnessSession :: HarnessSpec -> Text
+resolveHarnessSession spec = case _h_backend spec of
+  TbTmux tc
+    | not (T.null (_tc_session tc)) -> _tc_session tc
+  _                                 -> defaultHarnessSession
+
+-- | The durable routing key for a session kind, if it is a tmux-backed
+-- harness. @Just k@ => route this session to a harness; @Nothing@ => provider
+-- session.
+--
+-- WU6 makes this /id-primary with a name fallback/: when the persisted
+-- 'HarnessSpec' carries a 'Registry.HarnessId' (the durable anchor), the key
+-- is that id's canonical text; otherwise it is the (dual-written) tmux window
+-- name — the legacy PR #74 routing key. 'sendToHarness' interprets the key:
+-- an id-shaped key resolves through the registry first, falling back to the
+-- window name; a name-shaped key goes straight to the legacy name-keyed map.
+-- The registry is EMPTY until later work units populate it, so until then this
+-- yields the window name and routing stays on the PR #74 path unchanged.
 harnessKeyFromKind :: SessionKind -> Maybe Text
 harnessKeyFromKind (SkHarness hs) = case _h_backend hs of
-  TbTmux tc -> Just (_tc_window tc)
+  TbTmux tc -> Just (maybe (_tc_window tc) Registry.harnessIdToText (_h_harnessId hs))
   _         -> Nothing
 harnessKeyFromKind _ = Nothing
+
+-- | The dual-written tmux window name for a tmux-backed harness session, used
+-- as the legacy name-fallback routing key when an id lookup misses (WU6).
+-- @Nothing@ for any non-tmux / non-harness kind.
+harnessWindowFromKind :: SessionKind -> Maybe Text
+harnessWindowFromKind (SkHarness hs) = case _h_backend hs of
+  TbTmux tc -> Just (_tc_window tc)
+  _         -> Nothing
+harnessWindowFromKind _ = Nothing
 
 -- | Routing decision: does this session route to a harness (vs the LLM provider)?
 shouldRouteToHarness :: SessionKind -> Bool
 shouldRouteToHarness = Maybe.isJust . harnessKeyFromKind
+
+-- | Is a registry entry PID-corroborated? A recorded shell or harness PID is
+-- evidence the entry is genuinely ours and not a bare, attacker-writable
+-- @\@pcl_id@ marker (design §8 C4 / K2). Routing trust requires this: an
+-- uncorroborated entry never receives keystrokes (D6.6).
+isPidCorroborated :: Registry.HarnessEntry -> Bool
+isPidCorroborated e =
+  Maybe.isJust (Registry._he_harnessPid e) || Maybe.isJust (Registry._he_shellPid e)
 
 -- | Per-origin WS subscriber counter. Lives at the same lifetime as the
 -- broker (constructed once in @startWithChannel@). The WS handler calls
@@ -285,20 +476,113 @@ data TabSnapshot = TabSnapshot
   , _ts_name      :: !Text
     -- ^ Human-readable tab name.
   , _ts_status    :: !Text
-    -- ^ @\"running\"@, @\"idle\"@, or @\"crashed\"@.
+    -- ^ Liveness word: @\"running\"@, @\"idle\"@, @\"exited\"@, or
+    -- @\"orphaned\"@ (Phase 2 split Exited\/Orphaned; see
+    -- 'livenessToTabStatus').
   , _ts_sessionId :: !(Maybe Text)
     -- ^ Session ID for session-backed tabs; 'Nothing' for raw shells.
+  , _ts_extModified :: !Bool
+    -- ^ The harness window was renamed out-of-band (the §7 ⚠ \"edited\"
+    -- pill). Orthogonal to liveness.
+  , _ts_stale :: !Bool
+    -- ^ Health could not be refreshed this cycle; the frontend holds the
+    -- last-known icon with a dimmed cue (§7).
+  , _ts_origin :: !Text
+    -- ^ How the harness entered the registry: @\"spawned\"@,
+    -- @\"discovered\"@, or @\"adopted\"@ (the §7 origin pill).
+  , _ts_attachCommand :: !(Maybe Text)
+    -- ^ Copyable @tmux attach@ command for live harness rows;
+    -- 'Nothing' for non-harness tabs.
   }
   deriving stock (Show, Eq)
 
+-- | Serialize a 'TabSnapshot'. EXTEND-ONLY: the original Phase-1 keys
+-- (@index@\/@kind@\/@name@\/@status@\/@session_id@) are emitted unchanged;
+-- the Phase-2 health fields are ADDED as new snake_case keys
+-- (@ext_modified@\/@stale@\/@origin@\/@attach_command@). Old consumers that
+-- ignore unknown keys keep working.
 instance ToJSON TabSnapshot where
   toJSON ts = object
-    [ "index"      .= _ts_index ts
-    , "kind"       .= _ts_kind ts
-    , "name"       .= _ts_name ts
-    , "status"     .= _ts_status ts
-    , "session_id" .= _ts_sessionId ts
+    [ "index"          .= _ts_index ts
+    , "kind"           .= _ts_kind ts
+    , "name"           .= _ts_name ts
+    , "status"         .= _ts_status ts
+    , "session_id"     .= _ts_sessionId ts
+    , "ext_modified"   .= _ts_extModified ts
+    , "stale"          .= _ts_stale ts
+    , "origin"         .= _ts_origin ts
+    , "attach_command" .= _ts_attachCommand ts
     ]
+
+-- | Map a registry 'Registry.Liveness' to the @TabSnapshot@ status vocabulary.
+-- Phase 2 (§7) SPLITS the former \"crashed\" bucket: 'Registry.LivenessExited'
+-- (the process exited; offer Restart\/Dismiss) and 'Registry.LivenessOrphaned'
+-- (the window vanished out-of-band; greyed, offer Dismiss) now map to distinct
+-- words so the frontend can render the state→visual table.
+livenessToTabStatus :: Registry.Liveness -> Text
+livenessToTabStatus lv = case lv of
+  Registry.LivenessIdle     -> "idle"
+  Registry.LivenessThinking -> "running"
+  Registry.LivenessExited   -> "exited"
+  Registry.LivenessOrphaned -> "orphaned"
+
+-- | Map a registry 'Registry.HarnessOrigin' to the @TabSnapshot@ origin
+-- vocabulary (the §7 origin pill): @\"spawned\"@ (we launched it),
+-- @\"discovered\"@ (boot-reconstructed from a tagged window), or
+-- @\"adopted\"@ (taken over from another controller).
+harnessOriginToText :: Registry.HarnessOrigin -> Text
+harnessOriginToText o = case o of
+  Registry.OriginSpawned    -> "spawned"
+  Registry.OriginDiscovered -> "discovered"
+  Registry.OriginAdopted    -> "adopted"
+
+-- | Project the harness registry's entries onto @TabSnapshot@s for the
+-- Active-Tabs list. Phase-1 minimal slice: only harness entries are surfaced
+-- (provider\/raw_shell tabs are the Phase-2 full tab model).
+--
+-- 'HarnessEntry' carries no intrinsic tab index in Phase 1, so the index is a
+-- STABLE DISPLAY ORDERING derived by sorting deterministically on
+-- @(label, id-text)@ and enumerating from 0. Full tab-index semantics are
+-- Phase 2.
+-- | The canonical display ordering of harness entries: sort deterministically
+-- on @(label, id-text)@. This is the SINGLE source of the index→entry mapping —
+-- both 'harnessEntriesToTabs' (which enumerates this list to assign
+-- '_ts_index') and 'tabIndexToEntry' (which resolves an action's display index
+-- back to an entry) consume it, so a @POST \/api\/tabs\/{n}\/...@ action always
+-- targets exactly the row @GET \/api\/tabs@ shows at index @n@.
+sortedHarnessEntries :: [Registry.HarnessEntry] -> [Registry.HarnessEntry]
+sortedHarnessEntries =
+  List.sortOn
+    (\e -> (Registry._he_label e, Registry.harnessIdToText (Registry._he_id e)))
+
+-- | Resolve a display tab index to its 'Registry.HarnessEntry' using the SAME
+-- ordering '/api/tabs' publishes ('sortedHarnessEntries'). 'Nothing' for an
+-- out-of-range index. The caller passes the current registry snapshot.
+tabIndexToEntry :: [Registry.HarnessEntry] -> Int -> Maybe Registry.HarnessEntry
+tabIndexToEntry entries idx
+  | idx < 0   = Nothing
+  | otherwise = case drop idx (sortedHarnessEntries entries) of
+      (e : _) -> Just e
+      []      -> Nothing
+
+harnessEntriesToTabs :: [Registry.HarnessEntry] -> [TabSnapshot]
+harnessEntriesToTabs entries =
+  zipWith toTab [0 ..] (sortedHarnessEntries entries)
+  where
+    toTab :: Int -> Registry.HarnessEntry -> TabSnapshot
+    toTab idx e = TabSnapshot
+      { _ts_index         = idx
+      , _ts_kind          = "harness"
+      , _ts_name          = Registry._he_label e
+      , _ts_status        = livenessToTabStatus (Registry._he_liveness e)
+      , _ts_sessionId     = Registry._he_sessionId e
+      , _ts_extModified   = Registry._he_extModified e
+      , _ts_stale         = Registry._he_stale e
+      , _ts_origin        = harnessOriginToText (Registry._he_origin e)
+      , _ts_attachCommand =
+          Just ("tmux attach -t " <> Registry._he_session e
+                  <> ":" <> Registry._he_windowName e)
+      }
 
 -- | JSON-serializable session info for the frontend.
 data SessionInfo = SessionInfo
@@ -354,8 +638,22 @@ apiApp env req respond = do
       handleTranscript env sid respond
     ("POST", ["api", "tabs", tidx, "close"]) ->
       handleCloseTab env tidx respond
+    ("POST", ["api", "tabs", tidx, "dismiss"]) ->
+      handleDismissTab env tidx respond
+    ("POST", ["api", "tabs", tidx, "release"]) ->
+      handleReleaseTab env tidx req respond
+    ("POST", ["api", "tabs", tidx, "destroy"]) ->
+      handleDestroyTab env tidx req respond
+    ("POST", ["api", "tabs", tidx, "acknowledge"]) ->
+      handleAcknowledgeTab env tidx respond
+    ("POST", ["api", "tabs", _tidx, "restart"]) ->
+      handleRestartTab respond
     ("POST", ["api", "tabs", "new"]) ->
       handleNewTab env req respond
+    ("POST", ["api", "discovery", "scan"]) ->
+      handleDiscoveryScan env respond
+    ("POST", ["api", "adopt"]) ->
+      handleAdopt env req respond
     ("POST", ["api", "sessions", "new"]) ->
       handleNewSessionGone respond
     ("POST", ["api", "sessions", sid, "send"]) ->
@@ -374,49 +672,123 @@ apiApp env req respond = do
       handleListProviderModels env name respond
     _                                        -> respondNotFound respond
 
+-- | @GET \/api\/harnesses@ — report every harness in the registry with its
+-- reconciled liveness. The registry (not the legacy '_fe_harnesses' map) is the
+-- source of truth for health (Harness Registry, WU5): the reconcile loop keeps
+-- each entry's '_he_liveness' fresh, so the handler reads the cached state
+-- rather than performing a live tmux capture per request.
 handleHarnesses :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleHarnesses env respond = do
-  harnesses <- readIORef (_fe_harnesses env)
-  infos <- traverse probeHarness (Map.toList harnesses)
+  entries <- Registry.snapshot (_fe_harnessRegistry env)
+  let infos = map harnessInfoOfEntry entries
   respond $ jsonResponse status200 infos
 
--- | Probe a single harness to determine its activity.
--- Checks process status first, then does a quick screen capture
--- to distinguish thinking from idle.
-probeHarness :: (Text, HarnessHandle) -> IO HarnessInfo
-probeHarness (name, hh) = do
-  st <- _hh_status hh
-  activity <- case st of
-    HarnessExited _ -> pure HarnessStopped
-    HarnessRunning  -> probeActivity (_hh_session hh) name
-  pure HarnessInfo
-    { _hi_name     = name
-    , _hi_activity = activity
-    }
-
--- | Capture the tmux window and check if the harness is idle or thinking.
-probeActivity :: Text -> Text -> IO HarnessActivity
-probeActivity tmuxSession windowName = do
-  let target = tmuxSession <> ":" <> extractWindowIdx windowName
-  result <- try @SomeException $ captureWindow target 50
-  case result of
-    Left _        -> pure HarnessIdle
-    Right capture -> do
-      let screenText = TE.decodeUtf8Lenient capture
-      pure $ if isIdle screenText then HarnessIdle else HarnessThinking
-
--- | Extract the window index suffix from a harness name like "claude-code-0".
-extractWindowIdx :: Text -> Text
-extractWindowIdx name =
-  case T.splitOn "-" name of
-    parts | length parts >= 2 -> last parts
-    _                         -> "0"
+-- | Map a registry entry to its JSON-serializable 'HarnessInfo'. The display
+-- name is the entry's label (the tmux window name); the activity comes from the
+-- reconciled liveness via the same mapping the reconcile loop publishes.
+harnessInfoOfEntry :: Registry.HarnessEntry -> HarnessInfo
+harnessInfoOfEntry e = HarnessInfo
+  { _hi_name     = Registry._he_label e
+  , _hi_activity = livenessToActivity (Registry._he_liveness e)
+  }
 
 -- | Return all currently open tabs as a JSON array.
 handleListTabs :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleListTabs env respond = do
   tabs <- _fe_listTabs env
   respond $ jsonResponse status200 tabs
+
+-- | On-demand discovery of adoptable (PureClaw-unmarked) tmux windows
+-- (Phase 3, WU2). The scan LISTS ALL tmux sessions and is METADATA-ONLY — it
+-- never captures a pane (design @docs\/harness-registry.md@ §8 B2\/C1). The
+-- adoption allow-list was dropped: consent gates adoption (a separate action,
+-- WU4), not discovery. Discovered candidates are transient (not registry
+-- entries).
+handleDiscoveryScan :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleDiscoveryScan _env respond = do
+  candidates <- scanDiscoverableIO
+  respond $ jsonResponse status200 (candidates :: [DiscoverableWindow])
+
+-- | Request body for @POST \/api\/adopt@. A discovered candidate has NO tab
+-- index (it is not a registry entry yet), so it is addressed by
+-- @session@ + @window@ — the "resolve a 'DiscoverableWindow' target" shape. The
+-- @consent_confirmed@ flag is the browser dialog's confirmation; the endpoint
+-- requires it @== true@ (a 400 otherwise) AND independently requires an
+-- interactive consent CHANNEL via 'authorizeAdoption' (a 403 otherwise) — a
+-- client cannot bypass the channel check by sending @consent_confirmed:true@.
+data AdoptRequest = AdoptRequest
+  { _ar_session          :: !Text
+  , _ar_window           :: !Text
+  , _ar_consentConfirmed :: !Bool
+  }
+
+instance FromJSON AdoptRequest where
+  parseJSON = Aeson.withObject "AdoptRequest" $ \o ->
+    AdoptRequest
+      <$> o .: "session"
+      <*> o .: "window"
+      <*> o .:? "consent_confirmed" .!= False
+
+-- | @POST \/api\/adopt@ — adopt an external (discovered, UNMARKED) tmux window
+-- into the registry (Phase 3, WU4). SECURITY-CRITICAL ordering (SEC-1):
+-- 'authorizeAdoption' runs BEFORE any tmux mutation, so a denied request stamps
+-- NO @\@pcl_id@ and creates NO registry entry.
+--
+-- Steps:
+--
+--   1. Decode the body; require @consent_confirmed == true@ (else @400@).
+--   2. 'authorizeAdoption' (_fe_consentChannel) session:
+--
+--        * @Left AdoptNoConsentChannel@ → @403@ (a headless\/gateway\/import run
+--          has no human at the confirm dialog — fail-closed, the SOLE remaining
+--          denial; denies even a @consent_confirmed:true@ body).
+--        * @Right token@ → run '_fe_adopt' with the token. On success @200@; on
+--          a tmux\/adopt failure @500@.
+--
+-- On a successful adopt the legacy '_fe_harnesses' map is synced (D-ADD-2) so
+-- name-keyed routing keeps working until the session.json id is consulted.
+handleAdopt :: FrontendEnv -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleAdopt env req respond = do
+  body <- consumeBody req
+  case Aeson.eitherDecode body of
+    Left err ->
+      respond $ jsonResponse status400
+        (object ["error" .= ("Invalid JSON: " <> T.pack err)])
+    Right ar
+      | not (_ar_consentConfirmed ar) ->
+          respond $ jsonResponse status400
+            (object ["error" .= ("adoption requires consent_confirmed: true" :: Text)])
+      | otherwise ->
+          -- SEC-1: the gate runs BEFORE any tmux mutation. On Left we respond
+          -- and NEVER call '_fe_adopt', so nothing is stamped/registered.
+          case authorizeAdoption (_fe_consentChannel env) (_ar_session ar) of
+            Left AdoptNoConsentChannel ->
+              respond $ jsonResponse status403
+                (object ["error" .= ("adoption requires an interactive consent channel" :: Text)])
+            Right token -> do
+              result <- _fe_adopt env token (_ar_window ar)
+              case result of
+                Left err ->
+                  respond $ harnessErrorResponse err
+                Right (hid, hh) -> do
+                  -- D-ADD-2: sync the legacy name-keyed map so name-fallback
+                  -- routing reaches the adopted handle immediately.
+                  modifyIORef' (_fe_harnesses env) (Map.insert (_ar_window ar) hh)
+                  -- Surface the PureClaw session id created for this harness (it
+                  -- lives on the registry entry's '_he_sessionId') so the web
+                  -- "Existing Harness" composer can drop the user into the
+                  -- conversation and send a first message right after adopting.
+                  -- 'Nothing' -> null.
+                  mEntry <- Registry.lookupById (_fe_harnessRegistry env) hid
+                  broadcastLists env
+                  respond $ jsonResponse status200
+                    (object
+                      [ "adopted"     .= True
+                      , "harness_id"  .= Registry.harnessIdToText hid
+                      , "session"     .= _ar_session ar
+                      , "window"      .= _ar_window ar
+                      , "session_id"  .= (mEntry >>= Registry._he_sessionId)
+                      ])
 
 -- | Close a tab by index via the '_fe_closeTab' callback.
 handleCloseTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
@@ -433,6 +805,272 @@ handleCloseTab env tidxText respond =
     _ ->
       respond $ jsonResponse status400 (object ["error" .= ("Invalid tab index" :: Text)])
 
+-- | Parse a display tab index and resolve it against the CURRENT registry
+-- snapshot using the same ordering '/api/tabs' publishes
+-- ('tabIndexToEntry'\/'sortedHarnessEntries'). On a non-numeric index responds
+-- @400@; on an out-of-range index responds @404@; otherwise runs the action
+-- with the resolved entry. Shared by Dismiss\/Acknowledge so both agree on
+-- which row an index names.
+withResolvedTab
+  :: FrontendEnv
+  -> Text
+  -> (Response -> IO ResponseReceived)
+  -> (Registry.HarnessEntry -> IO ResponseReceived)
+  -> IO ResponseReceived
+withResolvedTab env tidxText respond act =
+  case reads (T.unpack tidxText) :: [(Int, String)] of
+    [(idx, "")] -> do
+      entries <- Registry.snapshot (_fe_harnessRegistry env)
+      case tabIndexToEntry entries idx of
+        Just e  -> act e
+        Nothing ->
+          respond $ jsonResponse status404
+            (object ["error" .= ("No tab at index " <> tidxText)])
+    _ ->
+      respond $ jsonResponse status400 (object ["error" .= ("Invalid tab index" :: Text)])
+
+-- | @POST \/api\/tabs\/{index}\/dismiss@ — user-initiated removal of an
+-- Exited\/Orphaned row. Removes the entry from BOTH the registry and the legacy
+-- '_fe_harnesses' map, but NEVER touches @session.json@ — so the session
+-- reappears in Recent Sessions (design §7 \"appears in exactly one section\").
+-- Acts on both stores directly (the registry and legacy map both live on
+-- 'FrontendEnv'), so no extra callback is needed.
+handleDismissTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleDismissTab env tidxText respond =
+  withResolvedTab env tidxText respond $ \e -> do
+    Registry.deleteEntry (_fe_harnessRegistry env) (Registry._he_id e)
+    modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
+    broadcastLists env
+    respond $ jsonResponse status200 (object ["dismissed" .= True])
+
+-- | Request body for @POST \/api\/tabs\/{index}\/release@. The @purge@ flag is
+-- ACCEPTED but RESERVED for the Phase-3 MVP: transcript\/@session.json@ are
+-- retained regardless (design §8 C2). It is decoded so a future release can
+-- honor it without a wire-format change; today it is a documented no-op.
+data ReleaseRequest = ReleaseRequest
+  { _rr_purge :: !Bool
+  }
+
+instance FromJSON ReleaseRequest where
+  parseJSON = Aeson.withObject "ReleaseRequest" $ \o ->
+    ReleaseRequest <$> o .:? "purge" .!= False
+
+-- | @POST \/api\/tabs\/{index}\/release@ — release an ADOPTED harness: stop
+-- managing it and REMOVE PureClaw's @\@pcl_id@ marker, but NEVER kill the
+-- window and RETAIN its transcript\/@session.json@ (design §6, §8 C2). Distinct
+-- from Dismiss (which removes a dead row with no tmux op) and from Close (which
+-- never kills either): Release issues a @set-option -wu@ on a LIVE window — but
+-- ONLY after re-corroborating it is still ours (SEC-3 anti-spoof).
+--
+-- SECURITY-CRITICAL ordering — re-corroboration runs BEFORE any tmux mutation:
+--
+--   1. Resolve the display index → entry (shared 'tabIndexToEntry' resolver).
+--   2. Release applies to a harness of ANY origin (Spawned, Adopted, or
+--      Discovered) — the safety control is the corroboration in step 3, not the
+--      origin. PureClaw stops managing the window and hands it back.
+--   3. Re-read the LIVE @\@pcl_id@ of the entry's @(session, windowName)@ via
+--      the injected seam and compare to @harnessIdToText (_he_id entry)@:
+--
+--        * MATCH → 'Tmux.clearWindowMarker' (@set-option -wu@) + retitle the
+--          window via 'Tmux.renameWindowNamed' to @\"… (released)\"@, then
+--          deregister from the registry AND the legacy '_fe_harnesses' map;
+--          respond @200 {"released":true}@. The window is NOT killed.
+--        * MISMATCH \/ window gone (the cached coord now points at a different
+--          \/absent window — the PID-reuse\/replacement case) → deregister from
+--          BOTH stores WITHOUT issuing ANY tmux @set-option@\/mutation, and log
+--          a refusal; respond @200 {"released":true,"note":...}@. The invariant:
+--          NEVER @set-option -wu@ a window we cannot confirm is ours.
+--
+-- The @purge@ body flag is accepted but RESERVED (documented no-op; retention
+-- only — design §8 C2).
+handleReleaseTab
+  :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleReleaseTab env tidxText req respond = do
+  body <- consumeBody req
+  -- The body is optional; an empty/garbage body decodes to the default
+  -- (purge = False). The purge flag is reserved regardless, so we never fail the
+  -- request on a bad body.
+  let reservedPurge = case Aeson.eitherDecode body of
+        Right rr -> _rr_purge rr
+        Left _   -> False
+  -- RESERVED (Phase-3 MVP = retention only, design §8 C2): accepted but a
+  -- documented no-op. We log when it is requested so the intent is auditable,
+  -- but we do NOT purge/delete the transcript or session.json.
+  when reservedPurge $
+    _lh_logInfo (_fe_logger env)
+      "release: purge requested but RESERVED (Phase-3 MVP retains transcript/session.json)"
+  -- Release applies to ANY harness (spawned OR adopted): PureClaw stops managing
+  -- it but leaves the tmux window + processes running. The corroborate-before-
+  -- mutate gate inside 'releaseHarnessEntry' is the safety control, not the
+  -- origin.
+  withResolvedTab env tidxText respond $ \e -> releaseHarnessEntry env e respond
+
+-- | The corroborate-then-act core of Release, for a harness of ANY origin.
+-- Re-reads the live @\@pcl_id@ BEFORE any mutation (SEC-3) and branches:
+-- corroborated → unmark + retitle the window \"… (released)\" + deregister;
+-- stale → deregister only (no tmux op) + warn. Either way the entry leaves both
+-- stores, the window survives, and the transcript\/@session.json@ are retained
+-- (C2).
+releaseHarnessEntry
+  :: FrontendEnv -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+releaseHarnessEntry env e respond = do
+  let session  = Registry._he_session e
+      window   = Registry._he_windowName e
+      expected = Registry.harnessIdToText (Registry._he_id e)
+      rt       = _fe_releaseTmux env
+  liveMarker <- _rt_liveMarker rt session window
+  if liveMarker == Just expected
+    then do
+      -- Corroborated: the live window still carries THIS entry's marker, so it
+      -- is safe to mutate it. Unmark it (@pcl_id), then retitle it so the user
+      -- can see PureClaw has detached. Neither op kills the window. The window
+      -- name is PureClaw-managed (spawn: @claude-code-N@; adopt: @adopted-…@),
+      -- so it is dot-free and the @session:name@ rename target is unambiguous.
+      _rt_clearMarker rt session window
+      _rt_renameWindow rt session window (releasedWindowName window)
+      deregister env e
+      broadcastLists env
+      respond $ jsonResponse status200 (object ["released" .= True])
+    else do
+      -- Stale/uncorroborated: the cached coord no longer points at our window
+      -- (mismatched marker or window gone — PID-reuse/replacement). We refuse to
+      -- `set-option -wu` a window we can't confirm is ours; deregister WITHOUT
+      -- any tmux mutation and log the refusal.
+      _lh_logWarn (_fe_logger env) $
+        "release: window " <> session <> ":" <> window
+          <> " no longer corroborated (live @pcl_id="
+          <> Maybe.fromMaybe "<none>" liveMarker
+          <> ", expected " <> expected
+          <> "); deregistering WITHOUT unmarking"
+      deregister env e
+      broadcastLists env
+      respond $ jsonResponse status200
+        (object
+          [ "released" .= True
+          , "note"     .= ("window no longer corroborated; deregistered without unmarking" :: Text)
+          ])
+
+-- | Remove an entry from BOTH the registry and the legacy '_fe_harnesses' map
+-- (shared by both Release branches). Mirrors Dismiss's deregistration; NEVER
+-- touches @session.json@\/the transcript (retention — design §8 C2).
+deregister :: FrontendEnv -> Registry.HarnessEntry -> IO ()
+deregister env e = do
+  Registry.deleteEntry (_fe_harnessRegistry env) (Registry._he_id e)
+  modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
+
+-- | Request body for @POST \/api\/tabs\/{index}\/destroy@. @confirm_adopted@
+-- must be @true@ to destroy an 'Registry.OriginAdopted' harness — killing a
+-- window PureClaw did not create breaks the "release never kills" contract, so
+-- the server fail-closes unless the caller explicitly confirms. Defaults to
+-- 'False' (and on a missing/garbage body), so an unconfirmed adopted destroy is
+-- always rejected.
+newtype DestroyRequest = DestroyRequest
+  { _dr_confirmAdopted :: Bool
+  }
+
+instance FromJSON DestroyRequest where
+  parseJSON = Aeson.withObject "DestroyRequest" $ \o ->
+    DestroyRequest <$> o .:? "confirm_adopted" .!= False
+
+-- | @POST \/api\/tabs\/{index}\/destroy@ — terminate a harness: kill its tmux
+-- window (claude-code + the pane shell), ARCHIVE its session (transcript
+-- retained — design: destroy is reversible at the data layer), and deregister
+-- it from BOTH the registry and the legacy '_fe_harnesses' map. Distinct from
+-- Release (never kills), Dismiss (no tmux op, session stays in Recent), and
+-- Close.
+--
+-- Two guards:
+--
+--   * ADOPTED gate (server-enforced, not UI-trusted): an 'OriginAdopted' entry
+--     is rejected with @409@ and NO mutation unless the body carries
+--     @confirm_adopted: true@. Spawned\/Discovered entries (our own windows)
+--     destroy without confirmation.
+--   * SEC-3 corroborate-before-kill: the kill ('_fe_killWindow') fires ONLY
+--     when the live @\@pcl_id@ at the entry's cached @(session, window)@ still
+--     equals THIS entry's id. On a mismatch\/missing marker (window replaced or
+--     gone) we deregister + archive WITHOUT killing and log a refusal — we
+--     never kill a window we cannot confirm is ours.
+handleDestroyTab
+  :: FrontendEnv -> Text -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleDestroyTab env tidxText req respond = do
+  body <- consumeBody req
+  let confirmAdopted = case Aeson.eitherDecode body of
+        Right dr -> _dr_confirmAdopted dr
+        Left _   -> False
+  withResolvedTab env tidxText respond $ \e ->
+    case Registry._he_origin e of
+      Registry.OriginAdopted | not confirmAdopted ->
+        -- Server-side enforcement of the kill-adopted confirmation: the UI gate
+        -- is not trusted. No tmux op, no deregistration.
+        respond $ jsonResponse status409
+          (object ["error" .= ("adopted harness requires confirm_adopted" :: Text)])
+      _ -> destroyHarnessEntry env e respond
+
+-- | The corroborate-then-kill core of Destroy, for an entry already cleared by
+-- the adopted gate. Re-reads the live @\@pcl_id@ BEFORE killing (SEC-3); kills
+-- only when corroborated, otherwise logs a refusal and skips the kill. Either
+-- way the session is archived (transcript retained) and the entry leaves both
+-- stores.
+destroyHarnessEntry
+  :: FrontendEnv -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+destroyHarnessEntry env e respond = do
+  let session  = Registry._he_session e
+      window   = Registry._he_windowName e
+      expected = Registry.harnessIdToText (Registry._he_id e)
+  liveMarker <- _rt_liveMarker (_fe_releaseTmux env) session window
+  killed <-
+    if liveMarker == Just expected
+      then do
+        -- Corroborated: the live window still carries THIS entry's marker, so
+        -- it is safe to kill.
+        _fe_killWindow env session window
+        pure True
+      else do
+        _lh_logWarn (_fe_logger env) $
+          "destroy: window " <> session <> ":" <> window
+            <> " no longer corroborated (live @pcl_id="
+            <> Maybe.fromMaybe "<none>" liveMarker
+            <> ", expected " <> expected
+            <> "); deregistering WITHOUT killing"
+        pure False
+  -- Archive the backing session (retain the transcript) if session-backed. A
+  -- missing/unparseable session is non-fatal: the window kill + deregistration
+  -- still stand, so we log and continue rather than fail the request.
+  case Registry._he_sessionId e of
+    Just sid -> do
+      archiveResult <- setArchived (_fe_sessionsDir env) (SessionId sid) True
+      case archiveResult of
+        Right () -> pure ()
+        Left err -> _lh_logWarn (_fe_logger env) $
+          "destroy: could not archive session " <> sid <> ": " <> T.pack (show err)
+    Nothing -> pure ()
+  deregister env e
+  broadcastLists env
+  respond $ jsonResponse status200 $ object $
+    ("destroyed" .= True)
+      : [ "note" .= ("window no longer corroborated; deregistered without killing" :: Text)
+        | not killed ]
+
+-- | @POST \/api\/tabs\/{index}\/acknowledge@ — clear the out-of-band
+-- '_he_extModified' flag (the §7 ⚠ \"edited\" pill). Uses 'Registry.modifyEntry'
+-- (a single-STM read-modify-write) so the clear cannot race the reconcile
+-- loop's 'mergeReconcile'.
+handleAcknowledgeTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleAcknowledgeTab env tidxText respond =
+  withResolvedTab env tidxText respond $ \e -> do
+    Registry.modifyEntry (_fe_harnessRegistry env) (Registry._he_id e)
+      (\x -> x { Registry._he_extModified = False })
+    broadcastLists env
+    respond $ jsonResponse status200 (object ["acknowledged" .= True])
+
+-- | @POST \/api\/tabs\/{index}\/restart@ — RESERVED. The Restart affordance is
+-- a label only in Phase 2 (design §2\/§7: auto-restart is a non-goal here);
+-- the implementation is deferred, so the endpoint exists but returns @501@.
+handleRestartTab :: (Response -> IO ResponseReceived) -> IO ResponseReceived
+handleRestartTab respond =
+  respond $ jsonResponse status501
+    (object ["error" .= ("restart not yet implemented" :: Text)])
+
 handleRecentSessions :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleRecentSessions env respond = do
   let limit   = _fe_recentLimit env
@@ -447,10 +1085,23 @@ handleRecentSessions env respond = do
   -- the same session does not appear in both "Active Tabs" and
   -- "Recent Sessions" simultaneously.
   tabs <- _fe_listTabs env
-  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } <- tabs]
+      -- Only NON-harness tabs (provider / raw-shell, shown under "Active Tabs")
+      -- dedupe their session out of "Recent Sessions". A harness tab keeps its
+      -- controls entry under "Running Harnesses" AND, intentionally, its backing
+      -- session is also listed under "Recent Sessions" so the user can jump
+      -- straight to the conversation — so harness-kind tabs are NOT counted here.
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
+      -- A running harness's backing session is kept in "Recent Sessions" even
+      -- with an EMPTY transcript: it is the user's clickable entry point into the
+      -- harness conversation (the harness tab itself shows controls, not a chat).
+      -- Otherwise a freshly-adopted harness — whose transcript is empty until its
+      -- first turn — is unreachable/unchattable in the UI.
+      harnessSids   = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = "harness" } <- tabs]
+      isHarnessSession m = unSessionId (_sm_id m) `elem` harnessSids
       notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
       visible       = filter (\m -> not (_sm_archived m) && notInTab m) metas
-  nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
+  nonEmpty <- filterM (\m -> if isHarnessSession m then pure True
+                                                   else hasTranscriptEntries baseDir m) visible
   let chosen = take limit nonEmpty
   -- Read a first-message snippet per session (bounded read per file).
   -- This is the cheap display fallback when no user description and no
@@ -486,10 +1137,21 @@ computeListsSnapshot env = do
   -- empty transcripts, enrich with first-message snippet — same pipeline
   -- as handleRecentSessions.
   allMetas <- listSessions baseDir Nothing (limit * 3)
-  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } <- tabs]
+      -- Only NON-harness tabs (provider / raw-shell, shown under "Active Tabs")
+      -- dedupe their session out of "Recent Sessions". A harness tab keeps its
+      -- controls entry under "Running Harnesses" AND, intentionally, its backing
+      -- session is also listed under "Recent Sessions" so the user can jump
+      -- straight to the conversation — so harness-kind tabs are NOT counted here.
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
+      -- Keep a running harness's (possibly empty-transcript) session in recents —
+      -- it is the clickable entry point to the harness conversation. See
+      -- 'handleRecentSessions' for the rationale.
+      harnessSids   = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = "harness" } <- tabs]
+      isHarnessSession m = unSessionId (_sm_id m) `elem` harnessSids
       notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids
       visible       = filter (\m -> not (_sm_archived m) && notInTab m) allMetas
-  nonEmpty <- filterM (hasTranscriptEntries baseDir) visible
+  nonEmpty <- filterM (\m -> if isHarnessSession m then pure True
+                                                   else hasTranscriptEntries baseDir m) visible
   let chosen = take limit nonEmpty
   snippets <- traverse (firstMessageSnippet baseDir) chosen
   let recentInfos = zipWith toSessionInfo chosen snippets
@@ -1013,11 +1675,28 @@ createHarnessTab env tabKind spec sk curCount respond = do
       _ <- try @IOException (removeDirectoryRecursive (_sh_dir sh))
       respond $ harnessErrorResponse err
     Right st -> do
-      -- Persist the real tmux coordinates returned by the spawn so the
-      -- session routes to the live harness handle on subsequent sends.
+      -- Persist the real tmux coordinates AND the durable HarnessId returned by
+      -- the spawn (WU7, D7.2). The id is the primary routing anchor (resolved
+      -- through the registry by 'harnessKeyFromKind'/'sendToHarness'); the tmux
+      -- window/session is dual-written for the name-fallback path. The persisted
+      -- '_tc_session' is the resolved session honored by '_fe_startHarness'.
       modifyIORef' (_sh_meta sh) $ \m ->
-        m { _sm_kind = SkHarness (spec { _h_backend = TbTmux (_shh_tmux st) }) }
+        m { _sm_kind = SkHarness
+              (spec { _h_backend           = TbTmux (_shh_tmux st)
+                    , _h_harnessId         = Just (_shh_id st)
+                    , _h_claudeSessionUuid = _shh_claudeSessionUuid st
+                    , _h_canonicalCwd      = _shh_canonicalCwd st
+                    }) }
       _sh_save sh
+      -- Link the freshly-spawned harness's registry entry back to THIS session.
+      -- The low-level spawn (startHarnessByName) inserts the entry with
+      -- '_he_sessionId = Nothing' because it has no session of its own; only this
+      -- orchestrator knows both the 'HarnessId' and the 'sid'. Without the link
+      -- the tab's session_id is null and the right pane shows "No session
+      -- associated yet" (the adopt path already links via '_he_sessionId'). Set
+      -- it before 'broadcastLists' so the live lists snapshot already carries it.
+      Registry.modifyEntry (_fe_harnessRegistry env) (_shh_id st)
+        (\e -> e { Registry._he_sessionId = Just (unSessionId sid) })
       -- Read back the post-spawn meta so the live broadcast carries the real
       -- TbTmux backend (the persisted session.json above is already correct;
       -- the original 'meta' still holds the placeholder backend).
@@ -1177,9 +1856,14 @@ handleSend env sid req respond = do
               -- load the meta (missing/malformed) falls through to the
               -- provider path, preserving prior behaviour.
               mMeta <- tryLoad (_fe_sessionsDir env) (T.unpack sid)
-              case mMeta >>= (harnessKeyFromKind . _sm_kind) of
-                Just key ->
-                  sendToHarness env sid key userText transcriptPath respond
+              let mKind = _sm_kind <$> mMeta
+              case mKind >>= harnessKeyFromKind of
+                Just key -> do
+                  -- The dual-written tmux window name is the legacy name-fallback
+                  -- key; an id-shaped @key@ resolves via the registry first and
+                  -- falls back to this name (WU6).
+                  let fallbackName = mKind >>= harnessWindowFromKind
+                  sendToHarness env sid key fallbackName userText transcriptPath respond
                 Nothing -> do
                   mProvider <- readIORef (_fe_provider env)
                   mModel <- readIORef (_fe_model env)
@@ -1209,53 +1893,200 @@ handleSend env sid req respond = do
 -- If no live handle is registered under @key@ (e.g. the harness crashed or
 -- was never reconnected after a restart) it returns a clear 503 — never a
 -- silent provider completion and never a 500.
+--
+-- WU6 makes routing /id-primary with a name fallback/. Resolution order:
+--
+--   1. If @key@ parses as a 'Registry.HarnessId', look it up in the registry:
+--
+--        * Found AND PID-corroborated AND it has a live handle -> route to that
+--          handle (the durable, rename-proof path).
+--        * Found AND corroborated but with NO handle (e.g. boot-discovered, not
+--          yet attached) -> fall through to the name path.
+--        * Found but NOT PID-corroborated -> REFUSE (respond 503, log a
+--          refusal, send NO keystrokes). A spoofable @\@pcl_id@ marker on a
+--          window with no recorded PID is treated as "not ours" (§8 C4 / D6.6).
+--          This case does NOT fall back to the name path.
+--        * Not found in the registry -> fall back to the name path (the registry
+--          is empty until later work units populate it).
+--
+--   2. Name path (legacy, PR #74): look the @fallbackName@ (the dual-written
+--      tmux window name) up in '_fe_harnesses'. On a match, route; on a miss,
+--      respond 503 "not running". When a corroborated registry entry matches
+--      this name by label, lazily back-fill its 'Registry.HarnessId' into
+--      @session.json@ (D6.5) so subsequent sends route by id.
 sendToHarness
   :: FrontendEnv
-  -> Text       -- ^ session id
-  -> Text       -- ^ harness map key (= persisted tmux window name)
-  -> Text       -- ^ user message text
-  -> FilePath   -- ^ session transcript path
+  -> Text         -- ^ session id
+  -> Text         -- ^ routing key (a 'Registry.HarnessId' text, or a window name)
+  -> Maybe Text   -- ^ fallback tmux window name (the dual-written legacy key)
+  -> Text         -- ^ user message text
+  -> FilePath     -- ^ session transcript path
   -> (Response -> IO ResponseReceived)
   -> IO ResponseReceived
-sendToHarness env sid key userText transcriptPath respond = do
+sendToHarness env sid key fallbackName userText transcriptPath respond =
+  case Registry.parseHarnessId key of
+    Just hid -> do
+      mEntry <- Registry.lookupById (_fe_harnessRegistry env) hid
+      case mEntry of
+        Just entry
+          | not (isPidCorroborated entry) -> do
+              -- D6.6 (§8 C4): a spoofable marker without recorded PID provenance
+              -- is NOT ours. Refuse outright — never send keystrokes, never fall
+              -- back to the name map for this case.
+              _lh_logError (_fe_logger env) $
+                "Refusing to route session '" <> sid <> "' to harness id '"
+                <> key <> "': registry entry is not PID-corroborated (possible "
+                <> "spoofed @pcl_id marker — §8 C4)."
+              respond $ jsonResponse status503 (object
+                [ "error" .= ("harness id is not PID-corroborated; refusing to route" :: Text) ])
+          | Just hh <- Registry._he_handle entry ->
+              -- Corroborated, with a live handle: the durable id path. The id
+              -- is already durable here, so no back-fill is needed.
+              routeViaHandle env sid hh userText transcriptPath (pure ()) respond
+          | otherwise ->
+              -- Corroborated but no attached handle yet: fall through to name.
+              routeViaName env sid fallbackName userText transcriptPath respond
+        -- Unknown id: the registry has no entry yet -> legacy name fallback.
+        Nothing -> routeViaName env sid fallbackName userText transcriptPath respond
+    -- Key is not id-shaped: a legacy window-name key. Route by name directly.
+    Nothing -> routeViaName env sid (Just key) userText transcriptPath respond
+
+-- | The legacy name-keyed routing path (PR #74). Looks @mName@ up in
+-- '_fe_harnesses'; on a match, routes via that handle (and lazily back-fills a
+-- 'Registry.HarnessId' if a corroborated entry matches by label — D6.5); on a
+-- miss (or no name available), responds 503 "not running".
+routeViaName
+  :: FrontendEnv
+  -> Text
+  -> Maybe Text
+  -> Text
+  -> FilePath
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+routeViaName env sid mName userText transcriptPath respond = do
   handles <- readIORef (_fe_harnesses env)
-  case Map.lookup key handles of
+  case mName >>= (`Map.lookup` handles) of
     Nothing ->
       respond $ jsonResponse status503
-        (object ["error" .= ("harness '" <> key <> "' is not running" :: Text)])
-    Just hh -> do
-      -- 'handleSend' is the sole writer of THIS session's transcript: on the
-      -- fresh-create path the harness handle was given a no-op transcript
-      -- ('createHarnessTab'), and a restart-discovered handle records to the
-      -- CLI's own session transcript (a different file), so 'sendToHarness'
-      -- recording here never duplicates an entry in this session transcript.
-      -- 'bracket' guarantees the transcript fd is flushed + closed even if
-      -- '_hh_send'/'_hh_receive' throws (tmux IO), so a failed send cannot
-      -- leak a file descriptor.
-      result <- try @SomeException $
-        bracket
-          (mkBroadcastingFileTranscriptHandle
-             (_fe_broker env) (SessionId sid) (_fe_logger env) transcriptPath)
-          (\th -> _th_flush th >> _th_close th)
-          (\th -> do
-            -- Record the user message as a Request entry (mirrors 'harnesseSend').
-            recordHarnessEntry th Request userText
-            _hh_send hh (TE.encodeUtf8 userText)
-            raw <- _hh_receive hh
-            let resp = sanitizeHarnessOutput (TE.decodeUtf8 raw)
-            -- Only record a Response entry when the harness produced output;
-            -- a blank reply must not leave an empty/duplicate entry.
-            unless (T.null (T.strip resp)) $
-              recordHarnessEntry th Response resp
-            pure resp)
-      case result of
-        Left e -> do
-          _lh_logError (_fe_logger env) $ "Harness send error: " <> T.pack (show e)
-          respond $ jsonResponse status500 (object ["error" .= ("Harness send failed" :: Text)])
-        Right resp -> do
-          touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
-          broadcastLists env
-          respond $ jsonResponse status200 (object ["response" .= resp])
+        (object ["error" .= ("harness '" <> Maybe.fromMaybe "?" mName
+                              <> "' is not running" :: Text)])
+    Just hh ->
+      -- D6.5: lazily back-fill the durable id when a corroborated registry
+      -- entry matches this window name by label. Best-effort; runs only AFTER
+      -- a successful send (post-send, synchronous-but-exception-proof: it runs
+      -- synchronously before 'respond' on the success branch — adding only
+      -- minor latency — but is itself exception-proof (D6.5c), so it can fail
+      -- neither the send the user already received nor the response.)
+      routeViaHandle env sid hh userText transcriptPath
+        (maybe (pure ()) (backfillHarnessId env sid) mName)
+        respond
+
+-- | Route a user message to a resolved 'HarnessHandle': record the
+-- Request\/Response transcript entries (sole writer of this session's
+-- transcript), broadcast, bump @_sm_lastActive@, and respond. Shared by the
+-- id and name resolution paths.
+--
+-- @postSend@ is a synchronous-but-exception-proof action run ONLY after a
+-- successful send (the name path uses it for the D6.5 id back-fill). It runs
+-- synchronously before @respond@ on the success branch — so it can add minor
+-- latency to a successful response but never delays a failed send; callers MUST
+-- make it exception-proof (see 'backfillHarnessId') so it cannot fail the send.
+routeViaHandle
+  :: FrontendEnv
+  -> Text
+  -> HarnessHandle
+  -> Text
+  -> FilePath
+  -> IO ()        -- ^ post-send hook (run only on success; must not throw)
+  -> (Response -> IO ResponseReceived)
+  -> IO ResponseReceived
+routeViaHandle env sid hh userText transcriptPath postSend respond = do
+  -- 'handleSend' is the sole writer of THIS session's transcript: on the
+  -- fresh-create path the harness handle was given a no-op transcript
+  -- ('createHarnessTab'), and a restart-discovered handle records to the
+  -- CLI's own session transcript (a different file), so recording here never
+  -- duplicates an entry in this session transcript. 'bracket' guarantees the
+  -- transcript fd is flushed + closed even if '_hh_send'/'_hh_receive' throws
+  -- (tmux IO), so a failed send cannot leak a file descriptor.
+  result <- try @SomeException $
+    bracket
+      (mkBroadcastingFileTranscriptHandle
+         (_fe_broker env) (SessionId sid) (_fe_logger env) transcriptPath)
+      (\th -> _th_flush th >> _th_close th)
+      (\th -> do
+        -- Record the user message as a Request entry (mirrors 'harnesseSend').
+        recordHarnessEntry th Request userText
+        _hh_send hh (TE.encodeUtf8 userText)
+        raw <- _hh_receive hh
+        let resp = sanitizeHarnessOutput (TE.decodeUtf8 raw)
+        -- Only record a Response entry when the harness produced output;
+        -- a blank reply must not leave an empty/duplicate entry.
+        unless (T.null (T.strip resp)) $
+          recordHarnessEntry th Response resp
+        pure resp)
+  case result of
+    Left e -> do
+      _lh_logError (_fe_logger env) $ "Harness send error: " <> T.pack (show e)
+      respond $ jsonResponse status500 (object ["error" .= ("Harness send failed" :: Text)])
+    Right resp -> do
+      touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
+      broadcastLists env
+      -- Synchronous-but-exception-proof post-send hook (e.g. the D6.5 id
+      -- back-fill). It runs synchronously here, before 'respond' — so it can add
+      -- minor latency — but is exception-proof at the source, so it cannot fail
+      -- the send the user is about to receive.
+      postSend
+      respond $ jsonResponse status200 (object ["response" .= resp])
+
+-- | Lazy migration (D6.5): if a corroborated registry entry's label matches
+-- @windowName@, persist its 'Registry.HarnessId' onto the session's
+-- 'HarnessSpec' in @session.json@ so subsequent sends route by id. Operates
+-- directly on the on-disk meta (read-modify-write with a tmp-file + atomic
+-- rename), mirroring the disk-only meta mutators in "PureClaw.Session.Handle".
+--
+-- Best-effort and exception-proof (D6.5c): a missing\/corrupt @session.json@,
+-- an absent\/uncorroborated entry, or an already-id-bearing spec are all silent
+-- no-ops, and ANY IO fault in the read-modify-write (a TOCTOU between
+-- 'doesFileExist' and 'LBS.readFile', a permission error, a disk-full or
+-- cross-device error on write\/'renameFile', or a lazy-read fault surfacing in
+-- 'Aeson.decode') is caught, logged, and swallowed. Keeping routing fast must
+-- never fail a send the user already received, so this function NEVER throws.
+backfillHarnessId :: FrontendEnv -> Text -> Text -> IO ()
+backfillHarnessId env sid windowName = do
+  result <- try @SomeException go
+  case result of
+    Left e ->
+      _lh_logError (_fe_logger env) $
+        "harnessId back-fill failed (non-fatal): " <> T.pack (show e)
+    Right () -> pure ()
+  where
+    go :: IO ()
+    go = do
+      mEntry <- Registry.lookupByLabel (_fe_harnessRegistry env) windowName
+      case mEntry of
+        Just entry | isPidCorroborated entry -> do
+          let p = _fe_sessionsDir env </> T.unpack sid </> "session.json"
+          ok <- doesFileExist p
+          when ok $ do
+            raw <- LBS.readFile p
+            case Aeson.decode raw of
+              Just meta -> case _sm_kind meta of
+                SkHarness hs
+                  | Maybe.isNothing (_h_harnessId hs) -> do
+                      let hs'   = hs { _h_harnessId = Just (Registry._he_id entry) }
+                          meta' = meta { _sm_kind = SkHarness hs' }
+                          -- A back-fill-specific tmp suffix, distinct from the
+                          -- @session.json.tmp@ used by 'touchSessionLastActive'
+                          -- /'updateSessionMeta', so the post-send back-fill can
+                          -- never race that mutator's tmp file on the same dir.
+                          tmpP  = p <> ".backfill.tmp"
+                      -- tmp-file + rename: a crash mid-write leaves the prior
+                      -- session.json intact (same atomicity as 'saveMeta').
+                      LBS.writeFile tmpP (Aeson.encode meta')
+                      renameFile tmpP p
+                _ -> pure ()
+              Nothing -> pure ()
+        _ -> pure ()
 
 -- | Record a single harness transcript entry, mirroring the field shape of
 -- 'harnesseSend'\/'harnessReceive' in "PureClaw.Harness.ClaudeCode".

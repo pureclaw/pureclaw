@@ -445,7 +445,14 @@ function CodeBlock({ lines }: { lines: CodeSpan[][] }) {
   )
 }
 
-function CollapsedBlock({ text, anchorId }: { text: string; anchorId?: string }) {
+/** A collapsible text block. Used for two distinct content kinds, told apart
+ *  by the optional `label`:
+ *   - the System prompt (no label \u2014 bare preview, unchanged historical look),
+ *   - a claude-code "thinking" block (label="Thinking" \u2014 a distinct pill so it
+ *     can never be mistaken for the System prompt).
+ *  Content is always rendered as React text children (escaped); there is no
+ *  `dangerouslySetInnerHTML` anywhere on this path. */
+function CollapsedBlock({ text, anchorId, label }: { text: string; anchorId?: string; label?: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
   const [expanded, setExpanded] = useState(targeted)
@@ -469,6 +476,14 @@ function CollapsedBlock({ text, anchorId }: { text: string; anchorId?: string })
     >
       <div className="flex items-center gap-1.5">
         <span style={{ fontSize: 10, opacity: 0.6 }}>{expanded ? '\u25BC' : '\u25B6'}</span>
+        {label && (
+          <span
+            className="text-xs font-semibold shrink-0"
+            style={{ color: 'var(--accent-secondary)' }}
+          >
+            {label}
+          </span>
+        )}
         {expanded ? (
           <pre className="whitespace-pre-wrap break-words flex-1" style={{ fontFamily: 'inherit', margin: 0, maxHeight: 400, overflow: 'auto' }}>
             {text}
@@ -615,6 +630,9 @@ function MessageBlock({ block }: { block: MessageContent }) {
   }
   if (block.collapsedText) {
     return <CollapsedBlock text={block.collapsedText} anchorId={block.id} />
+  }
+  if (block.thinkingText) {
+    return <CollapsedBlock text={block.thinkingText} anchorId={block.id} label="Thinking" />
   }
   if (block.codeBlock) {
     return <CodeBlock lines={block.codeBlock} />
@@ -910,7 +928,10 @@ export function ChatArea({
    *  stays in its normal position. */
   composerControls?: {
     panel: React.ReactNode
-    kind: 'provider' | 'harness'
+    /** 'attach' (Existing Harness) submits WITHOUT a typed message — the
+     *  submit button is gated only by `valid`. The other kinds require a
+     *  first message before send enables. */
+    kind: 'provider' | 'harness' | 'attach'
     /** False when the spec has a known-invalid field; the send button
      *  is disabled in that case. */
     valid: boolean
@@ -1163,11 +1184,16 @@ export function ChatArea({
           shell. */}
       {(() => {
         const isCompose = !!composerControls
-        const placeholder = isCompose
-          ? 'Type your first message\u2026'
-          : `Message ${selectedAgent.name}\u2026`
+        // Attach (Existing Harness) needs no message \u2014 the user only picks a
+        // session and submits. Other compose kinds require a first message.
+        const isAttach = composerControls?.kind === 'attach'
+        const placeholder = isAttach
+          ? 'Attach to the selected session\u2026'
+          : isCompose
+            ? 'Type your first message\u2026'
+            : `Message ${selectedAgent.name}\u2026`
         const submitDisabled = isCompose
-          ? !composerControls!.valid || !input.trim()
+          ? !composerControls!.valid || (!isAttach && !input.trim())
           : (!input.trim() || !onSend)
         const onSubmit = () => {
           if (isCompose) {

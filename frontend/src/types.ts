@@ -67,7 +67,13 @@ export function sessionSubtitle(s: { agent?: string | null; channel?: string | n
   return parts.join(' · ')
 }
 
-export type TabStatus = 'running' | 'idle' | 'crashed'
+/** Liveness of a tab/harness. `exited` (harness process died, window still
+ *  present) and `orphaned` (no live window for this id) replace the old
+ *  collapsed `crashed` value — the backend now reports them distinctly. */
+export type TabStatus = 'running' | 'idle' | 'exited' | 'orphaned'
+
+/** Where a harness came from, surfaced as a small pill. */
+export type TabOrigin = 'spawned' | 'discovered' | 'adopted'
 
 export interface TabInfo {
   index: number
@@ -75,6 +81,31 @@ export interface TabInfo {
   name: string
   status: TabStatus
   session_id: string | null
+  /** The harness window's name/session changed out-of-band since PureClaw
+   *  last reconciled it. An orthogonal flag (not a liveness state) — shows a
+   *  ⚠ "edited" pill + an Acknowledge action. */
+  extModified?: boolean
+  /** The last reconcile sweep failed for this entry, so its liveness is held
+   *  from the previous tick. Renders a subtle dimmed cue, no distinct glyph. */
+  stale?: boolean
+  /** How the harness entered the registry. */
+  origin?: TabOrigin
+  /** A copyable `tmux attach -t …` command for live rows, or null when the
+   *  tab has no attachable window. */
+  attachCommand?: string | null
+}
+
+/** An external (unmanaged) tmux window that PureClaw discovered via an
+ *  on-demand discovery scan and could be adopted. Transient, metadata-only —
+ *  it is NOT a registry entry and carries no capture capability. Mirrors the
+ *  backend `DiscoverableWindow` JSON (snake_case `window_name`/`window_index`/
+ *  `pane_pid`), mapped to camelCase at the fetch boundary. */
+export interface DiscoverableWindow {
+  session: string
+  windowName: string
+  windowIndex: number
+  /** The pane's shell PID, or null when tmux reported none. */
+  panePid: number | null
 }
 
 export interface AgentInfo {
@@ -110,7 +141,8 @@ export interface MessageContent {
   codeBlock?: CodeSpan[][]
   listItems?: string[]
   orderedItems?: string[]
-  collapsedText?: string   // shown collapsed by default, expandable
+  collapsedText?: string   // System-prompt block, shown collapsed by default, expandable
+  thinkingText?: string    // claude-code "thinking" block, collapsed by default under a "Thinking" label
   rawJson?: string         // raw JSON, hidden by default, toggleable
   toolCall?: ToolCallInfo  // assistant tool invocation (with matched result when available)
 }
