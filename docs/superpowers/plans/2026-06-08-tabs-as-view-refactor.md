@@ -44,7 +44,9 @@
 - `.coverage-thresholds.json` — (WU11) delete **retired** modules' staged waivers; bring **modified** modules to threshold.
 - `test/Integration/CLISpec.hs` — (WU11) end-to-end chat surface.
 
-**Retired in WU8 (deleted, superseded):** `src/PureClaw/Routing/AutoSpawn.hs`, `src/PureClaw/Routing/Registry.hs`, `src/PureClaw/Routing/Dashboard.hs`, `src/PureClaw/Routing/ChannelOut.hs` (gate logic → `Tabs.Relay`), `src/PureClaw/Tab/{Ai,Harness,Backend}.hs`, `src/PureClaw/Handles/Tab.hs` (its `TabIndex` + `parseTabIndexChar`/`mkTabIndex` move to `Tabs/Types.hs`; keep the validated arithmetic).
+**Retired in WU8 (deleted, superseded):** `src/PureClaw/Routing/AutoSpawn.hs`, `src/PureClaw/Routing/Registry.hs`, `src/PureClaw/Routing/Dashboard.hs`, `src/PureClaw/Routing/ChannelOut.hs` (gate logic → `Tabs.Relay`), `src/PureClaw/Routing/LegacyDispatch.hs` (its `dispatchLegacyTabCmd` wiring in `Agent/Loop.hs` is rewired onto the new dispatcher), `src/PureClaw/Tab/{Ai,Harness,Backend}.hs`.
+
+**Slimmed, NOT deleted, in WU8:** `src/PureClaw/Handles/Tab.hs` — it mixes legacy runtime (`TabHandle`, the per-tab factory, `TabStatus(Active|Idle|Crashed)`) with **surviving spec/value types** (`TabKind`, `TabError`, `TabIndex`) that are consumed by out-of-scope/surviving modules: `Frontend/API.hs` (the POST `/api/tabs/new` path — frontend is out of scope, must stay untouched), `Routing/Types.hs` (`_rc_defaultKind :: TabKind`, `RoutingTabError`, `Switch !TabIndex`), `Routing/Config.hs` (`tabKindCodec`), `Routing/PromptRenderer.hs` (`TabIndex`). WU8 removes ONLY the legacy runtime parts and keeps `TabKind`/`TabError`, **re-exporting `TabIndex`** from `Tabs/Types.hs`. Update/retire `src/PureClaw/Handles/Tab.hs-boot` to match the slimmed module. Because the spec types survive in place, `Frontend/API.hs`, `Routing/Types.hs`, `Routing/Config.hs`, and `Routing/PromptRenderer.hs` need **no edits** (scope respected).
 
 ---
 
@@ -73,7 +75,7 @@ Finish:
 - Create: `src/PureClaw/Tabs/Types.hs`, `src/PureClaw/Tabs.hs`
 - Modify: `src/PureClaw/Core/Types.hs` (define `ConversationId` here — leaf home)
 - Test: `test/PureClaw/Tabs/TypesSpec.hs`
-- Reference: `src/PureClaw/Routing/Registry.hs` (`packAfterRemove`/`firstFree` — copy the pure arithmetic), `src/PureClaw/Handles/Tab.hs` (`TabIndex`, `mkTabIndex`), `src/PureClaw/Session/Kind.hs` (`SessionId`, `HarnessId`)
+- Reference: `src/PureClaw/Routing/Registry.hs` (`packAfterRemove`/`firstFree` — copy the pure arithmetic), `src/PureClaw/Handles/Tab.hs` (`TabIndex`, `mkTabIndex`, `unTabIndex`), `src/PureClaw/Session/Kind.hs` (`SessionId`, `HarnessId`)
 
 **Dependencies:** none.
 
@@ -95,7 +97,7 @@ lookupSlot :: TabIndex -> TabList -> Maybe Tab
 lookupRef  :: TabRef   -> TabList -> Maybe TabIndex
 setStatus  :: TabRef -> TabStatus -> TabList -> TabList
 ```
-`TabIndex` + `parseTabIndexChar`/`mkTabIndex` move from `Handles/Tab.hs` into `Tabs/Types.hs` (re-export from `Routing/Parse.hs` if needed) so the validated 0–35 arithmetic is retained.
+`TabIndex` + `mkTabIndex`/`unTabIndex` move from `Handles/Tab.hs` into `Tabs/Types.hs` so the validated 0–35 arithmetic is retained. **`Handles/Tab.hs` MUST re-export them (mandatory, not optional)** — 10+ surviving importers (`Routing/Parse.hs`, `Routing/Types.hs`, `Routing/PromptRenderer.hs`, `Frontend/API.hs`, …) depend on `Handles.Tab.TabIndex`, so without the re-export WU1 itself ends red. `parseTabIndexChar` stays in `Routing/Parse.hs` (importing `TabIndex` from `Tabs/Types.hs`).
 
 **TDD steps:**
 - [ ] **Step 1 — failing test (I1 contiguity):** property — after any `appendTab`/`removeSlot` sequence, `map _tab_slot list == [0..n-1]`.
@@ -252,15 +254,16 @@ relayOutput :: RelayDeps -> CursorState -> RelayMode -> TabList -> TabRef -> Tex
 > **This is the one large, coordinated WU.** It is the only place old code is removed. The tree is green before (old model) and green after (new model). Recommended to execute with extra checkpoints. Internal steps are TDD for the new behavior; the `-Werror` build is re-green at the **end** of the WU.
 
 **Files:**
-- Modify: `src/PureClaw/Agent/Env.hs` (remove `_env_focus`, `_env_session`; add `TabRegistry`, `CursorState` ref, `SessionPool`, lifecycle `TQueue`), `src/PureClaw/Routing/Dispatcher.hs` (per-conversation dispatch + flat command handlers + wizard interception + queue drain stub), `src/PureClaw/Agent/SlashCommands.hs` + `src/PureClaw/Routing/Parse.hs` (flat verbs; retire `/tab <sub>`), `src/PureClaw/Agent/Loop.hs` + `src/PureClaw/CLI/Commands.hs` (onto `SessionPool`/`TabRegistry`), `*.cabal` (drop deleted modules).
-- Delete: `src/PureClaw/Routing/{AutoSpawn,Registry,Dashboard,ChannelOut}.hs`, `src/PureClaw/Tab/{Ai,Harness,Backend}.hs`, `src/PureClaw/Handles/Tab.hs` (after moving `TabIndex` in WU1).
+- Modify: `src/PureClaw/Agent/Env.hs` (remove `_env_focus`, `_env_session`; add `TabRegistry`, `CursorState` ref, `SessionPool`, lifecycle `TQueue`), `src/PureClaw/Routing/Dispatcher.hs` (per-conversation dispatch + flat command handlers + wizard interception + queue drain stub), `src/PureClaw/Agent/SlashCommands.hs` + `src/PureClaw/Routing/Parse.hs` (flat verbs; retire `/tab <sub>`), `src/PureClaw/Agent/Loop.hs` (rewire off `dispatchLegacyTabCmd`/`LegacyDispatch` onto the new dispatcher; onto `SessionPool`) + `src/PureClaw/CLI/Commands.hs` (onto `SessionPool`/`TabRegistry`), `src/PureClaw/Handles/Tab.hs` + `src/PureClaw/Handles/Tab.hs-boot` (**slim**: delete legacy `TabHandle`/factory/`TabStatus`; keep `TabKind`/`TabError`; re-export `TabIndex` from `Tabs/Types.hs`), `*.cabal` (drop deleted modules + their specs).
+- Delete: `src/PureClaw/Routing/{AutoSpawn,Registry,Dashboard,ChannelOut,LegacyDispatch}.hs`, `src/PureClaw/Tab/{Ai,Harness,Backend}.hs` (and their test specs).
+- Untouched by design (spec types survive in slimmed `Handles.Tab`): `src/PureClaw/Frontend/API.hs`, `src/PureClaw/Routing/{Types,Config,PromptRenderer}.hs`.
 - Test: `test/PureClaw/Routing/DispatchSpec.hs`, `test/PureClaw/Routing/TabCommandsSpec.hs`
 
 **Dependencies:** WU1–WU7.
 
 **TDD steps:**
 - [ ] **Step 1 — `AgentEnv` swap:** replace `_env_focus`/`_env_session` with the new refs + pool + lifecycle queue; wire `Tabs.Relay` as the output path replacing `ChannelOut.shouldEmit`; wire `SessionPool.acquire/release` into the AI tab loop. (Red until the legacy modules are deleted in Step 2.)
-- [ ] **Step 2 — delete legacy modules** (`Routing.{AutoSpawn,Registry,Dashboard,ChannelOut}`, `Tab.{Ai,Harness,Backend}`, `Handles.Tab`) + remove from `.cabal` + drop their test specs; fix every dangling import in `Dispatcher.hs:137,149-151`, `Agent/Loop.hs`, `CLI/Commands.hs`, `SlashCommands.hs`. Build must be clean here.
+- [ ] **Step 2 — delete legacy + slim `Handles.Tab`:** delete `Routing.{AutoSpawn,Registry,Dashboard,ChannelOut,LegacyDispatch}` + `Tab.{Ai,Harness,Backend}` + their specs + `.cabal` entries; **slim** `Handles.Tab` (drop `TabHandle`/factory/`TabStatus`; keep `TabKind`/`TabError`; re-export `TabIndex`) and update its `.hs-boot`; rewire `Agent/Loop.hs` off `dispatchLegacyTabCmd` onto the new dispatcher; fix every dangling import in `Dispatcher.hs:137,149-151`, `Agent/Loop.hs:37,136`, `CLI/Commands.hs`, `SlashCommands.hs`. Verify `Frontend/API.hs` + `Routing/{Types,Config,PromptRenderer}.hs` still compile **unchanged** (they use only the surviving `TabKind`/`TabError`/`TabIndex`). Build must be clean here.
 - [ ] **Step 3 — per-conversation dispatch tests:** `/2` from conversation A sets A's cursor only (B unchanged); plain text → active tab; empty cursor → `no active tab — /new to start one or /tab to attach`; `/5` of 3 tabs → `/5: out of range — you have 3 tabs (/0–/2); /tabs to list`. Implement against `CursorState`. Pass.
 - [ ] **Step 4 — `/new` reset (+ no-default + at-36):** `/new` rebinds the active tab's slot to a fresh session, prior session persists (I4); with no active tab it creates one; **`/new` still works at 36 slots**; with no default provider configured → `no default provider configured — set one with /target default <name> (or config.toml)`. Tests for each. Implement. Pass.
 - [ ] **Step 5 — `/nt` (+ exhaustion):** appends + switches; at 36 → `all 36 tab slots in use — /close one first`, no state change; no-default-provider hint as in Step 4. Tests + impl. Pass.
@@ -313,7 +316,7 @@ relayOutput :: RelayDeps -> CursorState -> RelayMode -> TabList -> TabRef -> Tex
 
 **TDD steps:**
 - [ ] **Step 1 — CLI integration:** spawn the real `pureclaw` binary; drive `/new`, `/nt`, `/tab` (wizard happy path), `/close`, `/0`, `/relay`, asserting §14 copy + tab-list output. Run `nix develop . --command cabal test`.
-- [ ] **Step 2 — staged-waiver cleanup (precise):** in `.coverage-thresholds.json`, **delete** waivers for the **retired** modules (`Routing.AutoSpawn`, `Routing.Dashboard`, `Routing.Registry`, `Tab.{Ai,Harness,Backend}`, `Handles.Tab`). For **modified-not-retired** modules (`Routing.Dispatcher`, `Harness.Reconcile`) bring them to ≥95% as a blocking gate **or** keep/extend a justified waiver — do NOT silently delete. Leave unrelated survivors (`Frontend.*`, `Harness.Tmux`, `Harness.ClaudeCode`) untouched. New `Tabs.*` modules carry **no** waivers (injected seams make them reachable).
+- [ ] **Step 2 — staged-waiver cleanup (precise):** treat `.coverage-thresholds.json` as ground truth for which waivers exist. **Delete** the waivers for **retired** modules **that have one** — confirmed present today: `Routing.AutoSpawn`, `Routing.Dashboard`, `Tab.{Ai,Harness,Backend}`, `Handles.Tab` (note: `Handles.Tab` is slimmed not deleted, but its legacy runtime is gone, so its waiver should be removed and the slimmed module covered; `Routing.Registry`/`Routing.ChannelOut`/`Routing.LegacyDispatch` have **no** waiver entry — nothing to delete). For **modified-not-retired** modules (`Routing.Dispatcher`, `Harness.Reconcile`) bring them to ≥95% as a blocking gate **or** keep/extend a justified waiver — do NOT silently delete. Leave unrelated survivors (`Frontend.*`, `Harness.Tmux`, `Harness.ClaudeCode`) untouched. New `Tabs.*` modules carry **no** waivers (injected seams make them reachable).
 - [ ] **Step 3 — full gate:** `cabal test --enable-coverage` meets `.coverage-thresholds.json` (95%); `hlint src test` clean; `cabal build` `-Werror` clean.
 - [ ] **Step 4 — file frontend-parity follow-up issue** in the epic, referencing #79. Commit.
 
@@ -329,6 +332,7 @@ relayOutput :: RelayDeps -> CursorState -> RelayMode -> TabList -> TabRef -> Tex
 | §4 Tab/TabRef/TabRegistry | WU1 |
 | §5 I1–I5 | WU1 (I1,I2), WU2 (I3), WU8 (I4 via `/new`,`/close`), WU9 (I5) |
 | §6.1 `/new` vs `/nt`, §6.2 exhaustion (+`/new`@36), §6.4 compaction | WU8, WU1 |
+| §6.3 reopen continue/append + dedup | WU8 Step 7 |
 | §6.5 concurrency shared-tab | WU8 Step 9 |
 | §7 command surface | WU8 |
 | §8 harness death | WU9 |
