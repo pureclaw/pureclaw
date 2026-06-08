@@ -6,7 +6,7 @@ plan: docs/superpowers/plans/2026-06-08-tabs-as-view-refactor.md
 design_review_gate: PASSED (2026-06-08)
 plan_review_gate: PASSED (2026-06-08, feasibility round 5)
 branch: feat/tabs-as-view-refactor
-execution_method: TBD (awaiting user choice)
+execution_method: metaswarm-orchestrated (chosen 2026-06-08)
 ---
 
 # Approved: Tabs-as-View Refactor (GitHub #79)
