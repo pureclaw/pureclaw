@@ -251,7 +251,17 @@ relayOutput :: RelayDeps -> CursorState -> RelayMode -> TabList -> TabRef -> Tex
 
 ## WU8 — CUTOVER: rewire dispatcher; remove globals; delete legacy
 
-> **This is the one large, coordinated WU.** It is the only place old code is removed. The tree is green before (old model) and green after (new model). Recommended to execute with extra checkpoints. Internal steps are TDD for the new behavior; the `-Werror` build is re-green at the **end** of the WU.
+> **This is the one large, coordinated WU.** It is the only place old code is removed. The tree is green before (old model) and green after (new model). Internal steps are TDD for the new behavior; the `-Werror` build is re-green at the **end** of the WU. **Execute in a dedicated worktree.**
+
+> **Authoritative blast radius (grep-derived — WU8 is NOT done until `cabal build` AND `cabal test` compile clean with zero references to any removed symbol/module).** The general rule: every module below that imports a deleted module or a removed symbol (`TabHandle`, `TabRunner`, `TabStatus(Active|Idle|Crashed)`, `mkTabAi`/`mkTabHarness`/`defaultTabFactory`, `TabUnsupportedCommand`, `_env_focus`, `_env_session`, `_env_tabs`, `_env_runners`, `dispatchLegacyTabCmd`, `startChannelOut`, `shouldEmit`, `insertTab`) is owned here.
+>
+> **Source — DELETE:** `Routing/{AutoSpawn,Registry,Dashboard,ChannelOut,LegacyDispatch}.hs`, `Tab/{Ai,Harness,Backend}.hs`, `Handles/Tab.hs-boot`.
+> **Source — MODIFY (rewire onto new model):** `Agent/{Env,Loop,SlashCommands}.hs`, `Routing/{Dispatcher,Parse,Onboarding,Types}.hs`, `CLI/Commands.hs`.
+> **Source — SLIM:** `Handles/Tab.hs` (keep `TabKind`/slimmed `TabError`, re-export `TabIndex`).
+> **Source — VERIFY UNCHANGED (use only surviving spec types):** `Frontend/API.hs`, `Routing/Config.hs`.
+> **Tests — DELETE (specs of deleted modules):** `test/Routing/{AutoSpawn,Registry,ChannelOut,LegacyDispatch}Spec.hs`, `test/Tab/{Ai,Backend,Harness}Spec.hs`, `test/Test/Fake/TabFactory.hs`.
+> **Tests — REWRITE onto the new model (touch removed symbols/fields):** `test/Handles/TabSpec.hs`, `test/Routing/{Parse,Dispatcher,Config}Spec.hs`, `test/Coexistence/SlashCmdSpec.hs`, `test/Security/TabSpec.hs`, `test/Agent/{Loop,SlashCommands}Spec.hs`, `test/Integration/SignalFlowSpec.hs`, `test/Onboarding/StartSpec.hs`, `test/Tools/DelegateSpec.hs`, `test/Frontend/ActivityProbeSpec.hs`.
+> Drop the deleted modules'/helpers' `pureclaw.cabal` `other-modules` entries. (`test/PureClaw/Routing/DispatchSpec.hs` is the NEW per-conversation spec this WU creates; reconcile it with the rewritten legacy `test/Routing/DispatcherSpec.hs` — likely fold the old one in and delete it.)
 
 **Files:**
 - Modify: `src/PureClaw/Agent/Env.hs` (remove `_env_focus`, `_env_session`; add `TabRegistry`, `CursorState` ref, `SessionPool`, lifecycle `TQueue`), `src/PureClaw/Routing/Dispatcher.hs` (per-conversation dispatch + flat command handlers + wizard interception + queue drain stub), `src/PureClaw/Agent/SlashCommands.hs` + `src/PureClaw/Routing/Parse.hs` (flat verbs; retire `/tab <sub>`), `src/PureClaw/Agent/Loop.hs` (rewire off `dispatchLegacyTabCmd`/`LegacyDispatch` onto the new dispatcher; onto `SessionPool`) + `src/PureClaw/CLI/Commands.hs` (onto `SessionPool`/`TabRegistry`), `src/PureClaw/Handles/Tab.hs` + `src/PureClaw/Handles/Tab.hs-boot` (**slim**: delete legacy `TabHandle`/factory/`TabStatus`; keep `TabKind`/`TabError`; re-export `TabIndex` from `Tabs/Types.hs`), `*.cabal` (drop deleted modules + their specs).
