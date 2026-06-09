@@ -38,6 +38,7 @@ module PureClaw.Tabs.Types
   , lookupSlot
   , lookupRef
   , setStatus
+  , rebindSlot
     -- * Cap
   , maxTabSlots
     -- * Per-conversation cursors & relay (I3)
@@ -204,6 +205,36 @@ setStatus ref status (TabList ts) =
     upd t =
       if _tab_ref t == ref
         then t { _tab_status = status }
+        else t
+
+-- | Rebind the tab at @slot@ to a new @ref@ and @name@, /in place/ — the
+-- slot, and the slots of every other tab, are unchanged (I1 preserved). The
+-- rebound tab's status is reset to 'Live'. This backs @\/new@'s "reset the
+-- active tab to a fresh session" semantics (design §6.1).
+--
+-- The new @ref@ is dedup-checked against I2:
+--
+--   * If @ref@ is already bound to a /different/ slot, the rebind is rejected
+--     with @'Left' ('AlreadyBound' i)@ (@i@ = that other slot) and the list is
+--     unchanged.
+--   * Rebinding a slot to the ref it /already/ holds is allowed — it is just a
+--     relabel (and a status reset) in place.
+--
+-- If no tab occupies @slot@, this is a no-op returning the list unchanged
+-- (@'Right'@) — callers that already verified an active tab never hit this,
+-- but it keeps the function total.
+rebindSlot :: TabIndex -> TabRef -> Text -> TabList -> Either TabsError TabList
+rebindSlot slot ref name tl@(TabList ts) =
+  case lookupSlot slot tl of
+    Nothing -> Right tl
+    Just _  ->
+      case lookupRef ref tl of
+        Just other | other /= slot -> Left (AlreadyBound other)
+        _ -> Right (TabList (map upd ts))
+  where
+    upd t =
+      if unTabIndex (_tab_slot t) == unTabIndex slot
+        then t { _tab_ref = ref, _tab_name = name, _tab_status = Live }
         else t
 
 -- ---------------------------------------------------------------------------

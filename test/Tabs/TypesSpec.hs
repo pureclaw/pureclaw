@@ -43,6 +43,7 @@ import PureClaw.Tabs.Types
   , emptyTabs
   , lookupRef
   , lookupSlot
+  , rebindSlot
   , removeSlot
   , setStatus
   , toList
@@ -280,6 +281,46 @@ spec = do
       registrySetStatus reg (refN 9) Dead   -- absent: no-op
       tl <- readTabs reg
       map _tab_status (toList tl) `shouldBe` [Dead, Live]
+
+  describe "rebindSlot (8b.4 /new support)" $ do
+    it "rebinds the ref + name at a slot in place, preserving the slot" $ do
+      let tl  = buildList 3
+          new = refN 99
+      case rebindSlot (idx 1) new "renamed" tl of
+        Left e   -> expectationFailure ("unexpected Left: " <> show e)
+        Right tl' -> do
+          -- slots stay contiguous and unchanged
+          map (unTabIndex . _tab_slot) (toList tl') `shouldBe` [0, 1, 2]
+          -- slot 1 now holds the new ref + name; neighbours untouched
+          fmap _tab_ref  (lookupSlot (idx 1) tl') `shouldBe` Just new
+          fmap _tab_name (lookupSlot (idx 1) tl') `shouldBe` Just "renamed"
+          fmap _tab_ref  (lookupSlot (idx 0) tl') `shouldBe` Just (refN 0)
+          fmap _tab_ref  (lookupSlot (idx 2) tl') `shouldBe` Just (refN 2)
+
+    it "resets the rebound tab's status to Live" $ do
+      let tl  = setStatus (refN 1) Dead (buildList 2)
+      case rebindSlot (idx 1) (refN 88) "fresh" tl of
+        Left e    -> expectationFailure ("unexpected Left: " <> show e)
+        Right tl' -> fmap _tab_status (lookupSlot (idx 1) tl') `shouldBe` Just Live
+
+    it "rejects rebinding to a ref already bound at a different slot" $ do
+      let tl = buildList 3
+      -- slot 1 -> ref already at slot 2
+      rebindSlot (idx 1) (refN 2) "dup" tl `shouldBe` Left (AlreadyBound (idx 2))
+
+    it "allows rebinding a slot to the ref it already holds (rename in place)" $ do
+      let tl = buildList 2
+      case rebindSlot (idx 0) (refN 0) "relabel" tl of
+        Left e    -> expectationFailure ("unexpected Left: " <> show e)
+        Right tl' -> do
+          fmap _tab_ref  (lookupSlot (idx 0) tl') `shouldBe` Just (refN 0)
+          fmap _tab_name (lookupSlot (idx 0) tl') `shouldBe` Just "relabel"
+
+    it "is a no-op Right when the slot is absent" $ do
+      let tl = buildList 1
+      case rebindSlot (idx 5) (refN 77) "ghost" tl of
+        Left e    -> expectationFailure ("unexpected Left: " <> show e)
+        Right tl' -> toList tl' `shouldBe` toList tl
 
 -- | Unsafe 'TabIndex' for tests (the int is always in range here).
 idx :: Int -> TabIndex
