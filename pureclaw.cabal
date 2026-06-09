@@ -81,6 +81,7 @@ library
     PureClaw.Tabs
     PureClaw.Tabs.Types
     PureClaw.Tabs.Persist
+    PureClaw.Tabs.SessionPool
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
     PureClaw.Tab.Ai
     PureClaw.Tab.Harness
@@ -389,6 +390,8 @@ test-suite pureclaw-test
     Tabs.CursorSpec
     -- Tabs-as-View (GitHub #79) WU3
     Tabs.PersistSpec
+    -- Tabs-as-View (GitHub #79) WU5
+    Tabs.SessionPoolSpec
     -- WU9 (HPureClaw depth limit)
     Routing.DepthLimitSpec
     -- WU2 (Session.Kind leaf module)
