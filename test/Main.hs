@@ -137,6 +137,8 @@ import qualified Tabs.PersistSpec
 import qualified Tabs.SessionPoolSpec
 -- Tabs-as-View (GitHub #79) WU6
 import qualified Tabs.WizardSpec
+-- Tabs-as-View (GitHub #79) WU7
+import qualified Tabs.RelaySpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -289,6 +291,8 @@ main = hspec $ do
   describe "Tabs.SessionPool"     Tabs.SessionPoolSpec.spec
   -- Tabs-as-View (GitHub #79) WU6
   describe "Tabs.Wizard"          Tabs.WizardSpec.spec
+  -- Tabs-as-View (GitHub #79) WU7
+  describe "Tabs.Relay"           Tabs.RelaySpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)
