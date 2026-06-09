@@ -28,7 +28,7 @@ import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
 import PureClaw.Harness.Registry qualified as Registry
-import {-# SOURCE #-} PureClaw.Handles.Tab (TabHandle, TabIndex, TabRunner (..))
+import PureClaw.Handles.Tab (TabHandle, TabIndex, TabRunner (..))
 import PureClaw.Handles.Transcript (TranscriptHandle)
 import PureClaw.MCP (McpServer)
 import PureClaw.Providers.Class

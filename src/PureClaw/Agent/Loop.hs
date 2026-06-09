@@ -34,7 +34,6 @@ import PureClaw.Handles.Log
 import PureClaw.Handles.Transcript qualified as Transcript
 import PureClaw.MCP (mcpRegistry)
 import PureClaw.Providers.Class
-import PureClaw.Routing.LegacyDispatch (dispatchLegacyTabCmd)
 import PureClaw.Session.Handle qualified as Session
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Tools.Delegate (runSubAgent)
@@ -125,15 +124,16 @@ runAgentLoopWith env initialMessages = do
               -- get an error response rather than silently routing to the LLM.
               | "/" `T.isPrefixOf` stripped =
                   case parseSlashCommand stripped of
-                    Just (CmdTab tabCmd) -> do
-                      -- Tab commands need callbacks (SpawnIO, PromptRenderer,
-                      -- BannerEmit, etc.) that 'executeSlashCommand' can't wire
-                      -- without a dependency cycle. Dispatch via the legacy
-                      -- bridge instead. The bridge invokes the canonical
-                      -- 'Routing.AutoSpawn' handlers so /tab* commands behave
-                      -- the same way they would under the new dispatcher.
+                    Just (CmdTab _tabCmd) -> do
+                      -- /tab* commands are a property of the tabbed-chat
+                      -- runtime ('PureClaw.Tabs.Wiring.runTabbedLoop'), which
+                      -- is the live CLI entry point (8c.2). This legacy
+                      -- single-tab loop has no tab registry, so it cannot
+                      -- service them. Surviving callers of 'runAgentLoop' are
+                      -- tests that never exercise this branch.
                       _lh_logInfo logger $ "Slash command (tab): " <> stripped
-                      dispatchLegacyTabCmd env tabCmd
+                      _ch_send channel (OutgoingMessage
+                        "/tab commands are not available in the single-tab loop.")
                       go ctx
                     Just (CmdBg prompt) -> do
                       -- /bg runs the prompt in a fresh background session

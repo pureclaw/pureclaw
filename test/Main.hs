@@ -114,7 +114,8 @@ import qualified Frontend.ServerSpec
 import qualified Frontend.APISpec
 
 -- WU0 (tabbed-chat) red-phase scaffold specs
-import qualified Routing.ParseSpec
+-- Routing.ParseSpec removed in 8c.3 (imports the deleted Routing.Dispatcher
+-- / Routing.Registry); 8d re-adds a rewritten ParseSpec.
 import qualified Routing.ConfigSpec
 import qualified Onboarding.StartSpec
 -- Tabs-as-View (GitHub #79) WU1
@@ -266,7 +267,7 @@ main = hspec $ do
   -- WU-7 (POST /api/tabs/new unified endpoint)
   describe "Frontend.API"          Frontend.APISpec.spec
   -- WU0 (tabbed-chat) red-phase scaffold specs
-  describe "Routing.Parse"        Routing.ParseSpec.spec
+  -- Routing.Parse spec removed in 8c.3; 8d re-adds it.
   describe "Routing.Config"       Routing.ConfigSpec.spec
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
   -- Tabs-as-View (GitHub #79) WU1
