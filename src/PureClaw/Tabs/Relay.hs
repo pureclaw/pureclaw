@@ -1,14 +1,24 @@
 -- |
 -- Module      : PureClaw.Tabs.Relay
--- Description : Per-conversation output relay engine (Tabs-as-View, GitHub #79).
+-- Description : Streaming-aware per-conversation output relay (Tabs-as-View, #79).
 --
--- When a tab (named by its 'TabRef') emits output, 'relayOutput' fans that
--- output out to every conversation according to /that conversation's/
+-- When a tab (named by its 'TabRef') emits a 'ChannelEvent', 'relayEvent' fans
+-- that event out to every conversation according to /that conversation's/
 -- effective 'RelayMode' (its per-conversation override, else the global
--- default). This replaces the single-focus @ChannelOut@ gate
--- (@shouldEmit@): a tab can be foreground for conversation A and background
--- for B at the same time, so the decision is taken per conversation rather
--- than once for the whole output (design §9.3).
+-- default). This replaces the single-focus @ChannelOut@ gate (@shouldEmit@): a
+-- tab can be foreground for conversation A and background for B at the same
+-- time, so the decision is taken per conversation rather than once for the
+-- whole output (design §9.3).
+--
+-- Unlike the earlier whole-@Text@ relay, this engine is __streaming-aware__:
+-- it sinks a 'ChannelEvent', so a focused conversation receives every
+-- @StreamStart@\/@ChunkOf@\/@StreamEnd@ verbatim (full provider streaming),
+-- while a background 'ActivityDigest' conversation gets __at most one__
+-- breadcrumb ping per /burst/ — one logical message. The burst is identified
+-- by a 'BurstKey': all framing events of one stream share @'BurstStream' sid@,
+-- and a one-shot @FullMsg@ is its own @'BurstFull'@ burst. The pinged-set is
+-- keyed on @('ConversationKey', 'BurstKey')@ so a 100-chunk stream pings once,
+-- not 100 times (§4).
 --
 -- The engine is a __single writer__: the dispatcher invokes it from one
 -- thread, and it iterates conversations in a deterministic (sorted-key) order,
@@ -20,28 +30,29 @@
 --
 -- Let @focused@ mean the conversation's cursor names the source tab.
 --
---   * __FocusedOnly__ — deliver the full text iff @focused@; otherwise nothing.
---   * __Firehose__ — always deliver the full text, regardless of cursor.
---   * __ActivityDigest__ — if @focused@, deliver the full text; otherwise, if
---     @k@ has not already been pinged for this tab since it last focused it,
---     deliver a name-first activity ping and remember @k@. A repeat background
---     burst is suppressed (one ping per burst). The ping names the tab by its
---     friendly name first and its /current/ display slot second
---     (@\"\<name\> (\/N) has new output\"@), because slots renumber under
---     compaction (§8). A 'Dead' tombstone source still pings (§8) — only a
---     source ref /absent/ from the list yields no ping (no name\/slot to show).
---
--- Delivering the full text to a focused conversation (cursor == source) clears
--- that conversation's pinged membership: it is now looking at the tab, so a
--- future background burst should ping it again.
+--   * __Focused__ (any mode) — forward the event verbatim, and clear /every/
+--     @(k, _)@ entry from the pinged-set: the conversation is looking at the
+--     tab, so a future background burst should ping it again.
+--   * __FocusedOnly__ background — nothing.
+--   * __Firehose__ background — forward the event verbatim.
+--   * __ActivityDigest__ background — emit at most one ping per burst. A
+--     'BannerLine' source event is skipped entirely (banners are
+--     dispatcher-class, never relayed here): no ping, set untouched. For a
+--     stream\/full event, if @(k, burstKey)@ is not already pinged AND the
+--     source ref resolves in the 'TabList', deliver a 'BannerLine' ping
+--     (@\"\<name\> (\/N) has new output\"@, where @\<name\>@ is the source
+--     tab's friendly name and @N@ its /current/ display slot) and remember
+--     @(k, burstKey)@. A 'Dead' tombstone source still pings (§8) — only a
+--     source ref /absent/ from the list yields no ping (no name\/slot).
 --
 -- The set of conversations considered is every key present in the
 -- 'CursorState' — the union of the cursor-map keys and the relay-override-map
 -- keys — so a conversation that has only set a 'RelayMode' (no cursor yet) is
 -- still routed.
 module PureClaw.Tabs.Relay
-  ( RelayDeps (..)
-  , relayOutput
+  ( BurstKey (..)
+  , RelayDeps (..)
+  , relayEvent
   ) where
 
 import Data.Map.Strict qualified as Map
@@ -51,6 +62,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 import PureClaw.Handles.Tab (unTabIndex)
+import PureClaw.Routing.Types (ChannelEvent (..), StreamId)
 import PureClaw.Tabs.Types
   ( ConversationKey
   , CursorState (..)
@@ -63,30 +75,50 @@ import PureClaw.Tabs.Types
   , relayModeFor
   )
 
+-- | The /burst/ a 'ChannelEvent' belongs to — one logical message. All framing
+-- events of a single provider stream (@StreamStart@\/@ChunkOf@\/@StreamEnd@)
+-- share the same @'BurstStream' sid@; a one-shot @FullMsg@ is its own
+-- @'BurstFull'@ burst. 'ActivityDigest' de-dups its background ping on
+-- @('ConversationKey', 'BurstKey')@, so a multi-chunk stream pings once.
+data BurstKey
+  = BurstStream !StreamId
+  | BurstFull
+  deriving stock (Eq, Ord, Show)
+
 -- | The relay engine's only side-effect seam: a conversation-addressed output
--- sink. @'_rl_sink' k t@ delivers text @t@ to conversation @k@. Injected so
+-- sink. @'_rl_sink' k e@ delivers event @e@ to conversation @k@. Injected so
 -- the engine can be unit-tested against a recording sink.
 newtype RelayDeps = RelayDeps
-  { _rl_sink :: ConversationKey -> Text -> IO ()
+  { _rl_sink :: ConversationKey -> ChannelEvent -> IO ()
   }
 
--- | Fan one tab's output out to every conversation per its effective
+-- | The burst a 'ChannelEvent' belongs to, or 'Nothing' for a 'BannerLine'
+-- (banners are dispatcher-class and never relayed to background conversations).
+burstKeyOf :: ChannelEvent -> Maybe BurstKey
+burstKeyOf = \case
+  StreamStart sid _ -> Just (BurstStream sid)
+  ChunkOf sid _     -> Just (BurstStream sid)
+  StreamEnd sid     -> Just (BurstStream sid)
+  FullMsg _ _       -> Just BurstFull
+  BannerLine _      -> Nothing
+
+-- | Fan one tab's 'ChannelEvent' out to every conversation per its effective
 -- 'RelayMode'. See the module header for the full per-conversation decision.
 --
 -- @globalDefault@ is the fallback 'RelayMode' for conversations with no
--- override. @pinged@ is the set of conversations already activity-pinged for
--- /this/ source tab since they last focused it (burst de-dup for
--- 'ActivityDigest'); the updated set is returned.
-relayOutput
+-- override. @pinged@ is the set of @('ConversationKey', 'BurstKey')@ pairs
+-- already activity-pinged (burst de-dup for 'ActivityDigest'); the updated set
+-- is returned.
+relayEvent
   :: RelayDeps
   -> CursorState
   -> RelayMode
   -> TabList
-  -> Set ConversationKey
+  -> Set (ConversationKey, BurstKey)
   -> TabRef
-  -> Text
-  -> IO (Set ConversationKey)
-relayOutput deps cs globalDefault tl pinged src text =
+  -> ChannelEvent
+  -> IO (Set (ConversationKey, BurstKey))
+relayEvent deps cs globalDefault tl pinged src event =
     go pinged conversationKeys
   where
     -- Every conversation the dispatcher knows about: keys with a cursor or a
@@ -107,40 +139,55 @@ relayOutput deps cs globalDefault tl pinged src text =
       i <- lookupRef src tl
       _tab_name <$> lookupSlot i tl
 
-    -- A name-first activity ping for the source tab at its current slot.
-    -- 'Nothing' when the source ref is absent (no name/slot to render).
-    activityPing :: Maybe Text
+    -- A name-first activity ping for the source tab at its current slot, as a
+    -- 'BannerLine'. 'Nothing' when the source ref is absent (no name/slot).
+    activityPing :: Maybe ChannelEvent
     activityPing = do
       name <- srcName
       slot <- srcSlot
-      pure (name <> " (/" <> T.pack (show slot) <> ") has new output")
+      pure (BannerLine (name <> " (/" <> T.pack (show slot) <> ") has new output"))
 
-    deliver :: ConversationKey -> Text -> IO ()
+    deliver :: ConversationKey -> ChannelEvent -> IO ()
     deliver = _rl_sink deps
 
-    go :: Set ConversationKey -> [ConversationKey] -> IO (Set ConversationKey)
+    go
+      :: Set (ConversationKey, BurstKey)
+      -> [ConversationKey]
+      -> IO (Set (ConversationKey, BurstKey))
     go acc []       = pure acc
     go acc (k : ks) = do
       acc' <-
         if Map.lookup k (_cs_cursors cs) == Just src
-          -- Focused on the source tab: deliver the full text in every mode,
-          -- and clear this conversation's pinged membership (it is now looking
-          -- at the tab, so a future background burst should ping it again).
-          then deliver k text >> pure (Set.delete k acc)
+          -- Focused on the source tab: forward the event verbatim in every
+          -- mode, and clear ALL of this conversation's burst entries (it is
+          -- now looking at the tab, so a future background burst should ping).
+          then deliver k event >> pure (clearKey k acc)
           -- Background: behaviour depends on the conversation's effective mode.
           else case relayModeFor k globalDefault cs of
             FocusedOnly    -> pure acc
-            Firehose       -> deliver k text >> pure acc
+            Firehose       -> deliver k event >> pure acc
             ActivityDigest -> backgroundDigest acc k
       go acc' ks
 
+    -- Drop every @(k, _)@ burst entry for conversation @k@.
+    clearKey
+      :: ConversationKey
+      -> Set (ConversationKey, BurstKey)
+      -> Set (ConversationKey, BurstKey)
+    clearKey k = Set.filter ((/= k) . fst)
+
     -- ActivityDigest for a background conversation: one name-first ping per
-    -- burst. Suppressed when @k@ was already pinged for this tab, or when the
-    -- source ref is absent from the list (no name\/slot to render).
+    -- burst. A 'BannerLine' source is skipped (no burst, set untouched).
+    -- Otherwise suppressed when @(k, burstKey)@ was already pinged, or when the
+    -- source ref is absent from the list (no name/slot to render).
     backgroundDigest
-      :: Set ConversationKey -> ConversationKey -> IO (Set ConversationKey)
-    backgroundDigest acc k
-      | k `Set.member` acc = pure acc
-      | otherwise          = case activityPing of
-          Just p  -> deliver k p >> pure (Set.insert k acc)
-          Nothing -> pure acc
+      :: Set (ConversationKey, BurstKey)
+      -> ConversationKey
+      -> IO (Set (ConversationKey, BurstKey))
+    backgroundDigest acc k = case burstKeyOf event of
+      Nothing -> pure acc
+      Just bk
+        | (k, bk) `Set.member` acc -> pure acc
+        | otherwise -> case activityPing of
+            Just p  -> deliver k p >> pure (Set.insert (k, bk) acc)
+            Nothing -> pure acc
