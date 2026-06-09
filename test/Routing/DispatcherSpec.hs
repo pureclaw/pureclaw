@@ -393,7 +393,7 @@ spec = do
                     -- inject one valid message
                     feedIncoming fch
                       (IncomingMessage
-                        (mkMessageSource CkCli (Just (UserId "u")) mempty) "hello")
+                        (mkMessageSource CkCli (ConversationId "cli") (Just (UserId "u")) mempty) "hello")
                     -- read it through the underlying queue
                     _ch_receive (fakeChannelHandle fch)
                   else throwIO (ErrorCall "EOF")
@@ -644,7 +644,7 @@ spec = do
                   then do
                     feedIncoming fch
                       (IncomingMessage
-                        (mkMessageSource CkCli (Just (UserId "allowed")) mempty) "/0")
+                        (mkMessageSource CkCli (ConversationId "cli") (Just (UserId "allowed")) mempty) "/0")
                     _ch_receive (fakeChannelHandle fch)
                   else throwIO (ErrorCall "EOF")
             }
@@ -674,7 +674,7 @@ spec = do
       -- noOp / sourceless path derives the empty UserId "" sentinel via
       -- imUserId, and that sentinel must never match a non-empty allow-list.
       let sourceless = IncomingMessage
-            (mkMessageSource (CkOther "noop") Nothing mempty) "hello"
+            (mkMessageSource (CkOther "noop") (ConversationId "noop") Nothing mempty) "hello"
           populated  = AllowList (Set.fromList [UserId "alice", UserId "bob"])
       -- The derived sender is the empty sentinel...
       imUserId sourceless `shouldBe` UserId ""

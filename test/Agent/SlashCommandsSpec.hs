@@ -117,7 +117,7 @@ mkMockChannel sentRef msgsRef = mkNoOpChannelHandle
   { _ch_send         = writeIORef sentRef . Just . _om_content
   , _ch_receive      = do
       m <- popMsg msgsRef
-      pure (IncomingMessage (mkMessageSource CkCli (Just (UserId "test")) mempty) m)
+      pure (IncomingMessage (mkMessageSource CkCli (ConversationId "cli") (Just (UserId "test")) mempty) m)
   , _ch_prompt       = \_ -> popMsg msgsRef
   , _ch_promptSecret = \_ -> popMsg msgsRef
   }
@@ -128,7 +128,7 @@ mkMockChannelAll allSentRef msgsRef = mkNoOpChannelHandle
   { _ch_send         = \msg -> modifyIORef allSentRef (_om_content msg :)
   , _ch_receive      = do
       m <- popMsg msgsRef
-      pure (IncomingMessage (mkMessageSource CkCli (Just (UserId "test")) mempty) m)
+      pure (IncomingMessage (mkMessageSource CkCli (ConversationId "cli") (Just (UserId "test")) mempty) m)
   , _ch_prompt       = \_ -> popMsg msgsRef
   , _ch_promptSecret = \_ -> popMsg msgsRef
   }
@@ -437,7 +437,7 @@ spec = do
     it "/status renders Source as '<userId> (<channel>)' for a Just source with a userId" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let ctx = emptyContext Nothing
-          src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+          src = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
       env <- mkEnv sentRef
       -- Inject a source into the active session's metadata.
       sh <- readIORef (_env_session env)
@@ -451,7 +451,7 @@ spec = do
     it "/status renders a CkOther channel label for a Just source" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
       let ctx = emptyContext Nothing
-          src = mkMessageSource (CkOther "matrix") Nothing mempty
+          src = mkMessageSource (CkOther "matrix") (ConversationId "matrix") Nothing mempty
       env <- mkEnv sentRef
       sh <- readIORef (_env_session env)
       modifyIORef' (_sh_meta sh) (\m -> m { _sm_source = Just src })

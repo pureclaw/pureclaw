@@ -28,7 +28,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
-import PureClaw.Core.Types (ChannelKind (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
+import PureClaw.Core.Types (ChannelKind (..), ConversationId (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
 import PureClaw.Frontend.StreamBroker
   ( BrokerEvent (..)
@@ -1843,12 +1843,12 @@ spec = do
           , _sm_source            = src
           }
     it "exposes channel name and user id from the session source" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+      let src = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
           si  = toSessionInfo (baseMeta (Just src)) Nothing
       _si_channel si `shouldBe` Just "signal"
       _si_channelUserId si `shouldBe` Just "+15551234567"
     it "yields no channel user id when the source has no user id (e.g. tui/cli)" $ do
-      let src = mkMessageSource CkCli Nothing mempty
+      let src = mkMessageSource CkCli (ConversationId "cli") Nothing mempty
           si  = toSessionInfo (baseMeta (Just src)) Nothing
       _si_channel si `shouldBe` Just "cli"
       _si_channelUserId si `shouldBe` Nothing
@@ -1857,7 +1857,7 @@ spec = do
       _si_channel si `shouldBe` Nothing
       _si_channelUserId si `shouldBe` Nothing
     it "serializes channel and channelUserId into the SessionInfo JSON" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+      let src = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
           v   = Aeson.toJSON (toSessionInfo (baseMeta (Just src)) Nothing)
       lookupKey v "channel" `shouldBe` Just (Aeson.String "signal")
       lookupKey v "channelUserId" `shouldBe` Just (Aeson.String "+15551234567")

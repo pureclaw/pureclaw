@@ -255,6 +255,7 @@ test-suite pureclaw-test
   other-modules:
     Auth.AnthropicOAuthSpec
     Core.TypesSpec
+    Core.MessageSourceSpec
     Security.SecretsSpec
     Core.ErrorsSpec
     Security.PolicySpec

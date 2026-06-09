@@ -97,16 +97,16 @@ spec = do
 
   describe "MessageSource JSON" $ do
     it "round-trips with empty fields and no user id" $ do
-      let src = mkMessageSource CkWeb Nothing Map.empty
+      let src = mkMessageSource CkWeb (ConversationId "") Nothing Map.empty
       eitherDecode (encode src) `shouldBe` Right src
 
     it "round-trips with non-empty fields and a user id" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "+15551234567"))
+      let src = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567"))
                   (Map.fromList [("uuid", Aeson.String "abc-123")])
       eitherDecode (encode src) `shouldBe` Right src
 
     it "uses snake_case keys" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "+1555"))
+      let src = mkMessageSource CkSignal (ConversationId "+1555") (Just (UserId "+1555"))
                   (Map.fromList [("uuid", Aeson.String "abc")])
           out = BL.unpack (encode src)
       out `shouldSatisfy` ("\"channel\"" `isSubOf`)
@@ -114,64 +114,64 @@ spec = do
       out `shouldSatisfy` ("\"fields\"" `isSubOf`)
 
     it "serializes user_id as a plain string" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "+1555")) Map.empty
+      let src = mkMessageSource CkSignal (ConversationId "+1555") (Just (UserId "+1555")) Map.empty
           out = BL.unpack (encode src)
       out `shouldSatisfy` ("\"+1555\"" `isSubOf`)
 
     it "omits user_id when Nothing" $ do
-      let src = mkMessageSource CkWeb Nothing Map.empty
+      let src = mkMessageSource CkWeb (ConversationId "") Nothing Map.empty
           out = BL.unpack (encode src)
       out `shouldSatisfy` (not . ("\"user_id\"" `isSubOf`))
 
     it "omits fields when empty" $ do
-      let src = mkMessageSource CkWeb Nothing Map.empty
+      let src = mkMessageSource CkWeb (ConversationId "") Nothing Map.empty
           out = BL.unpack (encode src)
       out `shouldSatisfy` (not . ("\"fields\"" `isSubOf`))
 
     it "tolerant decode: missing user_id and fields" $ do
       let json = "{\"channel\":\"web\"}"
-      eitherDecode json `shouldBe` Right (mkMessageSource CkWeb Nothing Map.empty)
+      eitherDecode json `shouldBe` Right (mkMessageSource CkWeb (ConversationId "") Nothing Map.empty)
 
   describe "mkMessageSource normalization" $ do
     it "strips control chars and newlines on the user id" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "a\nb\tc\rd")) Map.empty
+      let src = mkMessageSource CkSignal (ConversationId "c1") (Just (UserId "a\nb\tc\rd")) Map.empty
       _ms_userId src `shouldBe` Just (UserId "abcd")
 
     it "strips control chars on a field string value" $ do
-      let src = mkMessageSource CkTelegram Nothing
+      let src = mkMessageSource CkTelegram (ConversationId "42") Nothing
                   (Map.fromList [("username", Aeson.String "ev\nil\tname")])
       Map.lookup "username" (_ms_fields src)
         `shouldBe` Just (Aeson.String "evilname")
 
     it "normalizes nested string values inside fields" $ do
       let nested = Aeson.object ["inner" Aeson..= Aeson.String "x\ny"]
-          src = mkMessageSource CkTelegram Nothing (Map.fromList [("o", nested)])
+          src = mkMessageSource CkTelegram (ConversationId "42") Nothing (Map.fromList [("o", nested)])
       Map.lookup "o" (_ms_fields src)
         `shouldBe` Just (Aeson.object ["inner" Aeson..= Aeson.String "xy"])
 
     it "normalizes string values inside a JSON array field" $ do
       let arr = Aeson.toJSON [Aeson.String "a\nb", Aeson.String "c\td"]
-          src = mkMessageSource CkTelegram Nothing (Map.fromList [("xs", arr)])
+          src = mkMessageSource CkTelegram (ConversationId "42") Nothing (Map.fromList [("xs", arr)])
       Map.lookup "xs" (_ms_fields src)
         `shouldBe` Just (Aeson.toJSON [Aeson.String "ab", Aeson.String "cd"])
 
     it "bounds user id length to maxSourceLen" $ do
       let long = T.replicate (maxSourceLen + 100) "a"
-          src = mkMessageSource CkSignal (Just (UserId long)) Map.empty
+          src = mkMessageSource CkSignal (ConversationId "c1") (Just (UserId long)) Map.empty
       case _ms_userId src of
         Just (UserId t) -> T.length t `shouldBe` maxSourceLen
         Nothing -> expectationFailure "expected Just user id"
 
     it "bounds field string length to maxSourceLen" $ do
       let long = T.replicate (maxSourceLen + 100) "b"
-          src = mkMessageSource CkTelegram Nothing
+          src = mkMessageSource CkTelegram (ConversationId "42") Nothing
                   (Map.fromList [("k", Aeson.String long)])
       case Map.lookup "k" (_ms_fields src) of
         Just (Aeson.String t) -> T.length t `shouldBe` maxSourceLen
         _ -> expectationFailure "expected Just (String ...)"
 
     it "folds CkOther \"signal\" to CkSignal" $ do
-      let src = mkMessageSource (CkOther "signal") Nothing Map.empty
+      let src = mkMessageSource (CkOther "signal") (ConversationId "") Nothing Map.empty
       _ms_channel src `shouldBe` CkSignal
 
     it "maxSourceLen is 512" $

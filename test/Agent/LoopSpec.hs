@@ -261,7 +261,7 @@ spec = do
     -- first inbound message, before slash/provider branching.
     it "captures _sm_source on the first inbound message" $
       withSystemTempDirectory "pc-src" $ \tmp -> do
-        let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+        let src = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
         channel <- mkSourcedChannel [(src, "hello")]
         env <- mkSourceCaptureEnv tmp (MockProvider "reply") channel
         runAgentLoop env
@@ -273,7 +273,7 @@ spec = do
       withSystemTempDirectory "pc-src" $ \tmp -> do
         -- An empty-content message still has a sender; origin is about the
         -- sender, not the content, so the empty-message branch must capture.
-        let src = mkMessageSource CkTelegram (Just (UserId "99999")) mempty
+        let src = mkMessageSource CkTelegram (ConversationId "99999") (Just (UserId "99999")) mempty
         channel <- mkSourcedChannel [(src, "")]
         env <- mkSourceCaptureEnv tmp (MockProvider "reply") channel
         runAgentLoop env
@@ -283,8 +283,8 @@ spec = do
 
     it "does not overwrite _sm_source when a later message has a different sender" $
       withSystemTempDirectory "pc-src" $ \tmp -> do
-        let first  = mkMessageSource CkSignal (Just (UserId "+15550000001")) mempty
-            second = mkMessageSource CkTelegram (Just (UserId "99999")) mempty
+        let first  = mkMessageSource CkSignal (ConversationId "+15550000001") (Just (UserId "+15550000001")) mempty
+            second = mkMessageSource CkTelegram (ConversationId "99999") (Just (UserId "99999")) mempty
         channel <- mkSourcedChannel [(first, "hello"), (second, "world")]
         env <- mkSourceCaptureEnv tmp (MockProvider "reply") channel
         runAgentLoop env
@@ -567,7 +567,7 @@ mkMockChannel messages = do
               (m:rest) -> do
                 writeIORef msgsRef rest
                 pure IncomingMessage
-                  { _im_source = mkMessageSource CkCli (Just (UserId "test")) mempty
+                  { _im_source = mkMessageSource CkCli (ConversationId "cli") (Just (UserId "test")) mempty
                   , _im_content = m
                   }
         , _ch_send = \msg ->

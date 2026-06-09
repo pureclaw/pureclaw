@@ -32,19 +32,19 @@ spec = do
   describe "IncomingMessage" $ do
     it "has Show and Eq instances" $ do
       let msg = IncomingMessage
-            (mkMessageSource CkCli (Just (UserId "user1")) mempty) "hello"
+            (mkMessageSource CkCli (ConversationId "cli") (Just (UserId "user1")) mempty) "hello"
       show msg `shouldContain` "user1"
       msg `shouldBe` msg
 
     it "imUserId derives the user id from a source with Just userId" $ do
       let msg = IncomingMessage
-            (mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty) "hi"
+            (mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty) "hi"
       imUserId msg `shouldBe` UserId "+15551234567"
       _ms_channel (_im_source msg) `shouldBe` CkSignal
 
     it "imUserId yields the UserId \"\" sentinel for a Nothing source" $ do
       let msg = IncomingMessage
-            (mkMessageSource (CkOther "noop") Nothing mempty) "hi"
+            (mkMessageSource (CkOther "noop") (ConversationId "noop") Nothing mempty) "hi"
       imUserId msg `shouldBe` UserId ""
       _ms_userId (_im_source msg) `shouldBe` Nothing
 

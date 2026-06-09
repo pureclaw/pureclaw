@@ -64,7 +64,7 @@ testRespNoUsage = CompletionResponse
 -- id is a recognizable phone number so omit-broadcast assertions elsewhere
 -- can grep for it.
 testSource :: MessageSource
-testSource = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+testSource = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
 
 -- | Safe access to list elements by index, failing with a clear message.
 entryAt :: [TranscriptEntry] -> Int -> IO TranscriptEntry

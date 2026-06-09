@@ -169,10 +169,16 @@ maxSourceLen = 512
 --
 -- Invariants (enforced by convention, not the type): '_ms_fields' must not
 -- duplicate '_ms_userId' and must never contain credentials/secrets.
+--
+-- '_ms_conversation' is the server-derived, transport-scoped conversation id
+-- (see 'ConversationId'). It is supplied as a required argument to
+-- 'mkMessageSource' and is NEVER read from '_ms_fields'/the message body, so a
+-- sender cannot forge it to steal another conversation's tab cursor.
 data MessageSource = MessageSource
-  { _ms_channel :: !ChannelKind
-  , _ms_userId  :: !(Maybe UserId)
-  , _ms_fields  :: !(Map Text Aeson.Value)
+  { _ms_channel      :: !ChannelKind
+  , _ms_conversation :: !ConversationId
+  , _ms_userId       :: !(Maybe UserId)
+  , _ms_fields       :: !(Map Text Aeson.Value)
   } deriving stock (Show, Eq, Generic)
 
 -- | Strip ASCII control characters (covers newlines, tabs, carriage
@@ -194,11 +200,18 @@ normalizeValue v                = v
 -- user id and on every string leaf inside the field map, and folds a
 -- 'CkOther' naming a known channel (e.g. @CkOther "signal"@) down to its
 -- typed constructor.
-mkMessageSource :: ChannelKind -> Maybe UserId -> Map Text Aeson.Value -> MessageSource
-mkMessageSource ch uid fields = MessageSource
-  { _ms_channel = foldChannel ch
-  , _ms_userId  = fmap (UserId . normalizeText . unUserId) uid
-  , _ms_fields  = fmap normalizeValue fields
+--
+-- The 'ConversationId' is a REQUIRED positional argument and is taken
+-- verbatim from the authenticated transport (after the same control-character
+-- normalization applied elsewhere). It is never sourced from @fields@, so a
+-- @conversation_id@ smuggled into the message body is ignored.
+mkMessageSource
+  :: ChannelKind -> ConversationId -> Maybe UserId -> Map Text Aeson.Value -> MessageSource
+mkMessageSource ch (ConversationId conv) uid fields = MessageSource
+  { _ms_channel      = foldChannel ch
+  , _ms_conversation = ConversationId (normalizeText conv)
+  , _ms_userId       = fmap (UserId . normalizeText . unUserId) uid
+  , _ms_fields       = fmap normalizeValue fields
   }
   where
     foldChannel (CkOther n) = channelKindFromText n
@@ -207,20 +220,25 @@ mkMessageSource ch uid fields = MessageSource
 instance Aeson.ToJSON MessageSource where
   toJSON s = Aeson.object $
     ["channel" .= _ms_channel s]
+      <> ["conversation" .= unConversationId (_ms_conversation s)]
       <> case _ms_userId s of
         Just u  -> ["user_id" .= unUserId u]
         Nothing -> []
       <> ["fields" .= _ms_fields s | not (Map.null (_ms_fields s))]
+    where
+      unConversationId (ConversationId c) = c
 
 instance Aeson.FromJSON MessageSource where
   parseJSON = Aeson.withObject "MessageSource" $ \o -> do
     ch     <- o .:  "channel"
+    conv   <- o .:? "conversation" .!= ""
     uid    <- o .:? "user_id"
     fields <- o .:? "fields" .!= Map.empty
     pure MessageSource
-      { _ms_channel = ch
-      , _ms_userId  = fmap UserId uid
-      , _ms_fields  = fields
+      { _ms_channel      = ch
+      , _ms_conversation = ConversationId conv
+      , _ms_userId       = fmap UserId uid
+      , _ms_fields       = fields
       }
 
 -- | Workspace root directory — anchors all SafePath resolution

@@ -9,6 +9,7 @@ module PureClaw.Handles.Channel
   , ChannelHandle (..)
     -- * Implementations
   , mkNoOpChannelHandle
+  , noopConversationId
   ) where
 
 import Data.Maybe (fromMaybe)
@@ -77,7 +78,7 @@ data ChannelHandle = ChannelHandle
 -- sendError are silent. readSecret returns empty text.
 mkNoOpChannelHandle :: ChannelHandle
 mkNoOpChannelHandle = ChannelHandle
-  { _ch_receive      = pure (IncomingMessage (mkMessageSource (CkOther "noop") Nothing mempty) "")
+  { _ch_receive      = pure (IncomingMessage (mkMessageSource (CkOther "noop") noopConversationId Nothing mempty) "")
   , _ch_send         = \_ -> pure ()
   , _ch_sendError    = \_ -> pure ()
   , _ch_sendChunk    = \_ -> pure ()
@@ -86,3 +87,9 @@ mkNoOpChannelHandle = ChannelHandle
   , _ch_prompt       = \_ -> pure ""
   , _ch_promptSecret = \_ -> pure ""
   }
+
+-- | The conversation id for the no-op channel handle. A constant, since the
+-- no-op handle has no real transport and never carries a routable
+-- conversation.
+noopConversationId :: ConversationId
+noopConversationId = ConversationId "noop"

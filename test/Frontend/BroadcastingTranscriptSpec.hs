@@ -31,6 +31,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding qualified as TE
 import PureClaw.Core.Types
   ( ChannelKind (..)
+  , ConversationId (..)
   , MessageSource
   , ModelId (..)
   , ProviderId (..)
@@ -543,7 +544,7 @@ spec = do
 -- | A 'MessageSource' carrying the given user id, used to plant a
 -- recognizable sender id inside @_te_metadata@.
 sourceWith :: Text -> MessageSource
-sourceWith uid = mkMessageSource CkSignal (Just (UserId uid)) mempty
+sourceWith uid = mkMessageSource CkSignal (ConversationId uid) (Just (UserId uid)) mempty
 
 -- ---------------------------------------------------------------------------
 -- Local helpers

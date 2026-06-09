@@ -129,12 +129,12 @@ spec = do
       Aeson.decode (Aeson.encode s) `shouldBe` Just s
 
     it "round-trips a SessionMeta with a Just _sm_source" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+      let src = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
           s   = sample { _sm_source = Just src }
       Aeson.decode (Aeson.encode s) `shouldBe` Just s
 
     it "round-trips a SessionMeta with a CkOther source channel" $ do
-      let src = mkMessageSource (CkOther "matrix") (Just (UserId "@bob:matrix.org")) mempty
+      let src = mkMessageSource (CkOther "matrix") (ConversationId "matrix") (Just (UserId "@bob:matrix.org")) mempty
           s   = sample { _sm_source = Just src }
       Aeson.decode (Aeson.encode s) `shouldBe` Just s
 
@@ -158,7 +158,7 @@ spec = do
         Nothing -> expectationFailure "Failed to decode SessionMeta as Object"
 
     it "ToJSON EMITS the \"source\" key when _sm_source is Just" $ do
-      let src = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+      let src = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
           s   = sample { _sm_source = Just src }
           obj = Aeson.decode (Aeson.encode s) :: Maybe Aeson.Object
       case obj of
