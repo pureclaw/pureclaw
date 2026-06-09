@@ -85,6 +85,7 @@ library
     PureClaw.Tabs.Wizard
     PureClaw.Tabs.Relay
     PureClaw.Tabs.RelayWriter
+    PureClaw.Tabs.Exec
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
     PureClaw.Tab.Ai
     PureClaw.Tab.Harness
@@ -392,6 +393,8 @@ test-suite pureclaw-test
     Tabs.RelaySpec
     -- Tabs-as-View (GitHub #79) 8b.3a
     Tabs.RelayWriterSpec
+    -- Tabs-as-View (GitHub #79) 8b.3b
+    Tabs.ExecSpec
     -- WU9 (HPureClaw depth limit)
     Routing.DepthLimitSpec
     -- WU2 (Session.Kind leaf module)

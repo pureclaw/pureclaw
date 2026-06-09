@@ -131,6 +131,8 @@ import qualified Tabs.WizardSpec
 import qualified Tabs.RelaySpec
 -- Tabs-as-View (GitHub #79) 8b.3a
 import qualified Tabs.RelayWriterSpec
+-- Tabs-as-View (GitHub #79) 8b.3b
+import qualified Tabs.ExecSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -277,6 +279,8 @@ main = hspec $ do
   describe "Tabs.Relay"           Tabs.RelaySpec.spec
   -- Tabs-as-View (GitHub #79) 8b.3a
   describe "Tabs.RelayWriter"     Tabs.RelayWriterSpec.spec
+  -- Tabs-as-View (GitHub #79) 8b.3b
+  describe "Tabs.Exec"            Tabs.ExecSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)
