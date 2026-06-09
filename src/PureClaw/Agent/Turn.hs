@@ -41,6 +41,7 @@ import Control.Monad qualified as M
 import Data.Aeson (Value)
 import Data.IORef qualified as Ref
 import Data.Text (Text)
+import Data.Text qualified as T
 
 import PureClaw.Agent.Context (Context)
 import PureClaw.Agent.Context qualified as Ctx
@@ -147,14 +148,27 @@ cycleTurn deps ctx = do
   sid <- _turn_nextStreamId deps
   _turn_emit deps (TurnStart sid)
   responseRef <- Ref.newIORef (Nothing :: Maybe P.CompletionResponse)
+  streamedRef <- Ref.newIORef False
   -- Mirror Loop's @try@ around the stream so a throwing provider does not
   -- bring the turn down. The sink, not @_env_channel@, receives framing.
   streamResult <- E.try @E.SomeException $
     _turn_stream deps req $ \case
-      P.StreamText t   -> _turn_emit deps (TurnChunk sid t)
+      P.StreamText t   -> Ref.writeIORef streamedRef True >> _turn_emit deps (TurnChunk sid t)
       P.StreamWarning _ -> pure ()      -- non-fatal; logged by prod sink elsewhere
       P.StreamDone resp -> Ref.writeIORef responseRef (Just resp)
       _                 -> pure ()
+  -- Non-streaming providers (e.g. Ollama with @stream = False@) emit only a
+  -- single 'P.StreamDone' carrying the full response and no incremental
+  -- 'P.StreamText', so nothing was relayed as a 'TurnChunk' above. Mirror Loop's
+  -- fallback (Loop.hs: @unless wasStreaming ... _ch_send fullText@) by emitting
+  -- the whole response text as one chunk so it is displayed.
+  streamed <- Ref.readIORef streamedRef
+  mResp0   <- Ref.readIORef responseRef
+  case mResp0 of
+    Just resp | not streamed ->
+      let txt = P.responseText resp
+      in M.unless (T.null (T.strip txt)) $ _turn_emit deps (TurnChunk sid txt)
+    _ -> pure ()
   -- 'TurnEnd' is emitted unconditionally — success, throw, or no-StreamDone —
   -- so the burst is always closed for the downstream relay.
   _turn_emit deps (TurnEnd sid)

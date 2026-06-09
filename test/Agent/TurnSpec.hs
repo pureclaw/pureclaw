@@ -196,6 +196,29 @@ spec = do
       map P._msg_content msgs
         `shouldBe` [ [P.TextBlock "hi"], [P.TextBlock "Hello world"] ]
 
+    it "non-streaming provider (only StreamDone, no StreamText) emits the full text as one chunk" $ do
+      -- Regression for #79 8d: Ollama-style providers (stream=False) emit only a
+      -- single StreamDone with the whole response and no incremental StreamText,
+      -- so without a fallback nothing reaches the relay/screen. The turn must
+      -- emit the full response text as one TurnChunk so it is displayed.
+      scripts <- Ref.newIORef
+        [ [ P.StreamDone (mkResp [P.TextBlock "the whole reply"]) ] ]
+      emits   <- Ref.newIORef []
+      records <- Ref.newIORef []
+      sidRef  <- Ref.newIORef 0
+      execRef <- Ref.newIORef []
+      let deps = mkDeps (scriptedStream scripts) (recordingExec execRef)
+                        (recordingEmit emits) (recordingRecord records)
+                        (nextSid sidRef)
+      _ <- runTurnWithTools deps (Ctx.emptyContext Nothing) "hi"
+      evs <- Ref.readIORef emits
+      let sid0 = mkStreamId 0
+      evs `shouldBe`
+        [ TurnStart sid0
+        , TurnChunk sid0 "the whole reply"
+        , TurnEnd sid0
+        ]
+
     it "records user then assistant message to the transcript" $ do
       scripts <- Ref.newIORef
         [ [ P.StreamText "ok", P.StreamDone (mkResp [P.TextBlock "ok"]) ] ]
