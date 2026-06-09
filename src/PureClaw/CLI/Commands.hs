@@ -48,6 +48,7 @@ import PureClaw.Agent.Completion
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Agent.Loop
+import PureClaw.Tabs.Wiring (runTabbedLoop)
 import PureClaw.Agent.SlashCommands
 import PureClaw.Routing.Config qualified as Routing
 import PureClaw.Routing.Types qualified as Routing
@@ -685,6 +686,13 @@ runChat consentChannel opts = do
         activeCountTv  <- newTVarIO 0
         runnersRef     <- newIORef IntMap.empty
         channelOutQ    <- newTBQueueIO (fromIntegral (Routing._rc_channelOutQBound routingCfg))
+        -- Tabs-as-View (GitHub #79) 8c.2 — build the LIVE tab subsystem bundle
+        -- (tab registry, cursors, runtime registry, relay writer, sink
+        -- registry, wizard state, ref-tagged tab-output queue). The tab-output
+        -- queue reuses the channel-out queue bound. 'runTabbedLoop' (the new
+        -- production entry, wired below) drives these through
+        -- 'PureClaw.Routing.TabDispatch' + the relay-writer thread.
+        tabSub <- newTabSubsystem (Routing._rc_channelOutQBound routingCfg)
         -- Use lazy circular binding: delegateTaskTool captures env, and
         -- env.registry includes the delegate tool. Haskell's laziness
         -- makes this safe — the tool closure only forces env when invoked.
@@ -715,6 +723,14 @@ runChat consentChannel opts = do
               , _env_routingConfig    = routingCfg
               , _env_fork             = defaultEnvFork
               , _env_broker           = Just broker
+              -- Tabs-as-View (GitHub #79) 8c.2 — live tab subsystem fields.
+              , _env_tabRegistry      = _ts_tabRegistry tabSub
+              , _env_cursors          = _ts_cursors tabSub
+              , _env_exec             = _ts_exec tabSub
+              , _env_relayWriter      = _ts_relayWriter tabSub
+              , _env_sinks            = _ts_sinks tabSub
+              , _env_wizard           = _ts_wizard tabSub
+              , _env_tabOutQ          = _ts_tabOutQ tabSub
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)
@@ -854,7 +870,13 @@ runChat consentChannel opts = do
             (Reconcile.runReconcileLoopWith
                Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
             $ \_probeAsync ->
-            runAgentLoopWith env reloadedMessages
+            -- Tabs-as-View (GitHub #79) 8c.2 — flip the production entry to the
+            -- new tabbed loop. The legacy 'runAgentLoopWith' (and its seed
+            -- 'reloadedMessages') become dead code, deleted in 8c.3. The tabbed
+            -- loop seeds each provider runtime's context from the session
+            -- transcript directly (via 'loadRecentMessages'), so the
+            -- foreground-wide 'reloadedMessages' replay is no longer needed.
+            runTabbedLoop env
 
   case effectiveChannel of
     "signal" -> do

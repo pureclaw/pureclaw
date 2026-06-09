@@ -134,14 +134,17 @@ spec = do
       -- Should indicate no provider is configured
       err `shouldContain` "No providers configured"
 
-    it "shows a helpful message when sending a chat message without a provider" $ do
+    it "shows a helpful message when sending a chat message with no active tab" $ do
       bin <- findPureclaw
-      -- Send a non-slash message. Without a configured provider, the
-      -- binary should tell the user how to configure one, not crash.
+      -- Send a non-slash message. Under the Tabs-as-View model (GitHub #79,
+      -- 8c.2 flip) a plain chat message with no active tab is routed by the
+      -- per-conversation dispatcher, which tells the user how to start/attach a
+      -- tab rather than crashing. (Pre-flip this surfaced the "no provider"
+      -- message; the end-to-end CLISpec rewrite is 8d.)
       (exitCode, out, err) <- runPureclaw bin "Hello world\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      -- Should mention how to configure credentials
-      out `shouldContain` "provider"
+      -- Should guide the user to open or attach a tab.
+      out `shouldContain` "no active tab"
 
     it "shows a warning when --autonomy full is set" $ do
       bin <- findPureclaw
@@ -398,7 +401,7 @@ spec = do
       exitCode `shouldNotBe` ExitSuccess
       err `shouldContain` "not found"
 
-    it "resumes a session and replays prior transcript entries into the agent context" $ do
+    it "resumes a named session cleanly and uses its on-disk transcript (8c.2: per-tab replay)" $ do
       bin <- findPureclaw
       withSystemTempDirectory "pureclaw-session-replay-test" $ \tmpDir -> do
         -- Build a session fixture directly on disk with two transcript
@@ -439,9 +442,16 @@ spec = do
         _th_record th (mkTxEntry "e2" Response "prior assistant reply")
         _th_flush th
         _th_close th
-        -- Now spawn the binary with --session <id> and /status; the
-        -- reported Messages count should include the two replayed
-        -- entries rather than the pre-fix value of 0.
+        -- Now spawn the binary with --session <id> and /status. Under the
+        -- Tabs-as-View model (GitHub #79, 8c.2 flip) the resumed transcript is
+        -- replayed lazily into each tab's runtime worker context (seeded via
+        -- 'loadRecentMessages' when the runtime starts), not eagerly into a
+        -- single foreground context. So /status — handled by the dispatcher
+        -- fallthrough over a fresh per-command context — no longer reflects the
+        -- replayed message count; what it MUST still show is that the named
+        -- session resumed cleanly and its on-disk transcript is in use.
+        -- (The per-tab Messages-count assertion is re-established in the 8d
+        -- end-to-end CLISpec rewrite.)
         let args = ["--no-vault", "--session", "replay-fixture-1"]
             pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "/status\n")))
                $ setStdout byteStringOutput
@@ -461,8 +471,12 @@ spec = do
             let outStr = T.unpack (TE.decodeUtf8 (LBS.toStrict out))
                 errStr = T.unpack (TE.decodeUtf8 (LBS.toStrict err))
             annotate errStr ec `shouldBe` annotate errStr ExitSuccess
-            -- The /status handler prints "  Messages: N" — must be 2.
-            outStr `shouldContain` "Messages:            2"
+            -- The named session resumed cleanly: /status renders and reports the
+            -- resumed session's on-disk transcript (the replay-fixture-1 dir),
+            -- confirming --session resolved + loaded the fixture rather than
+            -- starting a fresh session.
+            outStr `shouldContain` "replay-fixture-1"
+            outStr `shouldContain` "transcript.jsonl"
 
     it "logs a warning and falls back to TargetProvider when resuming an SkHarness session whose harness is not running" $ do
       bin <- findPureclaw

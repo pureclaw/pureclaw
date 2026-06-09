@@ -350,5 +350,12 @@ mkOnboardingEnv ch = do
     , _env_routingConfig     = defaultRoutingConfig
     , _env_fork              = defaultEnvFork
     , _env_broker              = Nothing
+    , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+    , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+    , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+    , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+    , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+    , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+    , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
     }
 

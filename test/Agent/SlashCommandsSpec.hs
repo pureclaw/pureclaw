@@ -360,6 +360,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -522,6 +529,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -572,6 +586,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -618,6 +639,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -664,6 +692,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -722,6 +757,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -771,6 +813,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget Nothing) ctx
@@ -816,6 +865,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
@@ -872,6 +928,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "claude-code")) ctx
@@ -930,6 +993,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "claude-code-0" "list TODOs") ctx
@@ -979,6 +1049,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "nonexistent" "hello") ctx
@@ -1028,6 +1105,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "cc-0" "test") ctx
@@ -1072,6 +1156,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -1131,6 +1222,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1186,6 +1284,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1234,6 +1339,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -1273,6 +1385,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1323,6 +1442,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1379,6 +1505,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1437,6 +1570,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1484,6 +1624,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1597,6 +1744,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -1647,6 +1801,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -1698,6 +1859,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -1785,6 +1953,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1840,6 +2015,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1888,6 +2070,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -1931,6 +2120,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env (CmdBg "x") ctx
@@ -2055,6 +2251,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2103,6 +2306,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -2163,6 +2373,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2214,6 +2431,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2287,6 +2511,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -2337,6 +2568,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -2384,6 +2622,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -2429,6 +2674,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -2489,6 +2741,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2566,6 +2825,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
 
     it "/agent list lists discovered agent names" $ withTempHome $ do
@@ -2630,6 +2896,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
 
     it "/agent info <name> shows files and frontmatter" $ withTempHome $ do
@@ -2792,6 +3065,13 @@ spec = do
             , _env_routingConfig = defaultRoutingConfig
             , _env_fork          = defaultEnvFork
             , _env_broker          = Nothing
+            , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
+            , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
+            , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
+            , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
+            , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
+            , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
+            , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             }
 
     it "/session new writes session.json on disk and returns a confirmation" $ withTempHome $ do
