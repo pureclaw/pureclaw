@@ -137,6 +137,7 @@ library
     PureClaw.Agent.Completion
     PureClaw.Agent.Env
     PureClaw.Agent.Loop
+    PureClaw.Agent.Turn
     PureClaw.Agent.Context
     PureClaw.Agent.Memory
     PureClaw.Agent.Compaction
@@ -278,6 +279,7 @@ test-suite pureclaw-test
     Providers.AnthropicSpec
     Agent.CompletionSpec
     Agent.LoopSpec
+    Agent.TurnSpec
     Channels.CLISpec
     CLI.CommandsSpec
     CLI.ConfigSpec

@@ -31,6 +31,7 @@ import qualified Agent.CompletionSpec
 import qualified Agent.ContextSpec
 import qualified Providers.AnthropicSpec
 import qualified Agent.LoopSpec
+import qualified Agent.TurnSpec
 import qualified Channels.CLISpec
 import qualified CLI.CommandsSpec
 import qualified CLI.ConfigSpec
@@ -178,6 +179,7 @@ main = hspec $ do
   describe "Agent.Completion" Agent.CompletionSpec.spec
   describe "Providers.Anthropic" Providers.AnthropicSpec.spec
   describe "Agent.Loop" Agent.LoopSpec.spec
+  describe "Agent.Turn" Agent.TurnSpec.spec
   describe "Channels.CLI" Channels.CLISpec.spec
   describe "CLI.Commands" CLI.CommandsSpec.spec
   describe "CLI.Config" CLI.ConfigSpec.spec
