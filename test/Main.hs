@@ -133,6 +133,8 @@ import qualified Tabs.RelaySpec
 import qualified Tabs.RelayWriterSpec
 -- Tabs-as-View (GitHub #79) 8b.3b
 import qualified Tabs.ExecSpec
+-- Tabs-as-View (GitHub #79) 8c.1
+import qualified Tabs.RuntimesSpec
 -- Tabs-as-View (GitHub #79) 8b.4
 import qualified Routing.TabDispatchSpec
 -- WU1 (live transcript streaming)
@@ -283,6 +285,7 @@ main = hspec $ do
   describe "Tabs.RelayWriter"     Tabs.RelayWriterSpec.spec
   -- Tabs-as-View (GitHub #79) 8b.3b
   describe "Tabs.Exec"            Tabs.ExecSpec.spec
+  describe "Tabs.Runtimes"        Tabs.RuntimesSpec.spec
   -- Tabs-as-View (GitHub #79) 8b.4
   describe "Routing.TabDispatch" Routing.TabDispatchSpec.spec
   -- WU1 (live transcript streaming)

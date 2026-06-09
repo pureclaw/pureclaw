@@ -86,6 +86,8 @@ library
     PureClaw.Tabs.Relay
     PureClaw.Tabs.RelayWriter
     PureClaw.Tabs.Exec
+    -- Tabs-as-View (GitHub #79) 8c.1 — real per-ref runtime constructors
+    PureClaw.Tabs.Runtimes
     -- Tabs-as-View (GitHub #79) 8b.4 — per-conversation routing brain
     PureClaw.Routing.TabDispatch
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
@@ -397,6 +399,8 @@ test-suite pureclaw-test
     Tabs.RelayWriterSpec
     -- Tabs-as-View (GitHub #79) 8b.3b
     Tabs.ExecSpec
+    -- Tabs-as-View (GitHub #79) 8c.1
+    Tabs.RuntimesSpec
     -- Tabs-as-View (GitHub #79) 8b.4
     Routing.TabDispatchSpec
     -- WU9 (HPureClaw depth limit)
