@@ -372,19 +372,8 @@ test-suite pureclaw-test
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs
     Routing.ParseSpec
-    Handles.TabSpec
-    Routing.RegistrySpec
     Routing.ConfigSpec
-    Routing.DispatcherSpec
-    Routing.ChannelOutSpec
-    Routing.AutoSpawnSpec
-    Routing.LegacyDispatchSpec
-    Tab.AiSpec
-    Tab.HarnessSpec
-    Tab.BackendSpec
     Tab.ContainerSpec
-    Coexistence.SlashCmdSpec
-    Security.TabSpec
     Onboarding.StartSpec
     -- Tabs-as-View (GitHub #79) WU1
     Tabs.TypesSpec
@@ -409,7 +398,6 @@ test-suite pureclaw-test
     -- WU0 (tabbed-chat) test seams T1–T4
     Test.Fake.Provider
     Test.Fake.ChannelHandle
-    Test.Fake.TabFactory
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw

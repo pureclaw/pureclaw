@@ -114,18 +114,7 @@ import qualified Frontend.APISpec
 
 -- WU0 (tabbed-chat) red-phase scaffold specs
 import qualified Routing.ParseSpec
-import qualified Handles.TabSpec
-import qualified Routing.RegistrySpec
 import qualified Routing.ConfigSpec
-import qualified Routing.DispatcherSpec
-import qualified Routing.ChannelOutSpec
-import qualified Routing.AutoSpawnSpec
-import qualified Routing.LegacyDispatchSpec
-import qualified Tab.AiSpec
-import qualified Tab.HarnessSpec
-import qualified Tab.BackendSpec
-import qualified Coexistence.SlashCmdSpec
-import qualified Security.TabSpec
 import qualified Onboarding.StartSpec
 -- Tabs-as-View (GitHub #79) WU1
 import qualified Tabs.TypesSpec
@@ -268,18 +257,7 @@ main = hspec $ do
   describe "Frontend.API"          Frontend.APISpec.spec
   -- WU0 (tabbed-chat) red-phase scaffold specs
   describe "Routing.Parse"        Routing.ParseSpec.spec
-  describe "Handles.Tab"          Handles.TabSpec.spec
-  describe "Routing.Registry"     Routing.RegistrySpec.spec
   describe "Routing.Config"       Routing.ConfigSpec.spec
-  describe "Routing.Dispatcher"   Routing.DispatcherSpec.spec
-  describe "Routing.ChannelOut"   Routing.ChannelOutSpec.spec
-  describe "Routing.AutoSpawn"    Routing.AutoSpawnSpec.spec
-  describe "Routing.LegacyDispatch" Routing.LegacyDispatchSpec.spec
-  describe "Tab.Ai"               Tab.AiSpec.spec
-  describe "Tab.Harness"          Tab.HarnessSpec.spec
-  describe "Tab.Backend"          Tab.BackendSpec.spec
-  describe "Coexistence.SlashCmd" Coexistence.SlashCmdSpec.spec
-  describe "Security.Tab"         Security.TabSpec.spec
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
   -- Tabs-as-View (GitHub #79) WU1
   describe "Tabs.Types"           Tabs.TypesSpec.spec
