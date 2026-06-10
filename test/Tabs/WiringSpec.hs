@@ -357,9 +357,9 @@ spec = do
 
     it "handles a whitespace-only inbound without crashing and continues" $
       withSystemTempDirectory "pc-wiring" $ \tmp -> do
-        -- Whitespace-only routes to the parse-error copy; a following plain
-        -- message still produces the no-active-tab banner, proving the loop
-        -- did not crash on the blank message.
+        -- Whitespace-only is silently skipped (no parse-error emitted); a
+        -- following plain message still produces the no-active-tab banner,
+        -- proving the loop did not crash on the blank message.
         let msgs =
               [ mkInbound "conv-a" "alice" "   "
               , mkInbound "conv-a" "alice" "after"
@@ -370,8 +370,23 @@ spec = do
         sent <- readIORef (_clog_sent (_th_log th))
         let parseErr = "could not parse that — /tabs to list, /help for commands"
             banner   = "no active tab — /new to start one or /tab to attach"
-        sent `shouldContain` [parseErr]
+        sent `shouldNotContain` [parseErr]
         sent `shouldContain` [banner]
+
+    it "silently skips whitespace-only input and still captures source (pureclaw-z9h)" $
+      withSystemTempDirectory "pc-wiring" $ \tmp -> do
+        -- A whitespace-only message must: (a) NOT emit a parse-error, and
+        -- (b) still capture provenance (_sm_source set-once), because source
+        -- capture happens BEFORE the dispatch guard (same as empty-content).
+        let msg = mkInbound "conv-ws" "alice" "   "
+        th <- mkTabbedEnv tmp [msg]
+        completed <- runLoopBounded th
+        completed `shouldBe` True
+        sent <- readIORef (_clog_sent (_th_log th))
+        let parseErr = "could not parse that — /tabs to list, /help for commands"
+        sent `shouldNotContain` [parseErr]
+        src <- readSource (_th_env th)
+        src `shouldBe` Just (_im_source msg)
 
     it "acknowledges /bg in the foreground via the fallthrough" $
       withSystemTempDirectory "pc-wiring" $ \tmp -> do
