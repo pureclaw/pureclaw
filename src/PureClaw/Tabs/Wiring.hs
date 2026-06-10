@@ -39,6 +39,9 @@ module PureClaw.Tabs.Wiring
     -- * Exec wiring (exposed for tests \/ reuse)
   , mkExecDeps
   , mkTabDispatchDeps
+    -- * Effective tool registry (exposed for tests \/ reuse)
+  , effectiveRegistry
+  , execOneTool
   ) where
 
 import Control.Concurrent.STM (atomically, readTBQueue, writeTBQueue)
@@ -98,7 +101,11 @@ import PureClaw.Tabs.Types
   , TabRef (..)
   , resolveCursorSlot
   )
-import PureClaw.Tools.Registry (executeTool, registryDefinitions)
+import PureClaw.Tools.Registry
+  ( ToolRegistry
+  , executeTool
+  , registryDefinitions
+  )
 import PureClaw.Transcript.Provider (mkTranscriptProvider)
 
 -- ---------------------------------------------------------------------------
@@ -323,12 +330,24 @@ seedContextFrom env th = do
   recent <- Session.loadRecentMessages th 50 100000
   pure (Ctx.replaceMessages recent (Ctx.emptyContext (_env_systemPrompt env)))
 
--- | Run ONE tool call against the env registry, returning a tool-result
+-- | The effective tool registry for a per-tab runtime: the env's built-in
+-- registry merged with any connected MCP server tools (read per call, so tools
+-- connected after a tab is created are still seen). Mirrors the still-live
+-- @Loop.backgroundRegistry@ \/ legacy @effectiveRegistry@ (pureclaw-2u4; #79).
+effectiveRegistry :: AgentEnv -> IO ToolRegistry
+effectiveRegistry env = do
+  -- TEMP (RED): ignores _env_mcpServers — proves MCP tools are unreachable on
+  -- the tabbed path. GREEN merges mcpRegistry below.
+  _servers <- readIORef (_env_mcpServers env)
+  pure (_env_registry env)
+
+-- | Run ONE tool call against the effective registry, returning a tool-result
 -- 'P.Message'. Mirrors @Loop.executeCall@ + @toolResultMessage@ for a single
 -- call: an unknown tool yields a one-line error result rather than throwing.
 execOneTool :: AgentEnv -> ToolCallId -> Text -> Value -> IO P.Message
 execOneTool env callId name input = do
-  result <- executeTool (_env_registry env) name input
+  reg    <- effectiveRegistry env
+  result <- executeTool reg name input
   let (parts, isErr) = case result of
         Nothing       -> ([P.TRPText ("Unknown tool: " <> name)], True)
         Just (ps, er) -> (ps, er)

@@ -1,5 +1,6 @@
 module Tabs.WiringSpec (spec) where
 
+import Control.Concurrent.MVar (newEmptyMVar, takeMVar)
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (throwIO)
 import Data.IntMap.Strict qualified as IntMap
@@ -17,13 +18,27 @@ import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
 import Test.Hspec
 
+import Data.Aeson qualified as Aeson
+import MCP.Client.Config (ClientConfig (..), defaultClientConfig)
+import MCP.Client.Session (withClientSession)
+import MCP.Client.Transport (Transport (..))
+import MCP.Types (InputSchema (..), Tool (..))
+
 import PureClaw.Agent.Env
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Tab (TabRunner (..))
 import PureClaw.Harness.Registry qualified as Registry
-import PureClaw.Providers.Class (Provider (..), SomeProvider (..))
+import PureClaw.MCP (McpServer (..))
+import PureClaw.Providers.Class
+  ( ContentBlock (..)
+  , Message (..)
+  , Provider (..)
+  , SomeProvider (..)
+  , ToolDefinition (..)
+  , ToolResultPart (..)
+  )
 import PureClaw.Routing.Config (defaultRoutingConfig)
 import PureClaw.Routing.Types (RoutingConfig (..))
 import PureClaw.Security.Policy (defaultPolicy)
@@ -36,8 +51,14 @@ import PureClaw.Session.Handle
   )
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Tabs.RelayWriter (lookupSink)
-import PureClaw.Tabs.Wiring (runTabbedLoop)
-import PureClaw.Tools.Registry (emptyRegistry)
+import PureClaw.Tabs.Wiring (effectiveRegistry, execOneTool, runTabbedLoop)
+import PureClaw.Tools.Registry
+  ( ToolHandler (..)
+  , emptyRegistry
+  , executeTool
+  , registerTool
+  , registryDefinitions
+  )
 
 -- ---------------------------------------------------------------------------
 -- A provider that is never expected to be called in these loop-level tests.
@@ -225,6 +246,58 @@ readSource env = do
 cliKey :: Text -> (ChannelKind, ConversationId)
 cliKey conv = (CkCli, ConversationId conv)
 
+-- ---------------------------------------------------------------------------
+-- MCP-on-tabbed-path fixtures (pureclaw-2u4)
+-- ---------------------------------------------------------------------------
+
+-- | A fake MCP 'Transport' whose receive blocks forever (no server response)
+-- and whose send/close are no-ops. Paired with a tiny request timeout, a
+-- 'callTool' over a session on this transport returns a caught 'RequestTimeout'
+-- error result — proving the tool is REACHABLE (dispatched to the MCP handler),
+-- not "Unknown tool" — without spawning a real MCP server.
+fakeTransport :: IO Transport
+fakeTransport = do
+  block <- newEmptyMVar
+  pure Transport
+    { transport_send    = \_ -> pure ()
+    , transport_receive = takeMVar block   -- never fires (test never fills it)
+    , transport_close   = pure ()
+    }
+
+-- | A single MCP 'Tool' named "mcp_ping".
+mcpPingTool :: Tool
+mcpPingTool = Tool
+  { name         = "mcp_ping"
+  , title        = Nothing
+  , description  = Just "ping exposed by a fake MCP server"
+  , inputSchema  = InputSchema { schemaType = "object", properties = Nothing, required = Nothing }
+  , outputSchema = Nothing
+  , annotations  = Nothing
+  , _meta        = Nothing
+  }
+
+-- | Build an 'McpServer' over a real 'ClientSession' (transport faked) that
+-- exposes 'mcpPingTool', and run @action@ with it while the session is alive.
+-- The session uses a 1ms request timeout so a tool call returns promptly.
+withFakeMcpServer :: (McpServer -> IO a) -> IO a
+withFakeMcpServer action = do
+  transport <- fakeTransport
+  let cfg = defaultClientConfig { config_request_timeout_us = 1000 }
+  withClientSession transport cfg $ \session ->
+    action McpServer
+      { _ms_name       = "fake"
+      , _ms_command    = ["fake"]
+      , _ms_session    = session
+      , _ms_tools      = [mcpPingTool]
+      , _ms_serverInfo = Nothing
+      , _ms_cleanup    = pure ()
+      }
+
+-- | Seed an env's '_env_mcpServers' with one connected MCP server.
+seedMcp :: AgentEnv -> McpServer -> IO ()
+seedMcp env server =
+  writeIORef (_env_mcpServers env) (Map.singleton (_ms_name server) server)
+
 spec :: Spec
 spec = do
   describe "runTabbedLoop" $ do
@@ -321,3 +394,44 @@ spec = do
         case mSink of
           Just _  -> pure ()
           Nothing -> expectationFailure "expected sink registered for conv-sink"
+
+  describe "effectiveRegistry / execOneTool — MCP tools on the tabbed path (pureclaw-2u4)" $ do
+    it "merges connected MCP server tools into the effective registry (defs + base preserved)" $
+      withSystemTempDirectory "pc-wiring-mcp" $ \tmp ->
+        withFakeMcpServer $ \server -> do
+          th <- mkTabbedEnv tmp []
+          -- A base registry with a built-in tool, so the merge must keep BOTH.
+          let builtin = ToolDefinition
+                { _td_name        = "builtin_echo"
+                , _td_description = "echo"
+                , _td_inputSchema = Aeson.Null
+                }
+              baseReg = registerTool builtin (ToolHandler (\_ -> pure ("ok", False)))
+                          emptyRegistry
+              env = (_th_env th) { _env_registry = baseReg }
+          seedMcp env server
+          defs <- registryDefinitions <$> effectiveRegistry env
+          let names = map _td_name defs
+          names `shouldContain` ["mcp_ping"]    -- MCP tool advertised to the LLM
+          names `shouldContain` ["builtin_echo"] -- base registry preserved
+
+    it "executes a connected MCP tool (reachable, NOT \"Unknown tool\") via execOneTool" $
+      withSystemTempDirectory "pc-wiring-mcp" $ \tmp ->
+        withFakeMcpServer $ \server -> do
+          th <- mkTabbedEnv tmp []
+          let env = (_th_env th) { _env_registry = emptyRegistry }
+          seedMcp env server
+          -- Direct registry exec: a connected MCP tool resolves to a handler.
+          res <- effectiveRegistry env >>= \reg -> executeTool reg "mcp_ping" Aeson.Null
+          case res of
+            Nothing -> expectationFailure "mcp_ping unreachable: executeTool returned Nothing"
+            Just _  -> pure ()
+          -- And through execOneTool (the per-tab runtime seam): the result must
+          -- NOT be the "Unknown tool" message — it dispatched to the MCP handler.
+          msg <- execOneTool env (ToolCallId "c1") "mcp_ping" Aeson.Null
+          let texts =
+                [ t
+                | ToolResultBlock _ parts _ <- _msg_content msg
+                , TRPText t <- parts
+                ]
+          texts `shouldNotContain` ["Unknown tool: mcp_ping"]

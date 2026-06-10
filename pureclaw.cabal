@@ -428,6 +428,8 @@ test-suite pureclaw-test
     http-client,
     http-client-tls,
     http-types,
+    mcp-client,
+    mcp-types,
     network,
     optparse-applicative,
     stm,
