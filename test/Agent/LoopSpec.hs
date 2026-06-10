@@ -2,15 +2,12 @@ module Agent.LoopSpec (spec) where
 
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception
-import Control.Monad (forM)
 import Data.Aeson (object, (.=))
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (getCurrentTime)
-import System.Directory (doesFileExist, listDirectory)
-import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
@@ -301,55 +298,7 @@ spec = do
         SessionTypes._sm_source meta `shouldBe` Just first
 
     -- /bg — run a prompt in a fresh background session (issue #52)
-    it "/bg runs a background turn and pushes the result to the channel" $
-      withSystemTempDirectory "pc-bg" $ \tmp -> do
-        (channel, sentRef) <- mkMockChannel []
-        env <- mkBgTestEnv tmp (MockProvider "bg result") channel
-        runBackgroundTurn env "summarize the repo"
-        sent <- readIORef sentRef
-        sent `shouldBe` ["[bg done] bg result"]
-
-    it "/bg records the conversation to its own session transcript (frontend-visible)" $
-      withSystemTempDirectory "pc-bg" $ \tmp -> do
-        (channel, _sentRef) <- mkMockChannel []
-        env <- mkBgTestEnv tmp (MockProvider "bg result") channel
-        runBackgroundTurn env "summarize the repo"
-        -- A fresh session directory with a NON-EMPTY transcript.jsonl must
-        -- exist under the sessions dir (this is what the frontend scans).
-        -- The foreground test session has no turns, so its transcript is
-        -- empty; exactly one non-empty transcript (the /bg session) is added.
-        dirs <- listDirectory tmp
-        contents <- forM dirs $ \d -> do
-          let f = tmp </> d </> "transcript.jsonl"
-          ex <- doesFileExist f
-          if ex then readFile f else pure ""
-        length (filter (not . null) contents) `shouldBe` 1
-
-    it "/bg background turn maps a blank response to (no response)" $
-      withSystemTempDirectory "pc-bg" $ \tmp -> do
-        (channel, sentRef) <- mkMockChannel []
-        env <- mkBgTestEnv tmp (MockProvider "") channel
-        runBackgroundTurn env "do nothing"
-        sent <- readIORef sentRef
-        sent `shouldBe` ["[bg done] (no response)"]
-
-    it "/bg background turn with no provider reports it cannot run" $
-      withSystemTempDirectory "pc-bg" $ \tmp -> do
-        (channel, sentRef) <- mkMockChannel []
-        env <- mkBgTestEnv tmp (MockProvider "ignored") channel
-        writeIORef (_env_provider env) Nothing
-        runBackgroundTurn env "do thing"
-        sent <- readIORef sentRef
-        sent `shouldBe` ["[bg] Cannot run: no provider configured."]
-
-    it "/bg background turn surfaces provider failure without leaking details" $
-      withSystemTempDirectory "pc-bg" $ \tmp -> do
-        (channel, sentRef) <- mkMockChannel []
-        env <- mkBgTestEnv tmp FailingProvider channel
-        runBackgroundTurn env "do thing"
-        sent <- readIORef sentRef
-        sent `shouldBe` ["[bg] Something went wrong running the background task."]
-
+    -- Direct runBackgroundTurn tests live in Agent.BackgroundSpec (extracted in 8d.c.2).
     it "/bg in the loop acknowledges in the foreground (not the dispatcher fallback)" $
       withSystemTempDirectory "pc-bg" $ \tmp -> do
         (channel, sentRef) <- mkMockChannel ["/bg do a thing"]
