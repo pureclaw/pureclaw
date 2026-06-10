@@ -17,7 +17,6 @@ import Test.Hspec
 
 import PureClaw.Agent.Env
 import PureClaw.Harness.Registry qualified as Registry
-import PureClaw.Agent.Loop
 import PureClaw.Channels.Class
 import PureClaw.Channels.Signal
 import PureClaw.Channels.Signal.Transport
@@ -72,8 +71,8 @@ mkTestEnv p ch = do
   let routing = defaultRoutingConfig
   channelOutQ   <- newTBQueueIO (fromIntegral (_rc_channelOutQBound routing))
   -- Tabs-as-View (#79) 8c.2 subsystem: populate the seven tab fields so the
-  -- tabbed entry point (runTabbedLoop) can be exercised. The four still-on-
-  -- runAgentLoop Signal tests never touch these fields.
+  -- tabbed entry point (runTabbedLoop) can be exercised. All Signal end-to-end
+  -- tests now drive runTabbedLoop and rely on these fields.
   ts <- newTabSubsystem (_rc_channelOutQBound routing)
   pure AgentEnv
     { _env_provider     = providerRef
@@ -117,15 +116,20 @@ spec = do
       -- Set up Signal channel
       sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
-      let handle = (toHandle sc)
-            { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
+      let handle = mkRecordingHandle sc sentRef
       baseEnv <- mkTestEnv (EchoProvider "Echo: ") handle
       let env = baseEnv { _env_systemPrompt = Just "You are a test agent." }
 
-      -- Run agent loop in a separate thread
-      agentThread <- async $ runAgentLoop env
+      -- Run the tabbed loop in a separate thread.
+      agentThread <- async $ runTabbedLoop env
 
-      -- Push a Signal envelope into the inbox
+      -- On the tabbed path a plain DM only reaches the provider once the
+      -- conversation has an active tab, so mint one with /nt first and wait for
+      -- its confirmation banner.
+      atomically $ writeTQueue (_sch_inbox sc) (mkNtEnvelope "+9876543210")
+      waitForResponses sentRef 1
+
+      -- Now the real message.
       let envelope = SignalEnvelope
             { _se_sourceUuid = Nothing
             , _se_source    = "+9876543210"
@@ -137,30 +141,31 @@ spec = do
             }
       atomically $ writeTQueue (_sch_inbox sc) envelope
 
-      -- Poll until we see the response (up to 5s)
-      waitForResponses sentRef 1
+      -- Wait for the echo (the SECOND recorded output; the first was the banner).
+      waitForResponses sentRef 2
 
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
 
-      sent <- readIORef sentRef
-      length sent `shouldBe` 1
-      case sent of
-        (first:_) -> do
-          T.unpack first `shouldContain` "Echo:"
-          T.unpack first `shouldContain` "Hello from Signal!"
-        _ -> expectationFailure "expected at least one message"
+      -- Provider text now arrives chunked via the relay; assert on combined
+      -- content rather than an exact message count.
+      out <- allOutput sentRef
+      T.unpack out `shouldContain` "Echo:"
+      T.unpack out `shouldContain` "Hello from Signal!"
 
     it "handles multiple Signal messages in sequence" $ do
       sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
-      let handle = (toHandle sc)
-            { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
+      let handle = mkRecordingHandle sc sentRef
 
       env2 <- mkTestEnv (EchoProvider "Re: ") handle
-      agentThread <- async $ runAgentLoop env2
+      agentThread <- async $ runTabbedLoop env2
 
-      -- Push two messages
+      -- Establish an active tab first (then wait for its banner).
+      atomically $ writeTQueue (_sch_inbox sc) (mkNtEnvelope "+111")
+      waitForResponses sentRef 1
+
+      -- Push two messages; each provider reply streams in as chunks.
       let mkEnvelope txt ts = SignalEnvelope
             { _se_source = "+111"
             , _se_sourceUuid = Nothing
@@ -168,26 +173,28 @@ spec = do
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = txt, _sdm_timestamp = ts }
             }
       atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "First" 1000)
-      waitForResponses sentRef 1
-      atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "Second" 2000)
       waitForResponses sentRef 2
+      atomically $ writeTQueue (_sch_inbox sc) (mkEnvelope "Second" 2000)
+      waitForResponses sentRef 3
 
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
 
-      sent <- readIORef sentRef
-      length sent `shouldBe` 2
+      -- Both echoed user texts must appear in the combined output.
+      out <- allOutput sentRef
+      T.unpack out `shouldContain` "First"
+      T.unpack out `shouldContain` "Second"
 
     it "uses slash commands through Signal" $ do
       sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
-      let handle = (toHandle sc)
-            { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
+      let handle = mkRecordingHandle sc sentRef
 
       env3 <- mkTestEnv (EchoProvider "Echo: ") handle
-      agentThread <- async $ runAgentLoop env3
+      agentThread <- async $ runTabbedLoop env3
 
-      -- Send /status slash command
+      -- /status is a non-tab slash command dispatched by fallthrough ->
+      -- executeSlashCommand regardless of active tabs, so no /nt prelude needed.
       let statusEnvelope = SignalEnvelope
             { _se_source = "+111"
             , _se_sourceUuid = Nothing
@@ -200,17 +207,13 @@ spec = do
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
 
-      sent <- readIORef sentRef
-      length sent `shouldBe` 1
-      case sent of
-        (first:_) -> T.unpack first `shouldContain` "Messages"
-        _ -> expectationFailure "expected at least one message"
+      out <- allOutput sentRef
+      T.unpack out `shouldContain` "Messages"
 
     it "executes tool calls end-to-end" $ do
       sc <- mkTestSignalChannelForFlow
       sentRef <- newIORef ([] :: [Text])
-      let handle = (toHandle sc)
-            { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
+      let handle = mkRecordingHandle sc sentRef
 
       -- Register a test tool
       let testHandler = ToolHandler $ \_ -> pure ("tool result", False)
@@ -219,7 +222,11 @@ spec = do
       baseEnv4 <- mkTestEnv ToolCallThenTextProvider handle
       let env = baseEnv4 { _env_registry = registry }
 
-      agentThread <- async $ runAgentLoop env
+      agentThread <- async $ runTabbedLoop env
+
+      -- Establish an active tab so the DM reaches the provider, wait for banner.
+      atomically $ writeTQueue (_sch_inbox sc) (mkNtEnvelope "+111")
+      waitForResponses sentRef 1
 
       let envelope = SignalEnvelope
             { _se_source = "+111"
@@ -228,14 +235,21 @@ spec = do
             , _se_dataMessage = Just SignalDataMessage { _sdm_message = "do it", _sdm_timestamp = 1000 }
             }
       atomically $ writeTQueue (_sch_inbox sc) envelope
-      waitForResponses sentRef 1  -- at least 1 response
+      -- Full tool cycle produces three recorded outputs:
+      --   [0] /nt confirmation banner
+      --   [1] "Using tool..." (first provider turn, before tool execution)
+      --   [2] "Done with tool." (second provider turn, delivered asynchronously
+      --       by the relay-writer AFTER the tool result is fed back)
+      -- Wait for all three before reading allOutput so we don't race against
+      -- the relay-writer thread that delivers [2] after cancelWith.
+      waitForResponses sentRef 3
 
       cancelWith agentThread (userError "EOF")
       _ <- waitCatch agentThread
 
-      sent <- readIORef sentRef
-      -- Should get intermediate text + final response
-      length sent `shouldSatisfy` (>= 1)
+      -- The tool cycle ends with ToolCallThenTextProvider's final text.
+      out <- allOutput sentRef
+      T.unpack out `shouldContain` "Done with tool."
 
     -- End-to-end dual-storage proof (WU5): a Signal DM carrying BOTH a phone
     -- number AND a uuid must land in BOTH session.json (via _sm_source /
@@ -247,15 +261,7 @@ spec = do
       withSystemTempDirectory "pureclaw-signal-flow-spec" $ \baseDir -> do
         sc <- mkTestSignalChannelForFlow
         sentRef <- newIORef ([] :: [Text])
-        -- Record BOTH _ch_send (banners — e.g. the /nt confirmation) and
-        -- _ch_sendChunk (the relay writer maps a provider TurnChunk to ChunkOf ->
-        -- _ch_sendChunk, so the echo arrives as a streamed chunk, not _ch_send).
-        let handle = (toHandle sc)
-              { _ch_send      = \msg -> modifyIORef sentRef (<> [_om_content msg])
-              , _ch_sendChunk = \chunk -> case chunk of
-                  ChunkText t -> modifyIORef sentRef (<> [t])
-                  ChunkDone   -> pure ()
-              }
+        let handle = mkRecordingHandle sc sentRef
 
         -- A real on-disk FOREGROUND session handle with a fresh _sm_source =
         -- Nothing. Under runTabbedLoop the conversation runs in the active
@@ -374,6 +380,41 @@ mkSrcTestMeta sid = SessionMeta
 -- | Fixed timestamp for 'mkSrcTestMeta' (2025-01-01T00:00:00Z).
 srcTestEpoch :: UTCTime
 srcTestEpoch = UTCTime (fromGregorian 2025 1 1) (secondsToDiffTime 0)
+
+-- | Build a recording channel handle that captures BOTH banner sends
+-- (@_ch_send@ — e.g. the @/nt@ confirmation) and relayed provider chunks
+-- (@_ch_sendChunk@ — the relay writer maps each provider 'TurnChunk' to a
+-- 'ChunkOf' and emits it via @_ch_sendChunk@). On the tabbed path provider text
+-- arrives as streamed chunks, not a single @_ch_send@, so both must be recorded
+-- into the same ref to assert on the combined output.
+mkRecordingHandle :: SignalChannel -> IORef [Text] -> ChannelHandle
+mkRecordingHandle sc sentRef =
+  (toHandle sc)
+    { _ch_send      = \msg -> atomicModifyIORef' sentRef (\xs -> (xs <> [_om_content msg], ()))
+    , _ch_sendChunk = \chunk -> case chunk of
+        ChunkText t -> atomicModifyIORef' sentRef (\xs -> (xs <> [t], ()))
+        ChunkDone   -> pure ()
+    }
+
+-- | Construct a Signal envelope carrying @/nt@. Delivering this first mints a
+-- default-provider tab+session for the conversation and focuses the cursor on
+-- it — a prerequisite on the tabbed path before a plain DM can reach the
+-- provider.
+mkNtEnvelope :: Text -> SignalEnvelope
+mkNtEnvelope src = SignalEnvelope
+  { _se_source      = src
+  , _se_sourceUuid  = Nothing
+  , _se_timestamp   = Just 1
+  , _se_dataMessage = Just SignalDataMessage
+      { _sdm_message   = "/nt"
+      , _sdm_timestamp = 1
+      }
+  }
+
+-- | Concatenate all recorded output (banners + relayed chunks) into one Text so
+-- content assertions don't depend on how the output was chunked or banner-split.
+allOutput :: IORef [Text] -> IO Text
+allOutput ref = T.concat <$> readIORef ref
 
 -- | Create a test SignalChannel with mock transport.
 mkTestSignalChannelForFlow :: IO SignalChannel
