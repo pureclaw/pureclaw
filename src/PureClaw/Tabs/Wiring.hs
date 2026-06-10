@@ -446,14 +446,16 @@ lookupSinkFor :: AgentEnv -> ConversationKey -> IO (Maybe ChannelHandle)
 lookupSinkFor env = lookupSink (_env_sinks env)
 
 -- | Mint a fresh default-provider session, cache its handle in @store@, and
--- return its 'BoundSession' ref. @'Left' msg@ when no default provider\/model
--- is configured.
+-- return its 'BoundSession' ref. @'Left' msg@ when no default provider or
+-- model is configured; the message carries actionable setup guidance.
 mkNewDefaultSession :: AgentEnv -> SessionStore -> IO (Either Text TabRef)
 mkNewDefaultSession env store = do
-  mModel <- readIORef (_env_model env)
-  case mModel of
-    Nothing    -> pure (Left "no default provider configured")
-    Just model -> do
+  mProvider <- readIORef (_env_provider env)
+  mModel    <- readIORef (_env_model env)
+  case (mProvider, mModel) of
+    (Nothing, _) -> pure (Left noProviderMsg)
+    (_, Nothing) -> pure (Left noModelMsg)
+    (Just _, Just model) -> do
       now <- getCurrentTime
       dir <- sessionsDirOf env
       let sid  = SessionTypes.newSessionId Nothing now
@@ -461,6 +463,19 @@ mkNewDefaultSession env store = do
       sh <- Session.mkSessionHandle (_env_broker env) (_env_logger env) dir meta
       cacheSession store sid sh
       pure (Right (BoundSession sid))
+
+-- | Guidance emitted when no provider has been configured.
+noProviderMsg :: Text
+noProviderMsg =
+  "No provider configured. To start chatting, configure your provider with:\n\n"
+  <> "  /provider <PROVIDER>\n"
+
+-- | Guidance emitted when a provider is set but no model has been chosen.
+noModelMsg :: Text
+noModelMsg =
+  "No model configured. Set a model with:\n\n"
+  <> "  /target <MODEL>\n\n"
+  <> "or add 'model = \"<model>\"' to your config file."
 
 -- | A 'SessionTypes.SessionMeta' for a fresh provider-backed session.
 baseProviderMeta

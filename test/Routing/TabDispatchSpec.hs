@@ -135,7 +135,7 @@ mkFakesEx defB sendB harnesses sessions liveFn = do
         , _td_emit    = \k t -> modifyIORef' emits (++ [(k, t)])
         , _td_newDefaultSession = pure $ case defB of
             MintsRef r -> Right r
-            NoDefault  -> Left "no default"
+            NoDefault  -> Left noDefaultGuidance
         , _td_recentHarnesses = pure harnesses
         , _td_recentSessions  = pure sessions
         , _td_liveHarness     = pure . liveFn
@@ -200,6 +200,15 @@ cursorSlot f k = do
 -- ---------------------------------------------------------------------------
 -- Test fixtures
 -- ---------------------------------------------------------------------------
+
+-- | The no-default-provider guidance string returned by the 'NoDefault' fake
+-- (mirrors what 'mkNewDefaultSession' returns for the no-provider case).
+-- TabDispatch now passes the Left text through directly, so both the fake
+-- and the assertions use this constant.
+noDefaultGuidance :: Text
+noDefaultGuidance =
+  "No provider configured. To start chatting, configure your provider with:\n\n"
+  <> "  /provider <PROVIDER>\n"
 
 convA :: ConversationKey
 convA = (CkCli, ConversationId "cli")
@@ -290,8 +299,7 @@ newSpec = describe "/new (reset active tab)" $ do
     _ <- appendSession f "old" "old-tab"
     handleInbound (f_deps f) convA "/0"      -- focus it
     handleInbound (f_deps f) convA "/new"
-    lastEmit f `shouldReturn`
-      "no default provider configured — set one with /target default <name> (or config.toml)"
+    lastEmit f `shouldReturn` noDefaultGuidance
     -- nothing released; the tab is untouched
     released f `shouldReturn` []
 
@@ -324,8 +332,7 @@ ntSpec = describe "/nt (new tab)" $ do
   it "with no default provider, emits the §14 copy" $ do
     f <- simpleFakes NoDefault
     handleInbound (f_deps f) convA "/nt"
-    lastEmit f `shouldReturn`
-      "no default provider configured — set one with /target default <name> (or config.toml)"
+    lastEmit f `shouldReturn` noDefaultGuidance
 
 -- ---------------------------------------------------------------------------
 -- /close

@@ -243,7 +243,7 @@ resetActiveTab :: Ctx -> TabIndex -> IO ()
 resetActiveTab ctx slot = do
   mNew <- _td_newDefaultSession (_ctx_deps ctx)
   case mNew of
-    Left _       -> emit ctx noDefaultProviderMsg
+    Left msg     -> emit ctx msg
     Right newRef -> do
       -- The slot is present (the caller resolved it from a live cursor) and
       -- @newRef@ is freshly minted, so it is never already bound: 'rebindSlot'
@@ -273,7 +273,7 @@ cmdNt :: Ctx -> IO ()
 cmdNt ctx = do
   mNew <- _td_newDefaultSession (_ctx_deps ctx)
   case mNew of
-    Left _       -> emit ctx noDefaultProviderMsg
+    Left msg     -> emit ctx msg
     Right newRef -> bindNewTab ctx newRef defaultSessionName "new tab"
 
 -- ---------------------------------------------------------------------------
@@ -643,11 +643,6 @@ lastSlotChar n
 -- | Slot exhaustion at 36 (§14).
 slotsFullMsg :: Text
 slotsFullMsg = "all 36 tab slots in use — /close one first"
-
--- | No default provider configured (§14).
-noDefaultProviderMsg :: Text
-noDefaultProviderMsg =
-  "no default provider configured — set one with /target default <name> (or config.toml)"
 
 -- | Deferred death warning on next send to a 'Dead' tab (§14).
 deferredDeathMsg :: Text -> Text
