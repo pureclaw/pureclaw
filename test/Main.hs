@@ -139,6 +139,8 @@ import qualified Tabs.ExecSpec
 import qualified Tabs.RuntimesSpec
 -- Tabs-as-View (GitHub #79) 8b.4
 import qualified Routing.TabDispatchSpec
+-- Tabs-as-View (GitHub #79) 8d.c.3
+import qualified Tabs.WiringSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -291,6 +293,8 @@ main = hspec $ do
   describe "Tabs.Runtimes"        Tabs.RuntimesSpec.spec
   -- Tabs-as-View (GitHub #79) 8b.4
   describe "Routing.TabDispatch" Routing.TabDispatchSpec.spec
+  -- Tabs-as-View (GitHub #79) 8d.c.3
+  describe "Tabs.Wiring"          Tabs.WiringSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)
