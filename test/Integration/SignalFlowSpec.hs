@@ -3,7 +3,7 @@ module Integration.SignalFlowSpec (spec) where
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (object, (.=))
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Text (Text)
@@ -24,7 +24,6 @@ import PureClaw.Channels.Signal.Transport
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Log
-import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Providers.Class
 import PureClaw.Routing.Config (defaultRoutingConfig)
 import PureClaw.Routing.Types (RoutingConfig (..))
@@ -32,9 +31,10 @@ import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Session.Handle (mkNoOpSessionHandle, mkSessionHandle, noOpOnFirstStreamDoneRef)
-import PureClaw.Session.Handle qualified as Session
 import PureClaw.Session.Types
+import PureClaw.Tabs.Wiring (runTabbedLoop)
 import PureClaw.Tools.Registry
+import System.Directory (listDirectory)
 
 import Data.Map.Strict qualified as Map
 
@@ -71,6 +71,10 @@ mkTestEnv p ch = do
   runnersRef    <- newIORef IntMap.empty
   let routing = defaultRoutingConfig
   channelOutQ   <- newTBQueueIO (fromIntegral (_rc_channelOutQBound routing))
+  -- Tabs-as-View (#79) 8c.2 subsystem: populate the seven tab fields so the
+  -- tabbed entry point (runTabbedLoop) can be exercised. The four still-on-
+  -- runAgentLoop Signal tests never touch these fields.
+  ts <- newTabSubsystem (_rc_channelOutQBound routing)
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -97,13 +101,13 @@ mkTestEnv p ch = do
     , _env_routingConfig = routing
     , _env_fork          = defaultEnvFork
     , _env_broker          = Nothing
-    , _env_tabRegistry = error "8c.2 stub: _env_tabRegistry not exercised in this test"
-    , _env_cursors = error "8c.2 stub: _env_cursors not exercised in this test"
-    , _env_exec = error "8c.2 stub: _env_exec not exercised in this test"
-    , _env_relayWriter = error "8c.2 stub: _env_relayWriter not exercised in this test"
-    , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
-    , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
-    , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
+    , _env_tabRegistry = _ts_tabRegistry ts
+    , _env_cursors     = _ts_cursors ts
+    , _env_exec        = _ts_exec ts
+    , _env_relayWriter = _ts_relayWriter ts
+    , _env_sinks       = _ts_sinks ts
+    , _env_wizard      = _ts_wizard ts
+    , _env_tabOutQ     = _ts_tabOutQ ts
     }
 
 spec :: Spec
@@ -243,60 +247,83 @@ spec = do
       withSystemTempDirectory "pureclaw-signal-flow-spec" $ \baseDir -> do
         sc <- mkTestSignalChannelForFlow
         sentRef <- newIORef ([] :: [Text])
+        -- Record BOTH _ch_send (banners — e.g. the /nt confirmation) and
+        -- _ch_sendChunk (the relay writer maps a provider TurnChunk to ChunkOf ->
+        -- _ch_sendChunk, so the echo arrives as a streamed chunk, not _ch_send).
         let handle = (toHandle sc)
-              { _ch_send = \msg -> modifyIORef sentRef (<> [_om_content msg]) }
+              { _ch_send      = \msg -> modifyIORef sentRef (<> [_om_content msg])
+              , _ch_sendChunk = \chunk -> case chunk of
+                  ChunkText t -> modifyIORef sentRef (<> [t])
+                  ChunkDone   -> pure ()
+              }
 
-        -- A real on-disk session handle with a fresh _sm_source = Nothing.
+        -- A real on-disk FOREGROUND session handle with a fresh _sm_source =
+        -- Nothing. Under runTabbedLoop the conversation runs in the active
+        -- tab's BOUND session (minted by /nt below), not this foreground one;
+        -- this handle only roots the sessions directory (its parent, baseDir).
         let sid  = "sess-srctest"
             meta = mkSrcTestMeta sid
         sh <- mkSessionHandle Nothing mkNoOpLogHandle baseDir meta
 
         -- Build the test env, then OVERRIDE its (noOp) session with the real one
-        -- so the agent loop's transcript writes (and set-once source capture)
-        -- target the on-disk session.
+        -- so sessionsDirOf resolves the minted session under baseDir.
         baseEnv <- mkTestEnv (EchoProvider "Echo: ") handle
         writeIORef (_env_session baseEnv) sh
 
-        agentThread <- async $ runAgentLoop baseEnv
+        agentThread <- async $ runTabbedLoop baseEnv
 
-        -- A Signal DM carrying BOTH a phone (source) and a uuid (sourceUuid).
-        let envelope = SignalEnvelope
-              { _se_source    = "+15551234567"
+        -- 1) /nt mints a default-provider tab+session for this conversation and
+        --    focuses the cursor on it. The new path needs an active tab before a
+        --    plain DM can reach the provider.
+        let ntEnvelope = SignalEnvelope
+              { _se_source     = "+15551234567"
               , _se_sourceUuid = Just "uuid-abc-123"
-              , _se_timestamp = Just 1000
+              , _se_timestamp  = Just 999
+              , _se_dataMessage = Just SignalDataMessage
+                  { _sdm_message   = "/nt"
+                  , _sdm_timestamp = 999
+                  }
+              }
+        atomically $ writeTQueue (_sch_inbox sc) ntEnvelope
+        -- Wait for the /nt confirmation banner before sending the DM.
+        waitForResponses sentRef 1
+
+        -- 2) The real DM carrying BOTH a phone (source) and a uuid (sourceUuid).
+        let envelope = SignalEnvelope
+              { _se_source     = "+15551234567"
+              , _se_sourceUuid = Just "uuid-abc-123"
+              , _se_timestamp  = Just 1000
               , _se_dataMessage = Just SignalDataMessage
                   { _sdm_message   = "Hello"
                   , _sdm_timestamp = 1000
                   }
               }
         atomically $ writeTQueue (_sch_inbox sc) envelope
-        waitForResponses sentRef 1
+        -- Wait for the echo (the SECOND message; the first was the /nt banner).
+        waitForResponses sentRef 2
 
         cancelWith agentThread (userError "EOF")
         _ <- waitCatch agentThread
 
-        -- Flush the transcript so transcript.jsonl is on disk before reading.
-        _th_flush (Session._sh_transcript sh)
+        -- Locate the MINTED session dir: the subdir of baseDir that is not the
+        -- foreground session's dir.
+        entries <- listDirectory baseDir
+        let mintedDirs = filter (/= T.unpack sid) entries
+        mintedSid <- case mintedDirs of
+          (d:_) -> pure d
+          []    -> expectationFailure "expected a minted session dir under baseDir"
+                     >> pure ""
 
-        -- session.json: phone AND uuid persisted via _sm_source.
-        sessionJson <- TIO.readFile (baseDir </> T.unpack sid </> "session.json")
+        -- session.json (the BOUND session): phone AND uuid persisted via
+        -- _sm_source (set-once on the bound session, not the foreground one).
+        sessionJson <- TIO.readFile (baseDir </> mintedSid </> "session.json")
         T.unpack sessionJson `shouldContain` "+15551234567"
         T.unpack sessionJson `shouldContain` "uuid-abc-123"
-        -- Robust structural check on the in-memory meta: _sm_source carries the
-        -- phone as the user id and the uuid in the fields map.
-        persisted <- readIORef (Session._sh_meta sh)
-        (_ms_userId =<< _sm_source persisted)
-          `shouldBe` Just (UserId "+15551234567")
-        case _sm_source persisted of
-          Just src ->
-            Map.lookup "uuid" (_ms_fields src)
-              `shouldBe` Just (String "uuid-abc-123")
-          Nothing -> expectationFailure "expected _sm_source to be Just"
 
-        -- transcript.jsonl: phone AND uuid recorded on the Request entry's
-        -- metadata.source (the substring check is sufficient — both only appear
-        -- because mkTranscriptProvider wrote _im_source into the Request metadata).
-        transcriptJsonl <- TIO.readFile (baseDir </> T.unpack sid </> "transcript.jsonl")
+        -- transcript.jsonl (the BOUND session): phone AND uuid recorded on the
+        -- Request entry's metadata.source — present only because the transcript
+        -- wrapper read the bound session's _sm_source per request.
+        transcriptJsonl <- TIO.readFile (baseDir </> mintedSid </> "transcript.jsonl")
         T.unpack transcriptJsonl `shouldContain` "+15551234567"
         T.unpack transcriptJsonl `shouldContain` "uuid-abc-123"
 
