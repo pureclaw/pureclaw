@@ -54,6 +54,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (UTCTime, getCurrentTime)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory)
@@ -174,9 +175,14 @@ runTabbedLoop env = do
           -- session, so provenance lands on the session the turn actually runs
           -- in (pureclaw-opr; #79). No active tab / non-session ref → no-op.
           captureBoundSource env store convKey src
-          -- (c) Dispatch per conversation.
-          Dispatch.handleInbound dispatchDeps convKey (_im_content msg)
-          loop store dispatchDeps
+          -- (c) Dispatch per conversation — skip empty/whitespace input silently,
+          -- mirroring legacy dispatchMsg's T.null(T.strip) guard (pureclaw-z9h).
+          -- Source capture above is preserved even for empty content.
+          if T.null (T.strip (_im_content msg))
+            then loop store dispatchDeps
+            else do
+              Dispatch.handleInbound dispatchDeps convKey (_im_content msg)
+              loop store dispatchDeps
 
 -- | The 'ConversationKey' for a message source: its channel + conversation id
 -- (invariant I3 — the dispatcher keys cursors\/relay by this pair).
