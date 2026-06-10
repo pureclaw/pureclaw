@@ -39,7 +39,12 @@
 --   'TurnStart' sid    -> 'StreamStart' sid placeholderSlot
 --   'TurnChunk' sid t   -> 'ChunkOf' sid t
 --   'TurnEnd'   sid     -> 'StreamEnd' sid
+--   'TurnError' _sid t  -> 'FullMsg' placeholderSlot t
 -- @
+--
+-- 'TurnError' carries a provider-failure message (pureclaw-9d0); it maps to a
+-- whole-message 'FullMsg' (not stream framing) so the error reaches every
+-- channel — including the non-streaming Signal\/Telegram path.
 --
 -- The 'Tab.TabIndex' embedded in 'StreamStart' is __vestigial__: the relay now
 -- routes purely by 'TabRef' (spike §4), so the slot is a fixed placeholder
@@ -197,6 +202,11 @@ emitTurnEvent deps = \case
   TurnStart sid   -> emit (StreamStart sid placeholderSlot)
   TurnChunk sid t -> emit (ChunkOf sid t)
   TurnEnd   sid   -> emit (StreamEnd sid)
+  -- A provider failure: relay the legacy "Something went wrong" text as a
+  -- whole-message 'FullMsg' (pureclaw-9d0). 'FullMsg' reaches every channel
+  -- via @_ch_send@ — including the non-streaming Signal\/Telegram path (ao9) —
+  -- whereas the stream framing only reaches streaming sinks.
+  TurnError _sid t -> emit (FullMsg placeholderSlot t)
   where
     emit = _prd_emit deps (_prd_ref deps)
 

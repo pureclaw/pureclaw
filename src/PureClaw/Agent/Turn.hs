@@ -60,10 +60,17 @@ import PureClaw.Routing.Types (StreamId, mkStreamId)
 -- once per provider completion (so a tool cycle that re-completes produces a
 -- fresh 'StreamId' per leg). Deliberately env-light: no slot\/tab identity —
 -- the runtime maps these to 'PureClaw.Routing.Types.ChannelEvent' in 8b.3.
+--
+-- @'TurnError' sid msg@ surfaces a provider failure as a visible message. The
+-- legacy @Loop.handleCompletion@ caught a throwing stream and sent the user a
+-- @TemporaryError "Something went wrong. Please try again."@; on the tabbed
+-- path the throw must likewise be surfaced (pureclaw-9d0) rather than silently
+-- swallowed, leaving the user with an empty 'TurnStart'\/'TurnEnd' pair.
 data TurnEvent
   = TurnStart !StreamId
   | TurnChunk !StreamId !Text
   | TurnEnd   !StreamId
+  | TurnError !StreamId !Text
   deriving stock (Eq, Show)
 
 -- ---------------------------------------------------------------------------
@@ -122,7 +129,10 @@ data TurnDeps = TurnDeps
 --   4. On a provider error (the stream throws, or yields no 'P.StreamDone'),
 --      do not crash: 'TurnEnd' is still emitted (it is emitted unconditionally
 --      after the stream attempt) and the context — carrying at least the user
---      message — is returned.
+--      message — is returned. When the stream /throws/, a 'TurnError' is also
+--      emitted (after 'TurnEnd') so the failure is surfaced as a visible
+--      message — restoring the legacy @TemporaryError@ visibility (pureclaw-9d0).
+--      The no-'P.StreamDone' path stays a graceful, silent no-op.
 runTurnWithTools :: TurnDeps -> Context -> Text -> IO Context
 runTurnWithTools deps ctx0 userText = do
   let userMsg = P.textMessage P.User userText
@@ -173,7 +183,13 @@ cycleTurn deps ctx = do
   -- so the burst is always closed for the downstream relay.
   _turn_emit deps (TurnEnd sid)
   case streamResult of
-    Left _  -> pure ctx              -- provider threw: stop, keep context
+    Left _  -> do
+      -- Provider threw: surface a VISIBLE error (mirrors the legacy
+      -- @Loop.handleCompletion@ @TemporaryError@), then stop and keep the
+      -- context. Emitted after 'TurnEnd' so it lands as its own message rather
+      -- than as part of the (closed) stream burst (pureclaw-9d0).
+      _turn_emit deps (TurnError sid "Something went wrong. Please try again.")
+      pure ctx
     Right () -> do
       mResp <- Ref.readIORef responseRef
       case mResp of
