@@ -103,15 +103,31 @@ data Call
   | SentChunk StreamChunk
   deriving (Eq, Show)
 
--- | A fake 'ChannelHandle' that records '_ch_send' / '_ch_sendChunk' calls (in
--- order) into a fresh 'IORef', based on the no-op handle (all other fields
--- inherited).
+-- | A fake STREAMING 'ChannelHandle' that records '_ch_send' / '_ch_sendChunk'
+-- calls (in order) into a fresh 'IORef', based on the no-op handle (all other
+-- fields inherited). '_ch_streaming' is forced to 'True' so the relay streams
+-- chunks (matching the CLI channel).
 newRecordingHandle :: IO (IORef [Call], ChannelHandle)
 newRecordingHandle = do
   ref <- newIORef []
   let ch = mkNoOpChannelHandle
         { _ch_send      = \m -> modifyIORef' ref (++ [Sent m])
         , _ch_sendChunk = \c -> modifyIORef' ref (++ [SentChunk c])
+        , _ch_streaming = True
+        }
+  pure (ref, ch)
+
+-- | A fake NON-STREAMING 'ChannelHandle' (like the real Signal\/Telegram
+-- channels): '_ch_streaming' is 'False', '_ch_sendChunk' is a no-op (the real
+-- non-streaming channels discard chunks), and only '_ch_send' records. This is
+-- the realistic shape that surfaces the output-loss bug.
+newNonStreamingHandle :: IO (IORef [Call], ChannelHandle)
+newNonStreamingHandle = do
+  ref <- newIORef []
+  let ch = mkNoOpChannelHandle
+        { _ch_send      = \m -> modifyIORef' ref (++ [Sent m])
+        , _ch_sendChunk = \_ -> pure ()
+        , _ch_streaming = False
         }
   pure (ref, ch)
 
@@ -181,6 +197,26 @@ spec = do
         , SentChunk (ChunkText "llo")
         , SentChunk ChunkDone
         ]
+
+    it "buffers a focused stream and full-sends it on a NON-STREAMING channel (pureclaw-ao9)" $ do
+      -- The real Signal/Telegram channels are non-streaming: _ch_streaming is
+      -- False and _ch_sendChunk is a no-op, so streaming a focused reply via
+      -- _ch_sendChunk silently discards EVERY chunk. The relay must instead
+      -- buffer the stream's chunks and flush them as ONE _ch_send on StreamEnd.
+      reg <- newSinkRegistry
+      (calls, ch) <- newNonStreamingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = oneTab (refN 0)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+      w <- newRelayWriter
+      mapM_ (processOutput deps w (refN 0))
+        [ StreamStart (sidN 1) anyIdx
+        , ChunkOf (sidN 1) "Hel"
+        , ChunkOf (sidN 1) "lo"
+        , StreamEnd (sidN 1)
+        ]
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "Hello")]
 
     it "ActivityDigest background pings exactly once over a burst (DoD 2)" $ do
       reg <- newSinkRegistry

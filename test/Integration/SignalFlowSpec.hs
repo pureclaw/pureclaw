@@ -381,19 +381,19 @@ mkSrcTestMeta sid = SessionMeta
 srcTestEpoch :: UTCTime
 srcTestEpoch = UTCTime (fromGregorian 2025 1 1) (secondsToDiffTime 0)
 
--- | Build a recording channel handle that captures BOTH banner sends
--- (@_ch_send@ — e.g. the @/nt@ confirmation) and relayed provider chunks
--- (@_ch_sendChunk@ — the relay writer maps each provider 'TurnChunk' to a
--- 'ChunkOf' and emits it via @_ch_sendChunk@). On the tabbed path provider text
--- arrives as streamed chunks, not a single @_ch_send@, so both must be recorded
--- into the same ref to assert on the combined output.
+-- | Build a recording channel handle that is REALISTIC for the non-streaming
+-- Signal channel: @_ch_send@ is recorded (the path the real Signal channel
+-- actually uses for every reply) and @_ch_sendChunk@ is a no-op, exactly like
+-- the real Signal handle (@_ch_streaming = False@). The previous fake recorded
+-- @_ch_sendChunk@, masking pureclaw-ao9 — on the real channel those chunks are
+-- discarded, so every provider reply was silently lost. Post-fix the relay
+-- buffers a stream's chunks and flushes them as ONE @_ch_send@ on StreamEnd, so
+-- recording @_ch_send@ exercises the real delivery path.
 mkRecordingHandle :: SignalChannel -> IORef [Text] -> ChannelHandle
 mkRecordingHandle sc sentRef =
   (toHandle sc)
     { _ch_send      = \msg -> atomicModifyIORef' sentRef (\xs -> (xs <> [_om_content msg], ()))
-    , _ch_sendChunk = \chunk -> case chunk of
-        ChunkText t -> atomicModifyIORef' sentRef (\xs -> (xs <> [t], ()))
-        ChunkDone   -> pure ()
+    , _ch_sendChunk = \_ -> pure ()
     }
 
 -- | Construct a Signal envelope carrying @/nt@. Delivering this first mints a
