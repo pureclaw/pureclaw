@@ -49,6 +49,7 @@ import Control.Exception (try)
 import Control.Exception qualified as E
 import Control.Monad (forever)
 import Data.Aeson (Value)
+import Data.Aeson qualified as Aeson
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -73,7 +74,7 @@ import PureClaw.Handles.Harness
   , mkNoOpHarnessHandle
   )
 import PureClaw.Handles.Log (LogHandle (..))
-import PureClaw.Handles.Transcript (TranscriptHandle)
+import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Providers.Class qualified as P
 import PureClaw.Routing.TabDispatch (TabDispatchDeps (..))
@@ -110,6 +111,7 @@ import PureClaw.Tools.Registry
   , registryDefinitions
   )
 import PureClaw.Transcript.Provider (mkTranscriptProvider)
+import PureClaw.Transcript.Types qualified as TT
 
 -- ---------------------------------------------------------------------------
 -- Session-handle pool (8c.2-local)
@@ -200,17 +202,31 @@ conversationKeyOf src = (Core._ms_channel src, Core._ms_conversation src)
 captureBoundSource
   :: AgentEnv -> SessionStore -> ConversationKey -> Core.MessageSource -> IO ()
 captureBoundSource env store convKey src = do
+  mSh <- activeBoundSession env store convKey
+  case mSh of
+    Just sh -> Session.setSourceIfAbsent sh src
+    Nothing -> pure ()
+
+-- | Resolve the 'Session.SessionHandle' bound to a conversation's ACTIVE tab,
+-- if any. Follows the same cursor -> slot -> tab -> '_tab_ref' chain
+-- 'TabDispatch.doDefault' uses to pick the session a turn runs in, then — when
+-- the ref is a @BoundSession@ — resolves its handle from the loop's @store@. No
+-- active tab (no cursor / dangling cursor) or a non-session ref
+-- (@BoundHarness@) yields 'Nothing'. Shared by 'captureBoundSource' (provenance
+-- set-once) and 'fallthrough' (seeding the @\/status@ \/ @\/compact@ context
+-- from the live conversation's transcript — pureclaw-25k).
+activeBoundSession
+  :: AgentEnv -> SessionStore -> ConversationKey -> IO (Maybe Session.SessionHandle)
+activeBoundSession env store convKey = do
   cs <- readIORef (_env_cursors env)
   tl <- Tabs.readTabs (_env_tabRegistry env)
   case resolveCursorSlot convKey cs tl of
-    Nothing   -> pure ()
+    Nothing   -> pure Nothing
     Just slot -> do
       mTab <- Tabs.registryLookupSlot (_env_tabRegistry env) slot
       case _tab_ref <$> mTab of
-        Just (BoundSession sid) -> do
-          sh <- resolveSession env store sid
-          Session.setSourceIfAbsent sh src
-        _ -> pure ()
+        Just (BoundSession sid) -> Just <$> resolveSession env store sid
+        _                       -> pure Nothing
 
 -- | The global default 'RelayMode' for conversations with no override.
 -- 'FocusedOnly' matches the design default (only the focused tab is relayed).
@@ -355,6 +371,43 @@ seedContextFrom env th = do
   recent <- Session.loadRecentMessages th 50 100000
   pure (Ctx.replaceMessages recent (Ctx.emptyContext (_env_systemPrompt env)))
 
+-- | Seed a 'Ctx.Context' for a slash command (the 'fallthrough' path) from a
+-- session's transcript: the recent-message window ('seedContextFrom') PLUS the
+-- cumulative provider token usage recovered from the transcript's Response
+-- entries ('transcriptUsage'). This restores both the message count \/ context
+-- estimate AND the @Total input\/output tokens@ that @\/status@ reports — which
+-- the live runtime worker accumulates in its private 'Ctx.Context' that the
+-- slash path could never see (pureclaw-25k).
+seedSlashContext :: AgentEnv -> TranscriptHandle -> IO Ctx.Context
+seedSlashContext env th = do
+  base  <- seedContextFrom env th
+  usage <- transcriptUsage th
+  pure (Ctx.recordUsage (Just usage) base)
+
+-- | Sum the provider-reported token usage across every Response entry recorded
+-- in a session's transcript. Each Response entry carries its
+-- @input_tokens@ \/ @output_tokens@ in '_te_metadata' (written by
+-- 'PureClaw.Transcript.Provider.buildResponseMetadata'); missing or
+-- non-numeric values contribute zero. The result mirrors what the live worker's
+-- 'Ctx.recordUsage' accumulator would hold, so a seeded @\/status@ reports the
+-- real cumulative totals rather than zeros.
+transcriptUsage :: TranscriptHandle -> IO P.Usage
+transcriptUsage th = do
+  entries <- _th_query th TT.emptyFilter
+  let responses = [ e | e <- entries, TT._te_direction e == TT.Response ]
+      inp = sum [ metaInt "input_tokens"  (TT._te_metadata e) | e <- responses ]
+      out = sum [ metaInt "output_tokens" (TT._te_metadata e) | e <- responses ]
+  pure (P.Usage inp out)
+
+-- | Read a non-negative 'Int' from a metadata map under @key@; absent or
+-- non-numeric yields 0.
+metaInt :: Text -> Map.Map Text Value -> Int
+metaInt key m = case Map.lookup key m of
+  Just v  -> case Aeson.fromJSON v of
+    Aeson.Success n -> n
+    Aeson.Error _   -> 0
+  Nothing -> 0
+
 -- | The effective tool registry for a per-tab runtime: the env's built-in
 -- registry merged with any connected MCP server tools (read per call, so tools
 -- connected after a tab is created are still seen). Mirrors the still-live
@@ -446,7 +499,7 @@ mkTabDispatchDeps env execDeps store = TabDispatchDeps
   , _td_liveHarness       = liveHarness env
   , _td_relayDefault      = defaultRelayMode
   , _td_routingConfig     = _env_routingConfig env
-  , _td_fallthrough       = fallthrough env
+  , _td_fallthrough       = fallthrough env store
   }
 
 -- | Emit a dispatcher banner\/reply to a conversation's registered sink. The
@@ -576,11 +629,19 @@ isLive = \case
 -- dispatcher), so the tabbed loop forks a self-contained background turn
 -- ('runBg') instead, matching the legacy loop's @\/bg@ handling.
 --
--- The per-call 'Ctx.Context' is empty: these commands (status\/help\/config\/…)
--- do not consult conversation history. Per-conversation provider turns flow
--- through the runtime worker's own 'Ctx.Context', not this path.
-fallthrough :: AgentEnv -> ConversationKey -> Slash.SlashCommand -> IO ()
-fallthrough env _convKey cmd = case cmd of
+-- The per-call 'Ctx.Context' is SEEDED from the conversation's ACTIVE bound
+-- session transcript ('seedSlashContext' over 'activeBoundSession'): the
+-- recent-message window plus the cumulative token usage. This is what
+-- @\/status@ (message count, context estimate, total tokens) and @\/compact@
+-- read — the live runtime worker keeps those in its own private 'Ctx.Context'
+-- the slash path cannot reach, so without seeding every count reads zero
+-- (pureclaw-25k). When there is no active session\/tab (or a harness ref) the
+-- context falls back to empty, the pre-fix behaviour. Most other fallthrough
+-- commands (help\/config\/provider\/…) ignore the context entirely, so seeding
+-- is harmless for them.
+fallthrough
+  :: AgentEnv -> SessionStore -> ConversationKey -> Slash.SlashCommand -> IO ()
+fallthrough env store convKey cmd = case cmd of
   Slash.CmdBg prompt -> do
     _ch_send (_env_channel env)
       (OutgoingMessage
@@ -588,8 +649,20 @@ fallthrough env _convKey cmd = case cmd of
     _ <- _env_fork env (runBg env prompt)
     pure ()
   _ -> do
-    _ <- Slash.executeSlashCommand env cmd (Ctx.emptyContext (_env_systemPrompt env))
+    ctx <- slashContext env store convKey
+    _ <- Slash.executeSlashCommand env cmd ctx
     pure ()
+
+-- | The 'Ctx.Context' a fallthrough slash command runs against: seeded from the
+-- conversation's active bound session transcript when one exists, else an empty
+-- context carrying the env system prompt (the pre-fix fallback). See
+-- 'fallthrough' and 'seedSlashContext' (pureclaw-25k).
+slashContext :: AgentEnv -> SessionStore -> ConversationKey -> IO Ctx.Context
+slashContext env store convKey = do
+  mSh <- activeBoundSession env store convKey
+  case mSh of
+    Just sh -> seedSlashContext env (Session._sh_transcript sh)
+    Nothing -> pure (Ctx.emptyContext (_env_systemPrompt env))
 
 -- | Fork a @\/bg@ background turn. Re-exported from the loop so the tabbed
 -- fallthrough preserves @\/bg@ semantics without importing the whole loop's

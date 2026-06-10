@@ -332,7 +332,7 @@ runLoopBounded :: TabbedHarness -> IO Bool
 runLoopBounded th = do
   done <- timeout (5 * 1000000) (runTabbedLoop (_th_env th))
   cancelAll (_th_runners th)
-  pure (maybe False (const True) done)
+  pure (isJust done)
 
 -- | Read back the foreground session's captured origin.
 readSource :: AgentEnv -> IO (Maybe MessageSource)
@@ -356,7 +356,21 @@ shouldContain' haystack needle =
 transcriptHasUsage :: FilePath -> IO Bool
 transcriptHasUsage root = do
   files <- findTranscripts root
-  anyM (\f -> ("output_tokens" `isInfixOf`) <$> TIO.readFile f) files
+  anyM (fmap ("output_tokens" `isInfixOf`) . TIO.readFile) files
+  where
+    anyM _ []       = pure False
+    anyM p (x : xs) = do
+      r <- p x
+      if r then pure True else anyM p xs
+
+-- | 'True' once some @transcript.jsonl@ under @root@ contains a recorded
+-- provider Response (matched by the fixed assistant reply text) — i.e. a turn
+-- has completed and been flushed, regardless of whether usage metadata was
+-- present. Used to gate @\/status@ for the no-usage case (pureclaw-25k).
+transcriptHasResponse :: FilePath -> IO Bool
+transcriptHasResponse root = do
+  files <- findTranscripts root
+  anyM (fmap ("hello from the model" `isInfixOf`) . TIO.readFile) files
   where
     anyM _ []       = pure False
     anyM p (x : xs) = do
@@ -611,6 +625,33 @@ spec = do
             -- Token totals reconstructed from the transcript Response metadata.
             status `shouldContain'` "Total input tokens:  11"
             status `shouldContain'` "Total output tokens: 7"
+          [] -> expectationFailure "expected a /status block in the sent log"
+
+    it "/status seeds messages from the transcript even when the provider reports no usage (pureclaw-25k)" $
+      withSystemTempDirectory "pc-wiring-status-nousage" $ \tmp -> do
+        -- ReplyProvider reports no Usage, so the transcript Response carries no
+        -- token metadata: token totals stay 0 (metaInt's no-key branch), but the
+        -- message count is still reconstructed from the transcript (> 0). This
+        -- proves the seed is message-driven and degrades gracefully on usage.
+        let msgs =
+              [ mkInbound "conv-a" "alice" "/new"
+              , mkInbound "conv-a" "alice" "say hi"
+              , mkInbound "conv-a" "alice" "/status"
+              ]
+        chan <- gatedChannel ("/status" `isInfixOf`) (transcriptHasResponse tmp) msgs
+        th   <- mkTabbedEnvChan tmp chan
+        let env = _th_env th
+        writeIORef (_env_provider env) (Just (MkProvider ReplyProvider))
+        writeIORef (_env_model env)    (Just (ModelId "mock"))
+        completed <- runLoopBounded th
+        completed `shouldBe` True
+        sent <- readIORef (_clog_sent (_th_log th))
+        let statusBlocks = filter ("Session status:" `isInfixOf`) sent
+        case statusBlocks of
+          (status : _) -> do
+            status `shouldContain'` "Messages:            2"
+            status `shouldContain'` "Total input tokens:  0"
+            status `shouldContain'` "Total output tokens: 0"
           [] -> expectationFailure "expected a /status block in the sent log"
 
   describe "mkNewDefaultSession — provider/model guidance (pureclaw-ahj)" $ do
