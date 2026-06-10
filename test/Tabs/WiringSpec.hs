@@ -12,7 +12,7 @@ import Data.IORef
   , writeIORef
   )
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
+import Data.Text (Text, isInfixOf)
 import Data.Time (getCurrentTime)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
@@ -228,6 +228,20 @@ mkTabbedEnv sessionsDir scripted = do
         }
   pure (TabbedHarness env clog runnersTracker)
 
+-- | Variant of 'mkTabbedEnv' that overrides the provider and model refs.
+-- Used by the provider\/model guidance tests (pureclaw-ahj).
+mkTabbedEnvWith
+  :: FilePath
+  -> [IncomingMessage]
+  -> Maybe SomeProvider
+  -> Maybe ModelId
+  -> IO TabbedHarness
+mkTabbedEnvWith sessionsDir scripted mProvider mModel = do
+  th <- mkTabbedEnv sessionsDir scripted
+  writeIORef (_env_provider (_th_env th)) mProvider
+  writeIORef (_env_model    (_th_env th)) mModel
+  pure th
+
 -- | Run 'runTabbedLoop' under a 5s timeout, then cancel the relay-writer
 -- thread. Returns whether the loop completed (i.e. did NOT time out).
 runLoopBounded :: TabbedHarness -> IO Bool
@@ -409,6 +423,33 @@ spec = do
         case mSink of
           Just _  -> pure ()
           Nothing -> expectationFailure "expected sink registered for conv-sink"
+
+  describe "mkNewDefaultSession — provider/model guidance (pureclaw-ahj)" $ do
+    it "/new with no provider emits guidance mentioning /provider" $
+      withSystemTempDirectory "pc-wiring-guidance" $ \tmp -> do
+        -- Feed /new with provider=Nothing: must get a message that mentions
+        -- /provider to guide the user to configure a provider.
+        let msg = mkInbound "conv-a" "alice" "/new"
+        th <- mkTabbedEnvWith tmp [msg] Nothing (Just (ModelId "mock"))
+        completed <- runLoopBounded th
+        completed `shouldBe` True
+        sent <- readIORef (_clog_sent (_th_log th))
+        -- The reply must mention /provider (currently it says "no default
+        -- provider configured" without any /provider recipe — RED).
+        any ("/provider" `isInfixOf`) sent `shouldBe` True
+
+    it "/new with provider-but-no-model emits guidance mentioning /target" $
+      withSystemTempDirectory "pc-wiring-guidance" $ \tmp -> do
+        -- Feed /new with model=Nothing but provider present: must get a
+        -- message that mentions /target (currently mislabeled as "no provider"
+        -- with no /target recipe — RED).
+        let msg = mkInbound "conv-a" "alice" "/new"
+        th <- mkTabbedEnvWith tmp [msg] (Just (MkProvider UnusedProvider)) Nothing
+        completed <- runLoopBounded th
+        completed `shouldBe` True
+        sent <- readIORef (_clog_sent (_th_log th))
+        -- The reply must mention /target.
+        any ("/target" `isInfixOf`) sent `shouldBe` True
 
   describe "effectiveRegistry / execOneTool — MCP tools on the tabbed path (pureclaw-2u4)" $ do
     it "merges connected MCP server tools into the effective registry (defs + base preserved)" $
