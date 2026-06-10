@@ -467,15 +467,36 @@ cacheSession store sid sh =
 
 -- | Open a 'Session.SessionHandle' for an existing on-disk session id, rooted
 -- under the foreground session's sessions directory. Used only on the
--- wizard-reopen fallback path (TODO(8c.3) makes this a real
--- 'Session.resumeSession' resolve with metadata validation).
+-- wizard-reopen fallback path (a 'BoundSession' whose handle was not minted by
+-- '_td_newDefaultSession' and is not the foreground session).
+--
+-- Resolves the REAL on-disk session via 'Session.resumeSession' — the same
+-- loader the CLI @--session@ resume and the @\/resume@ slash command use — so
+-- the handle carries the actual @session.json@ metadata (model, description,
+-- created\/last-active) and reopens the real @transcript.jsonl@ for append.
+-- This replaces the prior fabrication (which set @_sm_model = unSessionId sid@
+-- and @createdAt\/lastActive = now@ via 'baseProviderMeta'); that synthesized
+-- meta was then persisted by 'Session.setSourceIfAbsent' \/ 'saveMeta',
+-- corrupting the real @session.json@ (pureclaw-apv; #79).
+--
+-- On a resume failure (missing or corrupted @session.json@ — the session no
+-- longer exists or its metadata is unreadable) we log a warning and fall back
+-- to a freshly-minted handle. This does not corrupt a healthy session: resume
+-- only fails when there is no valid @session.json@ to preserve.
 openSessionFromDisk :: AgentEnv -> Core.SessionId -> IO Session.SessionHandle
 openSessionFromDisk env sid = do
   dir <- sessionsDirOf env
-  now <- getCurrentTime
-  let modelTxt = Core.unSessionId sid
-      meta = baseProviderMeta env now sid (ModelId modelTxt) "session"
-  Session.mkSessionHandle (_env_broker env) (_env_logger env) dir meta
+  result <- Session.resumeSession (_env_broker env) (_env_logger env) dir sid
+  case result of
+    Right sh -> pure sh
+    Left err -> do
+      _lh_logWarn (_env_logger env) $
+        "Tabs.Wiring: could not resume wizard-reopened session "
+          <> Core.unSessionId sid <> ": " <> T.pack (show err)
+          <> " — falling back to a fresh session handle"
+      now <- getCurrentTime
+      let meta = baseProviderMeta env now sid (ModelId (Core.unSessionId sid)) "session"
+      Session.mkSessionHandle (_env_broker env) (_env_logger env) dir meta
 
 -- ---------------------------------------------------------------------------
 -- TabDispatchDeps — built from the live AgentEnv
