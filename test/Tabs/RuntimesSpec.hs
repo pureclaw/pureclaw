@@ -318,6 +318,38 @@ spec = do
       execed <- readIORef execRef
       execed `shouldBe` [(ToolCallId "c1", "search")]
 
+  describe "mkProviderRuntime - provider error" $
+    it "emits a visible FullMsg error when the stream throws (pureclaw-9d0)" $ do
+      -- Regression for pureclaw-9d0: a throwing provider stream must surface a
+      -- VISIBLE error to the channel. The env-light turn emits TurnError, which
+      -- the runtime maps to a FullMsg ChannelEvent carrying the legacy
+      -- "Something went wrong" message (not a silent StreamStart/StreamEnd pair).
+      gotError <- newEmptyMVar
+      emits    <- newIORef []
+      records  <- newIORef []
+      seedRef  <- newIORef (Ctx.emptyContext Nothing)
+      -- The emit sink signals once a FullMsg lands, giving a deterministic
+      -- handshake (no sleep): the error emit happens inside the worker turn,
+      -- after which the test can assert on the recorded events.
+      let onEmit r ev = do
+            modifyIORef' emits (++ [(r, ev)])
+            case ev of
+              FullMsg _ _ -> void (tryPutMVar gotError ())
+              _           -> pure ()
+          boomStream _req _cb = ioError (userError "provider boom")
+          deps = mkProvDeps boomStream noExec onEmit
+                            (\m -> modifyIORef' records (++ [m]))
+                            (readIORef seedRef)
+      rt <- mkProviderRuntime deps
+      _ <- _rt_send rt "hi"
+      takeMVar gotError             -- the error FullMsg was emitted
+      _rt_stop rt
+      evs <- readIORef emits
+      let fulls = [ t | (_, FullMsg _ t) <- evs ]
+      fulls `shouldContain` ["Something went wrong. Please try again."]
+      -- The error event is ref-tagged like every other emit.
+      map fst evs `shouldBe` replicate (length evs) testRef
+
   describe "mkProviderRuntime — stop" $
     it "cancels the worker; a later send runs no further turn; stop is idempotent" $ do
       scripts <- newIORef

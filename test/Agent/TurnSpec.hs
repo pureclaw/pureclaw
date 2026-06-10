@@ -115,11 +115,13 @@ spec = do
       show (TurnStart sid)        `shouldContain` "TurnStart"
       show (TurnChunk sid "hi")   `shouldContain` "TurnChunk"
       show (TurnEnd sid)          `shouldContain` "TurnEnd"
+      show (TurnError sid "boom") `shouldContain` "TurnError"
     it "has an Eq instance that distinguishes constructors" $ do
       let sid = mkStreamId 1
       TurnStart sid             `shouldBe` TurnStart sid
       TurnStart sid             `shouldNotBe` TurnEnd sid
       TurnChunk sid "a"         `shouldNotBe` TurnChunk sid "b"
+      TurnError sid "a"         `shouldNotBe` TurnError sid "b"
 
   describe "runTurnWithTools — request building" $ do
     it "builds the CompletionRequest from model/system/tools/maxTokens + context" $ do
@@ -355,7 +357,26 @@ spec = do
       map P._msg_role (Ctx.contextMessages ctx) `shouldBe` [P.User]
       evs <- Ref.readIORef emits
       let sid0 = mkStreamId 0
-      evs `shouldBe` [TurnStart sid0, TurnEnd sid0]
+      evs `shouldBe` [TurnStart sid0, TurnEnd sid0, TurnError sid0 "Something went wrong. Please try again."]
+
+    it "surfaces a visible TurnError with the legacy message when the stream throws" $ do
+      -- Regression for pureclaw-9d0: on the tabbed path provider errors were
+      -- SILENT — the Left branch returned ctx emitting only the unconditional
+      -- TurnEnd, so the user saw an empty StreamStart/StreamEnd and no message.
+      -- The throw must ALSO surface a visible TurnError carrying the exact
+      -- legacy "Something went wrong. Please try again." string.
+      let boom _req _cb = E.throwIO (userError "provider boom")
+      emits   <- Ref.newIORef []
+      records <- Ref.newIORef []
+      sidRef  <- Ref.newIORef 0
+      execRef <- Ref.newIORef []
+      let deps = mkDeps boom (recordingExec execRef)
+                        (recordingEmit emits) (recordingRecord records)
+                        (nextSid sidRef)
+      _ <- runTurnWithTools deps (Ctx.emptyContext Nothing) "hi"
+      evs <- Ref.readIORef emits
+      let sid0 = mkStreamId 0
+      evs `shouldContain` [TurnError sid0 "Something went wrong. Please try again."]
 
     it "does not throw when the stream emits no StreamDone; returns ctx with user msg" $ do
       scripts <- Ref.newIORef [ [ P.StreamText "partial" ] ]
