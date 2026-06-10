@@ -46,6 +46,8 @@ import PureClaw.Handles.Tab
   , TabError
   , TabIndex
   , mkTabIndex
+  , toPublicTabError
+  , unPublicTabError
   , unTabIndex
   )
 import PureClaw.Harness.Registry (HarnessId)
@@ -460,8 +462,10 @@ doInject :: Ctx -> TabIndex -> Text -> IO ()
 doInject ctx idx text = withSlot ctx idx $ \tab -> do
   let ref = _tab_ref tab
   setCursorTo ctx ref
-  _ <- sendTo ctx ref text
-  pure ()
+  result <- sendTo ctx ref text
+  case result of
+    Right () -> pure ()
+    Left err -> emit ctx ("couldn't deliver your message — " <> unPublicTabError (toPublicTabError err))
 
 -- | Resolve @idx@ to a present tab or emit the out-of-range §14 copy.
 withSlot :: Ctx -> TabIndex -> (Tab -> IO ()) -> IO ()
@@ -493,8 +497,10 @@ doDefault ctx text = do
           emit ctx (deferredDeathMsg (_tab_name tab))
           modifyCursor ctx (clearCursor (_ctx_conv ctx))
         else do
-          _ <- sendTo ctx (_tab_ref tab) text
-          pure ()
+          result <- sendTo ctx (_tab_ref tab) text
+          case result of
+            Right () -> pure ()
+            Left err -> emit ctx ("couldn't deliver your message — " <> unPublicTabError (toPublicTabError err))
 
 -- ---------------------------------------------------------------------------
 -- Cursor / wizard / registry mutation helpers (all 'Ctx'-saturated)
