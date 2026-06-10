@@ -42,6 +42,9 @@ module PureClaw.Tabs.Wiring
     -- * Effective tool registry (exposed for tests \/ reuse)
   , effectiveRegistry
   , execOneTool
+    -- * Session resolution (exposed for tests \/ reuse)
+  , SessionStore
+  , resolveSession
   ) where
 
 import Control.Concurrent.STM (atomically, readTBQueue, writeTBQueue)

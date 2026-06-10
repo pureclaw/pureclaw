@@ -17,7 +17,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text, isInfixOf)
 import Data.Text.IO qualified as TIO
-import Data.Time (getCurrentTime)
+import Data.Time (addUTCTime, getCurrentTime)
 import System.Directory qualified as Dir
 import System.FilePath qualified as FP
 import System.IO.Temp (withSystemTempDirectory)
@@ -25,6 +25,7 @@ import System.Timeout (timeout)
 import Test.Hspec
 
 import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as LBS
 import MCP.Client.Config (ClientConfig (..), defaultClientConfig)
 import MCP.Client.Session (withClientSession)
 import MCP.Client.Transport (Transport (..))
@@ -59,7 +60,12 @@ import PureClaw.Session.Handle
   )
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Tabs.RelayWriter (lookupSink)
-import PureClaw.Tabs.Wiring (effectiveRegistry, execOneTool, runTabbedLoop)
+import PureClaw.Tabs.Wiring
+  ( effectiveRegistry
+  , execOneTool
+  , resolveSession
+  , runTabbedLoop
+  )
 import PureClaw.Tools.Registry
   ( ToolHandler (..)
   , emptyRegistry
@@ -653,6 +659,77 @@ spec = do
             status `shouldContain'` "Total input tokens:  0"
             status `shouldContain'` "Total output tokens: 0"
           [] -> expectationFailure "expected a /status block in the sent log"
+
+  describe "resolveSession — wizard-reopen fallback loads real session (pureclaw-apv)" $ do
+    it "loads the REAL on-disk session.json (model + description), not a fabricated one" $
+      withSystemTempDirectory "pc-wiring-reopen" $ \tmp -> do
+        -- Author a REAL on-disk session under @tmp@ with a DISTINCT model and a
+        -- description, plus some transcript content. This session is NOT the
+        -- foreground session and is NOT minted in the loop's store, so resolving
+        -- its id runs the wizard-reopen fallback (openSessionFromDisk).
+        now <- getCurrentTime
+        -- A deterministically-distinct id from the foreground session (which is
+        -- minted from the wall clock): offset the timestamp by a full day so the
+        -- time-derived id cannot collide with the foreground one.
+        let realTime = addUTCTime (negate 86400) now
+            realSid  = SessionTypes.newSessionId Nothing realTime
+            realMeta = SessionTypes.SessionMeta
+              { SessionTypes._sm_id    = realSid
+              , SessionTypes._sm_agent = Nothing
+              , SessionTypes._sm_kind  = SessionTypes.SkProvider
+                  (SessionTypes.ProviderSpec
+                    (SessionTypes.inferProviderId "real-model-xyz")
+                    (ModelId "real-model-xyz") Nothing)
+              , SessionTypes._sm_model             = "real-model-xyz"
+              , SessionTypes._sm_channel           = "cli"
+              , SessionTypes._sm_createdAt         = now
+              , SessionTypes._sm_lastActive        = now
+              , SessionTypes._sm_bootstrapConsumed = False
+              , SessionTypes._sm_archived          = False
+              , SessionTypes._sm_description       = Just "the real reopened session"
+              , SessionTypes._sm_autoSummary       = Nothing
+              , SessionTypes._sm_source            = Nothing
+              }
+        realSh <- mkSessionHandle Nothing mkNoOpLogHandle tmp realMeta
+        let realSessionJson = _sh_dir realSh FP.</> "session.json"
+            realTranscript  = _sh_dir realSh FP.</> "transcript.jsonl"
+        -- Some transcript content on disk, so resumeSession reopens the REAL
+        -- transcript (rather than synthesizing a fresh empty one).
+        TIO.writeFile realTranscript "{\"marker\":\"real-transcript-content\"}\n"
+
+        -- A tabbed env whose FOREGROUND session is a different sid under @tmp@.
+        th <- mkTabbedEnv tmp []
+        let env = _th_env th
+        fgSid <- SessionTypes._sm_id <$>
+          (readIORef (_env_session env) >>= readIORef . _sh_meta)
+        realSid `shouldNotBe` fgSid     -- guard: genuinely the fallback path
+
+        -- Resolve via an EMPTY store: forces the openSessionFromDisk fallback.
+        store <- newIORef Map.empty
+        resolved <- resolveSession env store realSid
+        resolvedMeta <- readIORef (_sh_meta resolved)
+
+        -- The resolved handle must carry the REAL metadata, not a fabricated
+        -- one (currently openSessionFromDisk sets _sm_model = unSessionId sid).
+        SessionTypes._sm_model resolvedMeta `shouldBe` "real-model-xyz"
+        SessionTypes._sm_description resolvedMeta
+          `shouldBe` Just "the real reopened session"
+
+        -- And the on-disk session.json must NOT have been clobbered: it still
+        -- decodes and its model field is the real model (the fabrication wrote
+        -- the sid-as-model and the wrong createdAt/lastActive here).
+        rawAfter <- LBS.readFile realSessionJson
+        diskMeta <- either
+          (\e -> expectationFailure ("session.json corrupted: " <> e)
+                   >> ioError (userError e))
+          pure
+          (Aeson.eitherDecode' rawAfter)
+        SessionTypes._sm_model (diskMeta :: SessionTypes.SessionMeta)
+          `shouldBe` "real-model-xyz"
+        -- The original transcript content must survive (reopened for append,
+        -- not truncated).
+        txAfter <- TIO.readFile realTranscript
+        txAfter `shouldSatisfy` ("real-transcript-content" `isInfixOf`)
 
   describe "mkNewDefaultSession — provider/model guidance (pureclaw-ahj)" $ do
     it "/new with no provider emits guidance mentioning /provider" $
