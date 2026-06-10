@@ -94,7 +94,9 @@ import PureClaw.Tabs.Runtimes
 import PureClaw.Tabs.Types
   ( ConversationKey
   , RelayMode (..)
+  , Tab (..)
   , TabRef (..)
+  , resolveCursorSlot
   )
 import PureClaw.Tools.Registry (executeTool, registryDefinitions)
 import PureClaw.Transcript.Provider (mkTranscriptProvider)
@@ -140,12 +142,12 @@ runTabbedLoop env = do
   let dispatchDeps = mkTabDispatchDeps env execDeps store
   -- Read the first inbound message to learn the CLI conversation key, register
   -- its sink, then loop. (b) + (c).
-  loop dispatchDeps
+  loop store dispatchDeps
   where
     channel = _env_channel env
     logger  = _env_logger env
 
-    loop dispatchDeps = do
+    loop store dispatchDeps = do
       receiveResult <- try @E.IOException (_ch_receive channel)
       case receiveResult of
         Left _    -> _lh_logInfo logger "Session ended"
@@ -154,17 +156,46 @@ runTabbedLoop env = do
               convKey = conversationKeyOf src
           -- (b) Register this conversation's output sink (idempotent).
           registerSink (_env_sinks env) convKey channel
-          -- Capture the session origin (set-once), mirroring the legacy loop.
-          sh <- readIORef (_env_session env)
-          Session.setSourceIfAbsent sh src
+          -- Capture the session origin (set-once) on the FOREGROUND session,
+          -- mirroring the legacy loop (the no-active-tab case relies on this —
+          -- Tabs.WiringSpec).
+          fgSh <- readIORef (_env_session env)
+          Session.setSourceIfAbsent fgSh src
+          -- Also capture it (set-once) on the conversation's ACTIVE BOUND
+          -- session, so provenance lands on the session the turn actually runs
+          -- in (pureclaw-opr; #79). No active tab / non-session ref → no-op.
+          captureBoundSource env store convKey src
           -- (c) Dispatch per conversation.
           Dispatch.handleInbound dispatchDeps convKey (_im_content msg)
-          loop dispatchDeps
+          loop store dispatchDeps
 
 -- | The 'ConversationKey' for a message source: its channel + conversation id
 -- (invariant I3 — the dispatcher keys cursors\/relay by this pair).
 conversationKeyOf :: Core.MessageSource -> ConversationKey
 conversationKeyOf src = (Core._ms_channel src, Core._ms_conversation src)
+
+-- | Capture the inbound message source (set-once) onto the conversation's
+-- ACTIVE BOUND session — the session the turn actually runs in. Resolves the
+-- active tab exactly as 'TabDispatch.doDefault' does (cursor -> ref -> tab) and,
+-- when the ref is a @BoundSession@, resolves its 'Session.SessionHandle' from
+-- the loop's @store@ and applies 'Session.setSourceIfAbsent'. No active tab (no
+-- cursor / dangling cursor) or a non-session ref (@BoundHarness@) is a safe
+-- no-op. This restores the provenance the 8c cutover dropped (pureclaw-opr; #79)
+-- without disturbing the foreground @_env_session@ capture the no-tab case needs.
+captureBoundSource
+  :: AgentEnv -> SessionStore -> ConversationKey -> Core.MessageSource -> IO ()
+captureBoundSource env store convKey src = do
+  cs <- readIORef (_env_cursors env)
+  tl <- Tabs.readTabs (_env_tabRegistry env)
+  case resolveCursorSlot convKey cs tl of
+    Nothing   -> pure ()
+    Just slot -> do
+      mTab <- Tabs.registryLookupSlot (_env_tabRegistry env) slot
+      case _tab_ref <$> mTab of
+        Just (BoundSession sid) -> do
+          sh <- resolveSession env store sid
+          Session.setSourceIfAbsent sh src
+        _ -> pure ()
 
 -- | The global default 'RelayMode' for conversations with no override.
 -- 'FocusedOnly' matches the design default (only the focused tab is relayed).
@@ -213,11 +244,18 @@ startProvider env store sid = do
   -- request/response entries to transcript.jsonl + broker), exactly as the
   -- legacy loop did. A 'Nothing' provider yields a stream that records nothing
   -- and produces no StreamDone (the turn returns the seeded context).
+  --
+  -- The transcript's Request @metadata.source@ is the BOUND session's current
+  -- @_sm_source@, read per turn: 'runTabbedLoop' captures the inbound source
+  -- set-once onto this session before the worker runs, so this restores the
+  -- legacy loop's @(Just (_im_source msg))@ semantics (pureclaw-opr; #79).
   let streamFn req cb = case mProvider of
         Nothing -> pure ()
-        Just provider ->
-          let provider' = mkTranscriptProvider th modelName Nothing provider
-          in P.completeStream provider' req cb
+        Just provider -> do
+          meta <- readIORef (Session._sh_meta sh)
+          let provider' =
+                mkTranscriptProvider th modelName (SessionTypes._sm_source meta) provider
+          P.completeStream provider' req cb
   let deps = ProviderRuntimeDeps
         { _prd_ref          = BoundSession sid
         , _prd_emit         = enqueueTabOut env
