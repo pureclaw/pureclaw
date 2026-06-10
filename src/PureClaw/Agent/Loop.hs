@@ -1,18 +1,12 @@
 module PureClaw.Agent.Loop
-  ( -- * Agent loop
-    runAgentLoop
-  , runAgentLoopWith
-    -- * Background tasks (/bg, issue #52)
-  , runBackgroundTurn
+  ( -- * Background tasks (/bg, issue #52)
+    runBackgroundTurn
     -- * Re-exports from Handles.Harness (for backward compatibility)
   , sanitizeHarnessOutput
   ) where
 
 import Control.Exception
-import Control.Monad
 import Data.IORef
-import Data.Foldable (for_)
-import Data.Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (getCurrentTime)
@@ -20,14 +14,11 @@ import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
 
 import Data.Map.Strict qualified as Map
-import Data.Text.Encoding qualified as TE
 
 import PureClaw.Agent.AgentDef qualified as AgentDef
-import PureClaw.Agent.Context
 import PureClaw.Core.Types
 import PureClaw.Agent.Env
-import PureClaw.Agent.SlashCommands
-import PureClaw.Core.Errors
+import PureClaw.Agent.SlashCommands (getSessionsDir)
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
@@ -39,248 +30,6 @@ import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Tools.Delegate (runSubAgent)
 import PureClaw.Tools.Registry
 import PureClaw.Transcript.Provider
-
--- | Run the main agent loop. Reads messages from the channel, sends
--- them to the provider (with tool definitions), handles tool call/result
--- cycles, and writes responses back.
---
--- Slash commands (messages starting with '/') are intercepted and
--- handled before being sent to the provider.
---
--- If no provider is configured ('Nothing' in the IORef), chat messages
--- produce a helpful error directing the user to configure credentials.
--- Slash commands always work regardless of provider state.
---
--- Exits cleanly on 'IOException' from the channel (e.g. EOF / Ctrl-D).
--- Provider errors are logged and a 'PublicError' is sent to the channel.
---
--- == WU10 (Tabbed Chat #51) refactor status
---
--- The original WU10 plan called for 'runAgentLoop' to become a thin
--- wrapper around 'PureClaw.Routing.Dispatcher.runDispatcher'. WU10
--- escalated this part of the refactor: the WU6 AI tab loop in
--- 'PureClaw.Tab.Ai' is not yet a drop-in replacement for the
--- single-tab semantics this loop owns (model prefix emission on
--- channel output, tool-call execution cycle, transcript provider
--- wrapping via 'PureClaw.Transcript.Provider.mkTranscriptProvider',
--- '_env_onFirstStreamDone' callback, harness routing via
--- 'PureClaw.Handles.Harness.HarnessHandle'). Migrating all of those
--- features into 'Tab.Ai' is itself a multi-WU refactor and was
--- deferred to WU11\/WU12.
---
--- For now 'runAgentLoop' is the production entry-point for the
--- single-tab CLI flow; tabbed-chat is exercised via
--- 'PureClaw.Routing.Dispatcher.runDispatcher' (which the K-series
--- tests in @test\/Coexistence\/SlashCmdSpec.hs@ drive directly). The
--- two entry points coexist until the Tab.Ai feature gap closes.
-runAgentLoop :: AgentEnv -> IO ()
-runAgentLoop env = runAgentLoopWith env []
-
--- | Like 'runAgentLoop' but seeds the initial 'Context' with the given
--- messages (in chronological, oldest-first order). Used by the resume
--- path to replay recent transcript entries so the agent has memory of
--- prior turns.
-runAgentLoopWith :: AgentEnv -> [Message] -> IO ()
-runAgentLoopWith env initialMessages = do
-  _lh_logInfo logger "Agent loop started"
-  let ctx0 = replaceMessages initialMessages (emptyContext (_env_systemPrompt env))
-  go ctx0
-  where
-    channel  = _env_channel env
-    logger   = _env_logger env
-    baseRegistry = _env_registry env
-
-    -- | Build the effective registry by merging built-in tools with
-    -- any connected MCP server tools.
-    effectiveRegistry :: IO ToolRegistry
-    effectiveRegistry = do
-      servers <- readIORef (_env_mcpServers env)
-      if Map.null servers
-        then pure baseRegistry
-        else pure $ mergeRegistries baseRegistry (mcpRegistry (Map.elems servers))
-
-    go ctx = do
-      receiveResult <- try @IOException (_ch_receive channel)
-      case receiveResult of
-        Left _ -> _lh_logInfo logger "Session ended"
-        Right msg -> do
-          -- Capture the session origin (set-once) BEFORE any slash/harness/
-          -- /bg/provider branching, covering the empty-message branch too:
-          -- origin is about the SENDER, not the content. This is the
-          -- single-tab loop's sole inbound entry; the tabbed dispatcher
-          -- runtime is a separate path (out of scope, see design WU3).
-          --
-          -- SECURITY: _sm_source is attacker-asserted provenance and MUST
-          -- NOT feed any access-control decision.
-          sh <- readIORef (_env_session env)
-          Session.setSourceIfAbsent sh (_im_source msg)
-          dispatchMsg
-          where
-            stripped = T.strip (_im_content msg)
-            dispatchMsg
-              | T.null stripped = go ctx
-              -- INVARIANT: any message beginning with '/' is handled locally
-              -- and NEVER forwarded to the provider. Unknown slash commands
-              -- get an error response rather than silently routing to the LLM.
-              | "/" `T.isPrefixOf` stripped =
-                  case parseSlashCommand stripped of
-                    Just (CmdTab _tabCmd) -> do
-                      -- /tab* commands are a property of the tabbed-chat
-                      -- runtime ('PureClaw.Tabs.Wiring.runTabbedLoop'), which
-                      -- is the live CLI entry point (8c.2). This legacy
-                      -- single-tab loop has no tab registry, so it cannot
-                      -- service them. Surviving callers of 'runAgentLoop' are
-                      -- tests that never exercise this branch.
-                      _lh_logInfo logger $ "Slash command (tab): " <> stripped
-                      _ch_send channel (OutgoingMessage
-                        "/tab commands are not available in the single-tab loop.")
-                      go ctx
-                    Just (CmdBg prompt) -> do
-                      -- /bg runs the prompt in a fresh background session
-                      -- (issue #52). The single-tab loop has no tabbed-chat
-                      -- dispatcher, so we fork a self-contained background
-                      -- turn that emits its result directly to the channel
-                      -- (the ChannelOut writer is not running in this path).
-                      -- The foreground loop continues uninterrupted.
-                      _lh_logInfo logger $ "Slash command (bg): " <> stripped
-                      _ch_send channel (OutgoingMessage
-                        "\x1F504 /bg: running in the background \x2014 the result will appear here when ready.")
-                      _ <- _env_fork env (runBackgroundTurn env prompt)
-                      go ctx
-                    Just cmd -> do
-                      _lh_logInfo logger $ "Slash command: " <> stripped
-                      ctx' <- executeSlashCommand env cmd ctx
-                      go ctx'
-                    Nothing -> do
-                      _lh_logWarn logger $ "Unrecognized slash command: " <> stripped
-                      _ch_send channel
-                        (OutgoingMessage ("Unknown command: " <> stripped
-                          <> "\nType /status for session info, /help for available commands."))
-                      go ctx
-              | otherwise = do
-                  target <- readIORef (_env_target env)
-                  case target of
-                    TargetHarness name -> do
-                      harnesses <- readIORef (_env_harnesses env)
-                      case Map.lookup name harnesses of
-                        Nothing -> do
-                          _ch_send channel (OutgoingMessage
-                            ("Harness \"" <> name <> "\" is not running. Use /harness start "
-                              <> name <> " or /target to switch targets."))
-                          go ctx
-                        Just hh -> do
-                          _lh_logInfo logger $ "Routing to harness: " <> name
-                          _hh_send hh (TE.encodeUtf8 stripped)
-                          output <- _hh_receive hh
-                          let response = sanitizeHarnessOutput (TE.decodeUtf8 output)
-                          unless (T.null (T.strip response)) $
-                            _ch_send channel (OutgoingMessage (prefixHarnessOutput name response))
-                          go ctx
-                    TargetProvider -> do
-                      mProvider <- readIORef (_env_provider env)
-                      case mProvider of
-                        Nothing -> do
-                          _ch_send channel (OutgoingMessage noProviderMessage)
-                          go ctx
-                        Just provider -> do
-                          mModel <- readIORef (_env_model env)
-                          case mModel of
-                            Nothing -> do
-                              _ch_send channel (OutgoingMessage noModelMessage)
-                              go ctx
-                            Just model -> do
-                              let userMsg = textMessage User stripped
-                                  ctx' = addMessage userMsg ctx
-                              _lh_logDebug logger $
-                                "Sending " <> T.pack (show (length (contextMessages ctx'))) <> " messages"
-                              -- Wrap provider with transcript logging (session owns the transcript)
-                              th <- envTranscript env
-                              let provider' = mkTranscriptProvider th (unModelId model) (Just (_im_source msg)) provider
-                              handleCompletion provider' ctx'
-
-    handleCompletion provider ctx = do
-      mModel <- readIORef (_env_model env)
-      registry <- effectiveRegistry
-      let tools = registryDefinitions registry
-          model = fromMaybe (ModelId "") mModel
-          modelName = unModelId model
-          req = CompletionRequest
-            { _cr_model        = model
-            , _cr_messages     = contextMessages ctx
-            , _cr_systemPrompt = contextSystemPrompt ctx
-            , _cr_maxTokens    = Just 4096
-            , _cr_tools        = tools
-            , _cr_toolChoice   = Nothing
-            }
-      responseRef <- newIORef (Nothing :: Maybe CompletionResponse)
-      streamedRef <- newIORef False
-      prefixSentRef <- newIORef False
-      providerResult <- try @SomeException $
-        completeStream provider req $ \case
-          StreamText t -> do
-            -- Emit origin prefix before the first streamed chunk
-            prefixSent <- readIORef prefixSentRef
-            unless prefixSent $ do
-              _ch_sendChunk channel (ChunkText (modelName <> "> "))
-              writeIORef prefixSentRef True
-            _ch_sendChunk channel (ChunkText t)
-            writeIORef streamedRef True
-          StreamDone resp -> do
-            writeIORef responseRef (Just resp)
-            -- Fire and clear the one-shot "first StreamDone" callback
-            -- atomically so concurrent StreamDone deliveries cannot
-            -- race and invoke it twice. In production this is used to
-            -- mark the active session's bootstrap as consumed.
-            mAction <- atomicModifyIORef' (_env_onFirstStreamDone env)
-                         (Nothing,)
-            for_ mAction id
-          StreamWarning w -> _lh_logWarn logger w
-          _ -> pure ()
-      case providerResult of
-        Left e -> do
-          _lh_logError logger $ "Provider error: " <> T.pack (show e)
-          _ch_sendError channel (TemporaryError "Something went wrong. Please try again.")
-          go ctx
-        Right () -> do
-          wasStreaming <- readIORef streamedRef
-          when wasStreaming $ _ch_sendChunk channel ChunkDone
-          mResp <- readIORef responseRef
-          case mResp of
-            Nothing -> go ctx  -- shouldn't happen
-            Just response -> do
-              let calls = toolUseCalls response
-                  text = responseText response
-                  ctx' = recordUsage (_crsp_usage response)
-                       $ addMessage (Message Assistant (_crsp_content response)) ctx
-              -- Send the full text. For streaming channels, the text was already
-              -- displayed chunk-by-chunk so we skip the full send to avoid duplicates.
-              unless (wasStreaming && _ch_streaming channel || T.null (T.strip text)) $
-                _ch_send channel (OutgoingMessage (prefixHarnessOutput modelName text))
-              -- If there are tool calls, execute them and continue
-              if null calls
-                then go ctx'
-                else do
-                  results <- mapM executeCall calls
-                  let resultMsg = toolResultMessage results
-                      ctx'' = addMessage resultMsg ctx'
-                  _lh_logDebug logger $
-                    "Executed " <> T.pack (show (length results)) <> " tool calls, continuing"
-                  handleCompletion provider ctx''
-
-    executeCall (callId, name, input) = do
-      _lh_logInfo logger $ "Tool call: " <> name
-      registry <- effectiveRegistry
-      result <- executeTool registry name input
-      case result of
-        Nothing -> do
-          _lh_logWarn logger $ "Unknown tool: " <> name
-          pure (callId, [TRPText ("Unknown tool: " <> name)], True)
-        Just (parts, isErr) -> do
-          when isErr $ _lh_logWarn logger $ "Tool error in " <> name <> ": " <> partsToText parts
-          pure (callId, parts, isErr)
-
-    partsToText :: [ToolResultPart] -> Text
-    partsToText parts = T.intercalate "\n" [t | TRPText t <- parts]
 
 -- | Maximum turns for a @\/bg@ background task (provider + tool-call cycles).
 backgroundMaxTurns :: Int
@@ -405,8 +154,7 @@ ignoreExc :: IO () -> IO ()
 ignoreExc m = m `catch` \(_ :: SomeException) -> pure ()
 
 -- | The effective tool registry for a background turn: built-in tools
--- merged with any connected MCP server tools. Mirrors the @effectiveRegistry@
--- helper inside 'runAgentLoopWith'.
+-- merged with any connected MCP server tools.
 backgroundRegistry :: AgentEnv -> IO ToolRegistry
 backgroundRegistry env = do
   servers <- readIORef (_env_mcpServers env)
@@ -414,22 +162,3 @@ backgroundRegistry env = do
   pure $ if Map.null servers
            then base
            else mergeRegistries base (mcpRegistry (Map.elems servers))
-
--- | Message shown when user sends a chat message but no provider is configured.
-noProviderMessage :: Text
-noProviderMessage = T.intercalate "\n"
-  [ "No provider configured. To start chatting, configure your provider with:"
-  , ""
-  , "  /provider <PROVIDER>"
-  , ""
-  ]
-
--- | Message shown when user sends a chat message but no model is configured.
-noModelMessage :: Text
-noModelMessage = T.intercalate "\n"
-  [ "No model configured. Set a model with:"
-  , ""
-  , "  /target <MODEL>"
-  , ""
-  , "or add 'model = \"<model>\"' to your config file."
-  ]

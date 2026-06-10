@@ -47,7 +47,6 @@ import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Completion
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
-import PureClaw.Agent.Loop
 import PureClaw.Tabs.Wiring (runTabbedLoop)
 import PureClaw.Agent.SlashCommands
 import PureClaw.Routing.Config qualified as Routing
