@@ -40,7 +40,7 @@ import Test.Hspec
 
 import PureClaw.Agent.SlashCommands qualified as Slash
 import PureClaw.Core.Types (ChannelKind (..), ConversationId (..), SessionId (..))
-import PureClaw.Handles.Tab (unTabIndex)
+import PureClaw.Handles.Tab (TabError (..), unTabIndex)
 import PureClaw.Harness.Registry (HarnessId, parseHarnessId)
 import PureClaw.Routing.Config qualified as RConfig
 import PureClaw.Routing.TabDispatch
@@ -89,6 +89,11 @@ data DefaultBehaviour
   = MintsRef TabRef        -- ^ Returns @Right ref@.
   | NoDefault              -- ^ Returns @Left "..."@.
 
+-- | How the injected @_td_sendTo@ behaves.
+data SendBehaviour
+  = SendOk                 -- ^ Always returns @Right ()@.
+  | SendErr TabError       -- ^ Always returns @Left err@.
+
 -- | Build a fresh 'Fakes' with the given default-session behaviour and the
 -- given wizard candidate lists.
 mkFakes
@@ -97,7 +102,17 @@ mkFakes
   -> [(SessionId, Text)]    -- ^ recent sessions
   -> (HarnessId -> Bool)    -- ^ liveness probe
   -> IO Fakes
-mkFakes defB harnesses sessions liveFn = do
+mkFakes defB = mkFakesEx defB SendOk
+
+-- | Extended variant of 'mkFakes' that also controls @_td_sendTo@ behaviour.
+mkFakesEx
+  :: DefaultBehaviour
+  -> SendBehaviour
+  -> [(HarnessId, Text)]    -- ^ recent harnesses
+  -> [(SessionId, Text)]    -- ^ recent sessions
+  -> (HarnessId -> Bool)    -- ^ liveness probe
+  -> IO Fakes
+mkFakesEx defB sendB harnesses sessions liveFn = do
   emits     <- newIORef []
   sends     <- newIORef []
   ensures   <- newIORef []
@@ -114,7 +129,9 @@ mkFakes defB harnesses sessions liveFn = do
         , _td_release = \r -> modifyIORef' releases (++ [r])
         , _td_sendTo  = \r t -> do
             modifyIORef' sends (++ [(r, t)])
-            pure (Right ())
+            pure $ case sendB of
+              SendOk      -> Right ()
+              SendErr err -> Left err
         , _td_emit    = \k t -> modifyIORef' emits (++ [(k, t)])
         , _td_newDefaultSession = pure $ case defB of
             MintsRef r -> Right r
@@ -141,6 +158,11 @@ mkFakes defB harnesses sessions liveFn = do
 -- | A simple default-mint 'Fakes' (no wizard candidates, all harnesses live).
 simpleFakes :: DefaultBehaviour -> IO Fakes
 simpleFakes defB = mkFakes defB [] [] (const True)
+
+-- | Simple fakes where @_td_sendTo@ always returns the given 'TabError'.
+simpleFakesWithSendErr :: TabError -> IO Fakes
+simpleFakesWithSendErr err =
+  mkFakesEx (MintsRef (sess "x")) (SendErr err) [] [] (const True)
 
 -- ---------------------------------------------------------------------------
 -- Convenience accessors
@@ -573,6 +595,13 @@ switchInjectSpec = describe "/N switch and inject" $ do
       "/4: out of range — you have 1 tabs (/0–/0); /tabs to list"
     sentTexts f `shouldReturn` []
 
+  it "/N <text> when sendTo returns TabConcurrencyLimit, emits a banner" $ do
+    f <- simpleFakesWithSendErr (TabConcurrencyLimit 0)
+    _ <- appendSession f "s0" "a"
+    handleInbound (f_deps f) convA "/0 hello"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "input queue full"
+
 -- ---------------------------------------------------------------------------
 -- Default text
 -- ---------------------------------------------------------------------------
@@ -602,6 +631,22 @@ defaultSpec = describe "default text" $ do
       "⚠ \"claude-code\" exited while you were away — message not sent; resend when ready"
     sentTexts f `shouldReturn` []                  -- message dropped
     cursorSlot f convA `shouldReturn` Nothing      -- cursor cleared
+
+  it "when sendTo returns TabConcurrencyLimit, emits a banner (queue full)" $ do
+    f <- simpleFakesWithSendErr (TabConcurrencyLimit 0)
+    _ <- appendSession f "s0" "a"
+    handleInbound (f_deps f) convA "/0"
+    handleInbound (f_deps f) convA "hello"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "input queue full"
+
+  it "when sendTo returns TabNotFound, emits a banner (not found)" $ do
+    f <- simpleFakesWithSendErr (TabNotFound 0)
+    _ <- appendSession f "s0" "a"
+    handleInbound (f_deps f) convA "/0"
+    handleInbound (f_deps f) convA "hello"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "not found"
 
 -- ---------------------------------------------------------------------------
 -- Fallthrough (non-tab slash command)
