@@ -1,6 +1,6 @@
 module Tabs.WiringSpec (spec) where
 
-import Control.Concurrent.MVar (newEmptyMVar, takeMVar)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (throwIO)
 import Data.IntMap.Strict qualified as IntMap
@@ -12,6 +12,7 @@ import Data.IORef
   , writeIORef
   )
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isNothing)
 import Data.Text (Text, isInfixOf)
 import Data.Time (getCurrentTime)
 import System.IO.Temp (withSystemTempDirectory)
@@ -32,7 +33,8 @@ import PureClaw.Handles.Tab (TabRunner (..))
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.MCP (McpServer (..))
 import PureClaw.Providers.Class
-  ( ContentBlock (..)
+  ( CompletionResponse (..)
+  , ContentBlock (..)
   , Message (..)
   , Provider (..)
   , SomeProvider (..)
@@ -71,6 +73,23 @@ data UnusedProvider = UnusedProvider
 
 instance Provider UnusedProvider where
   complete UnusedProvider _ = throwIO (userError "provider unexpectedly called")
+
+-- ---------------------------------------------------------------------------
+-- A trivial streaming provider that always answers with a fixed reply.
+-- ---------------------------------------------------------------------------
+
+-- | A provider whose 'complete' returns a fixed text response. The default
+-- 'completeStream' (Provider class) then emits exactly one 'StreamDone'
+-- carrying it — enough to drive a provider turn end-to-end through the runtime
+-- worker so the @_env_onFirstStreamDone@ one-shot fires (pureclaw-8g4).
+data ReplyProvider = ReplyProvider
+
+instance Provider ReplyProvider where
+  complete ReplyProvider _ = pure CompletionResponse
+    { _crsp_content = [TextBlock "hello from the model"]
+    , _crsp_model   = ModelId "mock"
+    , _crsp_usage   = Nothing
+    }
 
 -- ---------------------------------------------------------------------------
 -- A scripted, recording channel.
@@ -423,6 +442,39 @@ spec = do
         case mSink of
           Just _  -> pure ()
           Nothing -> expectationFailure "expected sink registered for conv-sink"
+
+    it "fires the _env_onFirstStreamDone one-shot on the first provider turn (pureclaw-8g4)" $
+      withSystemTempDirectory "pc-wiring-bootstrap" $ \tmp -> do
+        -- End-to-end: /new mints a provider session + cursor, then a plain
+        -- message drives a real provider turn through the runtime worker. The
+        -- provider emits a StreamDone, which must fire the armed
+        -- _env_onFirstStreamDone exactly once (restoring markBootstrapConsumed
+        -- so BOOTSTRAP.md is not re-injected on every resume). Before the fix
+        -- the tabbed path NEVER fired it.
+        let msgs =
+              [ mkInbound "conv-a" "alice" "/new"
+              , mkInbound "conv-a" "alice" "say hi"
+              ]
+        th <- mkTabbedEnvWith tmp msgs (Just (MkProvider ReplyProvider))
+                              (Just (ModelId "mock"))
+        let env = _th_env th
+        counter <- newIORef (0 :: Int)
+        fired   <- newEmptyMVar
+        writeIORef (_env_onFirstStreamDone env)
+          (Just (modifyIORef' counter (+ 1) >> putMVar fired ()))
+        -- Run the loop to EOF (it enqueues the turn to the async worker and
+        -- returns), then wait for the worker's StreamDone to fire the hook
+        -- BEFORE tearing the runners down (cancelAll would otherwise kill the
+        -- worker mid-turn). The runner-tracking fork keeps the worker alive.
+        completed <- timeout (5 * 1000000) (runTabbedLoop env)
+        maybe False (const True) completed `shouldBe` True
+        firedInTime <- timeout (5 * 1000000) (takeMVar fired)
+        cancelAll (_th_runners th)
+        firedInTime `shouldBe` Just ()
+        readIORef counter `shouldReturn` 1
+        -- The action was read-and-cleared: the ref is now empty (no re-fire).
+        cleared <- isNothing <$> readIORef (_env_onFirstStreamDone env)
+        cleared `shouldBe` True
 
   describe "mkNewDefaultSession — provider/model guidance (pureclaw-ahj)" $ do
     it "/new with no provider emits guidance mentioning /provider" $

@@ -285,10 +285,27 @@ startProvider env store sid = do
         , _prd_systemPrompt = _env_systemPrompt env
         , _prd_tools        = registryDefinitions <$> effectiveRegistry env
         , _prd_maxTokens    = Just 4096
+          -- Restore the legacy @Loop.handleCompletion@ one-shot: fire (and
+          -- clear) @_env_onFirstStreamDone@ on the FIRST provider StreamDone, so
+          -- @markBootstrapConsumed@ runs once and an agent's BOOTSTRAP.md is not
+          -- re-injected on every resume (pureclaw-8g4; #79). The tabbed path
+          -- never fired this before the fix.
+        , _prd_onStreamDone = fireOnce (_env_onFirstStreamDone env)
         , _prd_fork         = _env_fork env
         , _prd_inputBound   = RT._rc_inputQueueBound (_env_routingConfig env)
         }
   mkProviderRuntime deps
+
+-- | Run a one-shot action stored in an 'IORef' at most once: atomically
+-- read-and-clear the 'Maybe' action, then run it if present. Mirrors the
+-- legacy @Loop.handleCompletion@ StreamDone handler
+-- (@atomicModifyIORef' ref (Nothing,); for_ mAction id@) so the armed
+-- @markBootstrapConsumed@ fires exactly once even though '_turn_onStreamDone'
+-- is invoked on every 'P.StreamDone' (pureclaw-8g4).
+fireOnce :: IORef (Maybe (IO ())) -> IO ()
+fireOnce ref = do
+  mAction <- atomicModifyIORef' ref (\m -> (Nothing, m))
+  maybe (pure ()) id mAction
 
 -- | Build + start a harness runtime for a 'Registry.HarnessId'. The
 -- 'HarnessHandle' is resolved from '_env_harnessRegistry'; when the entry has

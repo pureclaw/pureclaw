@@ -97,6 +97,7 @@ mkDeps stream execTool emit record next = TurnDeps
   , _turn_systemPrompt = Nothing
   , _turn_tools        = []
   , _turn_maxTokens    = Just 4096
+  , _turn_onStreamDone = pure ()
   }
 
 -- A tool-use block helper.
@@ -342,6 +343,59 @@ spec = do
       evs <- Ref.readIORef emits
       -- only the text chunk is surfaced; the incremental tool events are silent
       [ t | TurnChunk _ t <- evs ] `shouldBe` ["x"]
+
+  describe "runTurnWithTools — onStreamDone hook (pureclaw-8g4)" $ do
+    it "fires _turn_onStreamDone once on a single StreamDone" $ do
+      -- The legacy one-shot (markBootstrapConsumed) fired on the first
+      -- provider StreamDone; the tabbed path dropped it. cycleTurn must call
+      -- _turn_onStreamDone in the StreamDone branch so the hook runs.
+      scripts <- Ref.newIORef
+        [ [ P.StreamText "ok", P.StreamDone (mkResp [P.TextBlock "ok"]) ] ]
+      emits   <- Ref.newIORef []
+      records <- Ref.newIORef []
+      sidRef  <- Ref.newIORef 0
+      execRef <- Ref.newIORef []
+      counter <- Ref.newIORef (0 :: Int)
+      let deps = (mkDeps (scriptedStream scripts) (recordingExec execRef)
+                        (recordingEmit emits) (recordingRecord records)
+                        (nextSid sidRef))
+                   { _turn_onStreamDone = Ref.modifyIORef' counter (+ 1) }
+      _ <- runTurnWithTools deps (Ctx.emptyContext Nothing) "hi"
+      Ref.readIORef counter `shouldReturn` 1
+
+    it "fires once per StreamDone across a multi-leg tool cycle" $ do
+      -- Two completion legs (a tool call then the final answer) means two
+      -- StreamDone events, so the hook fires twice. A production read-and-clear
+      -- guard (wired at the Wiring layer) collapses this to a true one-shot.
+      scripts <- Ref.newIORef
+        [ [ P.StreamDone (mkResp [toolUse "c1" "search"]) ]
+        , [ P.StreamDone (mkResp [P.TextBlock "done"]) ]
+        ]
+      emits   <- Ref.newIORef []
+      records <- Ref.newIORef []
+      sidRef  <- Ref.newIORef 0
+      execRef <- Ref.newIORef []
+      counter <- Ref.newIORef (0 :: Int)
+      let deps = (mkDeps (scriptedStream scripts) (recordingExec execRef)
+                        (recordingEmit emits) (recordingRecord records)
+                        (nextSid sidRef))
+                   { _turn_onStreamDone = Ref.modifyIORef' counter (+ 1) }
+      _ <- runTurnWithTools deps (Ctx.emptyContext Nothing) "go"
+      Ref.readIORef counter `shouldReturn` 2
+
+    it "does not fire when the stream emits no StreamDone" $ do
+      scripts <- Ref.newIORef [ [ P.StreamText "partial" ] ]
+      emits   <- Ref.newIORef []
+      records <- Ref.newIORef []
+      sidRef  <- Ref.newIORef 0
+      execRef <- Ref.newIORef []
+      counter <- Ref.newIORef (0 :: Int)
+      let deps = (mkDeps (scriptedStream scripts) (recordingExec execRef)
+                        (recordingEmit emits) (recordingRecord records)
+                        (nextSid sidRef))
+                   { _turn_onStreamDone = Ref.modifyIORef' counter (+ 1) }
+      _ <- runTurnWithTools deps (Ctx.emptyContext Nothing) "hi"
+      Ref.readIORef counter `shouldReturn` 0
 
   describe "runTurnWithTools — provider error" $ do
     it "does not throw when the stream throws; returns ctx with user msg; emits TurnEnd" $ do

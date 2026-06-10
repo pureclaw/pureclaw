@@ -136,6 +136,7 @@ mkProvDeps stream execTool emit record seedCtx = ProviderRuntimeDeps
   , _prd_systemPrompt = Nothing
   , _prd_tools        = pure []
   , _prd_maxTokens    = Just 4096
+  , _prd_onStreamDone = pure ()
   , _prd_fork         = realFork
   , _prd_inputBound   = 64
   }

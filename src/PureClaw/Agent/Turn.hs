@@ -107,6 +107,13 @@ data TurnDeps = TurnDeps
     -- request falls back to 'Ctx.contextSystemPrompt' (matching Loop).
   , _turn_tools        :: [P.ToolDefinition]
   , _turn_maxTokens    :: Maybe Int
+  , _turn_onStreamDone :: IO ()
+    -- ^ A one-shot-style hook fired on EVERY provider 'P.StreamDone' (in
+    -- addition to capturing the response). Idempotency is the action's
+    -- responsibility — production wires a read-and-clear @fireOnce@ over
+    -- @_env_onFirstStreamDone@ so @'markBootstrapConsumed'@ runs exactly once,
+    -- restoring the legacy @Loop.handleCompletion@ behaviour the tabbed path
+    -- dropped (pureclaw-8g4). Tests default it to @pure ()@.
   }
 
 -- ---------------------------------------------------------------------------

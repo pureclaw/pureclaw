@@ -142,6 +142,11 @@ data ProviderRuntimeDeps = ProviderRuntimeDeps
     --   the tab was created — e.g. via @\/mcp connect@ — are still advertised
     --   to the LLM, matching the legacy loop's per-turn @effectiveRegistry@).
   , _prd_maxTokens    :: Maybe Int
+  , _prd_onStreamDone :: IO ()
+    -- ^ Fired on EVERY provider 'P.StreamDone' (threaded into 'TurnDeps' as
+    --   '_turn_onStreamDone'). Production wires a read-and-clear @fireOnce@ over
+    --   @_env_onFirstStreamDone@ so @'markBootstrapConsumed'@ runs exactly once
+    --   (pureclaw-8g4); idempotency is the action's responsibility.
   , _prd_fork         :: IO () -> IO Tab.TabRunner
     -- ^ The @_env_fork@ seam.
   , _prd_inputBound   :: Int
@@ -172,6 +177,7 @@ mkProviderRuntime deps = do
         , _turn_systemPrompt = _prd_systemPrompt deps
         , _turn_tools        = tools
         , _turn_maxTokens    = _prd_maxTokens deps
+        , _turn_onStreamDone = _prd_onStreamDone deps
         }
       worker = forever $ do
         userText <- atomically (readTBQueue inputQ)
