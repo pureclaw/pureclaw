@@ -435,3 +435,26 @@ spec = do
                 , TRPText t <- parts
                 ]
           texts `shouldNotContain` ["Unknown tool: mcp_ping"]
+
+    it "returns the base registry unchanged when no MCP servers are connected" $
+      withSystemTempDirectory "pc-wiring-mcp" $ \tmp -> do
+        th <- mkTabbedEnv tmp []
+        let builtin = ToolDefinition
+              { _td_name        = "builtin_only"
+              , _td_description = "echo"
+              , _td_inputSchema = Aeson.Null
+              }
+            baseReg = registerTool builtin (ToolHandler (\_ -> pure ("ok", False)))
+                        emptyRegistry
+            env = (_th_env th) { _env_registry = baseReg }
+        -- _env_mcpServers is empty (mkTabbedEnv default): the Map.null branch.
+        defs <- registryDefinitions <$> effectiveRegistry env
+        map _td_name defs `shouldBe` ["builtin_only"]
+        -- An unknown tool on the empty-MCP path still yields "Unknown tool".
+        msg <- execOneTool env (ToolCallId "c0") "nope" Aeson.Null
+        let texts =
+              [ t
+              | ToolResultBlock _ parts _ <- _msg_content msg
+              , TRPText t <- parts
+              ]
+        texts `shouldContain` ["Unknown tool: nope"]

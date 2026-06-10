@@ -101,9 +101,11 @@ import PureClaw.Tabs.Types
   , TabRef (..)
   , resolveCursorSlot
   )
+import PureClaw.MCP (mcpRegistry)
 import PureClaw.Tools.Registry
   ( ToolRegistry
   , executeTool
+  , mergeRegistries
   , registryDefinitions
   )
 import PureClaw.Transcript.Provider (mkTranscriptProvider)
@@ -275,7 +277,7 @@ startProvider env store sid = do
         , _prd_seedCtx      = seedContextFrom env th
         , _prd_model        = model
         , _prd_systemPrompt = _env_systemPrompt env
-        , _prd_tools        = registryDefinitions (_env_registry env)
+        , _prd_tools        = registryDefinitions <$> effectiveRegistry env
         , _prd_maxTokens    = Just 4096
         , _prd_fork         = _env_fork env
         , _prd_inputBound   = RT._rc_inputQueueBound (_env_routingConfig env)
@@ -336,10 +338,12 @@ seedContextFrom env th = do
 -- @Loop.backgroundRegistry@ \/ legacy @effectiveRegistry@ (pureclaw-2u4; #79).
 effectiveRegistry :: AgentEnv -> IO ToolRegistry
 effectiveRegistry env = do
-  -- TEMP (RED): ignores _env_mcpServers — proves MCP tools are unreachable on
-  -- the tabbed path. GREEN merges mcpRegistry below.
-  _servers <- readIORef (_env_mcpServers env)
-  pure (_env_registry env)
+  servers <- readIORef (_env_mcpServers env)
+  let base = _env_registry env
+  pure $
+    if Map.null servers
+      then base
+      else mergeRegistries base (mcpRegistry (Map.elems servers))
 
 -- | Run ONE tool call against the effective registry, returning a tool-result
 -- 'P.Message'. Mirrors @Loop.executeCall@ + @toolResultMessage@ for a single

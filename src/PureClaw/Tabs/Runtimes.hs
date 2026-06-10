@@ -132,7 +132,10 @@ data ProviderRuntimeDeps = ProviderRuntimeDeps
     -- ^ Seed the conversation 'Context' (prod: from the session transcript).
   , _prd_model        :: ModelId
   , _prd_systemPrompt :: Maybe Text
-  , _prd_tools        :: [P.ToolDefinition]
+  , _prd_tools        :: IO [P.ToolDefinition]
+    -- ^ Advertised tool definitions, read PER TURN (so tools connected after
+    --   the tab was created — e.g. via @\/mcp connect@ — are still advertised
+    --   to the LLM, matching the legacy loop's per-turn @effectiveRegistry@).
   , _prd_maxTokens    :: Maybe Int
   , _prd_fork         :: IO () -> IO Tab.TabRunner
     -- ^ The @_env_fork@ seam.
@@ -154,7 +157,7 @@ mkProviderRuntime deps = do
   ctxRef <- newIORef ctx0
   inputQ <- newTBQueueIO (fromIntegral (max 1 (_prd_inputBound deps)))
   sidRef <- newIORef (0 :: Word64)
-  let turnDeps = TurnDeps
+  let mkTurnDeps tools = TurnDeps
         { _turn_stream       = _prd_stream deps
         , _turn_execTool     = _prd_execTool deps
         , _turn_emit         = emitTurnEvent deps
@@ -162,13 +165,16 @@ mkProviderRuntime deps = do
         , _turn_nextStreamId = nextStreamId sidRef
         , _turn_model        = _prd_model deps
         , _turn_systemPrompt = _prd_systemPrompt deps
-        , _turn_tools        = _prd_tools deps
+        , _turn_tools        = tools
         , _turn_maxTokens    = _prd_maxTokens deps
         }
       worker = forever $ do
         userText <- atomically (readTBQueue inputQ)
-        ctx  <- readIORef ctxRef
-        ctx' <- runTurnWithTools turnDeps ctx userText
+        -- Read the advertised tools PER TURN so tools connected after this tab
+        -- was created (e.g. via @/mcp connect@) are still seen (pureclaw-2u4).
+        tools <- _prd_tools deps
+        ctx   <- readIORef ctxRef
+        ctx'  <- runTurnWithTools (mkTurnDeps tools) ctx userText
         writeIORef ctxRef ctx'
   runner <- _prd_fork deps worker
   pure Runtime
