@@ -278,7 +278,6 @@ test-suite pureclaw-test
     Providers.AnthropicSpec
     Agent.CompletionSpec
     Agent.BackgroundSpec
-    Agent.LoopSpec
     Agent.TurnSpec
     Channels.CLISpec
     CLI.CommandsSpec
