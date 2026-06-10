@@ -1,8 +1,10 @@
 module Tabs.WiringSpec (spec) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (throwIO)
+import Control.Monad qualified as M
 import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
   ( IORef
@@ -14,7 +16,10 @@ import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text, isInfixOf)
+import Data.Text.IO qualified as TIO
 import Data.Time (getCurrentTime)
+import System.Directory qualified as Dir
+import System.FilePath qualified as FP
 import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -40,6 +45,7 @@ import PureClaw.Providers.Class
   , SomeProvider (..)
   , ToolDefinition (..)
   , ToolResultPart (..)
+  , Usage (..)
   )
 import PureClaw.Routing.Config (defaultRoutingConfig)
 import PureClaw.Routing.Types (RoutingConfig (..))
@@ -92,6 +98,24 @@ instance Provider ReplyProvider where
     }
 
 -- ---------------------------------------------------------------------------
+-- A streaming provider that reports token usage.
+-- ---------------------------------------------------------------------------
+
+-- | A provider whose fixed reply carries a non-zero 'Usage'. Driving a turn
+-- through this provider records a transcript Response entry whose metadata
+-- carries @input_tokens@ \/ @output_tokens@, so a later @\/status@ that seeds
+-- its context from the bound session's transcript can recover both the message
+-- count AND the cumulative token totals (pureclaw-25k).
+data UsageReplyProvider = UsageReplyProvider
+
+instance Provider UsageReplyProvider where
+  complete UsageReplyProvider _ = pure CompletionResponse
+    { _crsp_content = [TextBlock "hello from the model"]
+    , _crsp_model   = ModelId "mock"
+    , _crsp_usage   = Just (Usage 11 7)
+    }
+
+-- ---------------------------------------------------------------------------
 -- A scripted, recording channel.
 -- ---------------------------------------------------------------------------
 
@@ -115,6 +139,41 @@ scriptedChannel scripted = do
             case queued of
               []         -> throwIO (userError "EOF" :: IOError)
               (m : rest) -> writeIORef pendingRef rest >> pure m
+        , _ch_send      = \msg -> modifyIORef' sentRef (<> [_om_content msg])
+        , _ch_sendError = \_ -> pure ()
+        , _ch_sendChunk = \_ -> pure ()
+        , _ch_streaming = True
+        , _ch_readSecret   = pure ""
+        , _ch_prompt       = \_ -> pure ""
+        , _ch_promptSecret = \_ -> pure ""
+        }
+  pure (channel, ChannelLog sentRef)
+
+-- | A channel like 'scriptedChannel' but where receiving a message whose
+-- content satisfies @gate@ first blocks until @ready@ becomes 'True'. Used to
+-- feed @\/status@ only after the prior provider turn's transcript Response
+-- entry (token-usage metadata) has been flushed to disk, so the seeded
+-- @\/status@ context is deterministic (pureclaw-25k).
+gatedChannel
+  :: (Text -> Bool)        -- ^ gate predicate over inbound content
+  -> IO Bool               -- ^ readiness probe; the gate releases once it is 'True'
+  -> [IncomingMessage]
+  -> IO (ChannelHandle, ChannelLog)
+gatedChannel gate ready scripted = do
+  pendingRef <- newIORef scripted
+  sentRef    <- newIORef []
+  let waitReady = do
+        ok <- ready
+        if ok then pure () else threadDelay 1000 >> waitReady
+      channel = ChannelHandle
+        { _ch_receive = do
+            queued <- readIORef pendingRef
+            case queued of
+              []         -> throwIO (userError "EOF" :: IOError)
+              (m : rest) -> do
+                writeIORef pendingRef rest
+                M.when (gate (_im_content m)) waitReady
+                pure m
         , _ch_send      = \msg -> modifyIORef' sentRef (<> [_om_content msg])
         , _ch_sendError = \_ -> pure ()
         , _ch_sendChunk = \_ -> pure ()
@@ -169,7 +228,13 @@ data TabbedHarness = TabbedHarness
 -- recording scripted channel, and a runner-tracking fork.
 mkTabbedEnv :: FilePath -> [IncomingMessage] -> IO TabbedHarness
 mkTabbedEnv sessionsDir scripted = do
-  (channel, clog) <- scriptedChannel scripted
+  chan <- scriptedChannel scripted
+  mkTabbedEnvChan sessionsDir chan
+
+-- | 'mkTabbedEnv' over an explicitly-built channel + log (so tests can supply a
+-- 'gatedChannel' instead of the default 'scriptedChannel').
+mkTabbedEnvChan :: FilePath -> (ChannelHandle, ChannelLog) -> IO TabbedHarness
+mkTabbedEnvChan sessionsDir (channel, clog) = do
   runnersTracker  <- newIORef []
 
   vaultRef     <- newIORef Nothing
@@ -278,6 +343,42 @@ readSource env = do
 -- | The conversation key for a CLI conversation id (channel + conversation).
 cliKey :: Text -> (ChannelKind, ConversationId)
 cliKey conv = (CkCli, ConversationId conv)
+
+-- | Assert that @needle@ is a substring of @haystack@ (Text).
+shouldContain' :: Text -> Text -> Expectation
+shouldContain' haystack needle =
+  haystack `shouldSatisfy` (needle `isInfixOf`)
+
+-- | 'True' once some @transcript.jsonl@ under @root@ contains an
+-- @output_tokens@ field — i.e. a provider Response entry with usage metadata
+-- has been flushed. Used as the gated-channel readiness probe so @\/status@ is
+-- fed only after the turn's usage is on disk (pureclaw-25k).
+transcriptHasUsage :: FilePath -> IO Bool
+transcriptHasUsage root = do
+  files <- findTranscripts root
+  anyM (\f -> ("output_tokens" `isInfixOf`) <$> TIO.readFile f) files
+  where
+    anyM _ []       = pure False
+    anyM p (x : xs) = do
+      r <- p x
+      if r then pure True else anyM p xs
+
+-- | All @transcript.jsonl@ files at or under @dir@ (one level of session
+-- subdirectories is enough for the tabbed harness, but this recurses to be
+-- safe).
+findTranscripts :: FilePath -> IO [FilePath]
+findTranscripts dir = do
+  exists <- Dir.doesDirectoryExist dir
+  if not exists
+    then pure []
+    else do
+      entries <- Dir.listDirectory dir
+      fmap concat $ M.forM entries $ \e -> do
+        let p = dir FP.</> e
+        isDir <- Dir.doesDirectoryExist p
+        if isDir
+          then findTranscripts p
+          else pure [p | e == "transcript.jsonl"]
 
 -- ---------------------------------------------------------------------------
 -- MCP-on-tabbed-path fixtures (pureclaw-2u4)
@@ -475,6 +576,42 @@ spec = do
         -- The action was read-and-cleared: the ref is now empty (no re-fire).
         cleared <- isNothing <$> readIORef (_env_onFirstStreamDone env)
         cleared `shouldBe` True
+
+    it "/status reflects the active session transcript: messages + token totals (pureclaw-25k)" $
+      withSystemTempDirectory "pc-wiring-status" $ \tmp -> do
+        -- End-to-end: /new mints a provider session, a plain message drives a
+        -- real provider turn (UsageReplyProvider reports Usage 11/7) recorded to
+        -- the bound session's transcript, THEN /status is fed. The /status reply
+        -- must reflect the live conversation: a non-zero message count, a
+        -- non-zero context-token estimate, and the cumulative input/output token
+        -- totals reconstructed from the transcript. Before the fix /status saw
+        -- an empty context and reported all zeros (RED).
+        let msgs =
+              [ mkInbound "conv-a" "alice" "/new"
+              , mkInbound "conv-a" "alice" "say hi"
+              , mkInbound "conv-a" "alice" "/status"
+              ]
+        -- Feed /status only after the turn's transcript Response entry (carrying
+        -- output_tokens) has been flushed under @tmp@, guaranteeing the seeded
+        -- /status context is deterministic.
+        chan <- gatedChannel ("/status" `isInfixOf`) (transcriptHasUsage tmp) msgs
+        th   <- mkTabbedEnvChan tmp chan
+        let env = _th_env th
+        writeIORef (_env_provider env) (Just (MkProvider UsageReplyProvider))
+        writeIORef (_env_model env)    (Just (ModelId "mock"))
+        completed <- runLoopBounded th
+        completed `shouldBe` True
+        sent <- readIORef (_clog_sent (_th_log th))
+        let statusBlocks = filter ("Session status:" `isInfixOf`) sent
+        case statusBlocks of
+          (status : _) -> do
+            -- Message count: 2 (user "say hi" + assistant reply) reconstructed
+            -- from the transcript, NOT 0.
+            status `shouldContain'` "Messages:            2"
+            -- Token totals reconstructed from the transcript Response metadata.
+            status `shouldContain'` "Total input tokens:  11"
+            status `shouldContain'` "Total output tokens: 7"
+          [] -> expectationFailure "expected a /status block in the sent log"
 
   describe "mkNewDefaultSession — provider/model guidance (pureclaw-ahj)" $ do
     it "/new with no provider emits guidance mentioning /provider" $
