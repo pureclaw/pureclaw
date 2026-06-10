@@ -172,7 +172,14 @@ cycleTurn deps ctx = do
     _turn_stream deps req $ \case
       P.StreamText t   -> Ref.writeIORef streamedRef True >> _turn_emit deps (TurnChunk sid t)
       P.StreamWarning _ -> pure ()      -- non-fatal; logged by prod sink elsewhere
-      P.StreamDone resp -> Ref.writeIORef responseRef (Just resp)
+      P.StreamDone resp -> do
+        Ref.writeIORef responseRef (Just resp)
+        -- Fire the one-shot-style hook on every StreamDone (mirrors the legacy
+        -- @Loop.handleCompletion@ StreamDone handler that ran
+        -- @_env_onFirstStreamDone@). Idempotency is the action's responsibility
+        -- — production wires a read-and-clear @fireOnce@ so
+        -- @markBootstrapConsumed@ runs exactly once (pureclaw-8g4).
+        _turn_onStreamDone deps
       _                 -> pure ()
   -- Non-streaming providers (e.g. Ollama with @stream = False@) emit only a
   -- single 'P.StreamDone' carrying the full response and no incremental

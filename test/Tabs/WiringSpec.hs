@@ -12,7 +12,7 @@ import Data.IORef
   , writeIORef
   )
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isNothing)
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text, isInfixOf)
 import Data.Time (getCurrentTime)
 import System.IO.Temp (withSystemTempDirectory)
@@ -467,7 +467,7 @@ spec = do
         -- BEFORE tearing the runners down (cancelAll would otherwise kill the
         -- worker mid-turn). The runner-tracking fork keeps the worker alive.
         completed <- timeout (5 * 1000000) (runTabbedLoop env)
-        maybe False (const True) completed `shouldBe` True
+        completed `shouldSatisfy` isJust
         firedInTime <- timeout (5 * 1000000) (takeMVar fired)
         cancelAll (_th_runners th)
         firedInTime `shouldBe` Just ()

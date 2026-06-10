@@ -304,8 +304,8 @@ startProvider env store sid = do
 -- is invoked on every 'P.StreamDone' (pureclaw-8g4).
 fireOnce :: IORef (Maybe (IO ())) -> IO ()
 fireOnce ref = do
-  mAction <- atomicModifyIORef' ref (\m -> (Nothing, m))
-  maybe (pure ()) id mAction
+  mAction <- atomicModifyIORef' ref (Nothing,)
+  fromMaybe (pure ()) mAction
 
 -- | Build + start a harness runtime for a 'Registry.HarnessId'. The
 -- 'HarnessHandle' is resolved from '_env_harnessRegistry'; when the entry has
