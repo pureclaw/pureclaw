@@ -372,9 +372,10 @@ test-suite pureclaw-test
     Harness.RegistrySpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs
-    -- Routing.ParseSpec removed in 8c.3: it imports the deleted
+    -- Routing.ParseSpec removed in 8c.3: it imported the deleted
     -- PureClaw.Routing.Dispatcher / PureClaw.Routing.Registry modules.
-    -- 8d re-adds a rewritten ParseSpec against the new tab system.
+    -- 8d.b re-adds a rewritten ParseSpec (pure-parser form, P18 recasted).
+    Routing.ParseSpec
     Routing.ConfigSpec
     Tab.ContainerSpec
     Onboarding.StartSpec
