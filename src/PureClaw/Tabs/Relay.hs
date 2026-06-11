@@ -73,6 +73,7 @@ import PureClaw.Tabs.Types
   , lookupRef
   , lookupSlot
   , relayModeFor
+  , toList
   )
 
 -- | The /burst/ a 'ChannelEvent' belongs to — one logical message. All framing
@@ -147,8 +148,53 @@ relayEvent deps cs globalDefault tl pinged src event =
       slot <- srcSlot
       pure (BannerLine (name <> " (/" <> T.pack (show slot) <> ") has new output"))
 
+    -- How many tabs exist right now. A single-tab CLI stays unlabelled; a
+    -- multi-tab session labels focused bursts so the speaker is identifiable.
+    tabCount :: Int
+    tabCount = length (toList tl)
+
+    -- A concise speaker label for the source tab at its current slot, as a
+    -- 'BannerLine' (tab identity only — NO "has new output" activity suffix).
+    -- 'Nothing' when the source ref is absent (no name/slot).
+    focusedLabel :: Maybe ChannelEvent
+    focusedLabel = do
+      name <- srcName
+      slot <- srcSlot
+      pure (BannerLine (name <> " (/" <> T.pack (show slot) <> ")"))
+
     deliver :: ConversationKey -> ChannelEvent -> IO ()
     deliver = _rl_sink deps
+
+    -- Forward the event to a focused conversation, prefixing a one-shot speaker
+    -- label at the START of a burst when more than one tab exists. The label is
+    -- emitted before a 'StreamStart' (once per stream) and before a 'FullMsg'
+    -- (once per whole-message capture); 'ChunkOf'\/'StreamEnd'\/'BannerLine'
+    -- carry no label, so a multi-chunk reply is labelled exactly once. A
+    -- single-tab session is never labelled (clean CLI, the gb7 decision).
+    deliverFocused :: ConversationKey -> IO ()
+    deliverFocused k = do
+      mapM_ (deliver k) (focusedLabelFor event)
+      deliver k event
+
+    -- The speaker label to prefix to a focused delivery of @ev@, if any: only
+    -- when more than one tab exists, the source tab resolves to a name\/slot,
+    -- AND @ev@ is a burst-start ('StreamStart' or 'FullMsg'). 'Nothing' for a
+    -- single-tab session, an unresolved source, or a non-burst-start event.
+    focusedLabelFor :: ChannelEvent -> Maybe ChannelEvent
+    focusedLabelFor ev
+      | tabCount > 1 && labelsBurstStart ev = focusedLabel
+      | otherwise                           = Nothing
+
+    -- Whether @event@ begins a burst that should carry a focused speaker label:
+    -- a 'StreamStart' (start of a streamed reply) or a 'FullMsg' (a whole
+    -- message capture). Mid-burst and framing-tail events do not.
+    labelsBurstStart :: ChannelEvent -> Bool
+    labelsBurstStart = \case
+      StreamStart {} -> True
+      FullMsg {}     -> True
+      ChunkOf {}     -> False
+      StreamEnd {}   -> False
+      BannerLine {}  -> False
 
     go
       :: Set (ConversationKey, BurstKey)
@@ -161,7 +207,7 @@ relayEvent deps cs globalDefault tl pinged src event =
           -- Focused on the source tab: forward the event verbatim in every
           -- mode, and clear ALL of this conversation's burst entries (it is
           -- now looking at the tab, so a future background burst should ping).
-          then deliver k event >> pure (clearKey k acc)
+          then deliverFocused k >> pure (clearKey k acc)
           -- Background: behaviour depends on the conversation's effective mode.
           else case relayModeFor k globalDefault cs of
             FocusedOnly    -> pure acc

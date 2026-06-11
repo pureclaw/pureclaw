@@ -133,9 +133,11 @@ spec = do
       let drive acc = relayEvent deps cs FocusedOnly tl acc src
       _ <- foldEvents drive events
       out <- readIORef sink
-      -- The focused conversation c0 saw all four events verbatim; c1 saw none.
+      -- The focused conversation c0 saw all four events verbatim (preceded by
+      -- a speaker label, since 2 tabs exist); c1 saw none.
       out `shouldBe`
-        [ (keyN 0, StreamStart sid anyIdx)
+        [ (keyN 0, focusLabel "alpha" 0)
+        , (keyN 0, StreamStart sid anyIdx)
         , (keyN 0, ChunkOf sid "a")
         , (keyN 0, ChunkOf sid "b")
         , (keyN 0, StreamEnd sid)
@@ -207,6 +209,31 @@ spec = do
         , (keyN 0, FullMsg anyIdx "cap")
         ]
 
+    -- A focused 'BannerLine' is forwarded verbatim and carries NO speaker label
+    -- even with 2+ tabs (only burst-start StreamStart/FullMsg label).
+    it "does NOT label a focused BannerLine even with 2+ tabs" $ do
+      let src = refN 0
+          other = refN 1
+          tl = append1 other "beta" (append1 src "alpha" emptyTabs)
+          cs = withCursors [(keyN 0, src)]
+      (sink, deps) <- newSink
+      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (BannerLine "raw")
+      out <- readIORef sink
+      out `shouldBe` [(keyN 0, BannerLine "raw")]
+
+    -- A focused source tab absent from the list yields no label (focusedLabel
+    -- is Nothing) even with 2+ tabs in the list; the event still forwards.
+    it "does NOT label when the focused source ref is absent from the list" $ do
+      let src = refN 0
+          a = refN 1
+          b = refN 2
+          tl = append1 b "gamma" (append1 a "beta" emptyTabs) -- src not present
+          cs = withCursors [(keyN 0, src)]
+      (sink, deps) <- newSink
+      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (FullMsg anyIdx "x")
+      out <- readIORef sink
+      out `shouldBe` [(keyN 0, FullMsg anyIdx "x")]
+
   -- DoD 2 — Firehose background: every event verbatim.
   describe "Firehose" $ do
     it "delivers every event of a stream verbatim to a background conversation" $ do
@@ -253,7 +280,8 @@ spec = do
       -- c1 gets exactly one ping; c0 gets all five events verbatim.
       filter ((== keyN 1) . fst) out `shouldBe` [(keyN 1, ping "alpha" 0)]
       filter ((== keyN 0) . fst) out `shouldBe`
-        [ (keyN 0, StreamStart sid anyIdx)
+        [ (keyN 0, focusLabel "alpha" 0)
+        , (keyN 0, StreamStart sid anyIdx)
         , (keyN 0, ChunkOf sid "1")
         , (keyN 0, ChunkOf sid "2")
         , (keyN 0, ChunkOf sid "3")
@@ -285,6 +313,7 @@ spec = do
       out <- readIORef sink
       out `shouldBe`
         [ (keyN 0, ping "alpha" 0)        -- m1 ping
+        , (keyN 0, focusLabel "alpha" 0)  -- m3 speaker label (2 tabs, focused)
         , (keyN 0, FullMsg anyIdx "m3")   -- m3 forwarded (focused)
         , (keyN 0, ping "alpha" 0)        -- m4 ping
         ]
@@ -326,9 +355,10 @@ spec = do
       final <- relayEvent deps cs FocusedOnly tl Set.empty src ev
       out <- readIORef sink
       out `shouldBe`
-        [ (keyN 1, ev)             -- Firehose
-        , (keyN 2, ping "alpha" 0) -- ActivityDigest background ping
-        , (keyN 3, ev)             -- FocusedOnly on src
+        [ (keyN 1, ev)                 -- Firehose
+        , (keyN 2, ping "alpha" 0)     -- ActivityDigest background ping
+        , (keyN 3, focusLabel "alpha" 0) -- speaker label (2 tabs, focused)
+        , (keyN 3, ev)                 -- FocusedOnly on src
         ]
       final `shouldBe` Set.fromList [(keyN 2, BurstFull)]
 
