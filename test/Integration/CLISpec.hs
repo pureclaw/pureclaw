@@ -568,3 +568,64 @@ spec = do
               `shouldReturn` True
             oneDir `shouldNotBe` twoDir
           _ -> expectationFailure "missing expected session directories"
+
+  -- ---------------------------------------------------------------------------
+  -- Tabbed command surface — §14 teaching strings (8d item a)
+  -- ---------------------------------------------------------------------------
+  -- These tests drive the REAL binary with no provider configured.  Every
+  -- assertion targets a deterministic §14 copy string that is emitted
+  -- regardless of credentials.  Provider-dependent behaviour (tab creation,
+  -- live chat turns) stays unit-covered in TabDispatchSpec / WiringSpec /
+  -- SignalFlowSpec with fakes.
+  -- ---------------------------------------------------------------------------
+
+  describe "tabbed command surface" $ do
+
+    -- /new with no provider → provider setup guidance (Wiring.hs:563)
+    it "/new with no provider configured shows provider setup guidance" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/new\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "No provider configured"
+      out `shouldContain` "/provider <PROVIDER>"
+
+    -- /5 with 0 tabs → out-of-range §14 copy (TabDispatch.hs:628-630)
+    it "/5 with no tabs shows the out-of-range §14 message" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/5\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "/5: out of range"
+      out `shouldContain` "you have 0 tabs"
+      out `shouldContain` "/tabs to list"
+
+    -- /tabs with 0 tabs → just the relay-mode line (TabDispatch.hs:347-352)
+    it "/tabs with no tabs renders the relay-mode line without crashing" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/tabs\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      -- With zero tabs the only output is the trailing relay line.
+      out `shouldContain` "relay:"
+
+    -- /relay with no arg → current relay mode (TabDispatch.hs:657-658)
+    it "/relay with no argument shows the current relay mode" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/relay\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "relay mode:"
+      out `shouldContain` "focused | activity | all"
+
+    -- /help → help text (already covered in "CLI startup"; verify in this
+    -- describe too so the tabbed surface §14 block is self-contained)
+    it "/help shows the slash-command reference" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/help\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "Slash commands:"
+
+    -- Unknown slash → parse-error §14 copy (TabDispatch.hs:662)
+    it "an unknown slash command shows the parse-error §14 copy" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/zzz\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "could not parse that"
+      out `shouldContain` "/help for commands"
