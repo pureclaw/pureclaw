@@ -36,3 +36,6 @@ frontend-build:
 # `cabal run pureclaw -- gateway run` directly.
 gateway-dev: frontend-build
 	$(NIX) cabal run pureclaw -- gateway run
+
+tui:
+	$(NIX) cabal run pureclaw -- tui
