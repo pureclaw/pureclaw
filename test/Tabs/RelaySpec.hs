@@ -96,6 +96,12 @@ withRelay k m cs = cs { _cs_relay = Map.insert k m (_cs_relay cs) }
 ping :: Text -> Int -> ChannelEvent
 ping name slot = BannerLine (name <> " (/" <> T.pack (show slot) <> ") has new output")
 
+-- | The focused speaker-label event the engine is contracted to produce when
+-- more than one tab exists (a tab-identity label, WITHOUT the activity-ping
+-- "has new output" suffix).
+focusLabel :: Text -> Int -> ChannelEvent
+focusLabel name slot = BannerLine (name <> " (/" <> T.pack (show slot) <> ")")
+
 -- | Unsafe 'TabIndex' for tests (the int is always in range here).
 idx :: Int -> TabIndex
 idx n = case mkTabIndex n of
@@ -133,6 +139,72 @@ spec = do
         , (keyN 0, ChunkOf sid "a")
         , (keyN 0, ChunkOf sid "b")
         , (keyN 0, StreamEnd sid)
+        ]
+
+  -- gb7 — focused output is labelled ONLY when more than one tab exists.
+  describe "focused multi-tab labelling (pureclaw-gb7)" $ do
+    -- Test A: 2+ tabs, focused on src, a provider streaming burst → the
+    -- speaker label is delivered exactly once (at StreamStart), before the
+    -- forwarded events.
+    it "labels a focused provider burst once at StreamStart when 2+ tabs exist" $ do
+      let src = refN 0
+          other = refN 1
+          tl = append1 other "beta" (append1 src "alpha" emptyTabs)
+          sid = sidN 4
+          cs = withCursors [(keyN 0, src)]
+          events =
+            [ StreamStart sid anyIdx
+            , ChunkOf sid "a"
+            , ChunkOf sid "b"
+            , StreamEnd sid
+            ]
+      (sink, deps) <- newSink
+      let drive acc = relayEvent deps cs FocusedOnly tl acc src
+      _ <- foldEvents drive events
+      out <- readIORef sink
+      out `shouldBe`
+        [ (keyN 0, focusLabel "alpha" 0)
+        , (keyN 0, StreamStart sid anyIdx)
+        , (keyN 0, ChunkOf sid "a")
+        , (keyN 0, ChunkOf sid "b")
+        , (keyN 0, StreamEnd sid)
+        ]
+
+    -- Test B: only ONE tab, focused on src, a provider burst → NO label
+    -- (single-tab CLI stays clean).
+    it "does NOT label focused output when only one tab exists" $ do
+      let src = refN 0
+          tl = append1 src "alpha" emptyTabs
+          sid = sidN 5
+          cs = withCursors [(keyN 0, src)]
+          events =
+            [ StreamStart sid anyIdx
+            , ChunkOf sid "a"
+            , StreamEnd sid
+            ]
+      (sink, deps) <- newSink
+      let drive acc = relayEvent deps cs FocusedOnly tl acc src
+      _ <- foldEvents drive events
+      out <- readIORef sink
+      out `shouldBe`
+        [ (keyN 0, StreamStart sid anyIdx)
+        , (keyN 0, ChunkOf sid "a")
+        , (keyN 0, StreamEnd sid)
+        ]
+
+    -- Test C: 2+ tabs, focused on src, a harness FullMsg → the label precedes
+    -- the FullMsg.
+    it "labels a focused FullMsg when 2+ tabs exist" $ do
+      let src = refN 0
+          other = refN 1
+          tl = append1 other "beta" (append1 src "alpha" emptyTabs)
+          cs = withCursors [(keyN 0, src)]
+      (sink, deps) <- newSink
+      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (FullMsg anyIdx "cap")
+      out <- readIORef sink
+      out `shouldBe`
+        [ (keyN 0, focusLabel "alpha" 0)
+        , (keyN 0, FullMsg anyIdx "cap")
         ]
 
   -- DoD 2 — Firehose background: every event verbatim.
