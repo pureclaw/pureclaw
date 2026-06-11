@@ -4,15 +4,14 @@
 -- Module      : PureClaw.Agent.Turn
 -- Description : Env-light, single-turn provider execution with tool cycling.
 --
--- == Tabs-as-View stage 8b.2
+-- == Tabs-as-View
 --
--- This module is the env-light extraction of the tool-call cycle that today
--- lives coupled inside @PureClaw.Agent.Loop.handleCompletion@
--- (Loop.hs:201-280). 'handleCompletion' writes @_env_channel@ directly, fires
--- @_env_onFirstStreamDone@, and tail-recurses into the singleton @go@ loop —
--- none of which is reusable per-tab.
+-- This module is the env-light extraction of the tool-call cycle. It is the
+-- reusable, per-tab core that the tabbed loop ('runTabbedLoop' via the tab
+-- runtimes) drives, replacing the original env-coupled completion handler that
+-- wrote @_env_channel@ directly and tail-recursed into a singleton loop.
 --
--- 'runTurnWithTools' performs the same logical cycle — build request, stream,
+-- 'runTurnWithTools' performs the logical cycle — build request, stream,
 -- capture response, run any tool calls, re-complete until none remain — but
 -- over an injected 'TurnDeps' record. Every effect (the provider stream, the
 -- tool executor, the streaming sink, the transcript append, the 'StreamId'
@@ -62,7 +61,7 @@ import PureClaw.Routing.Types (StreamId, mkStreamId)
 -- the runtime maps these to 'PureClaw.Routing.Types.ChannelEvent' in 8b.3.
 --
 -- @'TurnError' sid msg@ surfaces a provider failure as a visible message. The
--- legacy @Loop.handleCompletion@ caught a throwing stream and sent the user a
+-- the original completion handler caught a throwing stream and sent the user a
 -- @TemporaryError "Something went wrong. Please try again."@; on the tabbed
 -- path the throw must likewise be surfaced (pureclaw-9d0) rather than silently
 -- swallowed, leaving the user with an empty 'TurnStart'\/'TurnEnd' pair.
@@ -112,7 +111,7 @@ data TurnDeps = TurnDeps
     -- addition to capturing the response). Idempotency is the action's
     -- responsibility — production wires a read-and-clear @fireOnce@ over
     -- @_env_onFirstStreamDone@ so @'markBootstrapConsumed'@ runs exactly once,
-    -- restoring the legacy @Loop.handleCompletion@ behaviour the tabbed path
+    -- restoring the the original completion handler behaviour the tabbed path
     -- dropped (pureclaw-8g4). Tests default it to @pure ()@.
   }
 
@@ -122,7 +121,7 @@ data TurnDeps = TurnDeps
 
 -- | Run one user turn WITH the provider's tool-call cycle, env-light.
 --
--- Mirrors @Loop.handleCompletion@ (Loop.hs:201-280) but over 'TurnDeps':
+-- Mirrors the original completion handler but over 'TurnDeps':
 --
 --   1. Append a user 'P.Message' (the text) to the 'Context' and record it.
 --   2. Cycle: build a 'P.CompletionRequest' from the current context plus the
@@ -175,7 +174,7 @@ cycleTurn deps ctx = do
       P.StreamDone resp -> do
         Ref.writeIORef responseRef (Just resp)
         -- Fire the one-shot-style hook on every StreamDone (mirrors the legacy
-        -- @Loop.handleCompletion@ StreamDone handler that ran
+        -- the original completion handler StreamDone handler that ran
         -- @_env_onFirstStreamDone@). Idempotency is the action's responsibility
         -- — production wires a read-and-clear @fireOnce@ so
         -- @markBootstrapConsumed@ runs exactly once (pureclaw-8g4).
@@ -199,7 +198,7 @@ cycleTurn deps ctx = do
   case streamResult of
     Left _  -> do
       -- Provider threw: surface a VISIBLE error (mirrors the legacy
-      -- @Loop.handleCompletion@ @TemporaryError@), then stop and keep the
+      -- the original completion handler @TemporaryError@), then stop and keep the
       -- context. Emitted after 'TurnEnd' so it lands as its own message rather
       -- than as part of the (closed) stream burst (pureclaw-9d0).
       _turn_emit deps (TurnError sid "Something went wrong. Please try again.")

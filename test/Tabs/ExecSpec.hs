@@ -49,8 +49,7 @@ import Test.Hspec
 import PureClaw.Core.Types (SessionId (..))
 import PureClaw.Tabs.Types (TabRef (..))
 import PureClaw.Tabs.Exec
-  ( Exec
-  , ExecDeps (..)
+  ( ExecDeps (..)
   , Runtime (..)
   , ensure
   , newExec

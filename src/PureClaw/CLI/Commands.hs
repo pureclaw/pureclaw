@@ -17,12 +17,10 @@ module PureClaw.CLI.Commands
   ) where
 
 import Control.Concurrent.Async qualified as Async
-import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (IOException, SomeException, bracket_, try)
 import Control.Monad (filterM, unless, when)
 import Data.ByteString (ByteString)
 import Data.Either (fromRight)
-import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -54,7 +52,6 @@ import PureClaw.Routing.Types qualified as Routing
 import PureClaw.Session.Handle
   ( ResumeError (..)
   , SessionHandle (..)
-  , loadRecentMessages
   , markBootstrapConsumed
   , mkSessionHandle
   , resolveResumedTarget
@@ -632,12 +629,6 @@ runChat consentChannel opts = do
           currentMeta <- readIORef (_sh_meta sessionHandle)
           _lh_logInfo logger $ "Session: "
             <> unSessionId (SessionTypes._sm_id currentMeta)
-        -- After resume, load a bounded window of recent messages so
-        -- the agent has context to continue. Budget: 50 messages or
-        -- ~100K estimated tokens, whichever is smaller.
-        reloadedMessages <- case _co_session opts of
-          Just _  -> loadRecentMessages (_sh_transcript sessionHandle) 50 100000
-          Nothing -> pure []
         let th = _sh_transcript sessionHandle
         -- Discover any harnesses still running from a previous session
         (discoveredHarnesses, nextWindowIdx) <- discoverHarnesses th
@@ -673,19 +664,11 @@ runChat consentChannel opts = do
         onFirstStreamDoneRef <- newIORef
           =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         mcpRef <- newIORef Map.empty
-        -- WU3 (Tabbed Chat #51) — load routing config from disk and
-        -- pre-allocate the tab registry, focus pointer, active-count
-        -- TVar, runner placeholder map, and bounded channel-out queue.
-        -- All start empty / Nothing / 0; live tabs land in WU5+.
+        -- WU3 (Tabbed Chat #51) — load routing config from disk.
         routingCfg0    <- Routing.loadRoutingConfig pureclawDir
         let routingCfg = routingCfg0
               { Routing._rc_pureClawDepth = _co_depth opts }
-        tabsRef        <- newIORef IntMap.empty
-        focusRef       <- newIORef Nothing
-        activeCountTv  <- newTVarIO 0
-        runnersRef     <- newIORef IntMap.empty
-        channelOutQ    <- newTBQueueIO (fromIntegral (Routing._rc_channelOutQBound routingCfg))
-        -- Tabs-as-View (GitHub #79) 8c.2 — build the LIVE tab subsystem bundle
+        -- Tabs-as-View (GitHub #79) — build the LIVE tab subsystem bundle
         -- (tab registry, cursors, runtime registry, relay writer, sink
         -- registry, wizard state, ref-tagged tab-output queue). The tab-output
         -- queue reuses the channel-out queue bound. 'runTabbedLoop' (the new
@@ -714,15 +697,10 @@ runChat consentChannel opts = do
               , _env_session      = sessionRef
               , _env_onFirstStreamDone = onFirstStreamDoneRef
               , _env_mcpServers   = mcpRef
-              , _env_tabs             = tabsRef
-              , _env_focus            = focusRef
-              , _env_activeCount      = activeCountTv
-              , _env_runners          = runnersRef
-              , _env_channelOutQ      = channelOutQ
               , _env_routingConfig    = routingCfg
               , _env_fork             = defaultEnvFork
               , _env_broker           = Just broker
-              -- Tabs-as-View (GitHub #79) 8c.2 — live tab subsystem fields.
+              -- Tabs-as-View (GitHub #79) — live tab subsystem fields.
               , _env_tabRegistry      = _ts_tabRegistry tabSub
               , _env_cursors          = _ts_cursors tabSub
               , _env_exec             = _ts_exec tabSub
@@ -869,12 +847,10 @@ runChat consentChannel opts = do
             (Reconcile.runReconcileLoopWith
                Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
             $ \_probeAsync ->
-            -- Tabs-as-View (GitHub #79) 8c.2 — flip the production entry to the
-            -- new tabbed loop. The legacy 'runAgentLoopWith' (and its seed
-            -- 'reloadedMessages') become dead code, deleted in 8c.3. The tabbed
-            -- loop seeds each provider runtime's context from the session
-            -- transcript directly (via 'loadRecentMessages'), so the
-            -- foreground-wide 'reloadedMessages' replay is no longer needed.
+            -- Tabs-as-View (GitHub #79) — the production entry is the tabbed
+            -- loop. It seeds each provider runtime's context from the session
+            -- transcript directly (via 'loadRecentMessages'), so a
+            -- foreground-wide message replay at boot is not needed here.
             runTabbedLoop env
 
   case effectiveChannel of

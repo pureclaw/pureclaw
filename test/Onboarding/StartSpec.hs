@@ -23,17 +23,11 @@ import Data.IORef
   , newIORef
   , readIORef
   )
-import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Test.Hspec
-
-import Control.Concurrent.STM
-  ( newTBQueueIO
-  , newTVarIO
-  )
 
 import PureClaw.Agent.Context (emptyContext)
 import PureClaw.Agent.Env
@@ -319,11 +313,6 @@ mkOnboardingEnv ch = do
   windowIdxRef   <- newIORef 0
   sessionRef     <- newIORef =<< mkNoOpSessionHandle
   mcpRef         <- newIORef Map.empty
-  tabsRef        <- newIORef IntMap.empty
-  focusRef       <- newIORef Nothing
-  activeCountTv  <- newTVarIO 0
-  runnersRef     <- newIORef IntMap.empty
-  channelOutQ    <- newTBQueueIO 16
   pure AgentEnv
     { _env_provider          = providerRef
     , _env_model             = modelRef
@@ -342,11 +331,6 @@ mkOnboardingEnv ch = do
     , _env_session           = sessionRef
     , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
     , _env_mcpServers        = mcpRef
-    , _env_tabs              = tabsRef
-    , _env_focus             = focusRef
-    , _env_activeCount       = activeCountTv
-    , _env_runners           = runnersRef
-    , _env_channelOutQ       = channelOutQ
     , _env_routingConfig     = defaultRoutingConfig
     , _env_fork              = defaultEnvFork
     , _env_broker              = Nothing

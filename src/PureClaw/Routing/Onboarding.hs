@@ -37,8 +37,8 @@
 --     (which owns 'CmdStart' and the @\/help@ renderer) without
 --     dragging in the dispatcher or any tab factory.
 --   * 'handleStart' is non-blocking and has no side effects beyond
---     a single channel emit. It does NOT spawn a tab, mutate
---     '_env_focus', or touch '_env_tabs' — those flows are owned by
+--     a single channel emit. It does NOT spawn a tab, move the tab
+--     cursor, or touch the tab registry — those flows are owned by
 --     'PureClaw.Routing.Dispatcher' \/ 'PureClaw.Routing.AutoSpawn'
 --     and trigger automatically on the user's next slash command.
 --   * No 'forkIO'. The handler runs synchronously on the caller's

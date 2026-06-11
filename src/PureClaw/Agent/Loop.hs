@@ -53,9 +53,9 @@ backgroundMaxTurns = 20
 -- registry (built-ins + connected MCP servers), runs to completion via
 -- 'runSubAgent' (non-streaming, so it does not interleave with the
 -- foreground), and emits a single @[bg done] …@ message via '_ch_send'.
--- This intentionally does NOT go through '_env_channelOutQ' — the
--- single-tab CLI loop does not run the 'PureClaw.Routing.ChannelOut'
--- writer, so a queued event would never be delivered.
+-- This intentionally does NOT go through the tab-output queue
+-- ('_env_tabOutQ') — the background turn emits directly so its result is
+-- delivered even without the relay-writer thread in scope.
 --
 -- Provider/model-absent and provider-failure cases each emit a short,
 -- redacted @[bg] …@ message rather than throwing (the caller forks this

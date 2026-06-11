@@ -231,10 +231,10 @@ data InputEvent
 
 -- | Origin of a 'ChannelEvent' on the channel-out queue.
 --
--- The single writer thread reads 'OutputSource' on dequeue and uses
--- it as the focus gate: 'SrcDispatcher' events emit unconditionally
+-- A writer reads 'OutputSource' on dequeue and uses it as the focus
+-- gate: 'SrcDispatcher' events emit unconditionally
 -- ('PureClaw.Handles.Channel.ChannelHandle' always sees them), while
--- 'SrcTab' events are dropped when '_env_focus' is not @Just n@.
+-- 'SrcTab' events are dropped when the focused tab is not @Just n@.
 data OutputSource
   = SrcDispatcher
   | SrcTab !Tab.TabIndex
@@ -255,8 +255,8 @@ newtype StreamId = StreamId { unStreamId :: Word64 }
 mkStreamId :: Word64 -> StreamId
 mkStreamId = StreamId
 
--- | Events that flow through @_env_channelOutQ@ (the single bounded
--- queue feeding the writer thread).
+-- | Events that flow through the bounded channel-out queue feeding the
+-- writer thread.
 --
 -- AI tab loops emit @'StreamStart' sid n@ once per logical message,
 -- then a sequence of @'ChunkOf' sid chunk@, then @'StreamEnd' sid@.

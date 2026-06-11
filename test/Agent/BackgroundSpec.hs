@@ -1,9 +1,7 @@
 module Agent.BackgroundSpec (spec) where
 
-import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception
 import Control.Monad (forM)
-import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
@@ -22,7 +20,6 @@ import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
 import PureClaw.Routing.Config (defaultRoutingConfig)
-import PureClaw.Routing.Types (RoutingConfig (..))
 import PureClaw.Security.Policy
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
@@ -58,13 +55,7 @@ mkTestEnv p ch = do
   windowIdxRef  <- newIORef 0
   sessionRef <- newIORef =<< mkNoOpSessionHandle
   mcpRef     <- newIORef Map.empty
-  -- WU3 (Tabbed Chat #51) defaults
-  tabsRef       <- newIORef IntMap.empty
-  focusRef      <- newIORef Nothing
-  activeCountTv <- newTVarIO 0
-  runnersRef    <- newIORef IntMap.empty
   let routing = defaultRoutingConfig
-  channelOutQ   <- newTBQueueIO (fromIntegral (_rc_channelOutQBound routing))
   harnessReg    <- Registry.newRegistry
   pure AgentEnv
     { _env_provider     = providerRef
@@ -84,11 +75,6 @@ mkTestEnv p ch = do
     , _env_session       = sessionRef
     , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
     , _env_mcpServers   = mcpRef
-    , _env_tabs          = tabsRef
-    , _env_focus         = focusRef
-    , _env_activeCount   = activeCountTv
-    , _env_runners       = runnersRef
-    , _env_channelOutQ   = channelOutQ
     , _env_routingConfig = routing
     , _env_fork          = defaultEnvFork
     , _env_broker          = Nothing

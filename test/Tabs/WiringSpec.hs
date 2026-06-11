@@ -2,10 +2,8 @@ module Tabs.WiringSpec (spec) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
 import Control.Exception (throwIO)
 import Control.Monad qualified as M
-import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
   ( IORef
   , modifyIORef'
@@ -250,12 +248,7 @@ mkTabbedEnvChan sessionsDir (channel, clog) = do
   targetRef    <- newIORef TargetProvider
   windowIdxRef <- newIORef 0
   mcpRef       <- newIORef Map.empty
-  tabsRef      <- newIORef IntMap.empty
-  focusRef     <- newIORef Nothing
-  activeCountTv <- newTVarIO 0
-  legacyRunners <- newIORef IntMap.empty
   let routing = defaultRoutingConfig
-  channelOutQ <- newTBQueueIO (fromIntegral (_rc_channelOutQBound routing))
   harnessReg  <- Registry.newRegistry
 
   -- A real foreground session on disk so _sm_source set-once is observable.
@@ -300,11 +293,6 @@ mkTabbedEnvChan sessionsDir (channel, clog) = do
         , _env_session           = sessionRef
         , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
         , _env_mcpServers        = mcpRef
-        , _env_tabs              = tabsRef
-        , _env_focus             = focusRef
-        , _env_activeCount       = activeCountTv
-        , _env_runners           = legacyRunners
-        , _env_channelOutQ       = channelOutQ
         , _env_routingConfig     = routing
         , _env_fork              = trackingFork runnersTracker
         , _env_broker            = Nothing

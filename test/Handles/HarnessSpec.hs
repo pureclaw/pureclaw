@@ -186,7 +186,7 @@ spec = do
         `shouldBe` "Hello, world! Cost: $4.50 \x2014 done."
 
     it "preserves accented and non-Latin text" $
-      sanitizeHarnessOutput ("caf\xe9 na\xEFve \x00FCber")
+      sanitizeHarnessOutput "caf\xe9 na\xEFve \x00FCber"
         `shouldBe` "caf\xe9 na\xEFve \x00FCber"
 
     it "strips full-width block fill (U+2500-U+257F, U+2580-U+259F)" $

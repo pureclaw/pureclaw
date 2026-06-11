@@ -139,7 +139,6 @@ type SessionStore = IORef (Map Core.SessionId Session.SessionHandle)
 -- channel and dispatches each inbound message per conversation.
 runTabbedLoop :: AgentEnv -> IO ()
 runTabbedLoop env = do
-  let logger = _env_logger env
   _lh_logInfo logger "Tabbed agent loop started"
   store <- newIORef Map.empty
   let execDeps   = mkExecDeps env store

@@ -256,7 +256,7 @@ spec = do
       parse "/bg   do thing  " `shouldBe`
         Right (RT.ParsedSlashCmd (Slash.CmdBg "do thing"))
 
-    it "P18: LLM-free invariant — pure-parser property: switch | inject | slash-cmd inputs are never classified as Default (the only provider-routing category)" $
+    it "P18: LLM-free invariant — pure-parser property: switch | inject | slash-cmd inputs are never classified as Default (the only provider-routing category)"
       prop_P18_llm_free
 
   describe "parseInput — additional grammar invariants" $ do
