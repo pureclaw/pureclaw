@@ -310,6 +310,46 @@ spec = do
         , Sent (OutgoingMessage "alpha (/0) has new output")
         ]
 
+  describe "processOutput on a NON-STREAMING channel (emitToConversation arms)" $ do
+    it "drops an empty stream (StreamStart->StreamEnd, no chunks): no _ch_send" $ do
+      -- A focused stream that carries NO ChunkOf between StreamStart and
+      -- StreamEnd flushes an empty buffer. On a non-streaming channel the
+      -- StreamEnd arm must NOT emit a _ch_send (the empty-buffer drop arm).
+      reg <- newSinkRegistry
+      (calls, ch) <- newNonStreamingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = oneTab (refN 0)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+      w <- newRelayWriter
+      mapM_ (processOutput deps w (refN 0))
+        [ StreamStart (sidN 1) anyIdx
+        , StreamEnd (sidN 1)
+        ]
+      readIORef calls `shouldReturn` []
+
+    it "forwards a focused FullMsg as one _ch_send" $ do
+      reg <- newSinkRegistry
+      (calls, ch) <- newNonStreamingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = oneTab (refN 0)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+      w <- newRelayWriter
+      processOutput deps w (refN 0) (FullMsg anyIdx "whole")
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "whole")]
+
+    it "forwards a focused BannerLine as one _ch_send" $ do
+      reg <- newSinkRegistry
+      (calls, ch) <- newNonStreamingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = oneTab (refN 0)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+      w <- newRelayWriter
+      processOutput deps w (refN 0) (BannerLine "notice")
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "notice")]
+
 -- | Whether a 'lookupSink' result is empty, without needing 'Eq' on
 -- 'ChannelHandle'.
 isNothingHandle :: Maybe ChannelHandle -> Bool
