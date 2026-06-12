@@ -725,7 +725,6 @@ runChat consentChannel opts = do
         -- @startWithChannel@ as the common parent, and both are
         -- guaranteed to be cancelled within 1 s of @runAgentLoopWith@
         -- returning or throwing.
-        feTabCountRef <- newIORef 0
         let listModelsForProvider providerName =
               case parseProviderMaybe (Just providerName) of
                 Nothing -> pure []
@@ -773,7 +772,6 @@ runChat consentChannel opts = do
               , _fe_broker       = Just broker
               , _fe_streamGuard  = Just streamGuard
               , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
-              , _fe_tabCount     = feTabCountRef
               , _fe_tabRegistry  = _ts_tabRegistry tabSub
               , _fe_cursors      = _ts_cursors tabSub
               , _fe_exec         = _ts_exec tabSub

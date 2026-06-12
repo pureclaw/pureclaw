@@ -81,7 +81,6 @@ mkTestFrontendEnv sessionsDir broker guard = do
   harnessReg   <- Registry.newRegistry
   providerRef  <- newIORef Nothing
   modelRef     <- newIORef Nothing
-  tabCountRef  <- newIORef 0
   tabReg       <- newTabRegistry
   cursorsRef   <- newIORef emptyCursors
   exec         <- newExec
@@ -103,7 +102,6 @@ mkTestFrontendEnv sessionsDir broker guard = do
     , _fe_broker       = Just broker
     , _fe_streamGuard  = Just guard
     , _fe_maxTabs      = 0
-    , _fe_tabCount     = tabCountRef
     , _fe_tabRegistry  = tabReg
     , _fe_cursors      = cursorsRef
     , _fe_exec         = exec
