@@ -28,6 +28,21 @@
           "no #79 production code constructs TabHandle (verified by grep: zero `TabHandle {` call sites in src outside Handles.Tab itself); _trun_cancel (the live TabRunner field) IS exercised via Tabs.Runtimes; only _trun_wait + the TabHandle selectors + the 3 default-spec helpers remain orphaned"
         ]
       },
+      "PureClaw.Frontend.API": {
+        "stagedBy": "WU8 cutover frontend-tabs (#80)",
+        "filledBy": ["post-merge follow-up"],
+        "since": "2026-06-11",
+        "reason": "PureClaw.Frontend.API is the WAI IO endpoint layer (~2400 lines). Expression coverage is 77% (2452/3151); alternatives 76% (170/223); top-level 63% (141/222). This module was ALREADY below 95% on main (pre-existing IO transport debt — same class as Channels.CLI 2%, Telegram 77%, Signal 72%, Harness.* on main) and is not regressed by the Tabs-as-View edits. The NEW PURE logic added by this refactor IS fully covered: `tabsFromRegistry` (reads TabRegistry + harness snapshot, delegates to tabSnapshotsFromRegistry), `resolveRegistrySlot` (resolve display index to registry slot), `currentTabCount` + `atTabCap` (registry-length-based cap check), `harnessEntriesToTabs` (pure legacy-compat mapping), `computeListsSnapshot` tab deduplication, and `handleNewTab` provider path (registryAppend + finishProviderTab) — all exercised in Frontend.APISpec (WU7/WU8 blocks at lines 91/180/758/1069/1121/1864/3121). The WAIVED scope is EXACTLY the pre-existing WAI IO: request parsing/routing scaffolding, filesystem/disk I/O paths (session.json read/write, transcript load), real harness-spawn IO (startHarness + createHarnessTab harness path with a live tmux server), broker publish paths in finishProviderTab/finishHarnessTab (no-broker arm covered; Just-broker arm requires a real broker), and the write-path endpoints (PUT /api/sessions/{id}/meta, POST /api/sessions/{id}/archive, etc.) whose full round-trip requires disk fixtures. The pure projection (TabsView) is fully covered (100% expressions/alternatives via Frontend.TabsViewSpec); only the IO endpoints are waived.",
+        "minimalChecks": [
+          "tabsFromRegistry: reads TabRegistry + harness snapshot and delegates to tabSnapshotsFromRegistry (Frontend.APISpec GET /api/tabs WU8 D8.1/D8.2)",
+          "resolveRegistrySlot: resolves display index to slot+ref (Frontend.APISpec dismiss/release tests at index 0)",
+          "handleNewTab (provider): registryAppend + responds with slot+sid (Frontend.APISpec handleNewTab provider test, line 3121)",
+          "harnessEntriesToTabs: empty list + single-entry + multi-entry projections (Frontend.APISpec WU8 lines 1015-1063)",
+          "computeListsSnapshot: BoundSession tab deduplication — active tab sids excluded from archived (Frontend.APISpec lines 1864/1912)",
+          "atTabCap: 409 when registry is at maxTabs (Frontend.APISpec POST /api/tabs/new cap tests)",
+          "TabsView pure projection: 100% expressions/alternatives via Frontend.TabsViewSpec (the pure projection layer that API delegates to)"
+        ]
+      },
       "PureClaw.Tabs.Wiring": {
         "stagedBy": "WU8 cutover (#79)",
         "filledBy": ["WU9 (harness-death paths)", "post-merge follow-up (live-tmux integration)"],
