@@ -340,3 +340,7 @@ under Active Tabs with no green "running" dot and harness-only controls suppress
 ## Open follow-ups
 - `BoundShell` `TabRef` variant + real raw-shell backing (deferred raw-shell unify).
 - Frontend-initiated rename endpoint.
+- Pre-existing benign per-closed-session transcript-`fd` leak: the cached
+  `SessionHandle` holds an open append fd to `transcript.jsonl` that is never
+  `_th_close`d on tab close (SessionStore is never evicted today either). Close/evict
+  on last `Exec.release` when the `SessionPool` refcount work lands.
