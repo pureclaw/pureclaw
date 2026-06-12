@@ -155,6 +155,18 @@ spec = do
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       err `shouldContain` "allow all"
 
+    it "accepts --log-level debug and starts up cleanly" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclawWithArgs bin ["--log-level", "debug", "--no-vault"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "PureClaw"
+
+    it "rejects an invalid --log-level value with a non-zero exit" $ do
+      bin <- findPureclaw
+      (exitCode, _out, err) <- runPureclawWithArgs bin ["--log-level", "verbose", "--no-vault"] "" 5000000
+      exitCode `shouldNotBe` ExitSuccess
+      err `shouldContain` "log level"
+
     it "falls back to CLI when --channel signal and signal-cli is not installed" $ do
       bin <- findPureclaw
       (exitCode, out, err) <- runPureclawWithArgs bin ["gateway", "run", "--channel", "signal", "--no-vault"] "" 5000000
