@@ -51,6 +51,7 @@ import PureClaw.Core.Types
   , SessionId (..)
   , channelKindFromText
   , channelKindToText
+  , isValidSessionId
   )
 import PureClaw.Harness.Registry
   ( HarnessId
@@ -89,6 +90,11 @@ data PersistDeps = PersistDeps
     -- ^ Block until at least one harness-discovery\/reconcile pass has
     --   completed, so a transiently-absent live harness is not wrongly
     --   dropped at boot. Awaited /before/ any harness pruning.
+  , _pd_sessionExists  :: !(SessionId -> IO Bool)
+    -- ^ Probe whether a session-backed tab's ground truth still exists on
+    --   disk. A 'BoundSession' tab whose session.json has been removed
+    --   out-of-band is dropped during reconcile (analogous to the harness
+    --   liveness probe for 'BoundHarness' tabs).
   }
 
 -- | The on-disk file name under '_pd_stateDir'.
@@ -197,7 +203,7 @@ reconcileTabs deps tabs = do
   where
     keepTab :: Tab -> IO Bool
     keepTab t = case _tab_ref t of
-      BoundSession _ -> pure True
+      BoundSession s -> _pd_sessionExists deps s
       BoundHarness h -> _pd_harnessLive deps h
 
 -- | Re-append a list of tab specs into a fresh 'TabList', stamping contiguous
@@ -278,7 +284,11 @@ parseRef :: Aeson.Value -> Aeson.Parser TabRef
 parseRef = Aeson.withObject "TabRef" $ \o -> do
   tag <- o .: "tag" :: Aeson.Parser Text
   case tag of
-    "session" -> BoundSession . SessionId <$> o .: "sessionId"
+    "session" -> do
+      raw <- o .: "sessionId"
+      if isValidSessionId raw
+        then pure (BoundSession (SessionId raw))
+        else fail "invalid sessionId in tabs.json"
     "harness" -> do
       raw <- o .: "harnessId"
       case parseHarnessId raw of

@@ -93,13 +93,15 @@ buildTabs = List.foldl' step emptyTabs
 ckey :: ChannelKind -> Text -> ConversationKey
 ckey ch c = (ch, ConversationId c)
 
--- | Deps with an all-live probe and a no-op discovery gate.
+-- | Deps with an all-live probe, a no-op discovery gate, and all sessions
+-- present (suitable for tests that do not exercise session-orphan pruning).
 allLiveDeps :: FilePath -> PersistDeps
 allLiveDeps dir =
   PersistDeps
     { _pd_stateDir       = dir
     , _pd_harnessLive    = \_ -> pure True
     , _pd_discoveryReady = pure ()
+    , _pd_sessionExists  = \_ -> pure True
     }
 
 -- ---------------------------------------------------------------------------
@@ -241,6 +243,65 @@ spec = do
         (tabs', _) <- loadTabs (allLiveDeps dir)
         map _tab_ref (toList tabs') `shouldBe` [sid "dup"]
 
+  describe "session-exists reconcile" $ do
+    it "reconcile drops a BoundSession whose session.json is absent, keeps an existing one" $
+      withSystemTempDirectory "pureclaw-tabs" $ \dir -> do
+        let s1 = "s1valid"
+            s2 = "s2missing"
+            tabs =
+              buildTabs
+                [ (sid s1, "Session One")   -- session exists → kept
+                , (sid s2, "Session Two")   -- session gone → dropped
+                ]
+            cursors =
+              setCursor (ckey CkCli "c1") (sid s1) $
+                setCursor (ckey CkCli "c2") (sid s2) emptyCursors
+        saveTabs dir tabs cursors
+        let deps =
+              PersistDeps
+                { _pd_stateDir       = dir
+                , _pd_harnessLive    = \_ -> pure True
+                , _pd_discoveryReady = pure ()
+                , _pd_sessionExists  = \(SessionId t) -> pure (t == s1)
+                }
+        (tabs', cursors') <- loadTabs deps
+        map _tab_ref (toList tabs') `shouldBe` [sid s1]
+        Map.keys (_cs_cursors cursors') `shouldBe` [ckey CkCli "c1"]
+
+    it "reconcile keeps a BoundSession whose session.json exists" $
+      withSystemTempDirectory "pureclaw-tabs" $ \dir -> do
+        let tabs    = buildTabs [(sid "aliveSession", "Alive")]
+            cursors = setCursor (ckey CkCli "c1") (sid "aliveSession") emptyCursors
+        saveTabs dir tabs cursors
+        let deps =
+              PersistDeps
+                { _pd_stateDir       = dir
+                , _pd_harnessLive    = \_ -> pure True
+                , _pd_discoveryReady = pure ()
+                , _pd_sessionExists  = \_ -> pure True
+                }
+        (tabs', _) <- loadTabs deps
+        map _tab_ref (toList tabs') `shouldBe` [sid "aliveSession"]
+
+    it "loadTabs boots FRESH when tabs.json has a leading-dot/traversal session id" $
+      withSystemTempDirectory "pureclaw-tabs" $ \dir -> do
+        -- "." prefix makes isValidSessionId return False → whole-file fresh load
+        writeFile (dir </> "tabs.json")
+          "{\"tabs\":[\
+          \{\"ref\":{\"tag\":\"session\",\"sessionId\":\"../etc\"},\"name\":\"Bad\",\"status\":\"live\"},\
+          \{\"ref\":{\"tag\":\"session\",\"sessionId\":\"good1\"},\"name\":\"Good\",\"status\":\"live\"}\
+          \],\"cursors\":[],\"relay\":[]}"
+        let deps =
+              PersistDeps
+                { _pd_stateDir       = dir
+                , _pd_harnessLive    = \_ -> pure True
+                , _pd_discoveryReady = pure ()
+                , _pd_sessionExists  = \_ -> pure True
+                }
+        (tabs', cursors') <- loadTabs deps
+        tabs'    `shouldBe` emptyTabs
+        cursors' `shouldBe` emptyCursors
+
   describe "boot reconcile" $ do
     it "drops dead-harness tabs silently, prunes their cursors, keeps provider tabs, awaits discovery" $
       withSystemTempDirectory "pureclaw-tabs" $ \dir -> do
@@ -262,6 +323,7 @@ spec = do
                 { _pd_stateDir       = dir
                 , _pd_harnessLive    = \h -> pure (h /= hid 2)
                 , _pd_discoveryReady = modifyIORef' discoveryFlag (+ 1)
+                , _pd_sessionExists  = \_ -> pure True
                 }
         (tabs', cursors') <- loadTabs deps
 
