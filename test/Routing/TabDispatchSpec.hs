@@ -254,6 +254,7 @@ spec :: Spec
 spec = do
   newSpec
   ntSpec
+  tabNewSpec
   closeSpec
   tabsSpec
   renameSpec
@@ -339,6 +340,129 @@ ntSpec = describe "/nt (new tab)" $ do
     f <- simpleFakes NoDefault
     handleInbound (f_deps f) convA "/nt"
     lastEmit f `shouldReturn` noDefaultGuidance
+
+-- ---------------------------------------------------------------------------
+-- /tab new <kind>
+-- ---------------------------------------------------------------------------
+
+tabNewSpec :: Spec
+tabNewSpec = describe "cmdTabNew (/tab new)" $ do
+  it "/tab new ai mints a default session, binds a tab, ensures, switches" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new ai"
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "fresh"]
+    ensured f `shouldReturn` [sess "fresh"]
+    cursorSlot f convA `shouldReturn` Just 0
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+    lastEmit f `shouldReturn` "new tab /0"
+
+  it "/tab new (bare) behaves like /tab new ai" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new"
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "fresh"]
+    ensured f `shouldReturn` [sess "fresh"]
+    cursorSlot f convA `shouldReturn` Just 0
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+    lastEmit f `shouldReturn` "new tab /0"
+
+  it "/tab new provider behaves like /tab new ai" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new provider"
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "fresh"]
+    ensured f `shouldReturn` [sess "fresh"]
+    cursorSlot f convA `shouldReturn` Just 0
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+    lastEmit f `shouldReturn` "new tab /0"
+
+  it "is case-insensitive on the kind keyword (AI)" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new AI"
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "fresh"]
+    lastEmit f `shouldReturn` "new tab /0"
+
+  it "/tab new ai with no default provider emits the no-default guidance, no tab created" $ do
+    f <- simpleFakes NoDefault
+    handleInbound (f_deps f) convA "/tab new ai"
+    lastEmit f `shouldReturn` noDefaultGuidance
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    ensured f `shouldReturn` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "/tab new harness is not yet supported (WU-A placeholder)" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new harness"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "not yet supported"
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "/tab new shell is not yet supported" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new shell"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "not yet supported"
+    out `shouldSatisfy` T.isInfixOf "shell"
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "/tab new ssh is not yet supported" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new ssh"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "not yet supported"
+    out `shouldSatisfy` T.isInfixOf "ssh"
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "/tab new tmux is not yet supported" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new tmux"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "not yet supported"
+    out `shouldSatisfy` T.isInfixOf "tmux"
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "/tab new bogusxyz (unknown kind) emits a usage hint, no tab created" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    handleInbound (f_deps f) convA "/tab new bogusxyz"
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "ai"
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    ensured f `shouldReturn` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "REGRESSION: /tab <query> (no new) still opens the attach wizard" $ do
+    f <- mkFakes (MintsRef (sess "x"))
+            [(harn "1", "work:claude")]
+            [(SessionId "old", "refactor")]
+            (const True)
+    handleInbound (f_deps f) convA "/tab somequery"
+    -- wizard state is stored (the menu path), registry unchanged
+    wiz <- readIORef (f_wizard f)
+    Map.member convA wiz `shouldBe` True
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "REGRESSION: bare /tab still opens the attach wizard" $ do
+    f <- mkFakes (MintsRef (sess "x"))
+            [(harn "1", "work:claude")] [] (const True)
+    handleInbound (f_deps f) convA "/tab"
+    wiz <- readIORef (f_wizard f)
+    Map.member convA wiz `shouldBe` True
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "Attach a tab"
 
 -- ---------------------------------------------------------------------------
 -- /close

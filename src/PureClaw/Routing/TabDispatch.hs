@@ -222,6 +222,7 @@ handleNonWizard ctx raw =
     ("/tabs"   : _)    -> cmdTabs   ctx
     ("/rename" : args) -> cmdRename ctx args
     ("/relay"  : args) -> cmdRelay  ctx args
+    ("/tab" : "new" : rest) -> cmdTabNew ctx rest
     ("/tab"    : args) -> cmdTab    ctx args
     _                  -> routeGrammar ctx raw
   where
@@ -444,6 +445,38 @@ cmdTab ctx args = do
       st    = mkWizardSnapshot hs ss
   setWizard ctx (Just st)
   emit ctx (renderMenu st)
+
+-- ---------------------------------------------------------------------------
+-- /tab new <kind> — create a tab of the named kind
+-- ---------------------------------------------------------------------------
+
+-- | @\/tab new [\<kind\>]@: create a new tab of the requested kind. This is
+-- distinct from bare @\/tab@ (the attach wizard) and is dispatched /before/ it,
+-- so @\/tab new@ never opens the wizard.
+--
+-- For WU-A only the default-provider session kinds are live; the harness and
+-- shell-family kinds emit a "not yet supported" placeholder (harness arrives in
+-- WU-B). An unrecognised keyword emits a short usage hint.
+cmdTabNew :: Ctx -> [Text] -> IO ()
+cmdTabNew ctx rest = case kindKeyword of
+  -- bare / "ai" / "provider": mint a default-provider session (mirrors 'cmdNt').
+  Nothing         -> mintDefault
+  Just "ai"       -> mintDefault
+  Just "provider" -> mintDefault
+  Just "harness"  -> emit ctx (tabNewUnsupportedMsg "harness")
+  Just "shell"    -> emit ctx (tabNewUnsupportedMsg "shell")
+  Just "ssh"      -> emit ctx (tabNewUnsupportedMsg "ssh")
+  Just "tmux"     -> emit ctx (tabNewUnsupportedMsg "tmux")
+  Just _          -> emit ctx tabNewUsageMsg
+  where
+    kindKeyword = case rest of
+      (k : _) -> Just (T.toLower k)
+      []      -> Nothing
+    mintDefault = do
+      mNew <- _td_newDefaultSession (_ctx_deps ctx)
+      case mNew of
+        Left msg     -> emit ctx msg
+        Right newRef -> bindNewTab ctx newRef defaultSessionName "new tab"
 
 -- ---------------------------------------------------------------------------
 -- Stage 3: routing grammar
@@ -696,6 +729,15 @@ renameBadNameMsg e = "invalid tab name (" <> tshow e <> ")"
 -- | @\/relay@ with an unrecognised mode word.
 relayBadModeMsg :: Text
 relayBadModeMsg = "unknown relay mode — use focused, activity, or all"
+
+-- | @\/tab new \<kind\>@ for a kind that is recognised but not yet wired
+-- (harness arrives in WU-B; shell\/ssh\/tmux later).
+tabNewUnsupportedMsg :: Text -> Text
+tabNewUnsupportedMsg kind = "/tab new " <> kind <> " is not yet supported"
+
+-- | @\/tab new \<kind\>@ for an unrecognised kind keyword — a short usage hint.
+tabNewUsageMsg :: Text
+tabNewUsageMsg = "unknown tab kind — use ai, harness, shell, ssh, or tmux"
 
 -- ---------------------------------------------------------------------------
 -- Misc
