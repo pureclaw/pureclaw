@@ -1,328 +1,172 @@
 # Frontend Active-Tabs Unification — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. **All Haskell**: load `.claude/skills/haskell/haskell-coder/SKILL.md` first; `-Wall -Werror`, hlint clean, TDD (commit the failing test separately). Build/test via `nix develop . --command cabal build|test`. The tree is currently green at PR #80 head.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax. **All Haskell**: load `.claude/skills/haskell/haskell-coder/SKILL.md` first; `-Wall -Werror`, hlint clean, TDD (commit the failing test separately). Build/test via `nix develop . --command cabal build|test`. Tree is green at PR #80 head.
 
 **Goal:** Make the frontend "Active Tabs" sidebar reflect the backend `TabRegistry` as the single source of truth, bidirectional with chat/CLI: chat/CLI tabs appear in the frontend, their sessions leave "Recent Sessions", and frontend-created sessions become chat-switchable tabs; tabs persist across restart.
 
-**Architecture:** Same process → the frontend reads the shared `_env_tabRegistry` IORef. A new **pure** `tabSnapshotsFromRegistry` (in `Frontend/TabsView.hs`) projects the `TabList` into the existing `lists` WebSocket frame. A `_env_onTabsChanged :: IO ()` callback (set by `Commands.hs` to `saveTabs` + `broadcastLists`) fires on every registry mutation. Frontend tab endpoints resolve the index against the registry and drive `registryAppend`/`registryRemove`. `tabs.json` is wired for persistence.
+**Architecture:** Same process -> the frontend reads the shared `_env_tabRegistry` IORef. A pure `tabSnapshotsFromRegistry` (new `Frontend/TabsView.hs`) projects the `TabList` into the existing `lists` WebSocket frame. A `_env_onTabsChanged :: IO ()` callback (set by `Commands.hs` to `saveTabs` + `broadcastLists`) fires on every registry mutation. Frontend tab endpoints resolve the index against the registry and drive `registryAppend`/`registryRemove`. `tabs.json` wired for persistence.
 
 **Tech Stack:** Haskell (GHC 9.12, GHC2021, Handle/injected-seam pattern, Aeson, hspec), React/TypeScript (vitest), Nix.
 
 **Spec:** `docs/superpowers/specs/2026-06-11-frontend-active-tabs-unification-design.md` (design-review-gate APPROVED 5/5).
 
-**Sequencing / dependencies:** WU1→WU2 (validator+loader) · WU3 (pure projection) · WU4 (notify seam) · WU5 (persistence) · WU6 (read wiring, needs WU3) · WU7 (write path, needs WU6) · WU8 (Commands wiring, needs WU4/5/6/7) · WU9 (React, needs WU7) · WU10 (gate). Each WU is independently RED-GREEN and commits on its own.
+**Sequencing / dependencies:** WU1->WU2 (validator+loader) · WU3 (pure projection) · WU4 (notify seam) · WU5 (persistence) · WU6 (read wiring, needs WU3) · WU7 (write path, needs WU6) · WU8 (Commands wiring, needs WU4/5/6/7) · WU9 (React, needs WU7) · WU10 (gate). Each WU is independently RED-GREEN and commits on its own. (Note: this plan's "WU9" is the React unit; it is unrelated to the spec's deferred "WU9 harness-death" — that work is NOT in this plan.)
 
 ---
 
 ## WU1 — Strict canonical `isValidSessionId` in `Core.Types`
 
-**Files:**
-- Modify: `src/PureClaw/Core/Types.hs` (add the predicate + export)
-- Modify: `src/PureClaw/Agent/SlashCommands.hs` (delete local copy, import Core's)
-- Modify: `src/PureClaw/Frontend/API.hs` (delete weak `isValidSessionId`, import Core's)
-- Modify: `src/PureClaw/Session/Handle.hs` (delete weak `isValidBranchSourceId`, route callers to Core's)
-- Test: `test/Core/SessionIdValidatorSpec.hs` (new) — register in `test/Main.hs` + `pureclaw.cabal`
+**Files:** Modify `src/PureClaw/Core/Types.hs` (add + export); delete the local copies and import Core's in `src/PureClaw/Agent/SlashCommands.hs`, `src/PureClaw/Frontend/API.hs` (**keep it in API's export list** — `Frontend/Stream.hs:97,594` and `test/Frontend/StreamSpec.hs` import it from `Frontend.API`), `src/PureClaw/Session/Handle.hs` (`isValidBranchSourceId`). New test `test/Core/SessionIdValidatorSpec.hs` (register in `test/Main.hs` + `pureclaw.cabal`).
 
-- [ ] **Step 1: RED test** — `test/Core/SessionIdValidatorSpec.hs`, module `Core.SessionIdValidatorSpec`, `spec :: Spec`:
-
+- [ ] **Step 1: RED** — `test/Core/SessionIdValidatorSpec.hs` (module `Core.SessionIdValidatorSpec`): assert accepts `"20260610-122113-257"`, `"agent_run-01"`; rejects `""`, `".hidden"` (leading dot), `"../etc"`, `"a/b"`, `"a\x00b"`, `"a\\b"`, `"a:b"`, `"a.b"`; and the round-trip `isValidSessionId (ST.unSessionId (ST.newSessionId Nothing t))` is `True`.
+- [ ] **Step 2: Run -> FAIL**: `nix develop . --command cabal test --match "isValidSessionId" 2>&1 | tail -20`.
+- [ ] **Step 3: GREEN** — in `Core.Types` add to exports + define (qualify chars: `Data.Char qualified as C`; `Data.Text qualified as T`):
 ```haskell
-module Core.SessionIdValidatorSpec (spec) where
-
-import PureClaw.Core.Types (isValidSessionId)
-import PureClaw.Session.Types qualified as ST
-import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
-import Test.Hspec
-
-spec :: Spec
-spec = describe "isValidSessionId (strict canonical)" $ do
-  it "accepts a normal session id" $
-    isValidSessionId "20260610-122113-257" `shouldBe` True
-  it "accepts underscores and hyphens" $
-    isValidSessionId "agent_run-01" `shouldBe` True
-  it "rejects empty" $ isValidSessionId "" `shouldBe` False
-  it "rejects a leading dot" $ isValidSessionId ".hidden" `shouldBe` False
-  it "rejects .. traversal" $ isValidSessionId "../etc" `shouldBe` False
-  it "rejects a slash" $ isValidSessionId "a/b" `shouldBe` False
-  it "rejects a NUL/control char" $ isValidSessionId "a\x00b" `shouldBe` False
-  it "rejects a backslash / colon / dot" $ do
-    isValidSessionId "a\\b" `shouldBe` False
-    isValidSessionId "a:b" `shouldBe` False
-    isValidSessionId "a.b" `shouldBe` False
-  it "round-trips every minted id (format must stay within the charset)" $
-    let t = UTCTime (fromGregorian 2026 6 11) (secondsToDiffTime 45296)
-    in isValidSessionId (ST.unSessionId (ST.newSessionId Nothing t)) `shouldBe` True
-```
-
-- [ ] **Step 2: Run → FAIL** (`isValidSessionId` not in `Core.Types`):
-  `nix develop . --command cabal test --match "isValidSessionId" 2>&1 | tail -20`
-
-- [ ] **Step 3: GREEN** — in `src/PureClaw/Core/Types.hs` add to the export list `isValidSessionId` and define (mirror the strict `Agent/SlashCommands.hs` copy; note it also rejects `.`-containing ids since `.` ∉ charset, which covers `a.b` and leading-dot):
-
-```haskell
--- | The one strict session-id predicate. Path-traversal-safe: a valid id is a
--- nonempty string over [a-zA-Z0-9_-] with no leading dot. Used at every boundary
--- where an id is path-joined (parseRef, resumeSession, openSessionFromDisk) and at
--- the HTTP/WS surfaces. Single source of truth — do NOT re-define elsewhere.
 isValidSessionId :: Text -> Bool
-isValidSessionId t =
-  not (T.null t)
-    && T.head t /= '.'
-    && T.all ok t
-  where ok c = isAsciiLower c || isAsciiUpper c || isDigit c || c == '_' || c == '-'
+isValidSessionId t = not (T.null t) && T.head t /= '.' && T.all ok t
+  where ok c = C.isAsciiLower c || C.isAsciiUpper c || C.isDigit c || c == '_' || c == '-'
 ```
-(Ensure `Data.Char (isAsciiLower, isAsciiUpper, isDigit)` and `Data.Text qualified as T` are imported in `Core.Types`.)
-
-- [ ] **Step 4: Refactor the three copies onto it.** In `Agent/SlashCommands.hs`, `Frontend/API.hs`, and `Session/Handle.hs`: delete the local `isValidSessionId`/`isValidBranchSourceId` definitions and import `isValidSessionId` from `PureClaw.Core.Types`; point every caller (`resolveBranchSeed` in `Session/Handle.hs` keeps its `BranchInvalidSourceId` error but now uses the strict predicate) at it. Build to find every call site (`-Werror` will flag the now-unused imports / missing names).
-
-- [ ] **Step 5: Register** `Core.SessionIdValidatorSpec` in `test/Main.hs` + `pureclaw.cabal`.
-
-- [ ] **Step 6: Run → PASS** + full suite green: `nix develop . --command cabal test 2>&1 | tail -6`. Build `-Werror` clean.
-
-- [ ] **Step 7: Commit**
-```bash
-git add -A && git commit -m "feat(tabs-fe): one strict isValidSessionId in Core.Types (#80)"
-```
+- [ ] **Step 4:** Delete the 3 local copies; import Core's. `Frontend.API` re-exports it (keep in export list). `Session/Handle.resolveBranchSeed` keeps its `BranchInvalidSourceId` error but uses the strict predicate. Build `-Werror` to find every call site.
+- [ ] **Step 5:** Register the spec. Run -> PASS; full suite green.
+- [ ] **Step 6: Commit** `feat(tabs-fe): one strict isValidSessionId in Core.Types (#80)`
 
 ---
 
-## WU2 — Loader safety: validate ids in `resumeSession`/`openSessionFromDisk`
+## WU2 — Loader safety: validate ids in `resumeSession`
 
-**Files:**
-- Modify: `src/PureClaw/Session/Handle.hs` (`resumeSession` rejects invalid id → existing `ResumeError`; add a `ResumeInvalidId` constructor if none fits)
-- Modify: `src/PureClaw/Tabs/Wiring.hs` (`openSessionFromDisk` already has a `Left`-fallback that logs; no change needed if it routes through `resumeSession` — verify; if it builds a handle directly, add the guard there too)
-- Test: `test/Session/HandleSpec.hs` (extend) or `test/Tabs/WiringSpec.hs`
+**Files:** Modify `src/PureClaw/Session/Handle.hs` (`resumeSession` guards the id -> a `ResumeInvalidId` constructor). Verify `Tabs/Wiring.hs:openSessionFromDisk` already logs + safe-fallbacks on `Left` (apv fix). Test: `test/Session/HandleSpec.hs`.
 
-- [ ] **Step 1: RED** — add to `test/Session/HandleSpec.hs`:
+- [ ] **Step 1: RED** — assert the SPECIFIC new error so it's truly red (a missing path already returns `Left ResumeMissingMetadata`, which would pass a bare `Left _`):
 ```haskell
-it "resumeSession rejects a traversal session id without touching the filesystem" $
+it "resumeSession rejects a traversal id with ResumeInvalidId (no filesystem touch)" $
   withSystemTempDirectory "pc-resume" $ \dir -> do
     r <- resumeSession Nothing mkNoOpLogHandle dir (parseSessionId "../etc")
-    case r of
-      Left _  -> pure ()                       -- rejected (any ResumeError)
-      Right _ -> expectationFailure "expected Left for a traversal id"
+    r `shouldSatisfy` isResumeInvalidId    -- a helper matching the new ctor
 ```
-- [ ] **Step 2: Run → FAIL** (currently path-joins + likely `ResumeMissingMetadata` only by accident, or opens): `cabal test --match "traversal session id"`.
-- [ ] **Step 3: GREEN** — at the top of `resumeSession`, guard: `if not (isValidSessionId (unSessionId sid)) then pure (Left ResumeInvalidId) else …` (add `ResumeInvalidId` to the `ResumeError` sum + its `Show`/handling if needed). Confirm `openSessionFromDisk`'s existing `Left` fallback logs a warning and returns a safe fresh handle (per the `apv` fix) — no boot crash.
-- [ ] **Step 4: Run → PASS** + suite green.
+- [ ] **Step 2: Run -> FAIL** (no `ResumeInvalidId` ctor).
+- [ ] **Step 3: GREEN** — add `ResumeInvalidId` to `ResumeError` (+ Show); at the top of `resumeSession`, `if not (isValidSessionId (unSessionId sid)) then pure (Left ResumeInvalidId) else ...`.
+- [ ] **Step 4:** Run -> PASS; suite green.
 - [ ] **Step 5: Commit** `fix(tabs-fe): resumeSession validates the id (safe-by-construction) (#80)`
 
 ---
 
-## WU3 — `Frontend/TabsView.hs`: pure projection (the 95%-gated logic)
+## WU3 — `Frontend/TabsView.hs`: pure projection (95%-gated logic)
 
-**Files:**
-- Create: `src/PureClaw/Frontend/TabsView.hs` — relocate `TabSnapshot`, `livenessToTabStatus`, `harnessOriginToText` here from `Frontend/API.hs`; add the pure projection.
-- Modify: `src/PureClaw/Frontend/API.hs` — import `Frontend.TabsView`, re-export `TabSnapshot` (+ helpers) so existing call sites/tests compile unchanged.
-- Modify: `pureclaw.cabal` (add `PureClaw.Frontend.TabsView` to library `exposed-modules`/`other-modules`).
-- Test: `test/Frontend/TabsViewSpec.hs` (new) — register in Main.hs + cabal.
+**Files:** Create `src/PureClaw/Frontend/TabsView.hs` — **relocate** `TabSnapshot` (+ `ToJSON`), `livenessToTabStatus`, `harnessOriginToText` here from `Frontend/API.hs`; add the pure projection. Modify `Frontend/API.hs` to `import Frontend.TabsView` and **re-export** those names (existing call sites/`harnessEntriesToTabs`/tests reference them via `API`). Add the module to `pureclaw.cabal`. New test `test/Frontend/TabsViewSpec.hs` (register).
 
-- [ ] **Step 1: Relocate** the `TabSnapshot` record + `ToJSON TabSnapshot` + `livenessToTabStatus` + `harnessOriginToText` from `Frontend/API.hs` into the new `TabsView.hs` (cut/paste; keep field names/JSON keys identical). In `Frontend/API.hs`, `import PureClaw.Frontend.TabsView` and add `TabSnapshot (..)`, `livenessToTabStatus`, `harnessOriginToText` to its re-export list. Build green (no behavior change yet — `harnessEntriesToTabs` still works).
-
-- [ ] **Step 2: RED test** — `test/Frontend/TabsViewSpec.hs`, module `Frontend.TabsViewSpec`. Cover the branch matrix with **injected** lookups (no IO):
-```haskell
--- Build a TabList with a BoundSession and a BoundHarness; inject lookups.
-spec = describe "tabSnapshotsFromRegistry" $ do
-  it "projects a BoundSession with present meta as kind=provider, status=idle" $ do
-    let tl = mkTabList [ (BoundSession (parseSessionId "s1"), "chat 0", Live) ]
-        metaOf sid = if sid == parseSessionId "s1" then Just (providerMeta "s1") else Nothing
-        harnOf _   = Nothing
-        [t] = tabSnapshotsFromRegistry tl metaOf harnOf
-    _ts_kind t      `shouldBe` "provider"
-    _ts_status t    `shouldBe` "idle"      -- NOT "running"
-    _ts_sessionId t `shouldBe` Just "s1"
-    _ts_origin t    `shouldBe` ""
-  it "BoundSession with MISSING meta falls back to provider/idle (no crash)" $ ...
-  it "BoundHarness live → status from liveness + origin + attachCommand from the entry" $ ...
-  it "BoundHarness with a VANISHED entry → status exited, stale=True" $ ...
-  it "Dead BoundSession → status exited" $ ...
-  it "surfaces NO secret field" $        -- everything-visible: label/status/kind/sid only
-    -- assert the projected TabSnapshot exposes none of _sm_source/channelUserId/creds
-    ...
-```
-(Provide `mkTabList`/`providerMeta`/harness-entry fixtures in the spec.)
-
-- [ ] **Step 3: Run → FAIL** (`tabSnapshotsFromRegistry` undefined).
-
-- [ ] **Step 4: GREEN** — add the pure function to `TabsView.hs` and export it:
+- [ ] **Step 1: Relocate** the three items into `TabsView.hs` (identical field names/JSON keys); `Frontend.API` imports + re-exports them. Build green (no behavior change; `harnessEntriesToTabs` still compiles).
+- [ ] **Step 2: RED** — `test/Frontend/TabsViewSpec.hs` covers the branch matrix with injected lookups (no IO): `BoundSession` present-meta -> kind `"provider"`, status `"idle"` (NOT `"running"`), `_ts_origin ""`; `BoundSession` missing-meta -> provider/idle fallback (no crash); `Dead BoundSession` -> `"exited"`; `BoundHarness` live -> status from liveness + origin + attach command; `BoundHarness` vanished entry -> `"exited"`, `stale=True`; and a **no-secret-leak** assertion (projected snapshot exposes only label/status/kind/sid — none of `_sm_source`/`channelUserId`/creds).
+- [ ] **Step 3: Run -> FAIL** (`tabSnapshotsFromRegistry` undefined).
+- [ ] **Step 4: GREEN** — add the pure function:
 ```haskell
 tabSnapshotsFromRegistry
   :: TabList
   -> (Core.SessionId -> Maybe SessionTypes.SessionMeta)
   -> (Registry.HarnessId -> Maybe Registry.HarnessEntry)
   -> [TabSnapshot]
-tabSnapshotsFromRegistry tl metaOf harnOf =
-  [ project tab | tab <- Tabs.toList tl ]
-  where
-    project tab = case Tabs._tab_ref tab of
-      Tabs.BoundSession sid -> TabSnapshot
-        { _ts_index     = Tabs.unTabIndex (Tabs._tab_slot tab)
-        , _ts_kind      = "provider"
-        , _ts_name      = Tabs._tab_name tab
-        , _ts_status    = case Tabs._tab_status tab of
-                            Tabs.Live -> "idle"
-                            Tabs.Dead -> "exited"
-        , _ts_sessionId = Just (Core.unSessionId sid)
-        , _ts_extModified = False, _ts_stale = False
-        , _ts_origin    = "", _ts_attachCommand = Nothing }
-      Tabs.BoundHarness hid -> case harnOf hid of
-        Just e  -> TabSnapshot
-          { _ts_index = Tabs.unTabIndex (Tabs._tab_slot tab)
-          , _ts_kind = "harness"
-          , _ts_name = Tabs._tab_name tab     -- registry label (or fall back to _he_label)
-          , _ts_status = livenessToTabStatus (Registry._he_liveness e)
-          , _ts_sessionId = Registry._he_sessionId e
-          , _ts_extModified = Registry._he_extModified e
-          , _ts_stale = Registry._he_stale e
-          , _ts_origin = harnessOriginToText (Registry._he_origin e)
-          , _ts_attachCommand = Registry._he_attachCommand e }
-        Nothing -> TabSnapshot                -- vanished entry
-          { _ts_index = Tabs.unTabIndex (Tabs._tab_slot tab)
-          , _ts_kind = "harness", _ts_name = Tabs._tab_name tab
-          , _ts_status = "exited", _ts_sessionId = Nothing
-          , _ts_extModified = False, _ts_stale = True
-          , _ts_origin = "", _ts_attachCommand = Nothing }
 ```
-(Adjust field accessor names to the real `HarnessEntry`/`SessionMeta` — verify against `Harness/Registry.hs` and `Session/Types.hs`. The `_ts_name` for harness may prefer `Tabs._tab_name` and fall back to `Registry._he_label e`.)
-
-- [ ] **Step 5: Run → PASS**; register the spec; full suite green; build `-Werror` clean.
+Per `Tab` (`Tabs.toList`): `BoundSession sid` -> index `unTabIndex _tab_slot`, kind `"provider"`, name `_tab_name`, status (`Live`->`"idle"`, `Dead`->`"exited"`), sessionId `Just (unSessionId sid)`, origin `""`, attach `Nothing`, ext/stale `False`. `BoundHarness hid` with `harnOf hid = Just e` -> kind `"harness"`, status `livenessToTabStatus (_he_liveness e)`, origin `harnessOriginTotext (_he_origin e)`, **attach command computed as `Just ("tmux attach -t " <> _he_session e <> ":" <> _he_windowName e)`** (mirror the existing `Frontend/API.hs` builder — there is NO `_he_attachCommand` accessor), sessionId `_he_sessionId e`, extModified `_he_extModified e`, stale `_he_stale e`, name `_tab_name` (fall back to `_he_label e`); `Nothing` (vanished) -> kind `"harness"`, status `"exited"`, stale `True`, rest defaults. (Verify every `_he_*` accessor against `src/PureClaw/Harness/Registry.hs`.)
+- [ ] **Step 5:** Run -> PASS; register spec; suite green; `-Werror` clean.
 - [ ] **Step 6: Commit** `feat(tabs-fe): pure tabSnapshotsFromRegistry in Frontend/TabsView (#80)`
 
 ---
 
-## WU4 — `_env_onTabsChanged` notify seam (chat mutations → rebroadcast)
+## WU4 — `_env_onTabsChanged` notify seam
 
-**Files:**
-- Modify: `src/PureClaw/Agent/Env.hs` (add `_env_onTabsChanged :: IO ()` to `AgentEnv` + a `TabSubsystem` field, default `pure ()`; add to ALL `AgentEnv` construction sites — `-Werror -Wmissing-fields` will enumerate them)
-- Modify: `src/PureClaw/Routing/TabDispatch.hs` (add `_td_onTabsChanged :: IO ()` to `TabDispatchDeps`; call it after `cmdNt`/`cmdNew`/`cmdClose`/`cmdRename`/wizard-bind — at the registry-mutation boundary)
-- Modify: `src/PureClaw/Tabs/Wiring.hs` (`mkTabDispatchDeps` wires `_td_onTabsChanged = _env_onTabsChanged env`; any direct registry mutation in Wiring also calls it)
-- Test: `test/Routing/TabDispatchSpec.hs` (extend with a recorder)
+**Files:** `src/PureClaw/Agent/Env.hs` (add `_env_onTabsChanged :: IO ()` to `AgentEnv` + a `TabSubsystem` field, default `pure ()`; **fix ALL `AgentEnv` construction sites** — `-Werror -Wmissing-fields` enumerates them: `Commands.hs` + ~7 test files incl. `SlashCommandsSpec`/`WiringSpec`/`DelegateSpec`/`SignalFlowSpec`/`BackgroundSpec`/`StartSpec`/`DepthLimitSpec`). `src/PureClaw/Routing/TabDispatch.hs` (`_td_onTabsChanged :: IO ()` in `TabDispatchDeps`; call after `cmdNt`/`cmdNew`/`cmdClose`/`cmdRename`/wizard-bind). `src/PureClaw/Tabs/Wiring.hs` (`mkTabDispatchDeps` sets `_td_onTabsChanged = _env_onTabsChanged env`). Test: `test/Routing/TabDispatchSpec.hs`.
 
-- [ ] **Step 1: RED** — extend the TabDispatch fake-deps harness with `f_tabsChanged :: IORef Int` wired to `_td_onTabsChanged = modifyIORef' f_tabsChanged (+1)`; assert it fires once per mutation:
-```haskell
-it "fires _td_onTabsChanged once on /nt" $ do
-  f <- mkFakes
-  handleInbound (f_deps f) convA "/nt"
-  readIORef (f_tabsChanged f) `shouldReturn` 1
-it "fires once on /close" $ ...
-it "does NOT fire on a no-op (e.g. /tabs list)" $ do
-  ...; readIORef (f_tabsChanged f) `shouldReturn` 0
-```
-- [ ] **Step 2: Run → FAIL** (field/seam not present).
-- [ ] **Step 3: GREEN** — add the fields; call `_td_onTabsChanged (_ctx_deps ctx)` at the end of each mutating command (factor a tiny `notifyChanged ctx` helper). Add `_env_onTabsChanged` to `AgentEnv` (default `pure ()`) and `newTabSubsystem`; fix every construction site. Wire `mkTabDispatchDeps`.
-- [ ] **Step 4: Run → PASS** + suite green.
+- [ ] **Step 1: RED** — extend the fake-deps harness with `f_tabsChanged :: IORef Int` wired to `_td_onTabsChanged = modifyIORef' f_tabsChanged (+1)`; assert fires once on `/nt`, once on `/close`, and 0 on a no-op (`/tabs`).
+- [ ] **Step 2: Run -> FAIL**.
+- [ ] **Step 3: GREEN** — add fields; call `_td_onTabsChanged (_ctx_deps ctx)` at the end of each mutating command (factor `notifyChanged ctx`). Add `_env_onTabsChanged` (default `pure ()`) to `AgentEnv`/`newTabSubsystem`; fix every construction site; wire `mkTabDispatchDeps`.
+- [ ] **Step 4:** Run -> PASS; suite green.
 - [ ] **Step 5: Commit** `feat(tabs-fe): _env_onTabsChanged notify seam on registry mutation (#80)`
 
 ---
 
-## WU5 — Persistence: `_pd_sessionExists` seam + strict `parseRef` + reconcile drops
+## WU5 — Persistence: `_pd_sessionExists` + strict `parseRef` + reconcile drop
 
-**Files:**
-- Modify: `src/PureClaw/Tabs/Persist.hs` (`PersistDeps._pd_sessionExists :: SessionId -> IO Bool`; `parseRef` rejects invalid `SessionId`; `reconcileTabs.keepTab` drops a `BoundSession` failing `_pd_sessionExists`)
-- Test: `test/Tabs/PersistSpec.hs` (extend; drive via `loadTabs` — no new exports)
+**Decode model (VERIFIED — do not restructure):** `loadTabs` uses `eitherDecodeStrict'` over `FromJSON PersistedState` = `traverse parseTab`, so **any** `parseRef`/`parseTab` `fail` discards the WHOLE `tabs.json` and boots **fresh** (the existing `freshOn "a non-UUID harnessId"` test proves this). Per-tab survivorship is ONLY in `reconcileTabs` (filters the decoded list). So the strict `parseRef` guard is **fresh-on-invalid** (still safe: an invalid/traversal id never becomes a `TabRef`, so never reaches a path-join). Do NOT change the `freshOn` test.
 
-- [ ] **Step 1: RED** — extend `PersistSpec`:
-```haskell
-it "reconcile drops a BoundSession whose session.json is absent, keeps an existing one" $ do
-  -- write a tabs.json with two BoundSession tabs; _pd_sessionExists True for s1, False for s2
-  ... loadTabs deps ... -> tabs has s1, not s2
-it "parseRef drops a BoundSession with a traversal/leading-dot/control id, loads the rest" $ do
-  -- hand-write tabs.json containing ids: "../etc", ".hidden", "a b", and "good1"
-  ... loadTabs deps ... -> only "good1" survives
-it "reconcile drops a dead-harness tab (existing behavior preserved)" $ ...
+**Files:** `src/PureClaw/Tabs/Persist.hs` (`PersistDeps._pd_sessionExists :: SessionId -> IO Bool`; `parseRef` rejects invalid `SessionId`; `reconcileTabs.keepTab` drops a `BoundSession` failing `_pd_sessionExists`). Test: `test/Tabs/PersistSpec.hs` (drive via `loadTabs` — no new exports).
+
+- [ ] **Step 1: RED** —
 ```
-- [ ] **Step 2: Run → FAIL** (PersistDeps lacks `_pd_sessionExists`; parseRef lacks the guard).
-- [ ] **Step 3: GREEN** — add `_pd_sessionExists` to `PersistDeps`; in `keepTab`, `BoundSession sid -> _pd_sessionExists deps sid`; in `parseRef`, after decoding a `BoundSession`, `if isValidSessionId (unSessionId sid) then Just (BoundSession sid) else Nothing` (mirroring the invalid-`HarnessId` drop). Update every `PersistDeps` construction (tests + any default) with the new field.
-- [ ] **Step 4: Run → PASS** + suite green.
+it "reconcile drops a BoundSession whose session.json is absent, keeps an existing one"
+  -- decode succeeds (valid ids); _pd_sessionExists True for s1, False for s2 -> tabs has s1, not s2
+it "loadTabs boots FRESH when tabs.json has a traversal/leading-dot session id"
+  -- tabs.json with a BoundSession id "../etc" + a valid sibling -> (emptyTabs, emptyCursors)
+it "reconcile drops a dead-harness tab (existing behavior preserved)"
+```
+- [ ] **Step 2: Run -> FAIL** (no `_pd_sessionExists`; parseRef lacks the guard).
+- [ ] **Step 3: GREEN** — add `_pd_sessionExists :: SessionId -> IO Bool` to `PersistDeps`; `reconcileTabs.keepTab`: `BoundSession sid -> _pd_sessionExists deps sid`; `parseRef`: after decoding `BoundSession sid`, `if isValidSessionId (unSessionId sid) then pure (BoundSession sid) else fail "invalid session id"` (mirrors the invalid-`HarnessId` `fail`). Update every `PersistDeps` construction with the new field.
+- [ ] **Step 4:** Run -> PASS; suite green.
 - [ ] **Step 5: Commit** `feat(tabs-fe): persistence _pd_sessionExists + strict parseRef guard (#80)`
 
 ---
 
-## WU6 — Read wiring: `FrontendEnv` registry + lists IO wrapper + exclusion
+## WU6 — Read wiring: `FrontendEnv` (+ shared `Exec`) + lists projection + exclusion
 
-**Files:**
-- Modify: `src/PureClaw/Frontend/API.hs` (add `_fe_tabRegistry :: TabRegistry`, `_fe_cursors :: IORef CursorState` to `FrontendEnv`; replace `_fe_listTabs` body with the IO wrapper gathering the two lookups → `tabSnapshotsFromRegistry`; `computeListsSnapshot` recentSessions AND archived exclusion now reads registry-derived `tabs`)
-- Test: `test/Frontend/APISpec.hs` (extend; there's a `mkTestFrontendEnvWithTabs`-style helper — wire a real `TabRegistry`)
+**Files:** `src/PureClaw/Frontend/API.hs` — add `_fe_tabRegistry :: TabRegistry`, `_fe_cursors :: IORef CursorState`, **and `_fe_exec :: Exec`** to `FrontendEnv` (the close path in WU7 needs `Exec.release`; `FrontendEnv` has no exec today and `Frontend.API` does not import `Tabs.Exec` — add the import). Replace `_fe_listTabs` with the IO wrapper -> `tabSnapshotsFromRegistry`; `computeListsSnapshot` recentSessions AND archived exclusion read registry-derived `tabs`. Update every `FrontendEnv` construction site (tests) for the 3 new fields. Test: `test/Frontend/APISpec.hs`.
 
-- [ ] **Step 1: RED** — `APISpec`:
-```haskell
-it "a BoundSession tab appears in tabs and its sid is excluded from BOTH recent and archived" $ do
-  reg <- newTabRegistry; _ <- registryAppend reg (BoundSession (parseSessionId sid)) "chat 0"
-  env <- mkTestFrontendEnv ... { _fe_tabRegistry = reg, ... }   -- session sid also on disk (archived)
-  v <- computeListsSnapshot env
-  -- tabs contains sid; recentSessions does not; archivedSessions does not
-it "a harness-tab session stays dual-listed in recent" $ ...
-```
-- [ ] **Step 2: Run → FAIL**.
-- [ ] **Step 3: GREEN** — add the fields; `_fe_listTabs = do { tl <- readTabs (_fe_tabRegistry env); metas <- listSessions (_fe_sessionsDir env) Nothing big; entries <- Registry.snapshot (_fe_harnessRegistry env); pure (tabSnapshotsFromRegistry tl (lookupMeta metas) (lookupEntry entries)) }`. In `computeListsSnapshot`, derive `activeTabSids` from the new `tabs` (already does) and ALSO subtract them from the archived filter. Update every `FrontendEnv` construction site (tests + `Commands.hs` placeholder — `Commands` is fully wired in WU8) with the two new fields.
-- [ ] **Step 4: Run → PASS** + suite green.
+- [ ] **Step 1: RED** — a `BoundSession` tab in the registry appears in `tabs` and its sid is excluded from BOTH `recentSessions` and `archivedSessions`; a harness-tab session stays dual-listed in recent.
+- [ ] **Step 2: Run -> FAIL**.
+- [ ] **Step 3: GREEN** — add the 3 fields; `_fe_listTabs = do { tl <- readTabs (_fe_tabRegistry env); metas <- listSessions (_fe_sessionsDir env) Nothing big; entries <- Registry.snapshot (_fe_harnessRegistry env); pure (tabSnapshotsFromRegistry tl (lookupMeta metas) (lookupEntry entries)) }`. In `computeListsSnapshot`, derive `activeTabSids` from the new `tabs` and subtract them from the **archived** filter too.
+- [ ] **Step 4:** Run -> PASS; suite green.
 - [ ] **Step 5: Commit** `feat(tabs-fe): lists frame projects from the TabRegistry; tab-bound sids leave recent+archived (#80)`
 
 ---
 
 ## WU7 — Write path: registry-resolved actions + create + cap
 
-**Files:**
-- Modify: `src/PureClaw/Frontend/API.hs` (`handleNewTab` appends `BoundSession`/`BoundHarness`; tab-action endpoints resolve index against the `TabRegistry`; close releases the runtime via `_env_exec`; harness-only guard; `_fe_maxTabs` pre-check; drop `_fe_tabCount`)
-- Test: `test/Frontend/APISpec.hs` (extend; ~14 `_fe_tabCount` assertions → `readTabs` length)
+**Files:** `src/PureClaw/Frontend/API.hs`. Test: `test/Frontend/APISpec.hs` (~14 `_fe_tabCount` assertions -> `readTabs` length). **Note:** WU1 already tightened the live HTTP/WS resume surfaces (`API.hs:1362/1779/1845`, `Stream.hs:594`) from the weak guard to the strict one — an intentional tightening (real `newSessionId` ids pass; covered by WU1's round-trip test), not a regression.
 
-- [ ] **Step 1: RED** — `APISpec`:
-```haskell
-it "handleNewTab (provider) appends a BoundSession and returns its slot/sid" $ ...
-it "close resolves the registry slot and removes the tab (any kind)" $ ...
-it "dismiss on a BoundSession tab returns a 4xx 'not a harness tab'" $ ...
-it "create beyond _fe_maxTabs returns the cap 4xx (no append)" $ ...
-```
-- [ ] **Step 2: Run → FAIL**.
+- [ ] **Step 1: RED** — `handleNewTab` (provider) appends a `BoundSession` and returns its slot/sid; `close` resolves the registry slot and removes any-kind tab; `dismiss` on a `BoundSession` tab -> 4xx `{"error":"not a harness tab"}`; create beyond `_fe_maxTabs` -> the cap 4xx (no append).
+- [ ] **Step 2: Run -> FAIL**.
 - [ ] **Step 3: GREEN** —
-  - new `resolveRegistrySlot :: FrontendEnv -> Int -> IO (Maybe (TabIndex, TabRef))` via `readTabs` (replaces `tabIndexToEntry` for tab actions).
-  - `handleNewTab`: provider → mint+`registryAppend (BoundSession sid)`; harness → spawn then `registryAppend (BoundHarness hid)` after the deferred-success point; raw-shell arm: leave as-is (deferred) — but the affordance is hidden in WU9 so it isn't hit.
-  - `close` → `registryRemove`; for `BoundSession` also `release (_env_exec env) ref` (stop the runtime). `dismiss`/`release`/`destroy`/`acknowledge` → resolve ref; if `BoundHarness` run the existing harness teardown, else return `{"error":"not a harness tab"}` 4xx.
-  - cap: read `length <$> readTabs`; if `>= _fe_maxTabs` return the cap 4xx before appending. Remove `_fe_tabCount` IORef + its read/write; replace its assertions in `APISpec` with `readTabs`-length checks.
+  - `resolveRegistrySlot :: FrontendEnv -> Int -> IO (Maybe (TabIndex, TabRef))` via `readTabs` (replaces `tabIndexToEntry`/`withResolvedTab` for tab actions).
+  - `handleNewTab`: provider -> mint + `registryAppend (BoundSession sid)`; harness -> spawn then `registryAppend (BoundHarness hid)` after the deferred-success point. (Raw-shell arm left as-is/deferred; affordance hidden in WU9 so it isn't hit.)
+  - `close` -> `registryRemove`; for `BoundSession` also `release (_fe_exec env) ref` (stop the runtime — the SessionStore is `runTabbedLoop`-local + benign-if-stale, NOT evicted). `dismiss`/`release`/`destroy`/`acknowledge`: resolve ref; `BoundHarness` -> existing harness teardown; else `{"error":"not a harness tab"}` 4xx.
+  - cap: `n <- length <$> readTabs ...`; if `n >= _fe_maxTabs env` return the cap 4xx before append. Remove the `_fe_tabCount` IORef + its reads/writes; replace its `APISpec` assertions with `readTabs`-length checks.
   - call `_env_onTabsChanged` after each mutation.
-- [ ] **Step 4: Run → PASS** + suite green.
+- [ ] **Step 4:** Run -> PASS; suite green.
 - [ ] **Step 5: Commit** `feat(tabs-fe): frontend tab endpoints drive the registry (create/close/cap) (#80)`
 
 ---
 
 ## WU8 — `CLI/Commands.hs` wiring + boot reconcile + integration
 
-**Files:**
-- Modify: `src/PureClaw/CLI/Commands.hs` (set `_fe_tabRegistry`/`_fe_cursors` from the shared subsystem; `_env_onTabsChanged = \-> saveTabs stateDir <$> readTabs … <*> readIORef cursors >> broadcastLists frontendEnv`; `loadTabs`+reconcile after `bootReconstruct`, seed the registry/cursors before `Async.withAsync runFrontend`; wire `_pd_sessionExists`/`_pd_harnessLive`/`_pd_stateDir`)
-- Test: `test/Integration/CLISpec.hs` or a focused `test/Frontend/APISpec.hs` integration
+**Files:** `src/PureClaw/CLI/Commands.hs` — set `_fe_tabRegistry`/`_fe_cursors`/`_fe_exec` from the shared subsystem (`_ts_tabRegistry`/`_ts_cursors`/`_ts_exec tabSub`); `_env_onTabsChanged = (saveTabs stateDir <$> readTabs reg <*> readIORef cursors) >> broadcastLists frontendEnv`; `loadTabs`+reconcile after the synchronous `bootReconstruct` (strictly before `Async.withAsync runFrontend`), seed `_ts_tabRegistry`/`_ts_cursors` before server start; `PersistDeps { _pd_stateDir = pureclawDir </> "state", _pd_harnessLive = …, _pd_discoveryReady = pure (), _pd_sessionExists = \sid -> doesFileExist (sessionsDir </> unSessionId sid </> "session.json") }`. Test: a focused integration spec.
 
-- [ ] **Step 1: RED (integration)** — a test that: builds the shared env+frontendEnv (as Commands does), runs `runTabbedLoop`-style `/nt`, and asserts a broadcast `lists` snapshot contains the new tab and excludes its sid from recent; plus a **dual-write-consistency** assertion: a frontend `handleNewTab (BoundSession)` then `registryLookupSlot` for that slot equals the created ref (the same ref chat `/N` would resolve).
-- [ ] **Step 2: Run → FAIL**.
-- [ ] **Step 3: GREEN** — wire as above. `_env_onTabsChanged` saves+broadcasts. Boot: after `bootReconstruct`, `loadTabs (PersistDeps stateDir harnessLive (pure ()) sessionExists)` → seed `_ts_tabRegistry`/`_ts_cursors` before server start. `_pd_sessionExists sid = doesFileExist (sessionsDir </> unSessionId sid </> "session.json")`.
-- [ ] **Step 4: Run → PASS** + full suite green; build `-Werror` clean; `nix develop . --command hlint src test app`.
-- [ ] **Step 5: Commit** `feat(tabs-fe): wire registry↔frontend in Commands + boot persistence (#80)`
+- [ ] **Step 1: RED (integration)** — build the shared env+frontendEnv; run a `/nt` and assert a broadcast `lists` snapshot contains the new tab and excludes its sid from recent; **dual-write consistency**: a frontend `handleNewTab (BoundSession)` then `registryLookupSlot` for that slot equals the created ref (the same ref chat `/N` resolves).
+- [ ] **Step 2: Run -> FAIL**.
+- [ ] **Step 3: GREEN** — wire as above.
+- [ ] **Step 4:** Run -> PASS; full suite green; `-Werror` clean; `hlint src test app`.
+- [ ] **Step 5: Commit** `feat(tabs-fe): wire registry<->frontend in Commands + boot persistence (#80)`
 
 ---
 
-## WU9 — React frontend: slot-exhaustion surfacing + hide raw-shell + verify render
+## WU9 (React) — slot-exhaustion surfacing + raw-shell affordance + render check
 
-**Files:**
-- Modify: `frontend/src/App.tsx` (the inline `fetch('/api/tabs/new')` in `handleComposerSend`: on `!res.ok`, `await res.json()` and set a composer error state rendered via the existing `role="alert"` block; generalize `attachError`→`composerError` or add `createError`)
-- Modify: the new-tab composer/menu component (hide/disable the **raw-shell** create option)
-- Test: `frontend/src/__tests__/…` (vitest) — slot-exhaustion message renders; a session-kind tab renders under Active Tabs with the idle icon
+**Files:** `frontend/src/App.tsx` (the inline `fetch('/api/tabs/new')` in `handleComposerSend`: on `!res.ok`, `await res.json()` and set a composer error state rendered via the existing `role="alert"` block — generalize `attachError`->`composerError` or add `createError`). Any remaining raw-shell create affordance (NOTE: the top-level "Raw Shell" radio is ALREADY removed — `NewTabComposer.test.tsx` asserts this; only hide a still-present backend-selector raw-shell option, if any). Tests: vitest under `frontend/src`.
 
-- [ ] **Step 1: RED (vitest)** — mock `/api/tabs/new` → 409 `{"error":"maximum tab count reached"}`; assert the composer renders an actionable message (not a silent no-op). And a render test: a `TabInfo` with `kind:"provider", status:"idle", origin:""` renders under "Active Tabs", shows the muted `○` (no green dot), and shows only Archive + Close controls.
-- [ ] **Step 2: Run → FAIL**: `cd frontend && npm test -- --run`.
-- [ ] **Step 3: GREEN** — read the 4xx body and surface it; hide the raw-shell create affordance. (No new guard code for harness-only controls — they self-suppress for a provider/idle/origin-"" tab; the render test asserts that.)
-- [ ] **Step 4: Run → PASS**; `cd frontend && npm run build` (typecheck) clean.
+- [ ] **Step 1: RED (vitest)** — mock `/api/tabs/new` -> 409 `{"error":"maximum tab count reached"}`; assert the composer renders an actionable message (not a silent no-op). Render test: a `TabInfo` `{kind:"provider", status:"idle", origin:""}` renders under "Active Tabs", shows the muted `○` (no green dot), and only Archive + Close controls.
+- [ ] **Step 2: Run -> FAIL**: `cd frontend && npm test -- --run`.
+- [ ] **Step 3: GREEN** — read the 4xx body and surface it; hide any remaining raw-shell create option. (No new guard code for harness-only controls — they self-suppress for provider/idle/origin-"" tabs; the render test asserts that.)
+- [ ] **Step 4:** Run -> PASS; `cd frontend && npm run build` (typecheck) clean.
 - [ ] **Step 5: Commit** `feat(tabs-fe): surface slot-exhaustion, hide raw-shell affordance (#80)`
 
 ---
 
 ## WU10 — Coverage + final gate + self-reflect
 
-- [ ] **Step 1: Coverage** — `nix develop . --command cabal test --enable-coverage`; confirm `PureClaw.Frontend.TabsView` ≥95% (pure projection branch matrix). If the thin IO wrapper in `Frontend.API` dips the module, add the integration assertion (WU8 already exercises `broadcastLists → _fe_listTabs → wrapper`) or a one-line justified note in `.coverage-thresholds.json`. Do NOT add a `TabsView` waiver (it must self-hit 95%).
-- [ ] **Step 2: Full gate** — `cabal build` `-Werror` clean; `cabal test` green; `hlint src test app` → No hints; `cd frontend && npm test --run && npm run build`.
-- [ ] **Step 3: `/self-reflect`** — capture any learnings (e.g. the dual-source-of-truth unification pattern); commit knowledge-base updates.
-- [ ] **Step 4: Commit** any threshold/coverage updates `chore(tabs-fe): coverage gate + final cleanup (#80)`. Push to `origin/feat/tabs-as-view-refactor` (updates PR #80).
+- [ ] **Step 1: Coverage** — `cabal test --enable-coverage`; `PureClaw.Frontend.TabsView` >=95% (pure branch matrix; NO waiver). If the thin IO wrapper in `Frontend.API` dips the (non-waived) module, lean on WU8's integration (`broadcastLists -> _fe_listTabs -> wrapper`) or add a one-line justified note.
+- [ ] **Step 2: Full gate** — `cabal build` `-Werror` clean; `cabal test` green; `hlint src test app` -> No hints; `cd frontend && npm test --run && npm run build`.
+- [ ] **Step 3: `/self-reflect`** — capture learnings (dual-source-of-truth unification); commit KB updates.
+- [ ] **Step 4: Commit** any threshold updates `chore(tabs-fe): coverage gate + final cleanup (#80)`; push to `origin/feat/tabs-as-view-refactor` (updates PR #80).
 
 ---
 
 ## Self-review (author checklist — done)
-- **Spec coverage:** every Components-table row maps to a WU (Core.Types→WU1; loader→WU2; TabsView→WU3; notify seam→WU4; Persist→WU5; API read→WU6; API write→WU7; Commands→WU8; React→WU9; gate→WU10). Edge cases (status idle, archived exclusion, closed-focused cursor, slot-exhaustion, traversal guard, reconcile drop) each have a test.
-- **Type consistency:** `tabSnapshotsFromRegistry`, `_env_onTabsChanged`, `_td_onTabsChanged`, `_pd_sessionExists`, `_fe_tabRegistry`/`_fe_cursors`, `isValidSessionId`, `resolveRegistrySlot` used consistently across WUs.
-- **Deferred (out of scope, per spec):** raw-shell `BoundShell`, frontend rename, WU9 harness-death notified removal, the transcript-fd-leak follow-up.
+- **Spec coverage:** every Components-table row -> a WU (Core.Types->WU1; loader->WU2; TabsView->WU3; notify->WU4; Persist->WU5; API read+`_fe_exec`->WU6; API write->WU7; Commands->WU8; React->WU9; gate->WU10). Edge cases (idle status, archived exclusion, closed-focused cursor, slot-exhaustion, traversal guard, reconcile drop, runtime-release-on-close, dual-write, no-secret-leak) each have a test.
+- **Decode model corrected** (WU5 fresh-on-invalid, not per-tab drop). **`_fe_exec` field added** (WU6) so WU7's runtime-release compiles. **`isValidSessionId` re-exported** from `Frontend.API` (Stream consumers). **attachCommand** computed from `_he_session`/`_he_windowName`.
+- **Deferred (out of scope, per spec):** raw-shell `BoundShell`, frontend rename, spec-WU9 harness-death notified removal, transcript-fd-leak follow-up.
