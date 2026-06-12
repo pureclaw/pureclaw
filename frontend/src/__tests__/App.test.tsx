@@ -801,3 +801,44 @@ describe('App Existing-Harness (attach) compose flow', () => {
     expect(utils.queryByLabelText('Tab kind')).toBeTruthy()
   })
 })
+
+describe('App slot-exhaustion (WU9)', () => {
+  it('slot-exhaustion: a 4xx from /api/tabs/new on a normal new-tab create surfaces an actionable error message', async () => {
+    // Mock fetch to return 409 cap-reached for tabs/new.
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url === '/api/tabs/new') {
+        return new Response(
+          JSON.stringify({ error: 'maximum tab count reached' }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    // Normal new-tab compose (no branch, no attach): root URL, no session selected.
+    window.history.replaceState(null, '', '/')
+    const utils = render(<App />)
+
+    // Confirm we are in compose mode.
+    await waitFor(() => {
+      expect(utils.getByPlaceholderText('Type your first message…')).toBeTruthy()
+    })
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+    })
+
+    // An actionable error message must appear in the role="alert" block.
+    // It should mention the cap (maximum tab count reached) OR instruct to close a tab.
+    await waitFor(() => {
+      const alert = utils.getByRole('alert')
+      expect(alert.textContent).toMatch(/maximum tab count reached|close a tab/i)
+    })
+
+    // The composer is still shown (user can act after closing a tab).
+    expect(utils.queryByLabelText('Tab kind')).toBeTruthy()
+  })
+})

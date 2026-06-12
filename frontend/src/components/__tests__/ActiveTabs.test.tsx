@@ -636,3 +636,44 @@ describe('ActiveTabs', () => {
     expect(onArchiveTab).toHaveBeenCalledWith(0)
   })
 })
+
+describe('ActiveTabs session-kind tab render (WU9)', () => {
+  /** A provider/idle session tab: the normal case for a chat session. */
+  const providerIdleTab: TabInfo = {
+    index: 0,
+    kind: 'session:provider',
+    name: 'chat 0',
+    status: 'idle',
+    session_id: 's1',
+    // No origin, no extModified, no stale — a clean idle provider tab.
+  }
+
+  it('renders under "Active Tabs" heading', () => {
+    render(<ActiveTabs tabs={[providerIdleTab]} selectedId={null} {...noopProps()} />)
+    expect(screen.getByText('Active Tabs')).toBeInTheDocument()
+    expect(screen.getByText('chat 0')).toBeInTheDocument()
+  })
+
+  it('shows the idle (muted hollow circle) status indicator — NOT a running (green filled) dot', () => {
+    const { container } = render(
+      <ActiveTabs tabs={[providerIdleTab]} selectedId={null} {...noopProps()} />,
+    )
+    // The idle indicator must be present.
+    expect(container.querySelector('[data-testid="status-idle"]')).toBeInTheDocument()
+    // The running indicator must NOT be present.
+    expect(container.querySelector('[data-testid="status-running"]')).not.toBeInTheDocument()
+  })
+
+  it('shows Archive and Close controls — but NOT Dismiss, Release, Restart, or Acknowledge', () => {
+    render(<ActiveTabs tabs={[providerIdleTab]} selectedId={null} {...noopProps()} />)
+    // Archive: present (session-backed tab).
+    expect(screen.getByRole('button', { name: /archive tab/i })).toBeInTheDocument()
+    // Close: present (always).
+    expect(screen.getByRole('button', { name: /close tab/i })).toBeInTheDocument()
+    // The following self-suppress for an idle, no-origin, no-extModified provider tab:
+    expect(screen.queryByRole('button', { name: /dismiss tab/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /release tab/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /restart tab/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /acknowledge tab/i })).not.toBeInTheDocument()
+  })
+})
