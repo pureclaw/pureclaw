@@ -15,6 +15,7 @@ module PureClaw.Tabs
     TabRegistry (..)
   , newTabRegistry
   , readTabs
+  , overwriteTabs
   , registryAppend
   , registryRemove
   , registryLookupSlot
@@ -24,7 +25,7 @@ module PureClaw.Tabs
   , module PureClaw.Tabs.Types
   ) where
 
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, newIORef, readIORef)
 import Data.Text (Text)
 
 import PureClaw.Handles.Tab (TabIndex)
@@ -40,6 +41,15 @@ newTabRegistry = TabRegistry <$> newIORef emptyTabs
 -- | Read the current 'TabList' snapshot.
 readTabs :: TabRegistry -> IO TabList
 readTabs (TabRegistry ref) = readIORef ref
+
+-- | Replace the entire registry contents with @tl@, atomically. Used at boot
+-- (WU8) to SEED the live shared registry from the reconciled 'TabList' that
+-- 'PureClaw.Tabs.Persist.loadTabs' returns, BEFORE the frontend server or the
+-- tabbed loop observe it. The supplied 'TabList' already satisfies the slot
+-- invariants (it comes from 'loadTabs'\'s @rebuildTabs@), so this is a direct
+-- swap — no per-tab re-append.
+overwriteTabs :: TabRegistry -> TabList -> IO ()
+overwriteTabs (TabRegistry ref) = atomicWriteIORef ref
 
 -- | Append a tab binding @ref@ with label @name@, atomically. Returns the new
 -- slot, or the pure 'TabsError' (dedup\/cap) without mutating on rejection.
