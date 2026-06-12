@@ -70,6 +70,10 @@ import Network.Wai
 import System.Directory (doesFileExist, getFileSize, removeDirectoryRecursive, renameFile)
 import System.FilePath ((</>), takeDirectory)
 
+import PureClaw.Tabs (TabRegistry, readTabs)
+import PureClaw.Tabs.Types (CursorState)
+import PureClaw.Tabs.Exec (Exec)
+
 import PureClaw.Agent.AgentDef
   ( AgentDef (..)
   , composeAgentPromptWithBootstrap
@@ -81,12 +85,11 @@ import PureClaw.Agent.Context
 import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, isValidSessionId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
--- Note: 'tabSnapshotsFromRegistry' is used directly from TabsView (not
--- re-exported here); the WU6 IO wrapper imports PureClaw.Frontend.TabsView.
 import PureClaw.Frontend.TabsView
   ( TabSnapshot (..)
   , livenessToTabStatus
   , harnessOriginToText
+  , tabSnapshotsFromRegistry
   )
 import PureClaw.Frontend.StreamBroker
   ( BrokerEvent (..)
@@ -213,9 +216,6 @@ data FrontendEnv = FrontendEnv
     -- ^ Maximum number of tabs allowed (A8 enforcement).
   , _fe_tabCount     :: IORef Int
     -- ^ Current number of open tabs.
-  , _fe_listTabs     :: IO [TabSnapshot]
-    -- ^ Callback returning a point-in-time snapshot of all open tabs.
-    -- Wired by the dispatcher; returns @[]@ when no tab registry exists.
   , _fe_closeTab     :: Int -> IO (Either Text ())
     -- ^ Callback to close a tab by index. The dispatcher provides the
     -- real implementation; the default stub returns @Left \"not wired\"@.
@@ -252,6 +252,20 @@ data FrontendEnv = FrontendEnv
     -- before giving up. Defends against a model that keeps tool-calling
     -- without ever returning final text. Reaching the cap returns a
     -- placeholder response; it does not throw.
+  , _fe_tabRegistry :: TabRegistry
+    -- ^ The live first-class tab registry (WU6). 'tabsFromRegistry' reads
+    -- this alongside '_fe_harnessRegistry' to project the canonical
+    -- @GET \/api\/tabs@ list. Shares the SAME 'TabRegistry' as
+    -- 'AgentEnv._env_tabRegistry' so both views observe the same state.
+    -- Tests wire a fresh 'newTabRegistry' (empty on construction).
+  , _fe_cursors :: IORef CursorState
+    -- ^ Per-conversation cursor state (WU6 / WU7). Shared with the agent
+    -- loop. Unused in WU6 directly but added now to avoid a second
+    -- 'FrontendEnv' churn pass in WU7. Tests wire @newIORef emptyCursors@.
+  , _fe_exec :: Exec
+    -- ^ Refcounted per-'TabRef' runtime registry (WU6 / WU7). Unused in
+    -- WU6 directly but added now to allow WU7's close-path runtime release
+    -- without another 'FrontendEnv' churn pass. Tests wire 'newExec'.
   }
 
 -- | Result of successfully starting a harness via '_fe_startHarness'.
@@ -617,10 +631,26 @@ harnessInfoOfEntry e = HarnessInfo
   , _hi_activity = livenessToActivity (Registry._he_liveness e)
   }
 
+-- | Build the live tab list from the backend 'TabRegistry' enriched with
+-- 'Registry.HarnessEntry' data for harness-backed tabs (WU6). This is the
+-- canonical source of the @GET \/api\/tabs@ response: 'tabSnapshotsFromRegistry'
+-- does the pure projection; we read both registries here so the function is
+-- pure and testable without IO.
+--
+-- The 'harnOf' lookup function finds a 'Registry.HarnessEntry' by its
+-- 'Registry.HarnessId' using a linear scan of the current registry snapshot
+-- (the registry is small in practice).
+tabsFromRegistry :: FrontendEnv -> IO [TabSnapshot]
+tabsFromRegistry env = do
+  tl      <- readTabs (_fe_tabRegistry env)
+  entries <- Registry.snapshot (_fe_harnessRegistry env)
+  let harnOf hid = List.find ((== hid) . Registry._he_id) entries
+  pure (tabSnapshotsFromRegistry tl harnOf)
+
 -- | Return all currently open tabs as a JSON array.
 handleListTabs :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleListTabs env respond = do
-  tabs <- _fe_listTabs env
+  tabs <- tabsFromRegistry env
   respond $ jsonResponse status200 tabs
 
 -- | On-demand discovery of adoptable (PureClaw-unmarked) tmux windows
@@ -1009,7 +1039,7 @@ handleRecentSessions env respond = do
   -- Collect session IDs that are currently shown in an active tab so
   -- the same session does not appear in both "Active Tabs" and
   -- "Recent Sessions" simultaneously.
-  tabs <- _fe_listTabs env
+  tabs <- tabsFromRegistry env
       -- Only NON-harness tabs (provider / raw-shell, shown under "Active Tabs")
       -- dedupe their session out of "Recent Sessions". A harness tab keeps its
       -- controls entry under "Running Harnesses" AND, intentionally, its backing
@@ -1041,7 +1071,11 @@ handleArchivedSessions env respond = do
   let baseDir = _fe_sessionsDir env
   -- Load all sessions with a generous limit; filter to archived-only.
   metas <- listSessions baseDir Nothing 1000
-  let archived = filter _sm_archived metas
+  -- Exclude sessions that are bound to a non-harness tab: a tab binding
+  -- wins over the archived flag (WU6 — the session is open and active).
+  tabs <- tabsFromRegistry env
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
+      archived = filter (\m -> _sm_archived m && unSessionId (_sm_id m) `notElem` activeTabSids) metas
       infos = map (`toSessionInfo` Nothing) archived
   respond $ jsonResponse status200 infos
 
@@ -1057,7 +1091,7 @@ computeListsSnapshot :: FrontendEnv -> IO Aeson.Value
 computeListsSnapshot env = do
   let limit   = _fe_recentLimit env
       baseDir = _fe_sessionsDir env
-  tabs <- _fe_listTabs env
+  tabs <- tabsFromRegistry env
   -- Recent sessions: exclude archived, exclude active-tab-backed, exclude
   -- empty transcripts, enrich with first-message snippet — same pipeline
   -- as handleRecentSessions.
@@ -1082,8 +1116,12 @@ computeListsSnapshot env = do
   let recentInfos = zipWith toSessionInfo chosen snippets
   -- Archived: all archived sessions, sorted by lastActive descending
   -- (listSessions already sorts; we just filter).
+  -- Exclude sessions that are bound to a non-harness tab: tab binding wins
+  -- over the archived flag (WU6 — the session is open and active in a tab).
   archivedMetas <- listSessions baseDir Nothing 1000
-  let archivedChosen = filter _sm_archived archivedMetas
+  let archivedChosen = filter
+        (\m -> _sm_archived m && unSessionId (_sm_id m) `notElem` activeTabSids)
+        archivedMetas
   archivedSnippets <- traverse (firstMessageSnippet baseDir) archivedChosen
   let archivedInfos = zipWith toSessionInfo archivedChosen archivedSnippets
   pure $ object

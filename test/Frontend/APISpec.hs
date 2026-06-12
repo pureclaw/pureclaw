@@ -81,6 +81,9 @@ import PureClaw.Tools.Registry
   , registerTool
   )
 import Test.Fake.Provider (FakeProvider, newFakeProvider, peekRecorded, queueResponse, queueResponses)
+import PureClaw.Tabs (newTabRegistry, registryAppend)
+import PureClaw.Tabs.Exec (newExec)
+import PureClaw.Tabs.Types (TabRef (..), emptyCursors)
 
 spec :: Spec
 spec = do
@@ -758,16 +761,28 @@ spec = do
       st `shouldBe` HTTP.status200
       respBody `shouldBe` Aeson.encode ([] :: [Aeson.Value])
 
-    it "returns tab list with correct status words" $ do
-      let tabs =
-            [ (mkTabSnapshot 0 "provider" "claude-opus" "running")
-                { _ts_sessionId = Just "session-001" }
-            , (mkTabSnapshot 1 "raw_shell" "bash" "idle")
-                { _ts_sessionId = Nothing }
-            , (mkTabSnapshot 2 "provider" "gpt" "crashed")
-                { _ts_sessionId = Just "session-002" }
-            ]
-      env <- mkTestFrontendEnvWithTabs tabs
+    it "returns tab list with correct kind/status/session_id (registry-backed WU6)" $ do
+      -- Populate via the real TabRegistry:
+      --   slot 0: provider session (Live → "idle")
+      --   slot 1: harness        (LivenessThinking → "running")
+      --   slot 2: harness        (LivenessExited → "exited")
+      env <- mkTestFrontendEnv
+      let hid1 = mustParseHid "11111111-1111-4111-8111-111111111111"
+          hid2 = mustParseHid "22222222-2222-4222-8222-222222222222"
+          sid  = SessionId "session-001"
+      -- Slot 0: provider session
+      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid) "claude-opus"
+      -- Slots 1 & 2: harness tabs (also insert into harness registry)
+      seedHarnessTab env
+        (baseEntry hid1 "thinking-win" Nothing)
+          { Registry._he_label    = "claude-running"
+          , Registry._he_liveness = Registry.LivenessThinking
+          }
+      seedHarnessTab env
+        (baseEntry hid2 "exited-win" Nothing)
+          { Registry._he_label    = "claude-exited"
+          , Registry._he_liveness = Registry.LivenessExited
+          }
       (st, respBody) <- getJSON env ["api", "tabs"]
       st `shouldBe` HTTP.status200
       case Aeson.decode respBody of
@@ -775,20 +790,21 @@ spec = do
         Just (Aeson.Array arr) -> do
           let items = toList' arr
           length items `shouldBe` 3
-          -- Check first tab (running)
+          -- slot 0: provider tab — kind="provider", status="idle", session_id present
           let t0 = head items
           lookupKey t0 "index"      `shouldBe` Just (Aeson.Number 0)
           lookupKey t0 "kind"       `shouldBe` Just (Aeson.String "provider")
           lookupKey t0 "name"       `shouldBe` Just (Aeson.String "claude-opus")
-          lookupKey t0 "status"     `shouldBe` Just (Aeson.String "running")
+          lookupKey t0 "status"     `shouldBe` Just (Aeson.String "idle")
           lookupKey t0 "session_id" `shouldBe` Just (Aeson.String "session-001")
-          -- Check second tab (idle, no session)
+          -- slot 1: harness "running"
           let t1 = items !! 1
-          lookupKey t1 "status"     `shouldBe` Just (Aeson.String "idle")
-          lookupKey t1 "session_id" `shouldBe` Just Aeson.Null
-          -- Check third tab (crashed)
+          lookupKey t1 "kind"   `shouldBe` Just (Aeson.String "harness")
+          lookupKey t1 "status" `shouldBe` Just (Aeson.String "running")
+          -- slot 2: harness "exited"
           let t2 = items !! 2
-          lookupKey t2 "status"     `shouldBe` Just (Aeson.String "crashed")
+          lookupKey t2 "kind"   `shouldBe` Just (Aeson.String "harness")
+          lookupKey t2 "status" `shouldBe` Just (Aeson.String "exited")
         Just _ -> expectationFailure "Expected JSON array"
 
   describe "POST /api/discovery/scan (list-all metadata-only scan — allow-list dropped)" $ do
@@ -932,9 +948,8 @@ spec = do
 
     it "D4.4 a freshly-adopted window appears in GET /api/tabs with origin=\"adopted\" + an attach_command" $ do
       -- End-to-end at the endpoint: a real registry, a _fe_adopt that inserts an
-      -- OriginAdopted entry (as the production mechanism does), and the
-      -- production-wired _fe_listTabs. After POST /api/adopt the tab list shows
-      -- the adopted row.
+      -- OriginAdopted entry (as the production mechanism does) AND appends to the
+      -- TabRegistry (WU6). After POST /api/adopt the tab list shows the adopted row.
       env0 <- mkTestFrontendEnvWithRegistryTabs
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
           reg = _fe_harnessRegistry env0
@@ -949,6 +964,8 @@ spec = do
                     , Registry._he_origin     = Registry.OriginAdopted
                     , Registry._he_shellPid   = Just 4242  -- corroborated
                     })
+                -- WU6: also bind the tab in the TabRegistry so GET /api/tabs sees it.
+                _ <- registryAppend (_fe_tabRegistry env0) (BoundHarness hid) w
                 _ <- pure (tok :: AdoptedHarness)
                 pure (Right (hid, mkNoOpHarnessHandle))
             }
@@ -1058,7 +1075,7 @@ spec = do
     it "shows a spawned harness as a harness tab (the reported symptom fixed)" $ do
       env <- mkTestFrontendEnvWithRegistryTabs
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
-      Registry.insertEntry (_fe_harnessRegistry env)
+      seedHarnessTab env
         (baseEntry hid "claude-code-0" Nothing)
           { Registry._he_label    = "claude-code"
           , Registry._he_liveness = Registry.LivenessIdle
@@ -1080,7 +1097,7 @@ spec = do
           hidT = mustParseHid "22222222-2222-4222-8222-222222222222"
           hidE = mustParseHid "33333333-3333-4333-8333-333333333333"
           hidO = mustParseHid "44444444-4444-4444-8444-444444444444"
-          seed lbl hid lv = Registry.insertEntry (_fe_harnessRegistry env)
+          seed lbl hid lv = seedHarnessTab env
             (baseEntry hid "win" Nothing)
               { Registry._he_label = lbl, Registry._he_liveness = lv }
       seed "a-idle"     hidI Registry.LivenessIdle
@@ -1107,7 +1124,7 @@ spec = do
     it "surfaces ext_modified, stale, origin, and attach_command in the JSON (P2-WU1 D1.2)" $ do
       env <- mkTestFrontendEnvWithRegistryTabs
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
-      Registry.insertEntry (_fe_harnessRegistry env)
+      seedHarnessTab env
         (baseEntry hid "claude-code-0" Nothing)
           { Registry._he_label      = "claude-code"
           , Registry._he_session    = "pureclaw"
@@ -1132,7 +1149,7 @@ spec = do
     it "keeps the existing keys unchanged for back-compat (P2-WU1 D1.3)" $ do
       env <- mkTestFrontendEnvWithRegistryTabs
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
-      Registry.insertEntry (_fe_harnessRegistry env)
+      seedHarnessTab env
         (baseEntry hid "claude-code-0" Nothing)
           { Registry._he_label    = "claude-code"
           , Registry._he_liveness = Registry.LivenessIdle
@@ -1628,7 +1645,7 @@ spec = do
     it "clears the ext_modified flag (verified via a follow-up /api/tabs)" $ do
       env <- mkTestFrontendEnvWithRegistryTabs
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
-      Registry.insertEntry (_fe_harnessRegistry env)
+      seedHarnessTab env
         (baseEntry hid "claude-code-0" Nothing)
           { Registry._he_label       = "claude-code"
           , Registry._he_extModified = True
@@ -1668,12 +1685,14 @@ spec = do
     it "dismissing index N removes exactly the row /api/tabs shows at N" $ do
       env <- mkTestFrontendEnvWithRegistryTabs
       -- Two entries with labels that sort deterministically: "alpha" < "bravo".
+      -- Insert in alphabetical order so TabRegistry slot order agrees with
+      -- 'sortedHarnessEntries' order used by the action endpoints.
       let hidA = mustParseHid "11111111-1111-4111-8111-111111111111"
           hidB = mustParseHid "22222222-2222-4222-8222-222222222222"
-      Registry.insertEntry (_fe_harnessRegistry env)
-        (baseEntry hidB "bravo" Nothing) { Registry._he_label = "bravo" }
-      Registry.insertEntry (_fe_harnessRegistry env)
+      seedHarnessTab env
         (baseEntry hidA "alpha" Nothing) { Registry._he_label = "alpha" }
+      seedHarnessTab env
+        (baseEntry hidB "bravo" Nothing) { Registry._he_label = "bravo" }
       -- Discover which name /api/tabs shows at index 1 BEFORE dismissing.
       (_, tabsBody) <- getJSON env ["api", "tabs"]
       let nameAt n = case Aeson.decode tabsBody of
@@ -1683,8 +1702,9 @@ spec = do
                                 , round i == (n :: Int)
                                 , Just (Aeson.String nm) <- [lookupKey v "name"] ]
             _ -> Nothing
-      nameAt 1 `shouldBe` Just "bravo"  -- "alpha" at 0, "bravo" at 1
-      -- Dismiss index 1; exactly the "bravo" row (hidB) must be removed.
+      nameAt 1 `shouldBe` Just "bravo"  -- "alpha" at slot 0, "bravo" at slot 1
+      -- Dismiss index 1; exactly the "bravo" row (hidB) must be removed
+      -- (action endpoints still use sortedHarnessEntries ordering: alpha=0, bravo=1).
       (st, _) <- postJSON env ["api", "tabs", "1", "dismiss"] "{}"
       st `shouldBe` HTTP.status200
       goneB <- Registry.lookupById (_fe_harnessRegistry env) hidB
@@ -1701,12 +1721,13 @@ spec = do
         writeTestSession tmpDir sid2 False
         env0 <- mkTestFrontendEnvWithRegistryTabs
         let env = env0 { _fe_sessionsDir = tmpDir }
-        -- Seed a harness entry that holds sid1. A harness tab's session is NOT
-        -- de-duped out of recents (unlike a provider/raw-shell tab): the harness
-        -- keeps its controls entry under "Running Harnesses" AND its conversation
-        -- is reachable as a Recent Sessions row.
+        -- Seed a harness entry that holds sid1 into BOTH registries (WU6). A
+        -- harness tab's session is NOT de-duped out of recents (unlike a
+        -- provider/raw-shell tab): the harness keeps its controls entry under
+        -- "Running Harnesses" AND its conversation is reachable as a Recent
+        -- Sessions row.
         let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
-        Registry.insertEntry (_fe_harnessRegistry env)
+        seedHarnessTab env
           (baseEntry hid "claude-code-0" Nothing)
             { Registry._he_label = "claude-code", Registry._he_sessionId = Just sid1 }
         (st, respBody) <- getJSON env ["api", "sessions", "recent"]
@@ -1733,7 +1754,9 @@ spec = do
         env0 <- mkTestFrontendEnvWithRegistryTabs
         let env = env0 { _fe_sessionsDir = tmpDir }
             hid = mustParseHid "22222222-2222-4222-8222-222222222222"
-        Registry.insertEntry (_fe_harnessRegistry env)
+        -- WU6: seed into BOTH registries so the harness carve-out applies
+        -- (harness sessions bypass the empty-transcript filter).
+        seedHarnessTab env
           (baseEntry hid "claude-code-0" Nothing)
             { Registry._he_label = "claude-code", Registry._he_sessionId = Just sidH }
         (st, respBody) <- getJSON env ["api", "sessions", "recent"]
@@ -1757,10 +1780,13 @@ spec = do
             sid2 = "test-20240101-120000-002"
         writeTestSession tmpDir sid1 False
         writeTestSession tmpDir sid2 False
-        -- Tab has session sid1 open
-        let tabs = [ (mkTabSnapshot 0 "provider" "tab0" "running")
-                       { _ts_sessionId = Just sid1 } ]
-        env <- mkTestFrontendEnvWithTabsAndDir tabs tmpDir
+        -- Bind sid1 as a provider (non-harness) tab in the TabRegistry; WU6
+        -- excludes non-harness active-tab sessions from recent.
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        _ <- registryAppend
+               (_fe_tabRegistry env)
+               (BoundSession (SessionId sid1))
+               "tab0"
         (st, respBody) <- getJSON env ["api", "sessions", "recent"]
         st `shouldBe` HTTP.status200
         case Aeson.decode respBody of
@@ -1820,6 +1846,65 @@ spec = do
         (st, respBody) <- getJSON env ["api", "sessions", "archived"]
         st `shouldBe` HTTP.status200
         respBody `shouldBe` Aeson.encode ([] :: [Aeson.Value])
+
+  -- -----------------------------------------------------------------------
+  -- WU6: computeListsSnapshot — BoundSession tab deduplication
+  -- -----------------------------------------------------------------------
+
+  describe "computeListsSnapshot (WU6 — active-tab deduplication)" $ do
+    it "a BoundSession tab appears in tabs and its sid is excluded from BOTH recent and archived" $
+      withSystemTempDirectory "pureclaw-wu6-dedup" $ \tmpDir -> do
+        let sid = "test-20240101-120000-wu6a"
+        -- Create the session on disk and mark it ARCHIVED so it would normally
+        -- appear in archivedSessions; the BoundSession tab binding must suppress it.
+        writeTestSession tmpDir sid True
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Append the session as a non-harness tab (BoundSession).
+        _ <- registryAppend
+               (_fe_tabRegistry env)
+               (BoundSession (SessionId sid))
+               "wu6-session-tab"
+        snap <- computeListsSnapshot env
+        let lookupArr key v = case v of
+              Aeson.Object km -> case KM.lookup (AesonKey.fromText key) km of
+                Just (Aeson.Array arr) -> toList' arr
+                _                      -> []
+              _ -> []
+        -- The session appears in the "tabs" array.
+        let tabIds = [ t | v <- lookupArr "tabs" snap
+                         , Just (Aeson.String t) <- [lookupKey v "session_id"] ]
+        tabIds `shouldSatisfy` elem sid
+        -- The sid is NOT in recentSessions.
+        let recentIds = [ t | v <- lookupArr "recentSessions" snap
+                             , Just (Aeson.String t) <- [lookupKey v "id"] ]
+        recentIds `shouldSatisfy` notElem sid
+        -- The sid is NOT in archivedSessions.
+        let archIds = [ t | v <- lookupArr "archivedSessions" snap
+                           , Just (Aeson.String t) <- [lookupKey v "id"] ]
+        archIds `shouldSatisfy` notElem sid
+
+    it "a harness-tab session stays dual-listed in recentSessions" $
+      withSystemTempDirectory "pureclaw-wu6-harness" $ \tmpDir -> do
+        let sid = "test-20240101-120000-wu6b"
+        writeTestSession tmpDir sid False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let hid = mustParseHid "55555555-5555-4555-8555-555555555555"
+        -- Bind the session as a BoundHarness tab (kind="harness"); the harness
+        -- carve-out means the session MUST still appear in recentSessions.
+        seedHarnessTab env
+          (baseEntry hid "wu6-win" Nothing)
+            { Registry._he_label     = "wu6-harness"
+            , Registry._he_sessionId = Just sid
+            }
+        snap <- computeListsSnapshot env
+        let lookupArr key v = case v of
+              Aeson.Object km -> case KM.lookup (AesonKey.fromText key) km of
+                Just (Aeson.Array arr) -> toList' arr
+                _                      -> []
+              _ -> []
+        let recentIds = [ t | v <- lookupArr "recentSessions" snap
+                             , Just (Aeson.String t) <- [lookupKey v "id"] ]
+        recentIds `shouldSatisfy` elem sid
 
   -- -----------------------------------------------------------------------
   -- #67 follow-up: SessionInfo exposes channel name + channel user id
@@ -3225,6 +3310,9 @@ mkTestFrontendEnvWith maxTabs = do
   modelRef    <- newIORef Nothing
   let logger  = mkNoOpLogHandle
   tabCountRef <- newIORef 0
+  tabReg      <- newTabRegistry
+  cursorsRef  <- newIORef emptyCursors
+  exec        <- newExec
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
@@ -3242,7 +3330,9 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_defaultAgent = Nothing
     , _fe_maxTabs      = maxTabs
     , _fe_tabCount     = tabCountRef
-    , _fe_listTabs     = pure []
+    , _fe_tabRegistry  = tabReg
+    , _fe_cursors      = cursorsRef
+    , _fe_exec         = exec
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
     , _fe_startHarness = \_ _ -> pure (Left (HarnessBinaryNotFound "harness start not wired"))
     , _fe_listModels   = \_ -> pure []
@@ -3253,28 +3343,33 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_maxToolIterations = 90
     }
 
--- | Build a FrontendEnv with a pre-set tab listing.
-mkTestFrontendEnvWithTabs :: [TabSnapshot] -> IO FrontendEnv
-mkTestFrontendEnvWithTabs tabs = do
-  env <- mkTestFrontendEnv
-  pure env { _fe_listTabs = pure tabs }
-
--- | Build a FrontendEnv with tabs and a real sessions directory.
+-- | Build a FrontendEnv with a real sessions directory.
+-- The tab list is always driven by '_fe_tabRegistry' (WU6): callers that
+-- need tabs visible in GET /api/tabs should call 'registryAppend' or
+-- 'seedHarnessTab' on the returned env.
 mkTestFrontendEnvWithTabsAndDir :: [TabSnapshot] -> FilePath -> IO FrontendEnv
-mkTestFrontendEnvWithTabsAndDir tabs dir = do
-  env <- mkTestFrontendEnvWithTabs tabs
+mkTestFrontendEnvWithTabsAndDir _tabs dir = do
+  env <- mkTestFrontendEnv
   pure env { _fe_sessionsDir = dir }
 
--- | Build a FrontendEnv whose '_fe_listTabs' is wired to the shared harness
--- registry EXACTLY as production wires it in @CLI.Commands@
--- (@harnessEntriesToTabs \<$\> Registry.snapshot reg@). This lets the
--- @GET \/api\/tabs@ and recent-sessions exclusion tests exercise the WIRED
--- list (the reported symptom is the empty list), not just the pure mapper.
+-- | Build a FrontendEnv whose tab list is driven by the live tab
+-- registry (WU6). Use 'registryAppend' / 'seedHarnessTab' to populate it.
+-- Replaces the old @_fe_listTabs@-wired variant.
 mkTestFrontendEnvWithRegistryTabs :: IO FrontendEnv
-mkTestFrontendEnvWithRegistryTabs = do
-  env <- mkTestFrontendEnv
-  pure env
-    { _fe_listTabs = harnessEntriesToTabs <$> Registry.snapshot (_fe_harnessRegistry env) }
+mkTestFrontendEnvWithRegistryTabs = mkTestFrontendEnv
+
+-- | Insert a harness registry entry AND the corresponding 'BoundHarness'
+-- slot into '_fe_tabRegistry', so the entry appears in GET /api/tabs (WU6).
+-- Ignores slot-full / already-bound errors — tests should not overflow the
+-- 36-slot cap or re-seed the same 'HarnessId'.
+seedHarnessTab :: FrontendEnv -> Registry.HarnessEntry -> IO ()
+seedHarnessTab env e = do
+  Registry.insertEntry (_fe_harnessRegistry env) e
+  _ <- registryAppend
+         (_fe_tabRegistry env)
+         (BoundHarness (Registry._he_id e))
+         (Registry._he_label e)
+  pure ()
 
 -- | Write a minimal session.json + transcript.jsonl to disk so that
 -- @listSessions@ and @handleRecentSessions@ pick it up.
@@ -3583,21 +3678,6 @@ writeHarnessSessionWithId baseDir sid windowKey mHidTxt = do
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
   LBS.writeFile (dir </> "transcript.jsonl") ""
 
--- | Build a 'TabSnapshot' with the P2-WU1 health fields defaulted (no
--- session, not externally modified, not stale, spawned origin, no attach
--- command). Tests override the fields they care about via record update.
-mkTabSnapshot :: Int -> Text -> Text -> Text -> TabSnapshot
-mkTabSnapshot idx kind name status = TabSnapshot
-  { _ts_index         = idx
-  , _ts_kind          = kind
-  , _ts_name          = name
-  , _ts_status        = status
-  , _ts_sessionId     = Nothing
-  , _ts_extModified   = False
-  , _ts_stale         = False
-  , _ts_origin        = "spawned"
-  , _ts_attachCommand = Nothing
-  }
 
 -- | Force-parse a 'Registry.HarnessId' from canonical UUID text (test-only).
 mustParseHid :: Text -> Registry.HarnessId

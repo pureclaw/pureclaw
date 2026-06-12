@@ -58,7 +58,7 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Frontend.API (mkStreamGuard, harnessEntriesToTabs, productionReleaseTmux, productionKillWindow)
+import PureClaw.Frontend.API (mkStreamGuard, productionReleaseTmux, productionKillWindow)
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
@@ -774,7 +774,9 @@ runChat consentChannel opts = do
               , _fe_streamGuard  = Just streamGuard
               , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
               , _fe_tabCount     = feTabCountRef
-              , _fe_listTabs     = harnessEntriesToTabs <$> Registry.snapshot harnessReg
+              , _fe_tabRegistry  = _ts_tabRegistry tabSub
+              , _fe_cursors      = _ts_cursors tabSub
+              , _fe_exec         = _ts_exec tabSub
               , _fe_closeTab     = \_ -> pure (Left "not wired")
               , _fe_startHarness = \spec transcript -> do
                   windowIdx <- readIORef windowIdxRef

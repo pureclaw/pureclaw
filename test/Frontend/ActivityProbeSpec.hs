@@ -46,6 +46,9 @@ import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Security.Adoption (ConsentChannel (..))
 import PureClaw.Session.Types (SessionMeta (..))
+import PureClaw.Tabs (newTabRegistry)
+import PureClaw.Tabs.Exec (newExec)
+import PureClaw.Tabs.Types (emptyCursors)
 import PureClaw.Tools.Registry (emptyRegistry)
 
 -- ---------------------------------------------------------------------------
@@ -124,6 +127,9 @@ mkFrontendEnvForD18 broker sessionsDir = do
   providerRef  <- newIORef Nothing
   modelRef     <- newIORef Nothing
   tabCountRef  <- newIORef 0
+  tabReg       <- newTabRegistry
+  cursorsRef   <- newIORef emptyCursors
+  exec         <- newExec
   pure FrontendEnv
     { _fe_harnesses    = harnessesRef
     , _fe_harnessRegistry = harnessReg
@@ -143,7 +149,9 @@ mkFrontendEnvForD18 broker sessionsDir = do
     , _fe_streamGuard  = Nothing
     , _fe_maxTabs      = 32  -- non-zero so handleNewTab doesn't return 409
     , _fe_tabCount     = tabCountRef
-    , _fe_listTabs     = pure []
+    , _fe_tabRegistry  = tabReg
+    , _fe_cursors      = cursorsRef
+    , _fe_exec         = exec
     , _fe_closeTab     = \_ -> pure (Left "not wired in test")
     , _fe_startHarness = \_ _ -> pure (Left (HarnessBinaryNotFound "harness start not wired"))
     , _fe_listModels   = \_ -> pure []
