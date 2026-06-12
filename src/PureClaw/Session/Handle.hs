@@ -81,6 +81,7 @@ import PureClaw.Core.Types
   , MessageTarget (..)
   , ModelId (..)
   , SessionId (..)
+  , isValidSessionId
   , parseSessionId
   )
 import PureClaw.Frontend.BroadcastingTranscript
@@ -370,17 +371,6 @@ data BranchSeed = BranchSeed
   }
   deriving stock (Show, Eq)
 
--- | Traversal-safety guard for a branch source session id. Mirrors
--- @PureClaw.Frontend.API.isValidSessionId@; replicated locally to avoid an
--- import cycle (the API module imports this module). Rejects the empty
--- string and anything containing @..@ or @\/@.
-isValidBranchSourceId :: Text -> Bool
-isValidBranchSourceId sid
-  | T.null sid = False
-  | T.isInfixOf ".." sid = False
-  | T.isInfixOf "/" sid = False
-  | otherwise = True
-
 -- | Resolve a 'BranchSpec' against the on-disk source session under
 -- @baseDir@, producing a 'BranchSeed' or a typed 'BranchError'.
 --
@@ -398,7 +388,7 @@ isValidBranchSourceId sid
 -- from any caller-supplied payload — so a branch cannot inject history.
 resolveBranchSeed :: FilePath -> BranchSpec -> IO (Either BranchError BranchSeed)
 resolveBranchSeed baseDir bs
-  | not (isValidBranchSourceId sourceId) =
+  | not (isValidSessionId sourceId) =
       pure (Left (BranchInvalidSourceId sourceId))
   | otherwise = do
       let dir   = baseDir </> T.unpack sourceId

@@ -31,6 +31,8 @@ module PureClaw.Core.Types
   , WorkspaceRoot (..)
     -- * Autonomy
   , AutonomyLevel (..)
+    -- * Session ID validation
+  , isValidSessionId
     -- * Allow-lists
   , AllowList (..)
   , AllowListContext (..)
@@ -93,6 +95,16 @@ instance Aeson.FromJSON SessionId where
 -- symmetry with smart constructors elsewhere; performs no validation.
 parseSessionId :: Text -> SessionId
 parseSessionId = SessionId
+
+-- | The one strict session-id predicate. Path-traversal-safe: nonempty, no
+-- leading dot, charset @[a-zA-Z0-9_-]@. Used at every boundary where an id
+-- is path-joined (parseRef, resumeSession) and at the HTTP/WS surfaces.
+-- Single source of truth — do not replicate.
+isValidSessionId :: Text -> Bool
+isValidSessionId t = not (T.null t) && T.head t /= '.' && T.all ok t
+  where
+    ok c = Char.isAsciiLower c || Char.isAsciiUpper c || Char.isDigit c
+        || c == '_' || c == '-'
 
 -- | A server-derived, transport-scoped conversation identifier.
 --

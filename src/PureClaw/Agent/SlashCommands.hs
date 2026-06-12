@@ -707,23 +707,6 @@ tabResumeP t =
             _ -> Nothing
      else Nothing
 
--- | True iff @t@ satisfies the S3 / P15a session-id invariants:
--- non-empty, no path-traversal markers, all characters in
--- @[a-zA-Z0-9_-]@.
-isValidSessionId :: Text -> Bool
-isValidSessionId t =
-  not (T.null t)
-    && not ("." `T.isPrefixOf` t)
-    && not (".." `T.isInfixOf` t)
-    && T.all isSessionIdChar t
-  where
-    isSessionIdChar c =
-      Char.isAsciiLower c
-        || Char.isAsciiUpper c
-        || Char.isDigit c
-        || c == '_'
-        || c == '-'
-
 -- | Parse @\/tab rename <N> <name>@. The name captures the remainder
 -- verbatim; 'PureClaw.Routing.Parse.sanitizeTabName' runs at handler
 -- time per S10.

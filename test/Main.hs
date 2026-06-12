@@ -4,6 +4,7 @@ import Test.Hspec
 
 import qualified Auth.AnthropicOAuthSpec
 import qualified Core.TypesSpec
+import qualified Core.SessionIdValidatorSpec
 import qualified Core.MessageSourceSpec
 import qualified Core.ErrorsSpec
 import qualified Core.ConfigSpec
@@ -164,6 +165,7 @@ main :: IO ()
 main = hspec $ do
   describe "Auth.AnthropicOAuth" Auth.AnthropicOAuthSpec.spec
   describe "Core.Types" Core.TypesSpec.spec
+  describe "Core.SessionIdValidator" Core.SessionIdValidatorSpec.spec
   describe "Core.MessageSource" Core.MessageSourceSpec.spec
   describe "Core.Errors" Core.ErrorsSpec.spec
   describe "Core.Config" Core.ConfigSpec.spec

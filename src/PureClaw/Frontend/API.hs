@@ -77,7 +77,7 @@ import PureClaw.Agent.AgentDef
   , unAgentName
   )
 import PureClaw.Agent.Context
-import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, unModelId, unSessionId)
+import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, isValidSessionId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
 import PureClaw.Frontend.StreamBroker
@@ -409,19 +409,6 @@ mkStreamGuard maxPer = do
     { _streamGuard_perOrigin    = ref
     , _streamGuard_maxPerOrigin = maxPer
     }
-
--- | Shared session-ID validation used by every endpoint that consumes a
--- caller-supplied session id (HTTP @\/transcript@, @\/send@, @\/prompt@
--- and the WS @focus@ op). Rejects @..@ and @\/@ to foreclose path
--- traversal; rejects the empty string. Behavioural surface is intentionally
--- the same across the HTTP and WS paths so D26's "shared helper" property
--- holds: changing the rule here changes it everywhere.
-isValidSessionId :: Text -> Bool
-isValidSessionId sid
-  | T.null sid = False
-  | T.isInfixOf ".." sid = False
-  | T.isInfixOf "/" sid = False
-  | otherwise = True
 
 -- | JSON-serializable harness info for the frontend.
 data HarnessInfo = HarnessInfo
