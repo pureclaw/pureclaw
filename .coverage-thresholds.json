@@ -37,6 +37,7 @@
           "tabsFromRegistry: reads TabRegistry + harness snapshot and delegates to tabSnapshotsFromRegistry (Frontend.APISpec GET /api/tabs WU8 D8.1/D8.2)",
           "resolveRegistrySlot: resolves display index to slot+ref (Frontend.APISpec dismiss/release tests at index 0)",
           "handleNewTab (provider): registryAppend + responds with slot+sid (Frontend.APISpec handleNewTab provider test, line 3121)",
+          "spawnHarnessSession: extracted spawn+persist+link core of createHarnessTab (session meta + _fe_startHarness + persist tmux/ids + _he_sessionId link + rollback) — exercised by the existing Frontend.APISpec POST /api/tabs/new harness-spawn suite (D2.1/D6.2/D6.3/D2.3); also reused by the TUI _env_startHarness seam (pureclaw-de0). No new untested IO; remains within this WAI IO-glue waiver.",
           "harnessEntriesToTabs: empty list + single-entry + multi-entry projections (Frontend.APISpec WU8 lines 1015-1063)",
           "computeListsSnapshot: BoundSession tab deduplication — active tab sids excluded from archived (Frontend.APISpec lines 1864/1912)",
           "atTabCap: 409 when registry is at maxTabs (Frontend.APISpec POST /api/tabs/new cap tests)",
