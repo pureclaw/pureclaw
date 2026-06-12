@@ -151,8 +151,10 @@ Route the frontend tab endpoints through the `TabRegistry`:
     36-slot cap. `readTabs` length supersedes the `_fe_tabCount` IORef as the count
     source (drop `_fe_tabCount`; this is in-scope test churn — ~14 `_fe_tabCount`
     assertions in `APISpec` become `readTabs`-length assertions). A registry
-    `SlotsFull` (or the `_fe_maxTabs` pre-check) surfaces the existing
-    slot-exhaustion copy as a clear 4xx, not a raw registry error string.
+    `SlotsFull` (or the `_fe_maxTabs` pre-check) returns a clear 4xx with the
+    `{"error": …}` JSON convention; **the frontend must render an actionable
+    slot-exhaustion message** (today the non-branch create path silently swallows a
+    `!res.ok`, so the cap would otherwise be a silent no-op — see the React row).
 - **Tab actions resolve the index against the `TabRegistry`, not the HarnessRegistry**
   (fixes the index-aliasing blocker). Today `withResolvedTab`/`tabIndexToEntry`
   resolve `_ts_index` against `sortedHarnessEntries`; with interleaved session+harness
@@ -177,31 +179,36 @@ own selection (`selectedId`) stays a frontend-local view; the **list** is shared
 focus is per-surface.
 
 ### E. Persistence
-- **Chat sessions become durable:** `mkNewDefaultSession` (`Tabs/Wiring.hs`) must
-  `_sh_save` the freshly-minted session (matching the frontend provider path which
-  already saves). Without this, a `/nt`-created tab's `session.json` never exists and
-  a persisted+restored `BoundSession` tab is an unresolvable zombie. This is the
-  primary fix; reconcile (below) is the defense-in-depth backstop.
+- **Sessions are already durable** — `mkSessionHandle` (`Session/Handle.hs`) writes
+  `session.json` unconditionally at construction, and both `mkNewDefaultSession`
+  (`/nt`) and the frontend provider path go through it. So **no `_sh_save` change is
+  needed** (an earlier draft wrongly claimed `/nt` sessions weren't saved — corrected).
 - **Save:** `_env_onTabsChanged` also calls `saveTabs stateDir <tabs> <cursors>`
   (atomic temp+rename, 0600; best-effort — failure logged, not fatal). One seam →
-  save + broadcast together. (Note: because the seam carries both, the persistence
-  round-trip is also tested *directly* via the `Persist` module, independent of
-  whether a frontend/broadcast is wired.)
+  save + broadcast together. Persistence is tested *directly* via the `Persist` module
+  (round-trip through `saveTabs`/`loadTabs`), independent of the broadcast seam.
 - **Load:** in boot, after the existing synchronous `Reconcile.bootReconstruct`
-  (`Commands.hs`, which runs strictly before `Async.withAsync runFrontend`), call
-  `loadTabs`+`reconcileTabs` (`Tabs/Persist.hs`) with `PersistDeps` wired
-  (`_pd_stateDir`, `_pd_harnessLive` = HarnessRegistry liveness probe,
-  `_pd_discoveryReady` = `pure ()` since discovery has already completed
-  synchronously) and seed the `TabRegistry` + `CursorState` IORefs from the result
-  **before** the server/loop start, so the first WS `lists` snapshot already reflects
-  restored tabs. Reconcile keeps: a `BoundSession` tab **iff its `session.json`
-  exists** (drop orphans — defense in depth against any unsaved session); a
-  `BoundHarness` tab iff `_pd_harnessLive`.
-- **Traversal guard (security):** `parseRef` (`Tabs/Persist.hs`) must reject a
-  `BoundSession` whose decoded `SessionId` fails `isValidSessionId` (rejecting
-  `..`/`/`/empty), mirroring the existing invalid-`HarnessId` rejection — so a
-  hand-edited `tabs.json` cannot path-join a traversal id when `resolveSession`/
-  `openSessionFromDisk` later opens it. Drop the bad tab, load the rest (tolerant).
+  (`Commands.hs`, strictly before `Async.withAsync runFrontend`), call
+  `loadTabs`+`reconcileTabs` with `PersistDeps` wired (`_pd_stateDir =
+  pureclawDir </> "state"`, `_pd_harnessLive` = HarnessRegistry liveness probe,
+  `_pd_discoveryReady = pure ()` since discovery already completed synchronously) and
+  seed the `TabRegistry` + `CursorState` IORefs from the result **before** the
+  server/loop start, so the first WS `lists` snapshot already reflects restored tabs.
+  Reconcile keeps: a `BoundSession` tab **iff its `session.json` exists** — this is
+  **defense-in-depth against a hand-edited or partially-written `tabs.json`** that
+  references a session that was deleted out-of-band (not against an unsaved session,
+  which can't happen); a `BoundHarness` tab iff `_pd_harnessLive`.
+- **Traversal guard (security):** `SessionId` is opaque and `resumeSession`/
+  `openSessionFromDisk` path-join it **with no validation**. Promote a single
+  **strict** canonical validator `isValidSessionId` to the leaf `Core.Types`
+  (non-empty; no leading `.`; no `..`; no `/`/control/NUL; charset `[a-zA-Z0-9_-]`)
+  and: (a) `parseRef` (`Tabs/Persist.hs`) rejects a `BoundSession` whose decoded
+  `SessionId` fails it — drop that tab, load the rest (tolerant, mirroring the
+  invalid-`HarnessId` arm); (b) `resumeSession`/`openSessionFromDisk` also validate
+  (safe-by-construction regardless of caller). Refactor the existing three divergent
+  `isValidSessionId`/`isValidBranchSourceId` copies (`Frontend/API.hs`,
+  `Session/Handle.hs`, `Agent/SlashCommands.hs`) onto the one strict definition so the
+  rule lives in exactly one place.
 
 ## Data flow (end to end)
 
@@ -220,29 +227,34 @@ focus is per-surface.
 
 | Unit | Change | Owns |
 |---|---|---|
-| **`Frontend/TabsView.hs` (NEW)** | the **pure** `tabSnapshotsFromRegistry :: TabList -> (SessionId -> Maybe SessionMeta) -> (HarnessId -> Maybe HarnessEntry) -> [TabSnapshot]`; exported + unit-tested (branch matrix: session/harness/vanished-harness) | pure projection logic (95%-gated) |
-| `Frontend/API.hs` | `_fe_tabRegistry`/`_fe_cursors` fields; thin IO wrapper gathering lookups → `tabSnapshotsFromRegistry`; recentSessions+archived exclusion reads registry tabs; **tab-action endpoints resolve index against the TabRegistry slot** (close any kind; dismiss/release/destroy/acknowledge harness-only); `_fe_maxTabs` pre-check; drop `_fe_tabCount` | lists IO wrapper + frontend tab endpoints |
+| **`Frontend/TabsView.hs` (NEW)** | **relocate** `TabSnapshot` + `livenessToTabStatus` + `harnessOriginToText` here from `Frontend.API` (they're needed by the pure fn and `Frontend.API` will import `TabsView`, so they move *down* to avoid an import cycle; `Frontend.API` re-exports them for existing call sites/tests). Add the **pure** `tabSnapshotsFromRegistry :: TabList -> (SessionId -> Maybe SessionMeta) -> (HarnessId -> Maybe HarnessEntry) -> [TabSnapshot]`; exported + unit-tested (branch matrix) | pure projection logic + the wire type (95%-gated) |
+| `Frontend/API.hs` | import + re-export `TabsView`; `_fe_tabRegistry`/`_fe_cursors` fields; thin IO wrapper gathering lookups → `tabSnapshotsFromRegistry`; recentSessions+archived exclusion reads registry tabs; **tab-action endpoints resolve index against the TabRegistry slot** (close any kind; dismiss/release/destroy/acknowledge harness-only with a `"not a harness tab"` 4xx backstop); `_fe_maxTabs` pre-check; drop `_fe_tabCount` | lists IO wrapper + frontend tab endpoints |
 | `Agent/Env.hs` (+`TabSubsystem`) | add `_env_onTabsChanged :: IO ()` (default `pure ()`) | the change-notify seam |
 | `Routing/TabDispatch.hs` | `_td_onTabsChanged` deps field; call after `cmdNt`/`cmdNew`/`cmdClose`/`cmdRename`/wizard-bind | chat-side mutation notify |
-| `Tabs/Wiring.hs` | `mkNewDefaultSession` `_sh_save`s the session; call notify after its registry mutations; release runtime + evict `SessionStore` on close | live-loop notify + durable sessions |
-| `Tabs/Persist.hs` | `parseRef` rejects traversal `SessionId`; `reconcileTabs` drops `BoundSession` tabs whose `session.json` is absent | persistence codec + reconcile |
+| `Tabs/Wiring.hs` | call notify after its registry mutations; on close release the runtime + evict the `SessionStore` (add a remove op — owned here; the frontend close path reaches it via the shared `_env_exec`/store, see §D) | live-loop notify |
+| `Core/Types.hs` | the one strict `isValidSessionId` (leaf) | session-id validation |
+| `Tabs/Persist.hs` | `parseRef` rejects an invalid `SessionId` (strict guard); `reconcileTabs` drops `BoundSession` tabs whose `session.json` is absent. (Both reachable in tests via `loadTabs` — no new exports needed.) | persistence codec + reconcile |
+| `Session/Handle.hs` | `resumeSession`/`openSessionFromDisk` validate the id (safe-by-construction); drop the local validator copy in favor of `Core.Types` | loader safety |
 | `CLI/Commands.hs` | set `_fe_tabRegistry`/`_fe_cursors`; set `_env_onTabsChanged = saveTabs + broadcastLists`; `loadTabs`+reconcile after `bootReconstruct`, before server start | wiring |
-| React frontend | suppress harness-only controls (dismiss/release/destroy/acknowledge) on session rows; otherwise renders from the (unchanged-shape) `lists` frame; verify `mapTabInfo` maps a session tab (kind `provider`, status `idle`, origin `""`) cleanly | rendering |
+| React frontend | **surface slot-exhaustion**: the non-branch new-tab create path (`App.tsx`) must read the 4xx error body and render an actionable message (e.g. *"All N tab slots in use — close a tab to free one"*) instead of the current silent no-op. Harness-only controls already self-suppress on session rows via existing data-gating (`isDead`/`isExited`/`origin==='adopted'`/`extModified`/`attachCommand` all false-empty; Destroy needs `kind==='harness'`) — **no new guard code**; Archive + Close intentionally remain. Verify `mapTabInfo` maps a session tab (kind `provider`, status `idle`, origin `""`) cleanly with no green "running" dot. | rendering + error surfacing |
 
 ## Error handling & edge cases
 
 - **Vanished `BoundHarness` entry** → project `status="exited"`/stale; reconcile drops on next boot. (Full *live notified* harness-death removal is **WU9** — deferred; this feature only reflects exited status.)
 - **Session tab whose `session.json` is gone/archived** → projection falls back to the registry `_tab_name`/sid; row still renders. Archived session that is tab-bound: it's a tab (Active Tabs), not in Recent/Archived (tab binding wins).
-- **`SlotsFull` at 36** (chat or frontend create) → surface the existing slot-exhaustion copy; no state change.
+- **`SlotsFull` at 36** (chat or frontend create) → 4xx; the frontend renders an actionable "close a tab to free a slot" message (chat already prints its own copy); no state change.
 - **`saveTabs` failure** → log + continue (durability is best-effort; live sync unaffected).
 - **Concurrent registry mutation** (chat + frontend) → `atomicModifyIORef'` serializes; the later broadcast reflects the merged state.
 - **Same-tab simultaneous send from both surfaces** → out of scope (documented).
-- **One surface closes the tab another surface had focused** → cursors key by
-  `TabRef` (invariant I3); when the ref is removed, the focused conversation's cursor
-  becomes unresolvable → it is cleared (the existing `cmdClose` compaction already
-  clears cursors on the removed ref). Chat's next plain message then shows the
-  "no active tab — /new …" hint rather than erroring. The frontend's local
-  `selectedId` for a now-gone tab falls back to compose/empty state.
+- **One surface closes the tab another surface had focused** → there are two distinct
+  "focus" notions: the **backend per-`TabRef` cursor** (chat) and the **frontend
+  `selectedId`** (web, local). When the ref is removed, the chat cursor becomes
+  unresolvable → cleared (existing `cmdClose` compaction clears cursors on the removed
+  ref); chat's next plain message shows the "no active tab — /new …" hint. The
+  frontend's `selectedId` is independent: closing a tab the frontend had selected as
+  `session:<sid>` leaves a valid selection (the session re-renders from Recent
+  Sessions); closing one selected as `tab:<index>` falls back to compose/empty. No
+  cross-surface focus coupling is added.
 - **Rename directionality** → only chat `/rename` mutates a tab label in this phase
   (it propagates to the frontend via the notify seam). There is no frontend rename
   endpoint; frontend-initiated rename is a deferred follow-up, not a regression.
@@ -268,14 +280,20 @@ Backend (TDD, `-Werror`/hlint clean, 95% coverage gate):
   `TabDispatch` mutation (`/nt`,`/new`,`/close`,`/rename`) and once per `Wiring`
   mutation — pin which mutations route through which so a double-fire is caught.
 - **Write path**: `handleNewTab` (provider/harness) appends the right `TabRef`;
-  `_fe_maxTabs` pre-check + `SlotsFull` yield the slot-exhaustion copy; close removes
-  the tab AND releases the runtime/evicts the `SessionStore`; dismiss/release on a
-  `BoundSession` tab returns the `"not a harness tab"` error.
+  `_fe_maxTabs` pre-check + `SlotsFull` yield a 4xx; close removes the tab AND
+  releases the runtime/evicts the `SessionStore`; dismiss/release on a `BoundSession`
+  tab returns the `"not a harness tab"` 4xx.
+- **Strict id validation**: `Core.Types.isValidSessionId` rejects leading-dot,
+  `..`, `/`, control/NUL, and non-`[a-zA-Z0-9_-]` ids; `parseRef` drops a tab whose
+  id fails it (tested via `loadTabs` decoding a hand-written `tabs.json` with a
+  leading-dot / control-char / absolute-looking id — not just `..`).
 - **Persistence**: `saveTabs`→`loadTabs`+reconcile round-trip driven **directly via
-  the `Persist` module** (independent of the broadcast seam); reconcile drops a
+  the `Persist` module** (no new exports — through `loadTabs`); reconcile drops a
   dead-harness tab AND a `BoundSession` tab whose `session.json` is absent, keeps a
-  saved session tab; `parseRef` drops a traversal-`SessionId` tab; boot seeds the
-  registry. Save-failure is non-fatal; concurrent appends serialize (no lost update).
+  saved session tab; boot seeds the registry. Save-failure is non-fatal; concurrent
+  appends serialize (no lost update).
+- **Frontend slot-exhaustion**: a frontend test that a 4xx from `/api/tabs/new`
+  renders the actionable message (not a silent no-op).
 - **Dual-write consistency (req 4)**: a frontend `createTab` (`BoundSession`) and a
   chat `/N` resolve the **same** `TabRef` (`registryLookupSlot` equality) — the
   cross-surface invariant.
@@ -296,7 +314,9 @@ under Active Tabs with no green "running" dot and harness-only controls suppress
 - **Raw-shell tab unification** — the frontend raw-shell path is a vestigial,
   unbacked stub; deferred until real raw-shell backing exists (then add a `BoundShell`
   `TabRef` variant + persistence/reconcile arm). Covered here: `BoundSession` +
-  `BoundHarness` only.
+  `BoundHarness` only. To avoid an operator clicking "raw shell" and getting a stub
+  that never appears in Active Tabs (reading as a req-1 bug), **hide/disable the
+  raw-shell create affordance** in the frontend for this phase (small UI change).
 - WU9 live *notified* harness-death removal (only exited-status reflection here).
 - Frontend-initiated tab rename (chat `/rename` → frontend is one-directional here).
 - Coordinating simultaneous sends to the same tab from both surfaces.
