@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { SessionInfo, TabInfo } from '../types'
 import type { ListsSnapshot, StreamClient } from '../types/stream'
 import { streamClient } from '../lib/streamClient'
+import { mapTabInfo } from './useApi'
 
 export function useListsStream(client?: StreamClient) {
   const sc = client ?? streamClient()
@@ -11,7 +12,12 @@ export function useListsStream(client?: StreamClient) {
 
   useEffect(() => {
     const unsub = sc.onLists((snapshot: ListsSnapshot) => {
-      setTabs(snapshot.tabs)
+      // The WS `lists` frame carries tabs as raw backend JSON (`TabInfoWire`,
+      // snake_case health fields). Normalize them to the camelCase TabInfo shape
+      // the UI renders, mirroring the REST `/api/tabs` boundary in useTabs.
+      // `snapshot.tabs` is already typed `TabInfoWire[]`, so `mapTabInfo` applies
+      // directly — no cast needed (mapTabInfo is the single mapping point).
+      setTabs(snapshot.tabs.map(mapTabInfo))
       setRecentSessions(snapshot.recentSessions)
       setArchivedSessions(snapshot.archivedSessions)
     })

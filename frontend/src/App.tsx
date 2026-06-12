@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TopBar } from './components/TopBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
+import { HarnessControls } from './components/HarnessControls'
 import { NewTabComposer } from './components/NewTabComposer'
-import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab } from './hooks/useApi'
+import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab, releaseHarness, adoptWindow, destroyHarness } from './hooks/useApi'
 import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
@@ -122,7 +123,11 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
 
   for (const e of entries) {
     const ts = formatTimestamp(e.timestamp)
-    const rawJson = e.payload
+    // Use the full verbatim on-disk transcript line (all 9 _te_* fields incl.
+    // _te_metadata), not just the payload body — the "View raw JSON (message)"
+    // modal must show everything (pureclaw-1xd). Governing principle: PureClaw
+    // always makes EVERYTHING visible to the user.
+    const rawJson = e.raw
 
     if (e.direction === 'request') {
       const parsed = tryParseJson(e.payload)
@@ -146,10 +151,11 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
         // Extract only the LAST message from the request — it's the new
         // one being sent. Earlier messages in the array are conversation
         // history already represented by previous transcript entries.
-        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> }> | undefined
+        const msgs = parsed.messages as Array<{ role: string; content: Array<{ type: string; text?: string; thinking?: string; name?: string; id?: string; input?: unknown }> }> | undefined
         if (msgs && msgs.length > 0) {
           const msg = msgs[msgs.length - 1]!
           const textParts = extractTextFromContent(msg.content)
+          const thinkingParts = extractThinking(msg.content)
           const toolCalls = extractToolCalls(msg.content, toolResults)
           if (msg.role === 'user') {
             if (textParts) {
@@ -166,6 +172,8 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
             }
           } else if (msg.role === 'assistant') {
             const blocks: MessageContent[] = []
+            thinkingParts.forEach((tk, i) =>
+              blocks.push({ id: 'tk-' + e.id + '-' + i, thinkingText: tk }))
             if (textParts) blocks.push({ id: 'a-' + e.id + '-text', text: textParts })
             for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
             if (blocks.length > 0) {
@@ -196,8 +204,9 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
       // Response
       const parsed = tryParseJson(e.payload)
       if (parsed) {
-        const content = parsed.content as Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> | undefined
+        const content = parsed.content as Array<{ type: string; text?: string; thinking?: string; name?: string; id?: string; input?: unknown }> | undefined
         const textParts = extractTextFromContent(content)
+        const thinkingParts = extractThinking(content)
         const toolCalls = extractToolCalls(content, toolResults)
         const usage = parsed.usage as { input_tokens?: number; output_tokens?: number } | undefined
         const usageMeta = usage
@@ -205,6 +214,8 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           : undefined
 
         const blocks: MessageContent[] = []
+        thinkingParts.forEach((tk, i) =>
+          blocks.push({ id: 'r-' + e.id + '-tk-' + i, thinkingText: tk }))
         if (textParts) blocks.push({ id: 'r-' + e.id + '-text', text: textParts })
         for (const tc of toolCalls) blocks.push({ id: 'tc-' + tc.id, toolCall: tc })
         if (blocks.length === 0) blocks.push({ id: 'r-' + e.id + '-empty', text: '(empty response)' })
@@ -251,6 +262,17 @@ function extractTextFromContent(content: Array<{ type: string; text?: string }> 
     .filter((b) => b.type === 'text' && b.text)
     .map((b) => b.text!)
   return texts.length > 0 ? texts.join('\n') : null
+}
+
+/** Extract claude-code `type:"thinking"` blocks. Each such block carries the
+ *  reasoning text in its `thinking` field (shape
+ *  `{type:"thinking", thinking: string, signature?: string}`). Returns the
+ *  non-empty thinking texts in document order, or [] when none are present. */
+function extractThinking(content: Array<{ type: string; thinking?: string }> | undefined): string[] {
+  if (!content) return []
+  return content
+    .filter((b) => b.type === 'thinking' && b.thinking)
+    .map((b) => b.thinking!)
 }
 
 function extractToolCalls(
@@ -619,6 +641,10 @@ export default function App() {
   // branch create while retaining the draft so the user can retry.
   const [branchDraft, setBranchDraft] = useState<BranchDraft | null>(null)
   const [branchError, setBranchError] = useState<string | null>(null)
+  // Error from a failed "Existing Harness" (attach/adopt) submit. Retained
+  // so the user sees why nothing happened (e.g. a headless run → 403, or the
+  // window no longer exists) and can adjust + retry.
+  const [attachError, setAttachError] = useState<string | null>(null)
 
   const handleNewTab = useCallback(() => {
     setSelectedId(null)
@@ -628,6 +654,10 @@ export default function App() {
     // Clicking New tab abandons any in-progress branch draft.
     setBranchDraft(null)
     setBranchError(null)
+    // Re-open the composer (and clear any prior attach error) for the new
+    // compose session.
+    setComposerDismissed(false)
+    setAttachError(null)
   }, [])
 
   // Branch from a transcript entry: slice the currently-displayed messages
@@ -659,6 +689,8 @@ export default function App() {
       prefixModel,
     })
     setBranchError(null)
+    setComposerDismissed(false)
+    setAttachError(null)
     setSelectedId(null)
     setNewTabFocusTick((n) => n + 1)
     window.history.pushState(null, '', '/')
@@ -670,7 +702,12 @@ export default function App() {
   // can read from a single source of truth — the panel renders config
   // fields, the bottom input drives the create-and-send flow on submit.
   const composerSpec = useNewTabSpec()
-  const composing = selectedId === null
+  // After a successful "Existing Harness" attach there's no session to
+  // navigate to (the adopted window surfaces as a tab via the lists
+  // broadcast), so we dismiss the composer explicitly. Cleared on the next
+  // "New tab" click or selection change.
+  const [composerDismissed, setComposerDismissed] = useState(false)
+  const composing = selectedId === null && !composerDismissed
 
   // The transcript refresh callback is bound to whichever session is
   // currently focused. We keep the latest one in a ref so that the
@@ -681,6 +718,54 @@ export default function App() {
 
   const handleComposerSend = useCallback(
     async (message: string) => {
+      // Existing Harness (attach/adopt) flow. The user's pick+submit in this
+      // foreground form IS the consent (adoptWindow sends
+      // consent_confirmed:true). Adoption registers the running window
+      // server-side (it surfaces as an adopted tab + a Recent Sessions row).
+      // On success we drop the user INTO the adopted harness's conversation and,
+      // if they typed a first message, send it to the harness.
+      if (composerSpec.kind === 'attach') {
+        const session = composerSpec.attachSession.trim()
+        const targetWindow = composerSpec.attachWindow.trim()
+        const result = await adoptWindow(session, targetWindow)
+        if (!result.ok) {
+          setAttachError(
+            'Could not attach to that session — adoption was denied (a headless run can’t confirm consent) or the window no longer exists. Please try again.',
+          )
+          return
+        }
+        setAttachError(null)
+        setBranchDraft(null)
+        setBranchError(null)
+        const sid = result.sessionId
+        const trimmed = message.trim()
+        if (sid) {
+          // Navigate into the adopted harness's conversation (mirrors the
+          // new-session create flow), then send the typed first message.
+          if (trimmed.length > 0) {
+            streamClient().focus(sid)
+            entryCountAtSend.current = 0
+            setPendingMessageModel(null)
+            setPendingMessage(trimmed)
+          }
+          const newId = `session:${sid}`
+          setSelectedId(newId)
+          window.history.pushState(null, '', pathFromSelectedId(newId))
+          if (trimmed.length > 0) {
+            try {
+              await fetch(`/api/sessions/${encodeURIComponent(sid)}/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: trimmed }),
+              })
+            } catch {
+              // Best-effort: the conversation is open; the user can retry there.
+            }
+          }
+        }
+        setComposerDismissed(true)
+        return
+      }
       const body = composerSpec.buildBody()
       // Capture the branch state up-front: the draft is cleared on a
       // successful create (below) before we issue /send, so we snapshot
@@ -861,6 +946,57 @@ export default function App() {
     }
   }, [tabs, selectedId])
 
+  // Dismiss an exited/orphaned tab — removes the live row from the registry.
+  // The session stays in Recent Sessions (session.json is untouched). The
+  // backend broadcasts a refreshed `lists` snapshot, so no local poll is
+  // needed; we just clear the selection if the dismissed tab was focused.
+  const handleDismissTab = useCallback(async (index: number) => {
+    await dismissTab(index)
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
+  // Acknowledge an externally-modified tab — clears its edited flag on the
+  // registry entry. The backend broadcasts a refreshed `lists` snapshot.
+  const handleAcknowledgeTab = useCallback(async (index: number) => {
+    await acknowledgeTab(index)
+  }, [])
+
+  // Release an adopted harness — PureClaw stops managing it (never kills the
+  // tmux window). The backend broadcasts a refreshed `lists` snapshot; we
+  // clear the selection if the released tab was focused.
+  const handleReleaseTab = useCallback(async (index: number) => {
+    await releaseHarness(index)
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
+  // Destroy a harness — terminates its claude-code + shell processes and
+  // archives its session. `confirmAdopted` is forwarded to the backend, which
+  // fail-closes on an adopted harness unless the user has confirmed the kill.
+  // The backend broadcasts a refreshed `lists` snapshot; we clear the
+  // selection if the destroyed harness was focused.
+  const handleDestroyHarness = useCallback(async (index: number, confirmAdopted: boolean) => {
+    await destroyHarness(index, confirmAdopted)
+    if (selectedId === `tab:${index}`) {
+      setSelectedId(null)
+      window.history.pushState(null, '', '/')
+    }
+  }, [selectedId])
+
+  // The selected tab when it is a harness — drives the right-pane view router:
+  // a harness has no transcript, so we show HarnessControls instead of ChatArea.
+  const selectedHarnessTab = useMemo(() => {
+    if (!selectedId?.startsWith('tab:')) return null
+    const idx = parseInt(selectedId.slice('tab:'.length), 10)
+    const t = tabs.find((tab) => tab.index === idx)
+    return t && t.kind === 'harness' ? t : null
+  }, [selectedId, tabs])
+
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
     ? deriveAgent(selectedId, tabs, sessions)
@@ -913,7 +1049,23 @@ export default function App() {
           onUnarchiveSession={handleUnarchiveSession}
           onCloseTab={handleCloseTab}
           onArchiveTab={handleArchiveTab}
+          onDismissTab={handleDismissTab}
+          onAcknowledgeTab={handleAcknowledgeTab}
+          onReleaseTab={handleReleaseTab}
         />
+        {selectedHarnessTab ? (
+          <HarnessControls
+            tab={selectedHarnessTab}
+            session={
+              sessions.find((s) => s.id === selectedHarnessTab.session_id)
+              ?? archivedSessions.find((s) => s.id === selectedHarnessTab.session_id)
+              ?? null
+            }
+            onOpenSession={handleSelectSession}
+            onRelease={handleReleaseTab}
+            onDestroy={handleDestroyHarness}
+          />
+        ) : (
         <ChatArea
           selectedAgent={displayAgent ?? { id: 'none', name: 'PureClaw', status: 'idle', tokenCount: '0' }}
           selectedSession={selectedSession}
@@ -945,11 +1097,12 @@ export default function App() {
           selectedId={selectedId}
           onBranch={selectedSession?.runtime === 'provider' ? handleBranch : undefined}
           prefixMessages={composing && branchDraft ? branchDraft.prefixMessages : undefined}
-          composeError={composing && branchDraft ? branchError : null}
+          composeError={composing ? (branchDraft ? branchError : attachError) : null}
           currentModel={modelDropdownValue}
           availableModels={[...transcriptModels, ...composerSpec.models]}
           onModelChange={modelDropdownValue !== null ? setModelOverride : undefined}
         />
+        )}
       </div>
     </>
   )

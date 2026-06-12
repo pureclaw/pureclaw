@@ -11,6 +11,7 @@ module PureClaw.Frontend.Server
     -- * Re-export environment
   , FrontendEnv (..)
   , StartedHarness (..)
+  , resolveHarnessSession
   , ProviderInfo (..)
   ) where
 

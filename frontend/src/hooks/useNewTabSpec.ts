@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useAgents, useConfiguredProviders, fetchProviderModels, type ProviderInfo } from './useApi'
-import type { AgentInfo } from '../types'
+import { useAgents, useConfiguredProviders, fetchProviderModels, useDiscoverableWindows, type ProviderInfo } from './useApi'
+import type { AgentInfo, DiscoverableWindow } from '../types'
 
-export type NewTabKind = 'provider' | 'harness'
+export type NewTabKind = 'provider' | 'harness' | 'attach'
 export type BackendTag = 'local' | 'tmux' | 'ssh' | 'container'
 export type HarnessFlavour = 'claude-code' | 'codex' | 'opencode' | 'hermes' | 'pureclaw' | 'custom'
 
@@ -64,6 +64,25 @@ export interface NewTabSpec {
   backendConfig: BackendConfig
   updateBackendConfig: (updates: Partial<BackendConfig>) => void
 
+  // Attach (Existing Harness) — adopt a running external tmux window.
+  /** The tmux session of the window to attach to (dropdown selection or
+   *  manual entry). */
+  attachSession: string
+  setAttachSession: (v: string) => void
+  /** The tmux window name to attach to. */
+  attachWindow: string
+  setAttachWindow: (v: string) => void
+  /** When true, the user has opted into manual session/window entry instead
+   *  of (or in addition to) the detected-sessions dropdown. */
+  attachManual: boolean
+  setAttachManual: (v: boolean) => void
+  /** Detected adoptable windows from the most recent scan. */
+  discoverableWindows: DiscoverableWindow[]
+  /** True when the last scan failed (server denied or network error). */
+  discoveryError: boolean
+  /** Trigger a discovery scan (POST /api/discovery/scan). */
+  scanDiscoverable: () => Promise<void>
+
   // Computed
   /** Human-readable error if the spec is not submittable, else null. */
   validationError: string | null
@@ -75,7 +94,12 @@ function buildBackendPayload(tag: BackendTag, config: BackendConfig): Record<str
   const backend: Record<string, unknown> = { tag }
   if (tag === 'tmux') {
     if (config.session) backend.session = config.session
-    if (config.window) backend.window = config.window
+    // The tmux window is auto-assigned by the backend (`canonical-<idx>`)
+    // and ignored for placement, so the composer no longer offers a Window
+    // input. We still emit the key unconditionally because the backend's
+    // `TmuxConfig` request decode requires `o .: "window"`; sending `''`
+    // satisfies that decode while letting the server pick the real name.
+    backend.window = config.window ?? ''
   } else if (tag === 'ssh') {
     if (config.host) backend.host = config.host
     if (config.port) backend.port = config.port
@@ -118,6 +142,28 @@ export function useNewTabSpec(): NewTabSpec {
   // Backend
   const [backendTag, setBackendTag] = useState<BackendTag>('local')
   const [backendConfig, setBackendConfig] = useState<BackendConfig>({ tag: 'local' })
+
+  // Attach (Existing Harness)
+  const [attachSession, setAttachSession] = useState('')
+  const [attachWindow, setAttachWindow] = useState('')
+  const [attachManual, setAttachManual] = useState(false)
+  const { windows: discoverableWindows, error: discoveryError, scan: scanDiscoverable } = useDiscoverableWindows()
+
+  // Auto-load the detected-sessions dropdown the first time the user opens
+  // the Existing-Harness section. Discovery is an explicit, user-invoked
+  // action (the section being shown IS the invocation) — scan once per
+  // entry into the section, not on every render.
+  const [attachScanned, setAttachScanned] = useState(false)
+  useEffect(() => {
+    if (kind !== 'attach') {
+      // Reset so re-entering the section scans fresh.
+      if (attachScanned) setAttachScanned(false)
+      return
+    }
+    if (attachScanned) return
+    setAttachScanned(true)
+    void scanDiscoverable()
+  }, [kind, attachScanned, scanDiscoverable])
 
   // Default the provider to whatever PureClaw is configured to use (the
   // entry marked isDefault by the backend), or — failing that — the
@@ -198,6 +244,13 @@ export function useNewTabSpec(): NewTabSpec {
     if (kind === 'harness' && flavour === 'custom' && !customBinary.trim()) {
       return 'Binary name is required for custom flavour'
     }
+    if (kind === 'attach') {
+      // The only requirement to attach is a session to attach to (from the
+      // dropdown selection or the manual field). The adopt submit bypasses
+      // buildBody/backend entirely.
+      if (!attachSession.trim()) return 'Pick or enter a session to attach to'
+      return null
+    }
     // Backend sub-field validation applies to both kinds — the LLM's
     // tool calls (provider) and the harness binary's environment
     // (harness) both run against the chosen TerminalBackend.
@@ -233,7 +286,10 @@ export function useNewTabSpec(): NewTabSpec {
       backend: buildBackendPayload(backendTag, backendConfig),
       args: parseArgs(extraArgs),
     }
-    if (workingDir.trim()) sessionKind.working_dir = workingDir.trim()
+    // Field name must be `cwd` — the backend's FromJSON HarnessSpec
+    // (Session/Kind.hs) decodes `cwd`; any other name is silently dropped to
+    // Nothing and the harness starts in the default directory.
+    if (workingDir.trim()) sessionKind.cwd = workingDir.trim()
     return { kind: { tag: 'session', session_kind: sessionKind } }
   }, [kind, provider, model, agent, flavour, customBinary, workingDir, extraArgs, backendTag, backendConfig])
 
@@ -249,6 +305,10 @@ export function useNewTabSpec(): NewTabSpec {
     extraArgs, setExtraArgs,
     backendTag, handleBackendTagChange,
     backendConfig, updateBackendConfig,
+    attachSession, setAttachSession,
+    attachWindow, setAttachWindow,
+    attachManual, setAttachManual,
+    discoverableWindows, discoveryError, scanDiscoverable,
     validationError,
     buildBody,
   }

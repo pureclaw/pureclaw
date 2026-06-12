@@ -23,6 +23,7 @@ import PureClaw.Frontend.StreamBroker (StreamBroker)
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
+import PureClaw.Harness.Registry qualified as Registry
 import {-# SOURCE #-} PureClaw.Handles.Tab (TabHandle, TabIndex, TabRunner (..))
 import PureClaw.Handles.Transcript (TranscriptHandle)
 import PureClaw.MCP (McpServer)
@@ -67,6 +68,15 @@ data AgentEnv = AgentEnv
     -- ^ Security policy for command authorization. Needed by harness management.
   , _env_harnesses :: IORef (Map Text HarnessHandle)
     -- ^ Running harness handles, keyed by name (e.g. "claude-code").
+  , _env_harnessRegistry :: Registry.HarnessRegistry
+    -- ^ The durable 'HarnessId' registry — the source of truth for harness
+    -- identity and health (design @docs\/harness-registry.md@). This is
+    -- ADDITIVE alongside the legacy '_env_harnesses' map: the map keys by
+    -- mutable window name, whereas the registry keys by a UUID-backed
+    -- 'Registry.HarnessId' that survives tmux rename\/move and restart. The
+    -- two coexist during Phase 1; later work units migrate consumers onto the
+    -- registry. Shares one underlying 'TVar' with '_fe_harnessRegistry' so
+    -- the agent and frontend observe the same registry.
   , _env_target :: IORef MessageTarget
     -- ^ Where incoming user messages are routed. Mutable so @\/target@
     -- can hot-swap the destination.

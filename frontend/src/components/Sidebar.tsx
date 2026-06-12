@@ -3,6 +3,7 @@ import type { SessionInfo, TabInfo } from '../types'
 import { sessionDisplayTitle, sessionSubtitle } from '../types'
 import type { SessionActivityState } from '../types/stream'
 import { ActiveTabs } from './ActiveTabs'
+import { RunningHarnesses } from './RunningHarnesses'
 import { ActivityDot } from './StatusDot'
 
 function SectionHeader({ label }: { label: string }) {
@@ -208,6 +209,9 @@ export function Sidebar({
   onUnarchiveSession,
   onCloseTab,
   onArchiveTab,
+  onDismissTab,
+  onAcknowledgeTab,
+  onReleaseTab,
 }: {
   tabs: TabInfo[]
   sessions: SessionInfo[]
@@ -221,7 +225,23 @@ export function Sidebar({
   onUnarchiveSession: (id: string) => void
   onCloseTab: (index: number) => void
   onArchiveTab: (index: number) => void
+  onDismissTab: (index: number) => void
+  onAcknowledgeTab: (index: number) => void
+  onReleaseTab: (index: number) => void
 }) {
+  // Harnesses (the harness-registry rows, kind "harness") get their own
+  // "Running Harnesses" section; everything else stays under "Active Tabs".
+  const harnessTabs = tabs.filter((t) => t.kind === 'harness')
+  const otherTabs = tabs.filter((t) => t.kind !== 'harness')
+
+  // A running harness appears under "Running Harnesses" (its status/Destroy
+  // controls) AND, intentionally, its backing session is also listed under
+  // "Recent Sessions" so the user can jump straight to the conversation. The
+  // backend recents payload already excludes non-harness tab sessions (the
+  // provider/raw-shell tabs in "Active Tabs"), so no extra de-dupe is needed
+  // here — render every session the backend sent.
+  const recentSessions = sessions
+
   return (
     <div
       className="shrink-0 flex flex-col"
@@ -229,19 +249,34 @@ export function Sidebar({
     >
       <div className="flex-1 overflow-y-auto sidebar-scroll py-1 min-h-0">
         <ActiveTabs
-          tabs={tabs}
+          tabs={otherTabs}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
           onSelectTab={onSelectTab}
           onNewTab={onNewTab}
           onCloseTab={onCloseTab}
           onArchiveTab={onArchiveTab}
+          onDismiss={onDismissTab}
+          onAcknowledge={onAcknowledgeTab}
+          onRelease={onReleaseTab}
         />
 
-        {sessions.length > 0 && (
+        <RunningHarnesses
+          tabs={harnessTabs}
+          selectedId={selectedId}
+          sessionActivity={sessionActivity}
+          onSelectTab={onSelectTab}
+          onCloseTab={onCloseTab}
+          onArchiveTab={onArchiveTab}
+          onDismiss={onDismissTab}
+          onAcknowledge={onAcknowledgeTab}
+          onRelease={onReleaseTab}
+        />
+
+        {recentSessions.length > 0 && (
           <>
             <SectionHeader label="Recent Sessions" />
-            {sessions.map((s) => (
+            {recentSessions.map((s) => (
               <SessionRow
                 key={s.id}
                 session={s}

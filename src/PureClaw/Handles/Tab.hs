@@ -189,10 +189,13 @@ defaultProviderSpec = ProviderSpec
 -- | Default 'HarnessSpec' used by the 'KindHarness' pattern synonym.
 defaultHarnessSpec :: HarnessSpec
 defaultHarnessSpec = HarnessSpec
-  { _h_flavour = HClaudeCode
-  , _h_backend = TbLocal
-  , _h_cwd     = Nothing
-  , _h_args    = []
+  { _h_flavour   = HClaudeCode
+  , _h_backend   = TbLocal
+  , _h_cwd       = Nothing
+  , _h_args      = []
+  , _h_harnessId = Nothing
+  , _h_claudeSessionUuid = Nothing
+  , _h_canonicalCwd      = Nothing
   }
 
 -- | Default 'SshConfig' used by the 'KindSsh' pattern synonym.

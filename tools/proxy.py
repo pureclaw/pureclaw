@@ -61,15 +61,128 @@ def _dbg(*args: object) -> None:
         sys.stderr.write(f"[proxy {ts}] {' '.join(str(a) for a in args)}\n")
 
 
-def _log_request(log_path: str, body: dict) -> None:
+def _log_request(log_path: str, body: dict, response: dict | None = None) -> None:
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         **body,
     }
+    if response is not None:
+        record["_response"] = response
     line = json.dumps(record, separators=(",", ":")) + "\n"
     with _log_lock:
         with open(log_path, "a") as f:
             f.write(line)
+
+
+def _parse_response(
+    status: int, raw: bytes, is_streaming: bool,
+) -> dict:
+    """Build a compact log record from the upstream response.
+
+    Non-streaming: the body is a single JSON object — return it directly.
+    Streaming (SSE): the body is a series of `data: {...}` lines.  We
+    reassemble the final message from the event stream so the log
+    contains the same shape as a non-streaming response.
+    """
+    record: dict = {"status": status}
+    try:
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        record["_raw_bytes"] = len(raw)
+        return record
+
+    if not is_streaming:
+        try:
+            record["body"] = json.loads(text)
+        except json.JSONDecodeError:
+            record["_raw_text"] = text[:4000]
+        return record
+
+    # ── SSE reassembly ──────────────────────────────────────────────
+    # Collect every `data:` payload.  The final `message_stop` event's
+    # preceding `message_delta` carries stop_reason/usage; we also
+    # accumulate content blocks from `content_block_delta` events.
+    events: list[dict] = []
+    for line in text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[6:]
+        if payload.strip() == "[DONE]":
+            continue
+        try:
+            events.append(json.loads(payload))
+        except json.JSONDecodeError:
+            pass
+
+    if not events:
+        record["_raw_text"] = text[:4000]
+        return record
+
+    # Find the message_start event (contains the initial message scaffold)
+    message: dict | None = None
+    for ev in events:
+        if ev.get("type") == "message_start" and "message" in ev:
+            message = ev["message"]
+            break
+
+    if message is None:
+        # Fallback: just store all events
+        record["events"] = events
+        return record
+
+    # Ensure content is a list we can append to
+    if "content" not in message or not isinstance(message.get("content"), list):
+        message["content"] = []
+
+    # Replay content_block_start / content_block_delta to build content
+    content_blocks: dict[int, dict] = {}
+    for ev in events:
+        etype = ev.get("type", "")
+        if etype == "content_block_start":
+            idx = ev.get("index", 0)
+            content_blocks[idx] = ev.get("content_block", {})
+        elif etype == "content_block_delta":
+            idx = ev.get("index", 0)
+            delta = ev.get("delta", {})
+            block = content_blocks.get(idx, {})
+            # Text deltas
+            if delta.get("type") == "text_delta":
+                block["text"] = block.get("text", "") + delta.get("text", "")
+            # Thinking deltas
+            elif delta.get("type") == "thinking_delta":
+                block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
+            # Tool-use input deltas (partial JSON string)
+            elif delta.get("type") == "input_json_delta":
+                block["_input_json"] = block.get("_input_json", "") + delta.get("partial_json", "")
+            content_blocks[idx] = block
+
+    # Finalize content blocks
+    assembled: list[dict] = []
+    for idx in sorted(content_blocks.keys()):
+        block = content_blocks[idx]
+        # Parse accumulated tool-use input JSON
+        if "_input_json" in block:
+            raw_input = block.pop("_input_json")
+            try:
+                block["input"] = json.loads(raw_input)
+            except json.JSONDecodeError:
+                block["input"] = raw_input
+        assembled.append(block)
+    message["content"] = assembled
+
+    # Apply message_delta (stop_reason, usage) from the final event
+    for ev in reversed(events):
+        if ev.get("type") == "message_delta":
+            delta = ev.get("delta", {})
+            if "stop_reason" in delta:
+                message["stop_reason"] = delta["stop_reason"]
+            usage = ev.get("usage")
+            if usage:
+                message.setdefault("usage", {}).update(usage)
+            break
+
+    record["body"] = message
+    return record
 
 
 def _generate_mitm_cert() -> tuple[str, str, str]:
@@ -196,16 +309,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 else:
                     _dbg(f"    {k}: {v}")
 
-        # Log the request body
+        # Parse the request body
         try:
             body = json.loads(raw_body)
-            _log_request(self.log_path, body)
             _dbg(f"    model={body.get('model', '?')} stream={body.get('stream', False)} "
                  f"messages={len(body.get('messages', []))} tools={len(body.get('tools', []))}")
         except json.JSONDecodeError:
             _dbg("    ERROR: invalid JSON body")
             self._send_error(400, "Invalid JSON in request body")
             return
+
+        is_streaming = body.get("stream", False)
 
         # Build upstream URL:
         # - CONNECT tunnel: forward to https://<connect_host><path>
@@ -236,15 +350,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if key.lower() not in ("transfer-encoding",):
                     self.send_header(key, val)
             self.end_headers()
-            # Stream the response back in chunks
+            # Stream the response back in chunks, accumulating for the log
+            response_chunks: list[bytes] = []
             total_bytes = 0
             while True:
                 chunk = resp.read(8192)
                 if not chunk:
                     break
                 total_bytes += len(chunk)
+                response_chunks.append(chunk)
                 self.wfile.write(chunk)
             _dbg(f"    streamed {total_bytes} bytes to client")
+            response_record = _parse_response(
+                resp.status, b"".join(response_chunks), is_streaming,
+            )
+            _log_request(self.log_path, body, response=response_record)
         except HTTPError as e:
             elapsed = time.monotonic() - t0
             err_body = e.read()
@@ -262,9 +382,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.send_header(key, val)
             self.end_headers()
             self.wfile.write(err_body)
+            error_record = _parse_response(e.code, err_body, is_streaming)
+            _log_request(self.log_path, body, response=error_record)
         except URLError as e:
             elapsed = time.monotonic() - t0
             _dbg(f"<<< UNREACHABLE ({elapsed:.1f}s): {e.reason}")
+            _log_request(self.log_path, body, response={
+                "status": 502, "error": str(e.reason),
+            })
             self._send_error(502, f"Upstream unreachable: {e.reason}")
 
     def _send_error(self, code: int, message: str) -> None:

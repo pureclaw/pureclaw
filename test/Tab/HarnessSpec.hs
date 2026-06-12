@@ -53,6 +53,7 @@ import PureClaw.Handles.Harness
   ( HarnessHandle (..)
   , HarnessStatus (..)
   )
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Tab
   ( CloseMode (..)
@@ -131,6 +132,7 @@ mkHarnessTestEnv = do
   modelRef       <- newIORef (Nothing :: Maybe ModelId)
   vaultRef       <- newIORef (Nothing :: Maybe VaultHandle)
   harnessRef     <- newIORef (Map.empty :: Map Text HarnessHandle)
+  harnessReg     <- Registry.newRegistry
   targetRef      <- newIORef TargetProvider
   windowIdxRef   <- newIORef 0
   sessionRef     <- newIORef =<< mkNoOpSessionHandle
@@ -151,6 +153,7 @@ mkHarnessTestEnv = do
     , _env_pluginHandle      = mkPluginHandle
     , _env_policy            = defaultPolicy
     , _env_harnesses         = harnessRef
+    , _env_harnessRegistry  = harnessReg
     , _env_target            = targetRef
     , _env_nextWindowIdx     = windowIdxRef
     , _env_agentDef          = Nothing :: Maybe AgentDef

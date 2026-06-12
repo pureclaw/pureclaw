@@ -22,6 +22,7 @@ import PureClaw.Core.Errors
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Log
 import PureClaw.Providers.Class
 import PureClaw.Routing.Config (defaultRoutingConfig)
@@ -122,6 +123,7 @@ mkTestEnv p ch = do
   runnersRef    <- newIORef IntMap.empty
   let routing = defaultRoutingConfig
   channelOutQ   <- newTBQueueIO (fromIntegral (_rc_channelOutQBound routing))
+  harnessReg    <- Registry.newRegistry
   pure AgentEnv
     { _env_provider     = providerRef
     , _env_model        = modelRef
@@ -133,6 +135,7 @@ mkTestEnv p ch = do
     , _env_pluginHandle = mkMockPluginHandle [] (\_ -> Left (AgeError "mock"))
     , _env_policy       = defaultPolicy
     , _env_harnesses    = harnessRef
+    , _env_harnessRegistry = harnessReg
     , _env_target       = targetRef
     , _env_nextWindowIdx = windowIdxRef
     , _env_agentDef      = Nothing

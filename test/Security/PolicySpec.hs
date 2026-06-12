@@ -58,6 +58,16 @@ spec = do
       property $ \(cmdText :: String) ->
         isCommandAllowed policy (CommandName (T.pack cmdText)) `shouldBe` True
 
+    it "allowCommand is a no-op on an AllowAll local policy" $ do
+      let policy  = defaultPolicy { _sp_allowedCommands = AllowAll }
+          policy' = allowCommand (CommandName "git") policy
+      _sp_allowedCommands policy' `shouldBe` AllowAll
+
+    it "denyCommand is a no-op on an AllowAll local policy" $ do
+      let policy  = defaultPolicy { _sp_allowedCommands = AllowAll }
+          policy' = denyCommand (CommandName "git") policy
+      _sp_allowedCommands policy' `shouldBe` AllowAll
+
   describe "_sp_allowedRemoteCommands" $ do
     it "defaultPolicy denies all remote commands" $
       property $ \(cmdText :: String) ->

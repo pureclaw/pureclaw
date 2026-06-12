@@ -267,9 +267,45 @@ function BranchButton({ onClick, disabled }: { onClick: () => void; disabled?: b
   )
 }
 
+// Recursively expand string values that are THEMSELVES valid JSON
+// objects/arrays into nested structure — chiefly `_te_payload`, which is a
+// stringified JSON blob. This is for READABILITY of the displayed form only;
+// the exact on-disk bytes remain available verbatim via the Copy button.
+// Scalar-looking strings ("42", "true", plain prose) are deliberately left
+// untouched so we never coerce `"42"` into `42`. Depth-guarded against
+// pathologically nested payloads.
+function expandEmbeddedJson(value: unknown, depth = 0): unknown {
+  if (depth > 8) return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const parsed: unknown = JSON.parse(value)
+        if (parsed !== null && typeof parsed === 'object') {
+          return expandEmbeddedJson(parsed, depth + 1)
+        }
+      } catch {
+        // Not JSON — leave the string as-is.
+      }
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => expandEmbeddedJson(v, depth + 1))
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = expandEmbeddedJson(v, depth + 1)
+    }
+    return out
+  }
+  return value
+}
+
 function prettyJsonOrRaw(payload: string): string {
   try {
-    return JSON.stringify(JSON.parse(payload), null, 2)
+    return JSON.stringify(expandEmbeddedJson(JSON.parse(payload)), null, 2)
   } catch {
     return payload
   }
@@ -379,7 +415,7 @@ function RawJsonModal({ title, body, onClose }: { title: string; body: string; o
               Raw
             </button>
           </div>
-          <CopyJsonButton text={pretty} />
+          <CopyJsonButton text={body} />
           <button
             ref={closeBtnRef}
             className="raw-json-close"
@@ -393,7 +429,7 @@ function RawJsonModal({ title, body, onClose }: { title: string; body: string; o
         {tab === 'formatted' ? (
           parsed.ok ? (
             <div className="raw-json-body raw-json-body-tree">
-              <JsonTree value={parsed.value} />
+              <JsonTree value={expandEmbeddedJson(parsed.value)} />
             </div>
           ) : (
             <div
@@ -445,7 +481,14 @@ function CodeBlock({ lines }: { lines: CodeSpan[][] }) {
   )
 }
 
-function CollapsedBlock({ text, anchorId }: { text: string; anchorId?: string }) {
+/** A collapsible text block. Used for two distinct content kinds, told apart
+ *  by the optional `label`:
+ *   - the System prompt (no label \u2014 bare preview, unchanged historical look),
+ *   - a claude-code "thinking" block (label="Thinking" \u2014 a distinct pill so it
+ *     can never be mistaken for the System prompt).
+ *  Content is always rendered as React text children (escaped); there is no
+ *  `dangerouslySetInnerHTML` anywhere on this path. */
+function CollapsedBlock({ text, anchorId, label }: { text: string; anchorId?: string; label?: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
   const [expanded, setExpanded] = useState(targeted)
@@ -469,6 +512,14 @@ function CollapsedBlock({ text, anchorId }: { text: string; anchorId?: string })
     >
       <div className="flex items-center gap-1.5">
         <span style={{ fontSize: 10, opacity: 0.6 }}>{expanded ? '\u25BC' : '\u25B6'}</span>
+        {label && (
+          <span
+            className="text-xs font-semibold shrink-0"
+            style={{ color: 'var(--accent-secondary)' }}
+          >
+            {label}
+          </span>
+        )}
         {expanded ? (
           <pre className="whitespace-pre-wrap break-words flex-1" style={{ fontFamily: 'inherit', margin: 0, maxHeight: 400, overflow: 'auto' }}>
             {text}
@@ -615,6 +666,9 @@ function MessageBlock({ block }: { block: MessageContent }) {
   }
   if (block.collapsedText) {
     return <CollapsedBlock text={block.collapsedText} anchorId={block.id} />
+  }
+  if (block.thinkingText) {
+    return <CollapsedBlock text={block.thinkingText} anchorId={block.id} label="Thinking" />
   }
   if (block.codeBlock) {
     return <CodeBlock lines={block.codeBlock} />
@@ -910,7 +964,10 @@ export function ChatArea({
    *  stays in its normal position. */
   composerControls?: {
     panel: React.ReactNode
-    kind: 'provider' | 'harness'
+    /** 'attach' (Existing Harness) submits WITHOUT a typed message — the
+     *  submit button is gated only by `valid`. The other kinds require a
+     *  first message before send enables. */
+    kind: 'provider' | 'harness' | 'attach'
     /** False when the spec has a known-invalid field; the send button
      *  is disabled in that case. */
     valid: boolean
@@ -1163,11 +1220,16 @@ export function ChatArea({
           shell. */}
       {(() => {
         const isCompose = !!composerControls
-        const placeholder = isCompose
-          ? 'Type your first message\u2026'
-          : `Message ${selectedAgent.name}\u2026`
+        // Attach (Existing Harness) needs no message \u2014 the user only picks a
+        // session and submits. Other compose kinds require a first message.
+        const isAttach = composerControls?.kind === 'attach'
+        const placeholder = isAttach
+          ? 'Attach to the selected session\u2026'
+          : isCompose
+            ? 'Type your first message\u2026'
+            : `Message ${selectedAgent.name}\u2026`
         const submitDisabled = isCompose
-          ? !composerControls!.valid || !input.trim()
+          ? !composerControls!.valid || (!isAttach && !input.trim())
           : (!input.trim() || !onSend)
         const onSubmit = () => {
           if (isCompose) {

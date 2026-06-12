@@ -46,6 +46,7 @@ import PureClaw.Agent.SlashCommands qualified
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness (HarnessHandle)
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Log
 import PureClaw.Handles.Tab
   ( TabError (..)
@@ -167,6 +168,7 @@ mkAutoSpawnEnvWith ch routing = do
   modelRef       <- newIORef (Nothing :: Maybe ModelId)
   vaultRef       <- newIORef (Nothing :: Maybe VaultHandle)
   harnessRef     <- newIORef (Map.empty :: Map Text HarnessHandle)
+  harnessReg     <- Registry.newRegistry
   targetRef      <- newIORef TargetProvider
   windowIdxRef   <- newIORef 0
   sessionRef     <- newIORef =<< mkNoOpSessionHandle
@@ -187,6 +189,7 @@ mkAutoSpawnEnvWith ch routing = do
     , _env_pluginHandle      = mkPluginHandle
     , _env_policy            = defaultPolicy
     , _env_harnesses         = harnessRef
+    , _env_harnessRegistry  = harnessReg
     , _env_target            = targetRef
     , _env_nextWindowIdx     = windowIdxRef
     , _env_agentDef          = Nothing :: Maybe AgentDef

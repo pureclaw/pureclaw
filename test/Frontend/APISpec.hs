@@ -44,9 +44,12 @@ import PureClaw.Handles.Harness
   , HarnessStatus (..)
   , mkNoOpHarnessHandle
   )
+import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Harness.Tmux (TmuxWindowRow (..))
 import Data.ByteString (ByteString)
+import PureClaw.Security.Adoption (AdoptedHarness, ConsentChannel (..))
 import PureClaw.Security.Command (CommandError (..))
-import PureClaw.Handles.Log (mkNoOpLogHandle)
+import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
 import PureClaw.Providers.Class
   ( CompletionRequest (..)
@@ -201,6 +204,51 @@ spec = do
               _tc_session tc `shouldBe` "pureclaw"
               _tc_window tc  `shouldBe` "claude-code-0"
             other -> expectationFailure ("expected TbTmux backend, got " <> show other)
+          other -> expectationFailure ("expected SkHarness kind, got " <> show other)
+
+    -- WU6 (D6.2/D6.3): the claudeSessionUuid + canonicalCwd the spawn returns
+    -- in its StartedHarness are persisted additively into the session's
+    -- _sm_kind HarnessSpec, so a restart can re-derive the JSONL log path. The
+    -- fake spawn returns a KNOWN uuid; we read it back from session.json. This
+    -- proves the persisted uuid is exactly the value the spawn surfaced (which,
+    -- in production, is the SAME value injected as --session-id).
+    it "persists claudeSessionUuid and canonicalCwd into _sm_kind (WU6 D6.2/D6.3)" $ do
+      withSystemTempDirectory "pureclaw-wu6-persist" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let knownUuid = "0badf00d-1234-4abc-8abc-0badf00dface"
+            knownCwd  = "/canon/spawn/cwd"
+            env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessUuid (_fe_harnesses env0) "claude-code-0"
+                    (Just knownUuid) (Just knownCwd) }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> do
+            _h_claudeSessionUuid hs `shouldBe` Just knownUuid
+            _h_canonicalCwd hs `shouldBe` Just knownCwd
+          other -> expectationFailure ("expected SkHarness kind, got " <> show other)
+
+    -- WU6 (back-compat): when the spawn returns Nothing for both new fields
+    -- (e.g. an adopted/non-claude-code harness), the persisted spec carries
+    -- Nothing — no spurious correlation.
+    it "persists Nothing when the spawn yields no claudeSessionUuid (WU6)" $ do
+      withSystemTempDirectory "pureclaw-wu6-none" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessUuid (_fe_harnesses env0) "claude-code-0"
+                    Nothing Nothing }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> do
+            _h_claudeSessionUuid hs `shouldBe` Nothing
+            _h_canonicalCwd hs `shouldBe` Nothing
           other -> expectationFailure ("expected SkHarness kind, got " <> show other)
 
     -- D2.3: a failing spawn must not consume a tab slot and must remove the
@@ -669,6 +717,40 @@ spec = do
   -- WU-8: GET /api/tabs
   -- -----------------------------------------------------------------------
 
+  describe "GET /api/harnesses (registry-backed — WU5)" $ do
+    it "returns an empty list when the registry is empty" $ do
+      env <- mkTestFrontendEnv
+      (st, respBody) <- getJSON env ["api", "harnesses"]
+      st `shouldBe` HTTP.status200
+      respBody `shouldBe` Aeson.encode ([] :: [Aeson.Value])
+
+    it "reports each registry entry's reconciled liveness (not a live capture)" $ do
+      env <- mkTestFrontendEnv
+      let hidA = mustParseHid "11111111-1111-4111-8111-111111111111"
+          hidB = mustParseHid "22222222-2222-4222-8222-222222222222"
+      -- Two entries with DIFFERENT cached liveness; the handler must read the
+      -- registry's reconciled state, not perform a tmux capture.
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidA "claude-code-0" Nothing)
+          { Registry._he_liveness = Registry.LivenessThinking }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidB "claude-code-1" Nothing)
+          { Registry._he_liveness = Registry.LivenessOrphaned }
+      (st, respBody) <- getJSON env ["api", "harnesses"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody :: Maybe [Aeson.Value] of
+        Just arr -> do
+          let pairs =
+                [ (n, a)
+                | v <- arr
+                , Just (Aeson.String n) <- [lookupKey v "name"]
+                , Just (Aeson.String a) <- [lookupKey v "activity"]
+                ]
+          -- Orphaned collapses to "stopped"; Thinking → "thinking".
+          lookup "claude-code-0" pairs `shouldBe` Just "thinking"
+          lookup "claude-code-1" pairs `shouldBe` Just "stopped"
+        Nothing -> expectationFailure "harnesses response was not a JSON array"
+
   describe "GET /api/tabs" $ do
     it "returns an empty list when no tabs are open" $ do
       env <- mkTestFrontendEnv
@@ -678,27 +760,12 @@ spec = do
 
     it "returns tab list with correct status words" $ do
       let tabs =
-            [ TabSnapshot
-                { _ts_index     = 0
-                , _ts_kind      = "provider"
-                , _ts_name      = "claude-opus"
-                , _ts_status    = "running"
-                , _ts_sessionId = Just "session-001"
-                }
-            , TabSnapshot
-                { _ts_index     = 1
-                , _ts_kind      = "raw_shell"
-                , _ts_name      = "bash"
-                , _ts_status    = "idle"
-                , _ts_sessionId = Nothing
-                }
-            , TabSnapshot
-                { _ts_index     = 2
-                , _ts_kind      = "provider"
-                , _ts_name      = "gpt"
-                , _ts_status    = "crashed"
-                , _ts_sessionId = Just "session-002"
-                }
+            [ (mkTabSnapshot 0 "provider" "claude-opus" "running")
+                { _ts_sessionId = Just "session-001" }
+            , (mkTabSnapshot 1 "raw_shell" "bash" "idle")
+                { _ts_sessionId = Nothing }
+            , (mkTabSnapshot 2 "provider" "gpt" "crashed")
+                { _ts_sessionId = Just "session-002" }
             ]
       env <- mkTestFrontendEnvWithTabs tabs
       (st, respBody) <- getJSON env ["api", "tabs"]
@@ -724,6 +791,960 @@ spec = do
           lookupKey t2 "status"     `shouldBe` Just (Aeson.String "crashed")
         Just _ -> expectationFailure "Expected JSON array"
 
+  describe "POST /api/discovery/scan (list-all metadata-only scan — allow-list dropped)" $ do
+    it "D2.5 returns a 200 JSON array" $ do
+      -- Discovery now LISTS ALL tmux sessions (consent gates at adopt time, not
+      -- here). The endpoint wires the real tmux IO ('scanDiscoverableIO'); with
+      -- no tmux server reachable it returns an empty array, so the contract we
+      -- assert is "200 + JSON array" regardless of the host's tmux state. The
+      -- list-all filtering itself is unit-tested in Harness.DiscoverySpec.
+      env <- mkTestFrontendEnv
+      (st, respBody) <- postJSON env ["api", "discovery", "scan"] ""
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array _) -> pure ()
+        _ -> expectationFailure "Expected a JSON array body"
+
+  describe "POST /api/adopt (Phase 3 WU4 — typed default-deny consent gate, SEC-1)" $ do
+    -- The adopt body always confirms consent; the differentiator across tests
+    -- is the consent CHANNEL ('_fe_consentChannel'), which is the SOLE remaining
+    -- gate now that the allow-list is dropped.
+    let adoptBody s w = Aeson.encode $ object
+          [ "session"           .= (s :: Text)
+          , "window"            .= (w :: Text)
+          , "consent_confirmed" .= True
+          ]
+
+    it "W1.5 (SEC-1) returns 403 for a ConsentHeadless env EVEN with consent_confirmed:true, and calls _fe_adopt ZERO times (no tmux mutation)" $ do
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_consentChannel = ConsentHeadless  -- the ONLY denial cause
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-0")
+      st `shouldBe` HTTP.status403
+      -- No tmux mutation on denial: the adopt mechanism was never invoked, so
+      -- nothing was stamped (@pcl_id) and no entry could be created.
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 0
+      -- And the registry remains empty.
+      entries <- Registry.snapshot (_fe_harnessRegistry env)
+      length entries `shouldBe` 0
+
+    it "W1.5 ConsentInteractive adopts ANY session (no allow-list) — calls _fe_adopt once and returns 200" $ do
+      -- The allow-list is gone: a session the OLD default-deny policy would have
+      -- rejected is now adopted under interactive consent.
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "any-arbitrary-session" "win-0")
+      st `shouldBe` HTTP.status200
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 1
+
+    it "ConsentWeb (the gateway/web UI) adopts the selected session — calls _fe_adopt once and returns 200" $ do
+      -- The web "Existing Harness" flow: the gateway runs ConsentWeb, and the
+      -- browser's window selection (consent_confirmed:true) is the consent, so
+      -- adoption succeeds — it is NOT denied like a truly-headless run.
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_consentChannel = ConsentWeb
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "an-existing-harness" "win-3")
+      st `shouldBe` HTTP.status200
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 1
+
+    it "surfaces the created session_id in the response (for the composer's first-message send)" $ do
+      env0 <- mkTestFrontendEnv
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          env = env0
+            { _fe_consentChannel = ConsentWeb
+            , _fe_adopt          = \_ _ -> do
+                -- Mirror the real adopt mechanism: register an OriginAdopted entry
+                -- carrying the created PureClaw session id.
+                Registry.insertEntry (_fe_harnessRegistry env0)
+                  ((baseEntry hid "adopted-x" (Just mkNoOpHarnessHandle))
+                    { Registry._he_origin    = Registry.OriginAdopted
+                    , Registry._he_sessionId = Just "20240101-000000-001" })
+                pure (Right (hid, mkNoOpHarnessHandle))
+            }
+      (st, respBody) <- postJSON env ["api", "adopt"] (adoptBody "an-existing-harness" "win-3")
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "session_id" `shouldBe` Just (Aeson.String "20240101-000000-001")
+
+    it "returns 400 when consent_confirmed is false/absent, and calls _fe_adopt ZERO times" $ do
+      env0 <- mkTestFrontendEnv
+      adoptCalls <- newIORef (0 :: Int)
+      let env = env0
+            { _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ _ -> do
+                modifyIORef' adoptCalls (+ 1)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+          noConsent = Aeson.encode $ object
+            [ "session" .= ("scratch" :: Text), "window" .= ("win-0" :: Text) ]
+      (st, _) <- postJSON env ["api", "adopt"] noConsent
+      st `shouldBe` HTTP.status400
+      calls <- readIORef adoptCalls
+      calls `shouldBe` 0
+
+    it "the gate token is type-enforced: _fe_adopt is reachable ONLY on Right (interactive + consent_confirmed)" $ do
+      -- D4.3 mirror at the endpoint layer: _fe_adopt receives an AdoptedHarness
+      -- argument and is invoked EXACTLY ONCE only on the allow path, with the
+      -- requested window. (The mechanism's own type-enforcement is asserted in
+      -- Harness.ClaudeCodeSpec — there is no token-free adopt path.)
+      env0 <- mkTestFrontendEnv
+      gotWindow <- newIORef Nothing
+      let env = env0
+            { _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \(_tok :: AdoptedHarness) w -> do
+                writeIORef gotWindow (Just w)
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-7")
+      st `shouldBe` HTTP.status200
+      readIORef gotWindow `shouldReturn` Just "win-7"
+
+    it "syncs the legacy _fe_harnesses map on a successful adopt (D-ADD-2)" $ do
+      env0 <- mkTestFrontendEnv
+      let env = env0
+            { _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ _ ->
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-9")
+      st `shouldBe` HTTP.status200
+      handles <- readIORef (_fe_harnesses env)
+      Map.member "win-9" handles `shouldBe` True
+
+    it "D4.4 a freshly-adopted window appears in GET /api/tabs with origin=\"adopted\" + an attach_command" $ do
+      -- End-to-end at the endpoint: a real registry, a _fe_adopt that inserts an
+      -- OriginAdopted entry (as the production mechanism does), and the
+      -- production-wired _fe_listTabs. After POST /api/adopt the tab list shows
+      -- the adopted row.
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          reg = _fe_harnessRegistry env0
+          env = env0
+            { _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \tok w -> do
+                Registry.insertEntry reg
+                  ((baseEntry hid w (Just mkNoOpHarnessHandle))
+                    { Registry._he_session    = "scratch"
+                    , Registry._he_windowName = w
+                    , Registry._he_label      = w
+                    , Registry._he_origin     = Registry.OriginAdopted
+                    , Registry._he_shellPid   = Just 4242  -- corroborated
+                    })
+                _ <- pure (tok :: AdoptedHarness)
+                pure (Right (hid, mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-adopted")
+      st `shouldBe` HTTP.status200
+      (tabSt, tabBody) <- getJSON env ["api", "tabs"]
+      tabSt `shouldBe` HTTP.status200
+      case Aeson.decode tabBody of
+        Just (Aeson.Array items) -> case toList' items of
+          [t] -> do
+            lookupKey t "origin" `shouldBe` Just (Aeson.String "adopted")
+            lookupKey t "attach_command"
+              `shouldBe` Just (Aeson.String "tmux attach -t scratch:win-adopted")
+          other -> expectationFailure ("expected one tab, got " <> show (length other))
+        _ -> expectationFailure "expected a JSON array of tabs"
+
+  -- -----------------------------------------------------------------------
+  -- WU8: registry-backed Active-Tabs slice (the reported symptom)
+  -- -----------------------------------------------------------------------
+
+  describe "livenessToTabStatus (WU8 → P2-WU1 — status vocabulary)" $ do
+    it "maps LivenessIdle to \"idle\"" $
+      livenessToTabStatus Registry.LivenessIdle `shouldBe` "idle"
+    it "maps LivenessThinking to \"running\"" $
+      livenessToTabStatus Registry.LivenessThinking `shouldBe` "running"
+    -- P2-WU1 D1.1: Exited and Orphaned no longer collapse to "crashed";
+    -- they map to distinct status strings so the frontend can render the
+    -- §7 state→visual split (Exited: ✕ crashed + [Restart] [Dismiss];
+    -- Orphaned: ✕ greyed + [Dismiss]).
+    it "maps LivenessExited to \"exited\"" $
+      livenessToTabStatus Registry.LivenessExited `shouldBe` "exited"
+    it "maps LivenessOrphaned to \"orphaned\"" $
+      livenessToTabStatus Registry.LivenessOrphaned `shouldBe` "orphaned"
+    it "gives Exited and Orphaned distinct status strings (no longer collapsed)" $
+      livenessToTabStatus Registry.LivenessExited
+        `shouldNotBe` livenessToTabStatus Registry.LivenessOrphaned
+
+  describe "harnessOriginToText (P2-WU1 — origin pill mapping)" $ do
+    it "maps OriginSpawned to \"spawned\"" $
+      harnessOriginToText Registry.OriginSpawned `shouldBe` "spawned"
+    it "maps OriginDiscovered to \"discovered\"" $
+      harnessOriginToText Registry.OriginDiscovered `shouldBe` "discovered"
+    it "maps OriginAdopted to \"adopted\"" $
+      harnessOriginToText Registry.OriginAdopted `shouldBe` "adopted"
+
+  describe "harnessEntriesToTabs (WU8 — pure mapping)" $ do
+    it "returns an empty list for no entries" $
+      harnessEntriesToTabs [] `shouldBe` []
+
+    it "maps an entry's fields onto a harness TabSnapshot" $ do
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          e   = (baseEntry hid "claude-code-0" Nothing)
+                  { Registry._he_label     = "claude-code"
+                  , Registry._he_liveness  = Registry.LivenessThinking
+                  , Registry._he_sessionId = Just "session-xyz"
+                  }
+      case harnessEntriesToTabs [e] of
+        [t] -> do
+          _ts_kind t      `shouldBe` "harness"
+          _ts_name t      `shouldBe` "claude-code"
+          _ts_status t    `shouldBe` "running"
+          _ts_sessionId t `shouldBe` Just "session-xyz"
+          _ts_index t     `shouldBe` 0
+        other -> expectationFailure ("expected one tab, got " <> show (length other))
+
+    it "populates extModified, stale, origin, and the attach command (P2-WU1 D1.2)" $ do
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+          e   = (baseEntry hid "claude-code-3" Nothing)
+                  { Registry._he_session     = "pureclaw"
+                  , Registry._he_windowName  = "claude-code-3"
+                  , Registry._he_extModified = True
+                  , Registry._he_stale       = True
+                  , Registry._he_origin      = Registry.OriginDiscovered
+                  }
+      case harnessEntriesToTabs [e] of
+        [t] -> do
+          _ts_extModified t   `shouldBe` True
+          _ts_stale t         `shouldBe` True
+          _ts_origin t        `shouldBe` "discovered"
+          _ts_attachCommand t `shouldBe` Just "tmux attach -t pureclaw:claude-code-3"
+        other -> expectationFailure ("expected one tab, got " <> show (length other))
+
+    it "assigns stable indices by sorting on (label, id) and enumerating from 0" $ do
+      -- Insert in a non-sorted order; the indices must reflect the
+      -- deterministic (label, id) ordering, not insertion order.
+      let hidA = mustParseHid "33333333-3333-4333-8333-333333333333"
+          hidB = mustParseHid "11111111-1111-4111-8111-111111111111"
+          mk lbl hid = (baseEntry hid "win" Nothing) { Registry._he_label = lbl }
+          -- "bravo" sorts after "alpha"; "alpha" entries tie-break on id text.
+          es = [ mk "bravo" hidA          -- label bravo
+               , mk "alpha" hidA          -- label alpha, id "3333..."
+               , mk "alpha" hidB          -- label alpha, id "1111..." (sorts first)
+               ]
+      let tabs = harnessEntriesToTabs es
+      map _ts_index tabs `shouldBe` [0, 1, 2]
+      -- The first two are the "alpha" entries, id "1111..." before "3333...".
+      map (\t -> (_ts_index t, _ts_name t)) tabs
+        `shouldBe` [(0, "alpha"), (1, "alpha"), (2, "bravo")]
+
+  describe "GET /api/tabs (registry-wired — WU8 D8.1/D8.2)" $ do
+    it "is empty when the registry has no harnesses" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      respBody `shouldBe` Aeson.encode ([] :: [Aeson.Value])
+
+    it "shows a spawned harness as a harness tab (the reported symptom fixed)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label    = "claude-code"
+          , Registry._he_liveness = Registry.LivenessIdle
+          }
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let items = toList' arr
+          length items `shouldBe` 1
+          let t0 = head items
+          lookupKey t0 "kind" `shouldBe` Just (Aeson.String "harness")
+          lookupKey t0 "name" `shouldBe` Just (Aeson.String "claude-code")
+        _ -> expectationFailure "Expected JSON array with one harness tab"
+
+    it "reflects each entry's liveness as the documented status string" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hidI = mustParseHid "11111111-1111-4111-8111-111111111111"
+          hidT = mustParseHid "22222222-2222-4222-8222-222222222222"
+          hidE = mustParseHid "33333333-3333-4333-8333-333333333333"
+          hidO = mustParseHid "44444444-4444-4444-8444-444444444444"
+          seed lbl hid lv = Registry.insertEntry (_fe_harnessRegistry env)
+            (baseEntry hid "win" Nothing)
+              { Registry._he_label = lbl, Registry._he_liveness = lv }
+      seed "a-idle"     hidI Registry.LivenessIdle
+      seed "b-thinking" hidT Registry.LivenessThinking
+      seed "c-exited"   hidE Registry.LivenessExited
+      seed "d-orphaned" hidO Registry.LivenessOrphaned
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let pairs =
+                [ (n, s)
+                | v <- toList' arr
+                , Just (Aeson.String n) <- [lookupKey v "name"]
+                , Just (Aeson.String s) <- [lookupKey v "status"]
+                ]
+          lookup "a-idle"     pairs `shouldBe` Just "idle"
+          lookup "b-thinking" pairs `shouldBe` Just "running"
+          -- P2-WU1 D1.1: distinct status strings end-to-end through /api/tabs.
+          lookup "c-exited"   pairs `shouldBe` Just "exited"
+          lookup "d-orphaned" pairs `shouldBe` Just "orphaned"
+        _ -> expectationFailure "Expected JSON array"
+
+    it "surfaces ext_modified, stale, origin, and attach_command in the JSON (P2-WU1 D1.2)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label      = "claude-code"
+          , Registry._he_session    = "pureclaw"
+          , Registry._he_windowName = "claude-code-0"
+          , Registry._he_liveness   = Registry.LivenessIdle
+          , Registry._he_extModified = True
+          , Registry._he_stale       = True
+          , Registry._he_origin      = Registry.OriginAdopted
+          }
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let t0 = head (toList' arr)
+          lookupKey t0 "ext_modified"   `shouldBe` Just (Aeson.Bool True)
+          lookupKey t0 "stale"          `shouldBe` Just (Aeson.Bool True)
+          lookupKey t0 "origin"         `shouldBe` Just (Aeson.String "adopted")
+          lookupKey t0 "attach_command"
+            `shouldBe` Just (Aeson.String "tmux attach -t pureclaw:claude-code-0")
+        _ -> expectationFailure "Expected JSON array with one harness tab"
+
+    it "keeps the existing keys unchanged for back-compat (P2-WU1 D1.3)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label    = "claude-code"
+          , Registry._he_liveness = Registry.LivenessIdle
+          , Registry._he_sessionId = Just "session-abc"
+          }
+      (st, respBody) <- getJSON env ["api", "tabs"]
+      st `shouldBe` HTTP.status200
+      case Aeson.decode respBody of
+        Just (Aeson.Array arr) -> do
+          let t0 = head (toList' arr)
+          -- The original Phase-1 keys must remain present and unchanged so
+          -- existing consumers keep working (extend-only JSON).
+          lookupKey t0 "index"      `shouldBe` Just (Aeson.Number 0)
+          lookupKey t0 "kind"       `shouldBe` Just (Aeson.String "harness")
+          lookupKey t0 "name"       `shouldBe` Just (Aeson.String "claude-code")
+          lookupKey t0 "status"     `shouldBe` Just (Aeson.String "idle")
+          lookupKey t0 "session_id" `shouldBe` Just (Aeson.String "session-abc")
+        _ -> expectationFailure "Expected JSON array with one harness tab"
+
+  -- -----------------------------------------------------------------------
+  -- P2-WU3: per-row action endpoints (Dismiss / Acknowledge / Restart)
+  -- -----------------------------------------------------------------------
+
+  describe "POST /api/tabs/{index}/dismiss (P2-WU3 D3.1)" $ do
+    it "removes the entry from BOTH the registry and the legacy map, leaving session.json intact" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-001"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        let env = env0 { _fe_sessionsDir = tmpDir }
+            hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+        -- Seed a registry entry whose label is ALSO present in the legacy map.
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry hid "claude-code-0" Nothing)
+            { Registry._he_label     = "claude-code"
+            , Registry._he_liveness  = Registry.LivenessExited
+            , Registry._he_sessionId = Just sid
+            }
+        modifyIORef' (_fe_harnesses env)
+          (Map.insert "claude-code" mkNoOpHarnessHandle)
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "dismiss"] "{}"
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "dismissed" `shouldBe` Just (Aeson.Bool True)
+        -- Gone from the registry...
+        gone <- Registry.lookupById (_fe_harnessRegistry env) hid
+        (Registry._he_id <$> gone) `shouldBe` Nothing
+        -- ...and gone from the legacy map...
+        legacy <- readIORef (_fe_harnesses env)
+        Map.member "claude-code" legacy `shouldBe` False
+        -- ...but session.json is untouched, so the sid still loads in Recent.
+        (rst, recentBody) <- getJSON env ["api", "sessions", "recent"]
+        rst `shouldBe` HTTP.status200
+        case Aeson.decode recentBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr
+                          , Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+
+    it "returns 404 for an out-of-range index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+      (st, respBody) <- postJSON env ["api", "tabs", "5", "dismiss"] "{}"
+      st `shouldBe` HTTP.status404
+      lookupKey' respBody "dismissed" `shouldBe` Nothing
+      -- The entry was NOT removed by an out-of-range request.
+      still <- Registry.lookupById (_fe_harnessRegistry env) hid
+      (Registry._he_id <$> still) `shouldBe` Just hid
+
+    it "returns 400 for a non-numeric index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, _) <- postJSON env ["api", "tabs", "notanint", "dismiss"] "{}"
+      st `shouldBe` HTTP.status400
+
+  -- =========================================================================
+  -- Phase 3 WU5 — POST /api/tabs/{index}/release (never kills; SEC-3)
+  -- =========================================================================
+  describe "pickLiveMarker (Phase 3 WU5 — pure live-@pcl_id lookup)" $ do
+    let row name pclId = TmuxWindowRow
+          { _twr_windowIndex = 0
+          , _twr_windowName  = name
+          , _twr_pclId       = pclId
+          , _twr_panePid     = Just 100
+          , _twr_paneDead    = False
+          }
+    it "returns the non-empty @pcl_id of the matching window" $
+      pickLiveMarker "win-a" [row "win-x" "id-x", row "win-a" "id-a"]
+        `shouldBe` Just "id-a"
+    it "returns Nothing when the window is absent" $
+      pickLiveMarker "win-z" [row "win-a" "id-a"] `shouldBe` Nothing
+    it "treats an empty marker as no marker (window present but unmarked)" $
+      pickLiveMarker "win-a" [row "win-a" ""] `shouldBe` Nothing
+    it "returns Nothing for an empty sweep" $
+      pickLiveMarker "win-a" [] `shouldBe` Nothing
+
+  describe "POST /api/tabs/{index}/release (Phase 3 WU5)" $ do
+    let adoptedHid = mustParseHid "33333333-3333-4333-8333-333333333333"
+        -- An OriginAdopted entry whose live @pcl_id WILL match its id text.
+        adoptedEntry hid window =
+          (corroboratedEntry hid window (Just mkNoOpHarnessHandle))
+            { Registry._he_session    = "scratch"
+            , Registry._he_windowName = window
+            , Registry._he_label      = window
+            , Registry._he_origin     = Registry.OriginAdopted
+            }
+        -- A ReleaseTmux that records every (session, window) the handler asks it
+        -- to clear, and answers the live-marker probe from a fixed map.
+        recordingReleaseTmux liveRef clearedRef =
+          ReleaseTmux
+            { _rt_liveMarker  = \s w -> do
+                m <- readIORef liveRef
+                pure (Map.lookup (s, w) m)
+            , _rt_clearMarker = \s w ->
+                modifyIORef' clearedRef (++ [(s, w)])
+            , _rt_renameWindow = \_ _ _ -> pure ()
+            }
+
+    it "D5.1 corroborated adopted entry: clears @pcl_id (set-option -wu via seam), removes from registry+legacy map, NO kill issued" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      -- The live marker matches the entry's id text → corroborated.
+      liveRef <- newIORef
+        (Map.singleton ("scratch", "win-adopted")
+                       (Registry.harnessIdToText adoptedHid))
+      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      modifyIORef' (_fe_harnesses env)
+        (Map.insert "win-adopted" mkNoOpHarnessHandle)
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      -- The ONLY tmux mutation was the unmark, targeting our window — no kill.
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` [("scratch", "win-adopted")]
+      -- Gone from the registry...
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+      -- ...and gone from the legacy map.
+      legacy <- readIORef (_fe_harnesses env)
+      Map.member "win-adopted" legacy `shouldBe` False
+
+    it "D5.2 (SEC-3) STALE entry (live @pcl_id mismatch): deregisters WITHOUT any tmux set-option, and logs a refusal" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      logRef <- newIORef []
+      clearedRef <- newIORef []
+      -- The live marker is a DIFFERENT id (the window was replaced / PID reuse).
+      liveRef <- newIORef
+        (Map.singleton ("scratch", "win-adopted")
+                       "99999999-9999-4999-8999-999999999999")
+      let env = env0
+            { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+            , _fe_logger      = captureWarnLogger logRef
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      modifyIORef' (_fe_harnesses env)
+        (Map.insert "win-adopted" mkNoOpHarnessHandle)
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      -- The invariant: NO window op (clearMarker NEVER called) on a stale entry.
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` []
+      -- A refusal was logged.
+      warns <- readIORef logRef
+      warns `shouldSatisfy` any ("no longer corroborated" `T.isInfixOf`)
+      -- Still deregistered from BOTH stores (we stop managing it either way).
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+      legacy <- readIORef (_fe_harnesses env)
+      Map.member "win-adopted" legacy `shouldBe` False
+
+    it "D5.2 (SEC-3) window gone (no live marker): deregisters WITHOUT any tmux set-option, and logs" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      logRef <- newIORef []
+      clearedRef <- newIORef []
+      liveRef <- newIORef Map.empty  -- the window is gone → Nothing
+      let env = env0
+            { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+            , _fe_logger      = captureWarnLogger logRef
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      (st, _) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status200
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` []
+      -- The refusal log names the missing marker ("<none>") and is forced here.
+      warns <- readIORef logRef
+      warns `shouldSatisfy` any (\w -> "no longer corroborated" `T.isInfixOf` w
+                                       && "<none>" `T.isInfixOf` w)
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+
+    it "releases a SPAWNED harness too (corroborated): clears @pcl_id, retitles the window '(released)', deregisters, 200" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      renamedRef <- newIORef []
+      -- A corroborating live marker is present; origin is Spawned (baseEntry
+      -- default) — release now applies to ANY origin, gated only by corroboration.
+      liveRef <- newIORef
+        (Map.singleton ("pureclaw", "claude-code-0")
+                       (Registry.harnessIdToText adoptedHid))
+      let rt = ReleaseTmux
+            { _rt_liveMarker   = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+            , _rt_clearMarker  = \s w -> modifyIORef' clearedRef (++ [(s, w)])
+            , _rt_renameWindow = \s w n -> modifyIORef' renamedRef (++ [(s, w, n)])
+            }
+          env = env0 { _fe_releaseTmux = rt }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry adoptedHid "claude-code-0" (Just mkNoOpHarnessHandle))
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      -- The window was unmarked AND retitled to show PureClaw detached — but
+      -- never killed.
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` [("pureclaw", "claude-code-0")]
+      renamed <- readIORef renamedRef
+      renamed `shouldBe` [("pureclaw", "claude-code-0", "claude-code-0 (released)")]
+      -- Deregistered (PureClaw stops managing it); window left running.
+      gone <- Registry.lookupById (_fe_harnessRegistry env) adoptedHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+
+    it "returns 404 for an out-of-range index (no tmux op)" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      liveRef <- newIORef Map.empty
+      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      (st, _) <- postJSON env ["api", "tabs", "5", "release"] "{}"
+      st `shouldBe` HTTP.status404
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` []
+
+    it "returns 400 for a non-numeric index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, _) <- postJSON env ["api", "tabs", "notanint", "release"] "{}"
+      st `shouldBe` HTTP.status400
+
+    it "tolerates a non-JSON body (purge defaults to false): still releases a corroborated entry" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      clearedRef <- newIORef []
+      liveRef <- newIORef
+        (Map.singleton ("scratch", "win-adopted")
+                       (Registry.harnessIdToText adoptedHid))
+      let env = env0 { _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (adoptedEntry adoptedHid "win-adopted")
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "release"] "not json at all"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+      cleared <- readIORef clearedRef
+      cleared `shouldBe` [("scratch", "win-adopted")]
+
+    it "D5.3 retention: transcript/session.json persist after release — the sid still loads in Recent" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-007"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        clearedRef <- newIORef []
+        liveRef <- newIORef
+          (Map.singleton ("scratch", "win-adopted")
+                         (Registry.harnessIdToText adoptedHid))
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          ((adoptedEntry adoptedHid "win-adopted")
+            { Registry._he_sessionId = Just sid })
+        (st, _) <- postJSON env ["api", "tabs", "0", "release"] "{}"
+        st `shouldBe` HTTP.status200
+        -- The session.json was NOT deleted → it reappears in Recent Sessions.
+        (rst, recentBody) <- getJSON env ["api", "sessions", "recent"]
+        rst `shouldBe` HTTP.status200
+        case Aeson.decode recentBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr
+                          , Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+
+    it "D5.4 the purge flag is accepted but reserved (documented no-op): session.json is NOT deleted" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-008"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        clearedRef <- newIORef []
+        infoRef <- newIORef []
+        liveRef <- newIORef
+          (Map.singleton ("scratch", "win-adopted")
+                         (Registry.harnessIdToText adoptedHid))
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_releaseTmux = recordingReleaseTmux liveRef clearedRef
+              , _fe_logger      = captureInfoLogger infoRef
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          ((adoptedEntry adoptedHid "win-adopted")
+            { Registry._he_sessionId = Just sid })
+        -- Body explicitly requests purge:true — which is RESERVED (no-op).
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "release"]
+          (Aeson.encode (object ["purge" .= True]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "released" `shouldBe` Just (Aeson.Bool True)
+        -- The reserved-purge no-op is logged (auditable) but NOT acted upon.
+        infos <- readIORef infoRef
+        infos `shouldSatisfy` any ("purge requested but RESERVED" `T.isInfixOf`)
+        -- The session dir is still on disk (purge did NOT delete it).
+        stillThere <- doesDirectoryExist (tmpDir </> T.unpack sid)
+        stillThere `shouldBe` True
+
+  -- =========================================================================
+  -- POST /api/tabs/{index}/destroy — terminates the harness (kill-window),
+  -- archives its session (transcript retained), deregisters from both stores.
+  -- Adopted harnesses require an explicit confirm_adopted (server-enforced).
+  -- Kill is corroborated-before-mutate (SEC-3): never kill a window we cannot
+  -- confirm is ours.
+  -- =========================================================================
+  describe "POST /api/tabs/{index}/destroy" $ do
+    let destroyHid = mustParseHid "55555555-5555-4555-8555-555555555555"
+        -- A recording kill seam: records every (session, window) it is asked
+        -- to kill. A corroborating ReleaseTmux supplies the live @pcl_id probe.
+        recordingKill killedRef s w = modifyIORef' killedRef (++ [(s, w)])
+        liveMatching hid s w =
+          newIORef (Map.singleton (s, w) (Registry.harnessIdToText hid))
+
+    it "spawned + corroborated: kills the window, archives the session, deregisters from both stores" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-001"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        killedRef <- newIORef []
+        liveRef <- liveMatching destroyHid "pureclaw" "claude-code-0"
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_killWindow   = recordingKill killedRef
+              , _fe_releaseTmux  = ReleaseTmux
+                  { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                  , _rt_clearMarker = \_ _ -> pure ()
+                  , _rt_renameWindow = \_ _ _ -> pure ()
+                  }
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry destroyHid "claude-code-0" (Just mkNoOpHarnessHandle))
+            { Registry._he_label      = "claude-code-0"
+            , Registry._he_session    = "pureclaw"
+            , Registry._he_windowName = "claude-code-0"
+            , Registry._he_origin     = Registry.OriginSpawned
+            , Registry._he_sessionId  = Just sid
+            }
+        modifyIORef' (_fe_harnesses env) (Map.insert "claude-code-0" mkNoOpHarnessHandle)
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"] "{}"
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "destroyed" `shouldBe` Just (Aeson.Bool True)
+        -- The window was killed exactly once, at the right coordinate.
+        killed <- readIORef killedRef
+        killed `shouldBe` [("pureclaw", "claude-code-0")]
+        -- Gone from the registry and the legacy map.
+        gone <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+        (Registry._he_id <$> gone) `shouldBe` Nothing
+        legacy <- readIORef (_fe_harnesses env)
+        Map.member "claude-code-0" legacy `shouldBe` False
+        -- The session was ARCHIVED (transcript retained): it is no longer in
+        -- Recent, but it IS in Archived.
+        (_, recentBody) <- getJSON env ["api", "sessions", "recent"]
+        case Aeson.decode recentBody of
+          Just (Aeson.Array arr) ->
+            [ t | v <- toList' arr, Just (Aeson.String t) <- [lookupKey v "id"] ]
+              `shouldNotSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+        (_, archBody) <- getJSON env ["api", "sessions", "archived"]
+        case Aeson.decode archBody of
+          Just (Aeson.Array arr) ->
+            [ t | v <- toList' arr, Just (Aeson.String t) <- [lookupKey v "id"] ]
+              `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected JSON array"
+
+    it "SEC-3 stale entry (live @pcl_id mismatch): deregisters and archives WITHOUT killing, logs a refusal" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid = "test-20240101-120000-002"
+        writeTestSession tmpDir sid False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        killedRef <- newIORef []
+        logRef <- newIORef []
+        liveRef <- newIORef
+          (Map.singleton ("pureclaw", "claude-code-0")
+                         "99999999-9999-4999-8999-999999999999")
+        let env = env0
+              { _fe_sessionsDir = tmpDir
+              , _fe_killWindow   = recordingKill killedRef
+              , _fe_logger       = captureWarnLogger logRef
+              , _fe_releaseTmux  = ReleaseTmux
+                  { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                  , _rt_clearMarker = \_ _ -> pure ()
+                  , _rt_renameWindow = \_ _ _ -> pure ()
+                  }
+              }
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry destroyHid "claude-code-0" (Just mkNoOpHarnessHandle))
+            { Registry._he_session    = "pureclaw"
+            , Registry._he_windowName = "claude-code-0"
+            , Registry._he_origin     = Registry.OriginSpawned
+            , Registry._he_sessionId  = Just sid
+            }
+        (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"] "{}"
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "destroyed" `shouldBe` Just (Aeson.Bool True)
+        -- The invariant: we never killed a window we could not confirm is ours.
+        killed <- readIORef killedRef
+        killed `shouldBe` []
+        warns <- readIORef logRef
+        warns `shouldSatisfy` any ("no longer corroborated" `T.isInfixOf`)
+        -- Still deregistered (we stop managing it either way).
+        gone <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+        (Registry._he_id <$> gone) `shouldBe` Nothing
+
+    it "adopted WITHOUT confirm_adopted: 409, no kill, still registered" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      killedRef <- newIORef []
+      liveRef <- liveMatching destroyHid "scratch" "win-adopted"
+      let env = env0
+            { _fe_killWindow  = recordingKill killedRef
+            , _fe_releaseTmux = ReleaseTmux
+                { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                , _rt_clearMarker = \_ _ -> pure ()
+                , _rt_renameWindow = \_ _ _ -> pure ()
+                }
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry destroyHid "win-adopted" (Just mkNoOpHarnessHandle))
+          { Registry._he_session    = "scratch"
+          , Registry._he_windowName = "win-adopted"
+          , Registry._he_origin     = Registry.OriginAdopted
+          }
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"] "{}"
+      st `shouldBe` HTTP.status409
+      lookupKey' respBody "destroyed" `shouldBe` Nothing
+      killed <- readIORef killedRef
+      killed `shouldBe` []
+      still <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+      (Registry._he_id <$> still) `shouldBe` Just destroyHid
+
+    it "adopted WITH confirm_adopted=true + corroborated: kills the window and deregisters" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      killedRef <- newIORef []
+      liveRef <- liveMatching destroyHid "scratch" "win-adopted"
+      let env = env0
+            { _fe_killWindow  = recordingKill killedRef
+            , _fe_releaseTmux = ReleaseTmux
+                { _rt_liveMarker  = \s w -> Map.lookup (s, w) <$> readIORef liveRef
+                , _rt_clearMarker = \_ _ -> pure ()
+                , _rt_renameWindow = \_ _ _ -> pure ()
+                }
+            }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry destroyHid "win-adopted" (Just mkNoOpHarnessHandle))
+          { Registry._he_session    = "scratch"
+          , Registry._he_windowName = "win-adopted"
+          , Registry._he_origin     = Registry.OriginAdopted
+          }
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "destroy"]
+                          "{\"confirm_adopted\":true}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "destroyed" `shouldBe` Just (Aeson.Bool True)
+      killed <- readIORef killedRef
+      killed `shouldBe` [("scratch", "win-adopted")]
+      gone <- Registry.lookupById (_fe_harnessRegistry env) destroyHid
+      (Registry._he_id <$> gone) `shouldBe` Nothing
+
+    it "returns 404 for an out-of-range index (no kill)" $ do
+      env0 <- mkTestFrontendEnvWithRegistryTabs
+      killedRef <- newIORef []
+      let env = env0 { _fe_killWindow = recordingKill killedRef }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry destroyHid "claude-code-0" Nothing)
+      (st, _) <- postJSON env ["api", "tabs", "5", "destroy"] "{}"
+      st `shouldBe` HTTP.status404
+      killed <- readIORef killedRef
+      killed `shouldBe` []
+
+    it "returns 400 for a non-numeric index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      (st, _) <- postJSON env ["api", "tabs", "notanint", "destroy"] "{}"
+      st `shouldBe` HTTP.status400
+
+  describe "POST /api/tabs/{index}/acknowledge (P2-WU3 D3.2)" $ do
+    it "clears the ext_modified flag (verified via a follow-up /api/tabs)" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hid "claude-code-0" Nothing)
+          { Registry._he_label       = "claude-code"
+          , Registry._he_extModified = True
+          }
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "acknowledge"] "{}"
+      st `shouldBe` HTTP.status200
+      lookupKey' respBody "acknowledged" `shouldBe` Just (Aeson.Bool True)
+      -- A follow-up /api/tabs snapshot shows ext_modified == false.
+      (tst, tabsBody) <- getJSON env ["api", "tabs"]
+      tst `shouldBe` HTTP.status200
+      case Aeson.decode tabsBody of
+        Just (Aeson.Array arr) -> do
+          let t0 = head (toList' arr)
+          lookupKey t0 "ext_modified" `shouldBe` Just (Aeson.Bool False)
+        _ -> expectationFailure "Expected JSON array with one harness tab"
+
+    it "returns 404 for an out-of-range index" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry (mustParseHid "11111111-1111-4111-8111-111111111111")
+                   "claude-code-0" Nothing)
+      (st, _) <- postJSON env ["api", "tabs", "7", "acknowledge"] "{}"
+      st `shouldBe` HTTP.status404
+
+  describe "POST /api/tabs/{index}/restart (P2-WU3 D3.3)" $
+    it "returns 501 with the reserved not-implemented error body" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry (mustParseHid "11111111-1111-4111-8111-111111111111")
+                   "claude-code-0" Nothing)
+      (st, respBody) <- postJSON env ["api", "tabs", "0", "restart"] "{}"
+      st `shouldBe` HTTP.status501
+      lookupKey' respBody "error"
+        `shouldBe` Just (Aeson.String "restart not yet implemented")
+
+  describe "index->entry resolution matches /api/tabs ordering (P2-WU3 D3.4)" $
+    it "dismissing index N removes exactly the row /api/tabs shows at N" $ do
+      env <- mkTestFrontendEnvWithRegistryTabs
+      -- Two entries with labels that sort deterministically: "alpha" < "bravo".
+      let hidA = mustParseHid "11111111-1111-4111-8111-111111111111"
+          hidB = mustParseHid "22222222-2222-4222-8222-222222222222"
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidB "bravo" Nothing) { Registry._he_label = "bravo" }
+      Registry.insertEntry (_fe_harnessRegistry env)
+        (baseEntry hidA "alpha" Nothing) { Registry._he_label = "alpha" }
+      -- Discover which name /api/tabs shows at index 1 BEFORE dismissing.
+      (_, tabsBody) <- getJSON env ["api", "tabs"]
+      let nameAt n = case Aeson.decode tabsBody of
+            Just (Aeson.Array arr) ->
+              listToMaybe' [ nm | v <- toList' arr
+                                , Just (Aeson.Number i) <- [lookupKey v "index"]
+                                , round i == (n :: Int)
+                                , Just (Aeson.String nm) <- [lookupKey v "name"] ]
+            _ -> Nothing
+      nameAt 1 `shouldBe` Just "bravo"  -- "alpha" at 0, "bravo" at 1
+      -- Dismiss index 1; exactly the "bravo" row (hidB) must be removed.
+      (st, _) <- postJSON env ["api", "tabs", "1", "dismiss"] "{}"
+      st `shouldBe` HTTP.status200
+      goneB <- Registry.lookupById (_fe_harnessRegistry env) hidB
+      keptA <- Registry.lookupById (_fe_harnessRegistry env) hidA
+      (Registry._he_id <$> goneB) `shouldBe` Nothing
+      (Registry._he_id <$> keptA) `shouldBe` Just hidA
+
+  describe "GET /api/sessions/recent (registry-wired exclusion — WU8 D8.3)" $ do
+    it "lists the session held by a harness tab in recents (harness sessions stay reachable)" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sid1 = "test-20240101-120000-001"
+            sid2 = "test-20240101-120000-002"
+        writeTestSession tmpDir sid1 False
+        writeTestSession tmpDir sid2 False
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        let env = env0 { _fe_sessionsDir = tmpDir }
+        -- Seed a harness entry that holds sid1. A harness tab's session is NOT
+        -- de-duped out of recents (unlike a provider/raw-shell tab): the harness
+        -- keeps its controls entry under "Running Harnesses" AND its conversation
+        -- is reachable as a Recent Sessions row.
+        let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry hid "claude-code-0" Nothing)
+            { Registry._he_label = "claude-code", Registry._he_sessionId = Just sid1 }
+        (st, respBody) <- getJSON env ["api", "sessions", "recent"]
+        st `shouldBe` HTTP.status200
+        case Aeson.decode respBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr
+                          , Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` elem sid1
+            ids `shouldSatisfy` elem sid2
+          _ -> expectationFailure "Expected JSON array"
+
+    it "lists a harness session with an EMPTY transcript in recents (freshly-adopted harness stays reachable)" $
+      withSystemTempDirectory "pureclaw-test" $ \tmpDir -> do
+        let sidH = "test-20240101-120000-010"   -- harness-backed, EMPTY transcript
+            sidP = "test-20240101-120000-011"    -- unrelated session, EMPTY transcript
+        writeTestSession tmpDir sidH False
+        writeTestSession tmpDir sidP False
+        -- Empty BOTH transcripts. A freshly-adopted harness has no transcript
+        -- until its first turn; it must STILL be reachable (the only entry point
+        -- to its conversation), whereas a plain empty session stays filtered out.
+        LBS.writeFile (tmpDir </> T.unpack sidH </> "transcript.jsonl") ""
+        LBS.writeFile (tmpDir </> T.unpack sidP </> "transcript.jsonl") ""
+        env0 <- mkTestFrontendEnvWithRegistryTabs
+        let env = env0 { _fe_sessionsDir = tmpDir }
+            hid = mustParseHid "22222222-2222-4222-8222-222222222222"
+        Registry.insertEntry (_fe_harnessRegistry env)
+          (baseEntry hid "claude-code-0" Nothing)
+            { Registry._he_label = "claude-code", Registry._he_sessionId = Just sidH }
+        (st, respBody) <- getJSON env ["api", "sessions", "recent"]
+        st `shouldBe` HTTP.status200
+        case Aeson.decode respBody of
+          Just (Aeson.Array arr) -> do
+            let ids = [ t | v <- toList' arr, Just (Aeson.String t) <- [lookupKey v "id"] ]
+            ids `shouldSatisfy` elem sidH      -- empty-transcript harness session IS reachable
+            ids `shouldSatisfy` notElem sidP   -- a plain empty session is still hidden
+          _ -> expectationFailure "Expected JSON array"
+
   -- -----------------------------------------------------------------------
   -- WU-8: GET /api/sessions/recent excludes active-tab sessions
   -- -----------------------------------------------------------------------
@@ -737,7 +1758,8 @@ spec = do
         writeTestSession tmpDir sid1 False
         writeTestSession tmpDir sid2 False
         -- Tab has session sid1 open
-        let tabs = [ TabSnapshot 0 "provider" "tab0" "running" (Just sid1) ]
+        let tabs = [ (mkTabSnapshot 0 "provider" "tab0" "running")
+                       { _ts_sessionId = Just sid1 } ]
         env <- mkTestFrontendEnvWithTabsAndDir tabs tmpDir
         (st, respBody) <- getJSON env ["api", "sessions", "recent"]
         st `shouldBe` HTTP.status200
@@ -1287,6 +2309,385 @@ spec = do
         sent `shouldBe` ["will throw"]
 
   -- -----------------------------------------------------------------------
+  -- WU6: id-primary routing with name fallback + PID-corroboration refusal
+  -- -----------------------------------------------------------------------
+  describe "POST /api/sessions/{sid}/send (id-primary routing — WU6)" $ do
+    -- D6.3: a session persisting a HarnessId routes by id to a corroborated
+    -- registry entry's handle (not via the name-keyed map).
+    it "routes by HarnessId to a corroborated registry entry's handle (D6.3)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d63" $ \tmpDir -> do
+        let sid    = "sess-id-route"
+            hidTxt = "66666666-6666-4666-8666-666666666666"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-0"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- A corroborated entry (recorded harness PID) with a live handle, keyed
+        -- by the id. The legacy name map is EMPTY so a pass means id-routing.
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "id-routed reply")))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("ping" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "id-routed reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["ping"]
+
+    -- WU8 Part B (WU4-review): an ADOPTED harness's output must flow exactly like
+    -- a SPAWNED one. 'harnessKeyFromKind' returns the adopted entry's id;
+    -- 'sendToHarness' routes by id to the PID-corroborated OriginAdopted entry's
+    -- handle; and 'routeViaHandle' is the SOLE recorder of the session
+    -- transcript (the adopted handle, like the spawned one, was given a no-op
+    -- transcript). This proves a send to an adopted harness records exactly one
+    -- Request + one Response to the SESSION transcript — adoption is consistent
+    -- with the spawn-via-frontend path.
+    it "records a send to an ADOPTED harness to the session transcript (WU8 Part B)" $ do
+      withSystemTempDirectory "pureclaw-wu8-partb" $ \tmpDir -> do
+        let sid    = "sess-adopted-route"
+            hidTxt = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+            hid    = mustParseHid hidTxt
+            window = "adopted-window-0"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- An OriginAdopted, PID-corroborated entry with a live handle, keyed by
+        -- id. The legacy name map is EMPTY so a pass means id-routing to the
+        -- adopted entry (not a name-fallback).
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (adoptedCorroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "adopted reply")))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hello adopted" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "adopted reply")
+        -- The keystrokes reached the adopted handle.
+        sent <- readIORef sentRef
+        sent `shouldBe` ["hello adopted"]
+        -- handleSend recorded exactly one Request + one Response to the SESSION
+        -- transcript (sole recorder — no double-write from the adopted handle,
+        -- whose own transcript is a no-op, mirroring the spawn path).
+        entries <- readSessionTranscript tmpDir sid
+        let reqs  = [ e | e <- entries, _te_direction e == Request ]
+            resps = [ e | e <- entries, _te_direction e == Response ]
+        length reqs  `shouldBe` 1
+        length resps `shouldBe` 1
+        _te_payload (head reqs)  `shouldBe` "hello adopted"
+        _te_payload (head resps) `shouldBe` "adopted reply"
+
+    -- D6.4: id not in the registry -> falls back to the legacy name-keyed
+    -- _fe_harnesses map (the PR #74 path). Proves the name fallback survives.
+    it "falls back to the name-keyed map when the id is unregistered (D6.4)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d64" $ \tmpDir -> do
+        let sid    = "sess-id-fallback"
+            hidTxt = "77777777-7777-4777-8777-777777777777"
+            window = "claude-code-1"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Registry is EMPTY for this id; register a live handle under the
+        -- window NAME (the legacy PR #74 wiring).
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "name-fallback reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hi" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "name-fallback reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["hi"]
+
+    -- D6.4b: a fully-legacy session (no harnessId at all) routes via the name
+    -- map exactly as in PR #74. This is the dominant case until WU4/5/7 land.
+    it "routes a legacy (no-id) session via the name map unchanged (D6.4)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d64b" $ \tmpDir -> do
+        let sid    = "sess-legacy"
+            window = "claude-code-2"
+        writeHarnessSessionWithId tmpDir sid window Nothing
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "legacy reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("legacy hi" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "legacy reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["legacy hi"]
+
+    -- D6.6 (§8 C4): the id resolves to a registry entry that is NOT
+    -- PID-corroborated (a spoofed/uncorroborated marker). sendToHarness must
+    -- REFUSE — respond 503, log a refusal, and NEVER send keystrokes. It must
+    -- NOT silently fall back to the name map for this spoof case.
+    it "refuses to route to an uncorroborated registry entry (D6.6)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d66" $ \tmpDir -> do
+        let sid    = "sess-spoof"
+            hidTxt = "88888888-8888-4888-8888-888888888888"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-3"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        logRef  <- newIORef ([] :: [Text])
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Uncorroborated entry: NO recorded PIDs, but it DOES carry a (would-be
+        -- spoofed) live handle. A registered handle under the NAME must NOT
+        -- rescue it — the spoof path refuses outright.
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (uncorroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "SHOULD NOT SEND")))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "SHOULD NOT NAME-FALLBACK"))
+        let env = env0 { _fe_logger = captureErrorLogger logRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("spoofed" :: Text)]))
+        st `shouldBe` HTTP.status503
+        -- No keystrokes reached any handle.
+        sent <- readIORef logRef >> readIORef sentRef
+        sent `shouldBe` []
+        -- A refusal was logged.
+        logs <- readIORef logRef
+        any (T.isInfixOf "corroborat") logs `shouldBe` True
+        -- The error body mentions a refusal, not "not running".
+        case lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "error" of
+          Just (Aeson.String msg) ->
+            (T.isInfixOf "corroborat" msg || T.isInfixOf "refus" msg) `shouldBe` True
+          _ -> expectationFailure "expected a string 'error' field"
+
+    -- D6.6b: a corroborated entry whose handle is Nothing (e.g. boot-discovered
+    -- but not yet attached) falls through to the name path rather than refusing.
+    it "falls through to name path when a corroborated entry has no handle (D6.5/D6.6)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d66b" $ \tmpDir -> do
+        let sid    = "sess-nohandle"
+            hidTxt = "99999999-9999-4999-8999-999999999999"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-4"
+        writeHarnessSessionWithId tmpDir sid window (Just hidTxt)
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window Nothing)  -- corroborated, no handle
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "name-path reply"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("fallthrough" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "name-path reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["fallthrough"]
+
+    -- D6.5: lazy back-fill. A legacy (no-id) session whose window name matches
+    -- a corroborated registry entry by label persists that entry's HarnessId
+    -- into session.json on first matched send.
+    it "back-fills the HarnessId into session.json on first legacy match (D6.5)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d65" $ \tmpDir -> do
+        let sid    = "sess-backfill"
+            hidTxt = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-5"
+        writeHarnessSessionWithId tmpDir sid window Nothing  -- legacy, no id
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- A corroborated entry whose LABEL matches the window name.
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "matched")))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "matched"))
+        (st, _) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("first" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- session.json now carries the back-filled HarnessId.
+        reloaded <- tryLoadMetaJson tmpDir sid
+        harnessIdOfMeta reloaded `shouldBe` Just hidTxt
+
+    -- D6.5(c): the lazy back-fill is best-effort and must NEVER fail a send.
+    -- Here the back-fill's atomic write is forced to throw: we pre-create the
+    -- back-fill's tmp target (@session.json.backfill.tmp@) as a DIRECTORY, so
+    -- the back-fill's @LBS.writeFile@ into it fails with an IO error. The
+    -- harness send itself still succeeds, so the request MUST return 200 with
+    -- the harness reply and the keystrokes MUST have been delivered. Against
+    -- the unguarded implementation the back-fill exception propagates out of
+    -- 'handleSend' and aborts the send before any assertion can hold.
+    --
+    -- Note the tmp target is deliberately distinct from the
+    -- @session.json.tmp@ used by 'touchSessionLastActive', so this fault
+    -- isolates the back-fill and does not perturb the unrelated last-active
+    -- mutator (which runs in the same success branch).
+    it "never fails the send when the back-fill write throws (D6.5c)" $ do
+      withSystemTempDirectory "pureclaw-wu6-d65c" $ \tmpDir -> do
+        let sid    = "sess-backfill-fail"
+            hidTxt = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+            hid    = mustParseHid hidTxt
+            window = "claude-code-6"
+            sessDir = tmpDir </> T.unpack sid
+        writeHarnessSessionWithId tmpDir sid window Nothing  -- legacy, no id
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- A corroborated entry whose LABEL matches the window name, so the
+        -- back-fill is attempted (read succeeds; the subsequent write throws).
+        Registry.insertEntry (_fe_harnessRegistry env0)
+          (corroboratedEntry hid window
+            (Just (mkFakeHarnessHandle sentRef "matched")))
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert window (mkFakeHarnessHandle sentRef "matched"))
+        -- Occupy the back-fill's tmp target with a DIRECTORY so its
+        -- @LBS.writeFile session.json.backfill.tmp@ throws.
+        createDirectoryIfMissing True (sessDir </> "session.json.backfill.tmp")
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("first" :: Text)]))
+        -- The send succeeded despite the throwing back-fill.
+        st `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "matched")
+        -- The keystrokes were delivered.
+        sent <- readIORef sentRef
+        sent `shouldBe` ["first"]
+        -- The id was NOT back-filled (the write threw), but the session.json
+        -- is intact (the failing tmp write left the original in place).
+        reloaded <- tryLoadMetaJson tmpDir sid
+        harnessIdOfMeta reloaded `shouldBe` Nothing
+
+  -- -----------------------------------------------------------------------
+  -- WU7: _fe_startHarness honors _tc_session; createHarnessTab persists the id
+  -- -----------------------------------------------------------------------
+
+  describe "resolveHarnessSession (WU7 — D7.3)" $ do
+    -- D7.3: a spec with no tmux session (the frontend's placeholder 'local'
+    -- request backend) resolves to the default "pureclaw".
+    it "defaults to \"pureclaw\" when the spec has no tmux session (D7.3)" $
+      resolveHarnessSession (harnessSpecWithBackend TbLocal)
+        `shouldBe` "pureclaw"
+
+    -- D7.3: an empty _tc_session is treated as unspecified -> default.
+    it "treats an empty _tc_session as unspecified (D7.3)" $
+      resolveHarnessSession
+        (harnessSpecWithBackend (TbTmux (TmuxConfig "" "w" Nothing)))
+        `shouldBe` "pureclaw"
+
+    -- D7.3: a spec specifying a non-empty _tc_session is honored verbatim.
+    it "honors a non-empty _tc_session (D7.3)" $
+      resolveHarnessSession
+        (harnessSpecWithBackend (TbTmux (TmuxConfig "my-proj" "w" Nothing)))
+        `shouldBe` "my-proj"
+
+  describe "POST /api/tabs/new (harness id persistence — WU7)" $ do
+    -- D7.1: a frontend-created harness registers a HarnessId entry in the shared
+    -- registry. The fake _fe_startHarness seeds a corroborated entry keyed by the
+    -- id (as the real spawn path does via startHarnessByName); we assert the
+    -- registry carries it after the create flows end-to-end through createHarnessTab.
+    it "registers a HarnessId entry in the shared registry (D7.1)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d71" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        sentRef <- newIORef []
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessWith (_fe_harnesses env0) "claude-code-0"
+                    fakeStartedHid (Just (_fe_harnessRegistry env0, sentRef)) }
+        (st, _) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        mEntry <- Registry.lookupById (_fe_harnessRegistry env) fakeStartedHid
+        case mEntry of
+          Just _  -> pure ()
+          Nothing -> expectationFailure
+            "expected the frontend-created harness id in the registry"
+
+    -- Bugfix: a harness created via the web form gets its own session, but the
+    -- low-level spawn (startHarnessByName) inserts the registry entry with
+    -- _he_sessionId = Nothing. createHarnessTab must link the entry back to the
+    -- session it created (as the adopt path already does), otherwise the tab's
+    -- session_id is null and the right pane shows "No session associated yet".
+    it "links the spawned harness registry entry to the created session" $ do
+      withSystemTempDirectory "pureclaw-link-sess" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        sentRef <- newIORef []
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessWith (_fe_harnesses env0) "claude-code-0"
+                    fakeStartedHid (Just (_fe_harnessRegistry env0, sentRef)) }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        mEntry <- Registry.lookupById (_fe_harnessRegistry env) fakeStartedHid
+        case mEntry of
+          Just e  -> Registry._he_sessionId e `shouldBe` Just newSid
+          Nothing -> expectationFailure
+            "expected the spawned harness entry in the registry"
+
+    -- D7.2: the persisted session.json carries BOTH the harnessId (Just) AND
+    -- the resolved _tc_session. Read both back from disk and assert.
+    it "persists BOTH harnessId and _tc_session into session.json (D7.2)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d72" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        -- harnessId read back from the raw persisted JSON.
+        rawMeta <- tryLoadMetaJson tmpDir newSid
+        harnessIdOfMeta rawMeta
+          `shouldBe` Just (Registry.harnessIdToText fakeStartedHid)
+        -- _tc_session read back from the decoded meta (default "pureclaw").
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> do
+            _h_harnessId hs `shouldBe` Just fakeStartedHid
+            case _h_backend hs of
+              TbTmux tc -> _tc_session tc `shouldBe` "pureclaw"
+              other -> expectationFailure ("expected TbTmux, got " <> show other)
+          other -> expectationFailure ("expected SkHarness, got " <> show other)
+
+    -- D7.3 (end-to-end): a request specifying a custom _tc_session is honored —
+    -- the persisted session.json carries that session, not the default.
+    it "honors a request-specified _tc_session end-to-end (D7.3)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d73e" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarness (_fe_harnesses env0) "claude-code-0" }
+        (st, respBody) <- postJSON env ["api", "tabs", "new"]
+          (harnessNewTabBodyWithSession "my-proj")
+        st `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        meta <- readSessionMeta tmpDir newSid
+        case _sm_kind meta of
+          SkHarness hs -> case _h_backend hs of
+            TbTmux tc -> _tc_session tc `shouldBe` "my-proj"
+            other -> expectationFailure ("expected TbTmux, got " <> show other)
+          other -> expectationFailure ("expected SkHarness, got " <> show other)
+
+    -- D7.4: first-prompt routing still works via the persisted id. After
+    -- createHarnessTab persists the id and registers a corroborated registry
+    -- entry, a POST /api/sessions/<sid>/send resolves the persisted id through
+    -- the registry to the corroborated entry's handle (keystrokes reach it).
+    it "routes a post-create send via the persisted id through the registry (D7.4)" $ do
+      withSystemTempDirectory "pureclaw-wu7-d74" $ \tmpDir -> do
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        sentRef <- newIORef []
+        -- The legacy name map is EMPTY; the only live handle is the registry
+        -- entry keyed by the id. A successful send therefore PROVES id-routing.
+        let env = env0
+              { _fe_startHarness =
+                  fakeStartHarnessWith (_fe_harnesses env0) "claude-code-0"
+                    fakeStartedHid (Just (_fe_harnessRegistry env0, sentRef)) }
+        (stCreate, respBody) <- postJSON env ["api", "tabs", "new"] harnessNewTabBody
+        stCreate `shouldBe` HTTP.status200
+        newSid <- decodeSessionId respBody
+        (stSend, sendResp) <- postJSON env ["api", "sessions", newSid, "send"]
+          (Aeson.encode (object ["message" .= ("first prompt" :: Text)]))
+        stSend `shouldBe` HTTP.status200
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode sendResp)) "response"
+          `shouldBe` Just (Aeson.String "id-routed reply")
+        sent <- readIORef sentRef
+        sent `shouldBe` ["first prompt"]
+
+  -- -----------------------------------------------------------------------
   -- WU4: frozen system prompt + per-session agent rendering (§9.1)
   -- -----------------------------------------------------------------------
 
@@ -1746,17 +3147,26 @@ spec = do
           (Aeson.encode (object ["notprompt" .= ("X" :: Text)]))
         st `shouldBe` HTTP.status400
 
-  describe "harnessKeyFromKind (WU1)" $ do
-    it "returns Just the tmux window for a tmux-backed harness" $
+  describe "harnessKeyFromKind (WU1/WU6)" $ do
+    it "returns Just the tmux window for a legacy tmux harness (no id)" $
       harnessKeyFromKind
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] Nothing Nothing Nothing))
         `shouldBe` Just "claude-code-2"
+
+    -- WU6: when a HarnessId is present, harnessKeyFromKind returns the durable
+    -- id text (not the window name) — the id-primary routing key.
+    it "returns the HarnessId text when present (id-primary, WU6)" $ do
+      let hid = Registry.parseHarnessId "44444444-4444-4444-8444-444444444444"
+      harnessKeyFromKind
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] hid Nothing Nothing))
+        `shouldBe` (Registry.harnessIdToText <$> hid)
 
     it "returns Nothing for a non-tmux harness backend" $
       harnessKeyFromKind
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          TbLocal Nothing []))
+          TbLocal Nothing [] Nothing Nothing Nothing))
         `shouldBe` Nothing
 
     it "returns Nothing for a provider session" $
@@ -1768,13 +3178,20 @@ spec = do
     it "is True for a tmux-backed harness" $
       shouldRouteToHarness
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing []))
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] Nothing Nothing Nothing))
+        `shouldBe` True
+
+    it "is True for a tmux-backed harness that carries a HarnessId (WU6)" $ do
+      let hid = Registry.parseHarnessId "55555555-5555-4555-8555-555555555555"
+      shouldRouteToHarness
+        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
+          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] hid Nothing Nothing))
         `shouldBe` True
 
     it "is False for a non-tmux harness backend" $
       shouldRouteToHarness
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          TbLocal Nothing []))
+          TbLocal Nothing [] Nothing Nothing Nothing))
         `shouldBe` False
 
     it "is False for a provider session" $
@@ -1785,7 +3202,7 @@ spec = do
   describe "_fe_startHarness default stub (WU1)" $
     it "returns Left for the unwired test FrontendEnv" $ do
       env <- mkTestFrontendEnv
-      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") TbLocal Nothing []
+      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") TbLocal Nothing [] Nothing Nothing Nothing
       result <- _fe_startHarness env spec' mkNoOpTranscriptHandle
       case result of
         Left _  -> pure ()
@@ -1803,12 +3220,18 @@ mkTestFrontendEnv = mkTestFrontendEnvWith 36
 mkTestFrontendEnvWith :: Int -> IO FrontendEnv
 mkTestFrontendEnvWith maxTabs = do
   harnessRef  <- newIORef Map.empty
+  harnessReg  <- Registry.newRegistry
   provRef     <- newIORef Nothing
   modelRef    <- newIORef Nothing
   let logger  = mkNoOpLogHandle
   tabCountRef <- newIORef 0
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
+    , _fe_harnessRegistry = harnessReg
+    , _fe_consentChannel = ConsentHeadless  -- fail-closed default; adopt tests override
+    , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
+    , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ()) (\_ _ _ -> pure ())
+    , _fe_killWindow   = \_ _ -> pure ()
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
     , _fe_recentLimit  = 20
     , _fe_provider     = provRef
@@ -1841,6 +3264,17 @@ mkTestFrontendEnvWithTabsAndDir :: [TabSnapshot] -> FilePath -> IO FrontendEnv
 mkTestFrontendEnvWithTabsAndDir tabs dir = do
   env <- mkTestFrontendEnvWithTabs tabs
   pure env { _fe_sessionsDir = dir }
+
+-- | Build a FrontendEnv whose '_fe_listTabs' is wired to the shared harness
+-- registry EXACTLY as production wires it in @CLI.Commands@
+-- (@harnessEntriesToTabs \<$\> Registry.snapshot reg@). This lets the
+-- @GET \/api\/tabs@ and recent-sessions exclusion tests exercise the WIRED
+-- list (the reported symptom is the empty list), not just the pure mapper.
+mkTestFrontendEnvWithRegistryTabs :: IO FrontendEnv
+mkTestFrontendEnvWithRegistryTabs = do
+  env <- mkTestFrontendEnv
+  pure env
+    { _fe_listTabs = harnessEntriesToTabs <$> Registry.snapshot (_fe_harnessRegistry env) }
 
 -- | Write a minimal session.json + transcript.jsonl to disk so that
 -- @listSessions@ and @handleRecentSessions@ pick it up.
@@ -1899,6 +3333,38 @@ harnessNewTabBody = Aeson.encode $ object
       ]
   ]
 
+-- | A harness New-tab request body that specifies a tmux backend with an
+-- explicit @session@ (WU7, D7.3). The window is a placeholder the spawn path
+-- overrides; only the session is honored for placement.
+harnessNewTabBodyWithSession :: Text -> LBS.ByteString
+harnessNewTabBodyWithSession session = Aeson.encode $ object
+  [ "kind" .= object
+      [ "tag" .= ("session" :: Text)
+      , "session_kind" .= object
+          [ "tag"     .= ("harness" :: Text)
+          , "flavour" .= ("claude-code" :: Text)
+          , "backend" .= object
+              [ "tag"     .= ("tmux" :: Text)
+              , "session" .= session
+              , "window"  .= ("requested-window" :: Text)
+              ]
+          ]
+      ]
+  ]
+
+-- | A minimal 'HarnessSpec' carrying the given backend (WU7 unit tests for
+-- 'resolveHarnessSession'). All other fields are inert defaults.
+harnessSpecWithBackend :: TerminalBackend -> HarnessSpec
+harnessSpecWithBackend backend = HarnessSpec
+  { _h_flavour   = HClaudeCode
+  , _h_backend   = backend
+  , _h_cwd       = Nothing
+  , _h_args      = []
+  , _h_harnessId = Nothing
+  , _h_claudeSessionUuid = Nothing
+  , _h_canonicalCwd      = Nothing
+  }
+
 -- | A fake '_fe_startHarness' that registers a no-op 'HarnessHandle' under
 -- the given key and returns a 'StartedHarness' whose tmux window matches
 -- that key. Mirrors the dispatcher's real contract closely enough for the
@@ -1909,10 +3375,70 @@ fakeStartHarness
   :: IORef (Map.Map Text HarnessHandle)
   -> Text
   -> (HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness))
-fakeStartHarness harnessRef key _ _ = do
+fakeStartHarness harnessRef key =
+  fakeStartHarnessWith harnessRef key fakeStartedHid Nothing
+
+-- | A fake '_fe_startHarness' (WU6) that returns a configurable
+-- claudeSessionUuid + canonicalCwd on its 'StartedHarness', so a test can
+-- assert that 'createHarnessTab' persists those two additive fields into the
+-- session's @_sm_kind@. Registers a no-op handle under @key@ like
+-- 'fakeStartHarness'.
+fakeStartHarnessUuid
+  :: IORef (Map.Map Text HarnessHandle)
+  -> Text             -- ^ window/map key
+  -> Maybe Text       -- ^ claudeSessionUuid to surface
+  -> Maybe Text       -- ^ canonicalCwd to surface
+  -> (HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness))
+fakeStartHarnessUuid harnessRef key mUuid mCwd reqSpec _ = do
+  let session = resolveHarnessSession reqSpec
   modifyIORef' harnessRef (Map.insert key mkNoOpHarnessHandle)
-  pure $ Right $ StartedHarness key
-    (TmuxConfig { _tc_session = "pureclaw", _tc_window = key, _tc_pane = Nothing })
+  pure $ Right $ StartedHarness
+    { _shh_key  = key
+    , _shh_tmux = TmuxConfig { _tc_session = session, _tc_window = key, _tc_pane = Nothing }
+    , _shh_id   = fakeStartedHid
+    , _shh_claudeSessionUuid = mUuid
+    , _shh_canonicalCwd      = mCwd
+    }
+
+-- | The canonical 'Registry.HarnessId' a 'fakeStartHarness' stamps onto its
+-- 'StartedHarness' result (WU7). Tests that assert id persistence read this
+-- back from the persisted @session.json@.
+fakeStartedHid :: Registry.HarnessId
+fakeStartedHid = mustParseHid "abcdef00-0000-4000-8000-000000000001"
+
+-- | A configurable fake '_fe_startHarness' (WU7). Mirrors the real
+-- dispatcher's WU7 contract: it resolves the tmux session from the requested
+-- spec via 'resolveHarnessSession' (honoring '_tc_session', default
+-- @"pureclaw"@), and returns a 'StartedHarness' carrying the injected
+-- 'Registry.HarnessId' plus the resolved 'TmuxConfig'. When @mReg@ is 'Nothing'
+-- it registers a live no-op handle under @key@ in the legacy '_fe_harnesses'
+-- map (the WU2 contract). When @mReg@ is @Just (reg, sentRef)@ it instead seeds
+-- a corroborated registry entry keyed by the id, whose handle records sends
+-- into @sentRef@ — letting a test prove a post-'createHarnessTab' send routes
+-- by the persisted id through the registry (D7.4).
+fakeStartHarnessWith
+  :: IORef (Map.Map Text HarnessHandle)
+  -> Text                              -- ^ window/map key
+  -> Registry.HarnessId                -- ^ id to stamp on the result
+  -> Maybe (Registry.HarnessRegistry, IORef [ByteString])
+                                       -- ^ optional: seed a corroborated entry
+  -> (HarnessSpec -> TranscriptHandle -> IO (Either HarnessError StartedHarness))
+fakeStartHarnessWith harnessRef key hid mReg reqSpec _ = do
+  let session = resolveHarnessSession reqSpec
+  case mReg of
+    Just (reg, sentRef) ->
+      Registry.insertEntry reg
+        (corroboratedEntry hid key
+          (Just (mkFakeHarnessHandle sentRef "id-routed reply")))
+    Nothing ->
+      modifyIORef' harnessRef (Map.insert key mkNoOpHarnessHandle)
+  pure $ Right $ StartedHarness
+    { _shh_key  = key
+    , _shh_tmux = TmuxConfig { _tc_session = session, _tc_window = key, _tc_pane = Nothing }
+    , _shh_id   = hid
+    , _shh_claudeSessionUuid = Nothing
+    , _shh_canonicalCwd      = Nothing
+    }
 
 -- | A fake 'HarnessHandle' for the WU3 send-routing tests. It captures the
 -- bytes written via '_hh_send' into the supplied 'IORef' (newest last) and
@@ -1995,8 +3521,11 @@ writeHarnessSession baseDir sid windowKey = do
             , _tc_window  = windowKey
             , _tc_pane    = Nothing
             })
-        , _h_cwd  = Nothing
-        , _h_args = []
+        , _h_cwd       = Nothing
+        , _h_args      = []
+        , _h_harnessId = Nothing
+        , _h_claudeSessionUuid = Nothing
+        , _h_canonicalCwd      = Nothing
         }
       meta = SessionMeta
         { _sm_id                = SessionId sid
@@ -2015,6 +3544,138 @@ writeHarnessSession baseDir sid windowKey = do
       epochH = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
   LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
   LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Like 'writeHarnessSession', but also persists an optional 'HarnessId' on
+-- the 'HarnessSpec' (WU6). When @Just hid@, the spec carries BOTH the id and
+-- the dual-written tmux window name.
+writeHarnessSessionWithId :: FilePath -> Text -> Text -> Maybe Text -> IO ()
+writeHarnessSessionWithId baseDir sid windowKey mHidTxt = do
+  let dir = baseDir </> T.unpack sid
+  createDirectoryIfMissing True dir
+  let hSpecRec = HarnessSpec
+        { _h_flavour = HClaudeCode
+        , _h_backend = TbTmux (TmuxConfig
+            { _tc_session = "pureclaw"
+            , _tc_window  = windowKey
+            , _tc_pane    = Nothing
+            })
+        , _h_cwd       = Nothing
+        , _h_args      = []
+        , _h_harnessId = mHidTxt >>= Registry.parseHarnessId
+        , _h_claudeSessionUuid = Nothing
+        , _h_canonicalCwd      = Nothing
+        }
+      meta = SessionMeta
+        { _sm_id                = SessionId sid
+        , _sm_agent             = Nothing
+        , _sm_kind              = SkHarness hSpecRec
+        , _sm_model             = ""
+        , _sm_channel           = "web"
+        , _sm_createdAt         = epochH
+        , _sm_lastActive        = epochH
+        , _sm_bootstrapConsumed = True
+        , _sm_archived          = False
+        , _sm_description       = Nothing
+        , _sm_autoSummary       = Nothing
+        , _sm_source            = Nothing
+        }
+      epochH = UTCTime (fromGregorian 2024 1 1) (secondsToDiffTime 0)
+  LBS.writeFile (dir </> "session.json") (Aeson.encode meta)
+  LBS.writeFile (dir </> "transcript.jsonl") ""
+
+-- | Build a 'TabSnapshot' with the P2-WU1 health fields defaulted (no
+-- session, not externally modified, not stale, spawned origin, no attach
+-- command). Tests override the fields they care about via record update.
+mkTabSnapshot :: Int -> Text -> Text -> Text -> TabSnapshot
+mkTabSnapshot idx kind name status = TabSnapshot
+  { _ts_index         = idx
+  , _ts_kind          = kind
+  , _ts_name          = name
+  , _ts_status        = status
+  , _ts_sessionId     = Nothing
+  , _ts_extModified   = False
+  , _ts_stale         = False
+  , _ts_origin        = "spawned"
+  , _ts_attachCommand = Nothing
+  }
+
+-- | Force-parse a 'Registry.HarnessId' from canonical UUID text (test-only).
+mustParseHid :: Text -> Registry.HarnessId
+mustParseHid t = case Registry.parseHarnessId t of
+  Just h  -> h
+  Nothing -> error ("mustParseHid: not a UUID: " <> T.unpack t)
+
+-- | A PID-corroborated registry entry (a recorded harness PID is evidence the
+-- entry is ours) with the given id, label (= window name) and optional handle.
+corroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+corroboratedEntry hid window mHandle = (baseEntry hid window mHandle)
+  { Registry._he_harnessPid = Just 4242 }
+
+-- | A PID-corroborated, OriginAdopted registry entry (WU8 Part B). Mirrors what
+-- 'adoptExternalWindow' registers: an adopted window with recorded PID
+-- provenance and an attached handle whose own transcript is a NO-OP (so
+-- 'handleSend'/'routeViaHandle' remains the SOLE recorder, exactly as on the
+-- spawn path).
+adoptedCorroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+adoptedCorroboratedEntry hid window mHandle = (corroboratedEntry hid window mHandle)
+  { Registry._he_origin = Registry.OriginAdopted }
+
+-- | An UNcorroborated entry: a bare (spoofable) marker with NO recorded PIDs.
+uncorroboratedEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+uncorroboratedEntry = baseEntry
+
+-- | Shared 'HarnessEntry' skeleton for the routing tests.
+baseEntry :: Registry.HarnessId -> Text -> Maybe HarnessHandle -> Registry.HarnessEntry
+baseEntry hid window mHandle = Registry.HarnessEntry
+  { Registry._he_id          = hid
+  , Registry._he_session     = "pureclaw"
+  , Registry._he_windowName  = window
+  , Registry._he_shellPid    = Nothing
+  , Registry._he_harnessPid  = Nothing
+  , Registry._he_origin      = Registry.OriginSpawned
+  , Registry._he_liveness    = Registry.LivenessIdle
+  , Registry._he_extModified = False
+  , Registry._he_stale       = False
+  , Registry._he_sessionId   = Nothing
+  , Registry._he_label       = window
+  , Registry._he_orphanedTicks = 0
+  , Registry._he_handle      = mHandle
+  }
+
+-- | A 'LogHandle' that captures every error-level message into the 'IORef'.
+captureErrorLogger :: IORef [Text] -> LogHandle
+captureErrorLogger ref = mkNoOpLogHandle
+  { _lh_logError = \msg -> modifyIORef' ref (++ [msg]) }
+
+-- | A 'LogHandle' that captures every warn-level message into the 'IORef'.
+-- Used by the Release SEC-3 tests to assert the deregister-only refusal is
+-- logged.
+captureWarnLogger :: IORef [Text] -> LogHandle
+captureWarnLogger ref = mkNoOpLogHandle
+  { _lh_logWarn = \msg -> modifyIORef' ref (++ [msg]) }
+
+-- | A 'LogHandle' that captures every info-level message into the 'IORef'.
+-- Used by the Release D5.4 test to assert the reserved-purge no-op is logged.
+captureInfoLogger :: IORef [Text] -> LogHandle
+captureInfoLogger ref = mkNoOpLogHandle
+  { _lh_logInfo = \msg -> modifyIORef' ref (++ [msg]) }
+
+-- | Reload a session's @session.json@ as raw JSON (test-only).
+tryLoadMetaJson :: FilePath -> Text -> IO (Maybe Aeson.Value)
+tryLoadMetaJson baseDir sid = do
+  let p = baseDir </> T.unpack sid </> "session.json"
+  ok <- doesFileExist p
+  if not ok then pure Nothing else Aeson.decode <$> LBS.readFile p
+
+-- | Extract @kind.harnessId@ from a decoded @session.json@ value (test-only).
+harnessIdOfMeta :: Maybe Aeson.Value -> Maybe Text
+harnessIdOfMeta mv = do
+  v <- mv
+  kind <- lookupKey v "kind"
+  hid  <- lookupKey kind "harnessId"
+  case hid of
+    Aeson.String s -> Just s
+    _              -> Nothing
 
 -- | Read and decode a session's @transcript.jsonl@ into entries (oldest
 -- first), tolerating a missing or empty file (returns @[]@).
@@ -2148,7 +3809,7 @@ writeHarnessBranchSource baseDir sid = do
   let dir = baseDir </> T.unpack sid
   createDirectoryIfMissing True dir
   let hSpec = HarnessSpec (fixedFlavourLookup "claude-code")
-        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing []
+        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing [] Nothing Nothing Nothing
       meta = SessionMeta
         { _sm_id                = SessionId sid
         , _sm_agent             = Nothing
@@ -2429,6 +4090,15 @@ extractBody resp = do
 lookupKey :: Aeson.Value -> Text -> Maybe Aeson.Value
 lookupKey (Aeson.Object o) k = KM.lookup (AesonKey.fromText k) o
 lookupKey _ _ = Nothing
+
+-- | Decode a response body to a JSON object and look up a top-level key.
+lookupKey' :: LBS.ByteString -> Text -> Maybe Aeson.Value
+lookupKey' body k = Aeson.decode body >>= (`lookupKey` k)
+
+-- | Safe head for the @D3.4@ ordering assertion.
+listToMaybe' :: [a] -> Maybe a
+listToMaybe' []      = Nothing
+listToMaybe' (x : _) = Just x
 
 -- | Check if a key exists in a JSON Object.
 hasKey :: Aeson.Value -> Text -> Bool

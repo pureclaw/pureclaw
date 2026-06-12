@@ -10,6 +10,7 @@ import qualified Security.SecretsSpec
 import qualified Security.PolicySpec
 import qualified Security.PathSpec
 import qualified Security.CommandSpec
+import qualified Security.AdoptionSpec
 import qualified Handles.LogSpec
 import qualified Handles.FileSpec
 import qualified Handles.ShellSpec
@@ -88,6 +89,13 @@ import qualified Transcript.TypesSpec
 import qualified Handles.TranscriptSpec
 import qualified Handles.HarnessSpec
 import qualified Harness.ClaudeCodeSpec
+import qualified Harness.ClaudeLogConvertSpec
+import qualified Harness.ClaudeLogPathSpec
+import qualified Harness.ClaudeSessionSpec
+import qualified Harness.DiscoverySpec
+import qualified Harness.JsonlTailSpec
+import qualified Harness.ReconcileSpec
+import qualified Harness.RegistrySpec
 import qualified Harness.TmuxSpec
 import qualified Transcript.CombinatorSpec
 import qualified Transcript.ProviderSpec
@@ -147,6 +155,7 @@ main = hspec $ do
   describe "Security.Policy" Security.PolicySpec.spec
   describe "Security.Path" Security.PathSpec.spec
   describe "Security.Command" Security.CommandSpec.spec
+  describe "Security.Adoption" Security.AdoptionSpec.spec
   describe "Handles.Log" Handles.LogSpec.spec
   describe "Handles.File" Handles.FileSpec.spec
   describe "Handles.Shell" Handles.ShellSpec.spec
@@ -225,6 +234,13 @@ main = hspec $ do
   describe "Handles.Transcript" Handles.TranscriptSpec.spec
   describe "Handles.Harness" Handles.HarnessSpec.spec
   describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
+  describe "Harness.ClaudeLogConvert" Harness.ClaudeLogConvertSpec.spec
+  describe "Harness.ClaudeLogPath" Harness.ClaudeLogPathSpec.spec
+  describe "Harness.ClaudeSession" Harness.ClaudeSessionSpec.spec
+  describe "Harness.Discovery" Harness.DiscoverySpec.spec
+  describe "Harness.JsonlTail" Harness.JsonlTailSpec.spec
+  describe "Harness.Reconcile" Harness.ReconcileSpec.spec
+  describe "Harness.Registry" Harness.RegistrySpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec
   describe "Transcript.Combinator" Transcript.CombinatorSpec.spec
   describe "Transcript.Provider" Transcript.ProviderSpec.spec

@@ -30,6 +30,9 @@
   /* ── Semantic: Status ───────────────────────────────────────────────── */
   --needs-input:      #FF6B6B;
   --needs-input-glow: rgba(255, 107, 107, 0.35);
+  /* Subtle tinted background for the "edited" pill (a needs-input cue without
+     the full red fill); pairs with --needs-input text. */
+  --needs-input-bg:   rgba(255, 107, 107, 0.12);
   --success:          #34D399;
   --warning:          #FBBF24;
 

@@ -34,6 +34,7 @@ import PureClaw.Agent.SlashCommands
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 import PureClaw.Handles.Harness (HarnessHandle)
+import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Handles.Tab
   ( TabHandle (..)
@@ -73,6 +74,7 @@ mkTestEnvWithChannel fch = do
   modelRef       <- newIORef Nothing
   vaultRef       <- newIORef (Nothing :: Maybe VaultHandle)
   harnessRef     <- newIORef (Map.empty :: Map Text HarnessHandle)
+  harnessReg     <- Registry.newRegistry
   targetRef      <- newIORef TargetProvider
   windowIdxRef   <- newIORef 0
   sessionRef     <- newIORef =<< mkNoOpSessionHandle
@@ -93,6 +95,7 @@ mkTestEnvWithChannel fch = do
     , _env_pluginHandle      = mkPluginHandle
     , _env_policy            = defaultPolicy
     , _env_harnesses         = harnessRef
+    , _env_harnessRegistry  = harnessReg
     , _env_target            = targetRef
     , _env_nextWindowIdx     = windowIdxRef
     , _env_agentDef          = Nothing :: Maybe AgentDef

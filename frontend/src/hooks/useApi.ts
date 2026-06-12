@@ -1,7 +1,59 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { AgentInfo, HarnessInfo, SessionInfo, TabInfo, TranscriptEntry } from '../types'
+import type { AgentInfo, DiscoverableWindow, HarnessInfo, SessionInfo, TabInfo, TabOrigin, TabStatus, TranscriptEntry } from '../types'
 
 const POLL_INTERVAL = 3000
+
+/** Raw `/api/tabs` (and WS `lists`) wire shape: the backend emits the new
+ *  health fields in snake_case. `index`/`kind`/`name`/`status`/`session_id`
+ *  are already in their final shape; the rest map to camelCase TabInfo keys. */
+export interface TabInfoWire {
+  index: number
+  kind: string
+  name: string
+  status: string
+  session_id: string | null
+  ext_modified?: boolean
+  stale?: boolean
+  origin?: string
+  attach_command?: string | null
+}
+
+/** Normalize a backend tab object to the camelCase `TabInfo` shape the UI
+ *  renders. Tolerant of Phase-1 objects lacking the new fields (back-compat):
+ *  flags default to false, attachCommand to null, origin to undefined. */
+export function mapTabInfo(wire: TabInfoWire): TabInfo {
+  return {
+    index: wire.index,
+    kind: wire.kind,
+    name: wire.name,
+    status: wire.status as TabStatus,
+    session_id: wire.session_id,
+    extModified: wire.ext_modified ?? false,
+    stale: wire.stale ?? false,
+    origin: wire.origin as TabOrigin | undefined,
+    attachCommand: wire.attach_command ?? null,
+  }
+}
+
+/** Raw `/api/discovery/scan` wire row: the backend emits a discoverable
+ *  window in snake_case (`window_name`/`window_index`/`pane_pid`). */
+export interface DiscoverableWindowWire {
+  session: string
+  window_name: string
+  window_index: number
+  pane_pid: number | null
+}
+
+/** Normalize a backend discovery row to the camelCase `DiscoverableWindow`
+ *  shape the UI renders. */
+export function mapDiscoverableWindow(wire: DiscoverableWindowWire): DiscoverableWindow {
+  return {
+    session: wire.session,
+    windowName: wire.window_name,
+    windowIndex: wire.window_index,
+    panePid: wire.pane_pid,
+  }
+}
 
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
@@ -64,9 +116,9 @@ export function useTabs() {
   const [error, setError] = useState(false)
 
   const poll = useCallback(async () => {
-    const data = await fetchJson<TabInfo[]>('/api/tabs')
+    const data = await fetchJson<TabInfoWire[]>('/api/tabs')
     if (data) {
-      setTabs(data)
+      setTabs(data.map(mapTabInfo))
       setError(false)
     } else {
       setError(true)
@@ -111,6 +163,36 @@ export function useArchivedSessions() {
   }, [poll])
 
   return { sessions, error }
+}
+
+/** On-demand discovery of adoptable external tmux windows. Unlike the other
+ *  list hooks this is NOT polled — discovery is an explicit, user-invoked
+ *  action (bounded server-side by the adoption allow-list). `scan()` POSTs
+ *  `/api/discovery/scan`, maps the wire rows, and replaces the list. On any
+ *  failure the list is cleared and `error` is set so the section can surface
+ *  it. */
+export function useDiscoverableWindows() {
+  const [windows, setWindows] = useState<DiscoverableWindow[]>([])
+  const [error, setError] = useState(false)
+
+  const scan = useCallback(async () => {
+    try {
+      const res = await fetch('/api/discovery/scan', { method: 'POST' })
+      if (!res.ok) {
+        setWindows([])
+        setError(true)
+        return
+      }
+      const rows = await res.json() as DiscoverableWindowWire[]
+      setWindows(Array.isArray(rows) ? rows.map(mapDiscoverableWindow) : [])
+      setError(false)
+    } catch {
+      setWindows([])
+      setError(true)
+    }
+  }, [])
+
+  return { windows, error, scan }
 }
 
 export function useTranscript(sessionId: string | null) {
@@ -315,6 +397,95 @@ export async function closeTab(index: number): Promise<boolean> {
   try {
     const res = await fetch(`/api/tabs/${index}/close`, {
       method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Dismiss an exited/orphaned tab by index — removes the live row. The
+ *  underlying session stays in Recent Sessions (session.json is untouched).
+ *  Returns true if the backend accepted the dismiss. */
+export async function dismissTab(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/dismiss`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Acknowledge an externally-modified tab by index — clears its `ext_modified`
+ *  flag on the registry entry. Returns true if the backend accepted it. */
+export async function acknowledgeTab(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/acknowledge`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Adopt an external (discovered) tmux window so PureClaw begins managing and
+ *  capturing it. The body carries `consent_confirmed: true` — the user has
+ *  acknowledged the trust consequence in the confirmation dialog. Returns
+ *  true on 200; false on a denial (403 — headless run or not allow-listed) or
+ *  any error. */
+/** Adopt an existing tmux window. Returns whether it succeeded and the PureClaw
+ *  session id created for the adopted harness (so the caller can navigate into
+ *  its conversation and send a first message). `sessionId` is null on failure or
+ *  if the server didn't supply one. */
+export async function adoptWindow(
+  session: string,
+  window: string,
+): Promise<{ ok: boolean; sessionId: string | null }> {
+  try {
+    const res = await fetch('/api/adopt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session, window, consent_confirmed: true }),
+    })
+    if (!res.ok) return { ok: false, sessionId: null }
+    const data = (await res.json().catch(() => ({}))) as { session_id?: string | null }
+    return { ok: true, sessionId: data.session_id ?? null }
+  } catch {
+    return { ok: false, sessionId: null }
+  }
+}
+
+/** Release an adopted harness by tab index — PureClaw stops managing it and
+ *  clears its `@pcl_id` marker, but never kills the underlying tmux window.
+ *  Distinct from close/dismiss. Returns true if the backend accepted it. */
+export async function releaseHarness(index: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/release`, {
+      method: 'POST',
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Destroy a harness by tab index — terminates its claude-code + shell
+ *  processes (kills the tmux window) and archives its session (the transcript
+ *  is kept on disk). Distinct from Release (which never kills) and Close.
+ *
+ *  `confirmAdopted` must be true to destroy an ADOPTED harness: killing a
+ *  window PureClaw did not create breaks the "release never kills" contract,
+ *  so the backend fail-closes unless the caller explicitly confirms. Sent as
+ *  `confirm_adopted` in the body. Returns true if the backend accepted it. */
+export async function destroyHarness(index: number, confirmAdopted: boolean): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tabs/${index}/destroy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm_adopted: confirmAdopted }),
     })
     return res.ok
   } catch {

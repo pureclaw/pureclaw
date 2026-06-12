@@ -3,8 +3,10 @@
  *
  * Responsibilities:
  *   - Open a WS connection to `/api/stream` (relative URL by default).
- *   - Auto-reconnect with exponential backoff (250 ms -> 5 s, jittered, max 5
- *     attempts). On reconnect, re-send the last focus op with the most recent
+ *   - Auto-reconnect with exponential backoff (250 ms -> 5 s, jittered) and NO
+ *     fixed attempt cap: it retries until the gateway returns or the caller
+ *     explicitly closes, so a long restart never permanently freezes live
+ *     updates. On reconnect, re-send the last focus op with the most recent
  *     entry id as `since` so the server can replay missed entries.
  *   - Maintain a status union and notify subscribers on transitions.
  *   - Track `lastError` to distinguish hard errors (403/503) from clean closes.
@@ -26,7 +28,10 @@ import type { TranscriptEntry } from '../types'
 
 const RECONNECT_BASE_MS = 250
 const RECONNECT_MAX_MS = 5000
-const RECONNECT_MAX_ATTEMPTS = 5
+// Exponent ceiling for the backoff calc. Past this the delay is already
+// pinned at RECONNECT_MAX_MS, and it keeps `reconnectAttempt` from feeding an
+// unbounded value into Math.pow during a very long outage.
+const RECONNECT_MAX_EXPONENT = 8
 
 type FocusState =
   | { kind: 'none' }
@@ -271,10 +276,13 @@ class StreamClientImpl implements StreamClient {
       }
     }
     this.ws = null
-    if (this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
-      this.setStatus('closed')
-      return
-    }
+    // Reconnect indefinitely with capped backoff. We deliberately do NOT give
+    // up after a fixed number of attempts: a gateway outage longer than the
+    // backoff window (e.g. a dev-mode restart/rebuild) would otherwise leave
+    // the client permanently 'closed', silently freezing every live update
+    // (the sidebar's `lists` snapshot included) until the user manually
+    // reloads. Only an explicit `close()` or a fatal construction error ends
+    // the retry loop.
     this.setStatus('reconnecting')
     this.scheduleReconnect()
   }
@@ -283,7 +291,10 @@ class StreamClientImpl implements StreamClient {
     const attempt = this.reconnectAttempt
     this.reconnectAttempt += 1
     // Exponential backoff: 250, 500, 1000, 2000, 4000 — capped at RECONNECT_MAX_MS.
-    const expo = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt), RECONNECT_MAX_MS)
+    const expo = Math.min(
+      RECONNECT_BASE_MS * Math.pow(2, Math.min(attempt, RECONNECT_MAX_EXPONENT)),
+      RECONNECT_MAX_MS,
+    )
     // Full jitter in [0.5x, 1.0x] to avoid thundering-herd reconnects.
     const jitterFloor = expo * 0.5
     const delay = jitterFloor + Math.random() * (expo - jitterFloor)
