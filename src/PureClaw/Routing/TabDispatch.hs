@@ -127,6 +127,12 @@ data TabDispatchDeps = TabDispatchDeps
     -- ^ Routing config for 'Parse.parseInput' (index bounds etc.).
   , _td_fallthrough     :: !(ConversationKey -> Slash.SlashCommand -> IO ())
     -- ^ Handler for non-tab slash commands (e.g. @\/bg@).
+  , _td_onTabsChanged   :: !(IO ())
+    -- ^ Callback fired once after each __mutating__ command (@\/nt@, @\/new@,
+    -- @\/close@, @\/rename@, wizard bind). NOT fired on read\/switch commands
+    -- (@\/tabs@, @\/relay@, @\/N@ switch, default text). Allows callers (e.g.
+    -- "PureClaw.CLI.Commands") to rebroadcast\/persist the registry without
+    -- creating a dependency from @Routing\/Tabs@ onto @Frontend@.
   }
 
 -- ---------------------------------------------------------------------------
@@ -261,6 +267,7 @@ resetActiveTab ctx slot = do
       release ctx oldRef
       ensure ctx newRef
       setCursorTo ctx newRef
+      notifyChanged ctx
       emit ctx ("reset tab /" <> slotChar slot)
 
 -- ---------------------------------------------------------------------------
@@ -297,6 +304,7 @@ bindNewTab ctx ref name verb = do
     Right slot              -> do
       ensure ctx ref
       setCursorTo ctx ref
+      notifyChanged ctx
       emit ctx (verb <> " /" <> slotChar slot)
 
 -- ---------------------------------------------------------------------------
@@ -334,6 +342,7 @@ closeSlot ctx slot = do
       -- Drop every cursor focused on the removed ref (this conversation + any
       -- others sharing the tab); valid cursors survive via TabRef identity.
       mapM_ (modifyCursor ctx . clearCursor) (conversationsOn ref cs)
+      notifyChanged ctx
       emit ctx ("closed /" <> slotChar slot)
 
 -- ---------------------------------------------------------------------------
@@ -398,6 +407,7 @@ doRename ctx slot name =
                            id
                            (rebindSlot slot (_tab_ref tab) clean tl)
           writeTabs ctx tl'
+          notifyChanged ctx
           emit ctx ("renamed /" <> slotChar slot <> " " <> clean)
 
 -- ---------------------------------------------------------------------------
@@ -551,6 +561,12 @@ setWizard ctx mSt =
 -- | Drop the served conversation's wizard state.
 clearWizard :: Ctx -> IO ()
 clearWizard ctx = setWizard ctx Nothing
+
+-- | Fire the injected tabs-changed callback once (called after each mutating
+-- registry operation — tab create, close, rename, wizard bind). NOT called on
+-- read or cursor-switch operations.
+notifyChanged :: Ctx -> IO ()
+notifyChanged ctx = _td_onTabsChanged (_ctx_deps ctx)
 
 -- | Overwrite the registry's 'TabList' (used by in-place rebind/rename, which
 -- the registry handle has no dedicated op for). The rebinds here run on the

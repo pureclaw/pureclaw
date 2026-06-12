@@ -713,6 +713,7 @@ runChat consentChannel opts = do
               , _env_sinks            = _ts_sinks tabSub
               , _env_wizard           = _ts_wizard tabSub
               , _env_tabOutQ          = _ts_tabOutQ tabSub
+              , _env_onTabsChanged    = _ts_onTabsChanged tabSub
               }
         -- Fill the envRef so the tab completer can access the live env
         writeIORef envRef (Just env)

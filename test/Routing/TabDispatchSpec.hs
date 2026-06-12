@@ -73,15 +73,17 @@ import PureClaw.Tabs.Wizard (WizardState)
 
 -- | Recorders + injected behaviour for one 'TabDispatchDeps'.
 data Fakes = Fakes
-  { f_deps      :: TabDispatchDeps
-  , f_emits     :: IORef [(ConversationKey, Text)]
-  , f_sends     :: IORef [(TabRef, Text)]
-  , f_ensures   :: IORef [TabRef]
-  , f_releases  :: IORef [TabRef]
+  { f_deps        :: TabDispatchDeps
+  , f_emits       :: IORef [(ConversationKey, Text)]
+  , f_sends       :: IORef [(TabRef, Text)]
+  , f_ensures     :: IORef [TabRef]
+  , f_releases    :: IORef [TabRef]
   , f_fallthrough :: IORef [(ConversationKey, Slash.SlashCommand)]
-  , f_reg       :: TabRegistry
-  , f_cursors   :: IORef CursorState
-  , f_wizard    :: IORef (Map ConversationKey WizardState)
+  , f_reg         :: TabRegistry
+  , f_cursors     :: IORef CursorState
+  , f_wizard      :: IORef (Map ConversationKey WizardState)
+  , f_tabsChanged :: IORef Int
+    -- ^ Incremented once per call to '_td_onTabsChanged'.
   }
 
 -- | How the injected @newDefaultSession@ behaves.
@@ -113,26 +115,27 @@ mkFakesEx
   -> (HarnessId -> Bool)    -- ^ liveness probe
   -> IO Fakes
 mkFakesEx defB sendB harnesses sessions liveFn = do
-  emits     <- newIORef []
-  sends     <- newIORef []
-  ensures   <- newIORef []
-  releases  <- newIORef []
-  fall      <- newIORef []
-  reg       <- newTabRegistry
-  cursors   <- newIORef emptyCursors
-  wizard    <- newIORef Map.empty
+  emits       <- newIORef []
+  sends       <- newIORef []
+  ensures     <- newIORef []
+  releases    <- newIORef []
+  fall        <- newIORef []
+  reg         <- newTabRegistry
+  cursors     <- newIORef emptyCursors
+  wizard      <- newIORef Map.empty
+  tabsChanged <- newIORef (0 :: Int)
   let deps = TabDispatchDeps
-        { _td_tabs    = reg
-        , _td_cursors = cursors
-        , _td_wizard  = wizard
-        , _td_ensure  = \r -> modifyIORef' ensures (++ [r])
-        , _td_release = \r -> modifyIORef' releases (++ [r])
-        , _td_sendTo  = \r t -> do
+        { _td_tabs           = reg
+        , _td_cursors        = cursors
+        , _td_wizard         = wizard
+        , _td_ensure         = \r -> modifyIORef' ensures (++ [r])
+        , _td_release        = \r -> modifyIORef' releases (++ [r])
+        , _td_sendTo         = \r t -> do
             modifyIORef' sends (++ [(r, t)])
             pure $ case sendB of
               SendOk      -> Right ()
               SendErr err -> Left err
-        , _td_emit    = \k t -> modifyIORef' emits (++ [(k, t)])
+        , _td_emit           = \k t -> modifyIORef' emits (++ [(k, t)])
         , _td_newDefaultSession = pure $ case defB of
             MintsRef r -> Right r
             NoDefault  -> Left noDefaultGuidance
@@ -142,17 +145,19 @@ mkFakesEx defB sendB harnesses sessions liveFn = do
         , _td_relayDefault    = FocusedOnly
         , _td_routingConfig   = RConfig.defaultRoutingConfig
         , _td_fallthrough     = \k c -> modifyIORef' fall (++ [(k, c)])
+        , _td_onTabsChanged   = modifyIORef' tabsChanged (+1)
         }
   pure Fakes
-    { f_deps = deps
-    , f_emits = emits
-    , f_sends = sends
-    , f_ensures = ensures
-    , f_releases = releases
+    { f_deps        = deps
+    , f_emits       = emits
+    , f_sends       = sends
+    , f_ensures     = ensures
+    , f_releases    = releases
     , f_fallthrough = fall
-    , f_reg = reg
-    , f_cursors = cursors
-    , f_wizard = wizard
+    , f_reg         = reg
+    , f_cursors     = cursors
+    , f_wizard      = wizard
+    , f_tabsChanged = tabsChanged
     }
 
 -- | A simple default-mint 'Fakes' (no wizard candidates, all harnesses live).
@@ -259,6 +264,7 @@ spec = do
   defaultSpec
   fallthroughSpec
   edgeSpec
+  onTabsChangedSpec
 
 -- ---------------------------------------------------------------------------
 -- /new
@@ -763,6 +769,30 @@ edgeSpec = describe "edge cases" $ do
     handleInbound (f_deps f) convA "stranded"
     lastEmit f `shouldReturn` "no active tab — /new to start one or /tab to attach"
     sentTexts f `shouldReturn` []
+
+-- ---------------------------------------------------------------------------
+-- _td_onTabsChanged notify seam
+-- ---------------------------------------------------------------------------
+
+onTabsChangedSpec :: Spec
+onTabsChangedSpec = describe "_td_onTabsChanged" $ do
+  it "fires once on /nt" $ do
+    f <- simpleFakes (MintsRef (sess "s1"))
+    handleInbound (f_deps f) convA "/nt"
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+
+  it "fires once on /close" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "a"
+    handleInbound (f_deps f) convA "/0"   -- focus (cursor switch, not a mutation)
+    handleInbound (f_deps f) convA "/close"
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+
+  it "does NOT fire on a non-mutating command (/tabs)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "a"
+    handleInbound (f_deps f) convA "/tabs"
+    readIORef (f_tabsChanged f) `shouldReturn` 0
 
 -- ---------------------------------------------------------------------------
 -- Helpers

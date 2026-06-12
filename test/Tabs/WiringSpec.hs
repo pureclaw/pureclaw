@@ -303,6 +303,7 @@ mkTabbedEnvChan sessionsDir (channel, clog) = do
         , _env_sinks             = _ts_sinks ts
         , _env_wizard            = _ts_wizard ts
         , _env_tabOutQ           = _ts_tabOutQ ts
+        , _env_onTabsChanged     = _ts_onTabsChanged ts
         }
   pure (TabbedHarness env clog runnersTracker)
 

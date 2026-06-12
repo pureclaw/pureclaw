@@ -85,6 +85,7 @@ mkTestEnv p ch = do
     , _env_sinks = error "8c.2 stub: _env_sinks not exercised in this test"
     , _env_wizard = error "8c.2 stub: _env_wizard not exercised in this test"
     , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
+    , _env_onTabsChanged = pure ()
     }
 
 -- | Like 'mkTestEnv' but with a REAL foreground session rooted under the

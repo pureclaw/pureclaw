@@ -172,6 +172,12 @@ data AgentEnv = AgentEnv
     -- ^ Ref-tagged tab-output queue: runtimes enqueue @('TabRef',
     -- 'ChannelEvent')@ here; the relay-writer thread drains it through
     -- 'PureClaw.Tabs.RelayWriter.processOutput'.
+  , _env_onTabsChanged :: !(IO ())
+    -- ^ Callback fired once after each chat-side 'TabRegistry' mutation
+    -- (@\/nt@, @\/new@, @\/close@, @\/rename@, wizard bind). Default is
+    -- @'pure' ()@. Wired to rebroadcast\/persist the registry in
+    -- "PureClaw.CLI.Commands" (WU8). Keeping the callback here prevents
+    -- @Routing\/Tabs@ from depending on @Frontend@.
   }
 
 -- | Read the active session's transcript handle.
@@ -209,13 +215,16 @@ defaultEnvFork body = do
 -- the tabbed loop) by 'newTabSubsystem'; its fields map one-for-one onto the
 -- seven new 'AgentEnv' fields.
 data TabSubsystem = TabSubsystem
-  { _ts_tabRegistry :: !TabRegistry
-  , _ts_cursors     :: !(IORef CursorState)
-  , _ts_exec        :: !Exec
-  , _ts_relayWriter :: !RelayWriter
-  , _ts_sinks       :: !SinkRegistry
-  , _ts_wizard      :: !(IORef (Map ConversationKey WizardState))
-  , _ts_tabOutQ     :: !(TBQueue (TabRef, ChannelEvent))
+  { _ts_tabRegistry    :: !TabRegistry
+  , _ts_cursors        :: !(IORef CursorState)
+  , _ts_exec           :: !Exec
+  , _ts_relayWriter    :: !RelayWriter
+  , _ts_sinks          :: !SinkRegistry
+  , _ts_wizard         :: !(IORef (Map ConversationKey WizardState))
+  , _ts_tabOutQ        :: !(TBQueue (TabRef, ChannelEvent))
+  , _ts_onTabsChanged  :: !(IO ())
+    -- ^ Default @'pure' ()@; overridable at the construction site (e.g.
+    -- "PureClaw.CLI.Commands" in WU8) before wiring into 'AgentEnv'.
   }
 
 -- | Allocate a complete, empty tab subsystem: an empty tab registry, empty
@@ -235,11 +244,12 @@ newTabSubsystem outQBound = do
   wizard      <- newIORef Map.empty
   tabOutQ     <- newTBQueueIO (fromIntegral (max 1 outQBound))
   pure TabSubsystem
-    { _ts_tabRegistry = tabRegistry
-    , _ts_cursors     = cursors
-    , _ts_exec        = exec
-    , _ts_relayWriter = relayWriter
-    , _ts_sinks       = sinks
-    , _ts_wizard      = wizard
-    , _ts_tabOutQ     = tabOutQ
+    { _ts_tabRegistry   = tabRegistry
+    , _ts_cursors       = cursors
+    , _ts_exec          = exec
+    , _ts_relayWriter   = relayWriter
+    , _ts_sinks         = sinks
+    , _ts_wizard        = wizard
+    , _ts_tabOutQ       = tabOutQ
+    , _ts_onTabsChanged = pure ()
     }
