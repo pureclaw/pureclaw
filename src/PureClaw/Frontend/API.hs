@@ -31,6 +31,7 @@ module PureClaw.Frontend.API
   , ProviderInfo (..)
   , TabSnapshot (..)
     -- * Harness → tab snapshot mapping (WU8, exported for testing)
+    -- Re-exported from "PureClaw.Frontend.TabsView"
   , livenessToTabStatus
   , harnessOriginToText
   , harnessEntriesToTabs
@@ -80,6 +81,13 @@ import PureClaw.Agent.Context
 import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, isValidSessionId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
+-- Note: 'tabSnapshotsFromRegistry' is used directly from TabsView (not
+-- re-exported here); the WU6 IO wrapper imports PureClaw.Frontend.TabsView.
+import PureClaw.Frontend.TabsView
+  ( TabSnapshot (..)
+  , livenessToTabStatus
+  , harnessOriginToText
+  )
 import PureClaw.Frontend.StreamBroker
   ( BrokerEvent (..)
   , SessionActivity (..)
@@ -452,76 +460,6 @@ instance ToJSON ProviderInfo where
     [ "name"      .= _pi_name pi_
     , "isDefault" .= _pi_isDefault pi_
     ] ++ maybe [] (\m -> ["defaultModel" .= m]) (_pi_defaultModel pi_)
-
--- | A point-in-time snapshot of a single tab, pre-resolved to
--- JSON-friendly text values. The snapshot callback in 'FrontendEnv'
--- produces these; the API layer simply serializes them.
-data TabSnapshot = TabSnapshot
-  { _ts_index     :: !Int
-  , _ts_kind      :: !Text
-    -- ^ @\"provider\"@, @\"harness\"@, or @\"raw_shell\"@.
-  , _ts_name      :: !Text
-    -- ^ Human-readable tab name.
-  , _ts_status    :: !Text
-    -- ^ Liveness word: @\"running\"@, @\"idle\"@, @\"exited\"@, or
-    -- @\"orphaned\"@ (Phase 2 split Exited\/Orphaned; see
-    -- 'livenessToTabStatus').
-  , _ts_sessionId :: !(Maybe Text)
-    -- ^ Session ID for session-backed tabs; 'Nothing' for raw shells.
-  , _ts_extModified :: !Bool
-    -- ^ The harness window was renamed out-of-band (the §7 ⚠ \"edited\"
-    -- pill). Orthogonal to liveness.
-  , _ts_stale :: !Bool
-    -- ^ Health could not be refreshed this cycle; the frontend holds the
-    -- last-known icon with a dimmed cue (§7).
-  , _ts_origin :: !Text
-    -- ^ How the harness entered the registry: @\"spawned\"@,
-    -- @\"discovered\"@, or @\"adopted\"@ (the §7 origin pill).
-  , _ts_attachCommand :: !(Maybe Text)
-    -- ^ Copyable @tmux attach@ command for live harness rows;
-    -- 'Nothing' for non-harness tabs.
-  }
-  deriving stock (Show, Eq)
-
--- | Serialize a 'TabSnapshot'. EXTEND-ONLY: the original Phase-1 keys
--- (@index@\/@kind@\/@name@\/@status@\/@session_id@) are emitted unchanged;
--- the Phase-2 health fields are ADDED as new snake_case keys
--- (@ext_modified@\/@stale@\/@origin@\/@attach_command@). Old consumers that
--- ignore unknown keys keep working.
-instance ToJSON TabSnapshot where
-  toJSON ts = object
-    [ "index"          .= _ts_index ts
-    , "kind"           .= _ts_kind ts
-    , "name"           .= _ts_name ts
-    , "status"         .= _ts_status ts
-    , "session_id"     .= _ts_sessionId ts
-    , "ext_modified"   .= _ts_extModified ts
-    , "stale"          .= _ts_stale ts
-    , "origin"         .= _ts_origin ts
-    , "attach_command" .= _ts_attachCommand ts
-    ]
-
--- | Map a registry 'Registry.Liveness' to the @TabSnapshot@ status vocabulary.
--- Phase 2 (§7) SPLITS the former \"crashed\" bucket: 'Registry.LivenessExited'
--- (the process exited; offer Restart\/Dismiss) and 'Registry.LivenessOrphaned'
--- (the window vanished out-of-band; greyed, offer Dismiss) now map to distinct
--- words so the frontend can render the state→visual table.
-livenessToTabStatus :: Registry.Liveness -> Text
-livenessToTabStatus lv = case lv of
-  Registry.LivenessIdle     -> "idle"
-  Registry.LivenessThinking -> "running"
-  Registry.LivenessExited   -> "exited"
-  Registry.LivenessOrphaned -> "orphaned"
-
--- | Map a registry 'Registry.HarnessOrigin' to the @TabSnapshot@ origin
--- vocabulary (the §7 origin pill): @\"spawned\"@ (we launched it),
--- @\"discovered\"@ (boot-reconstructed from a tagged window), or
--- @\"adopted\"@ (taken over from another controller).
-harnessOriginToText :: Registry.HarnessOrigin -> Text
-harnessOriginToText o = case o of
-  Registry.OriginSpawned    -> "spawned"
-  Registry.OriginDiscovered -> "discovered"
-  Registry.OriginAdopted    -> "adopted"
 
 -- | Project the harness registry's entries onto @TabSnapshot@s for the
 -- Active-Tabs list. Phase-1 minimal slice: only harness entries are surfaced

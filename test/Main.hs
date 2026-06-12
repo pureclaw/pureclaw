@@ -154,6 +154,8 @@ import qualified Frontend.StreamIntegrationSpec
 -- WU4 (activity probe loop)
 import qualified Frontend.ActivityProbeSpec
 -- Frontend.APISpec is already imported at the top of this block (from main)
+-- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
+import qualified Frontend.TabsViewSpec
 
 -- WU-10 (Container + Local harness factory arms)
 import qualified Tab.ContainerSpec
@@ -310,6 +312,8 @@ main = hspec $ do
   -- WU4 (activity probe loop)
   describe "Frontend.ActivityProbe" Frontend.ActivityProbeSpec.spec
   -- Frontend.APISpec is registered earlier (from main's WU-7 unified endpoint)
+  -- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
+  describe "Frontend.TabsView" Frontend.TabsViewSpec.spec
   -- WU9 (HPureClaw depth limit)
   describe "Routing.DepthLimit"  Routing.DepthLimitSpec.spec
   -- WU-10 (Container + Local harness factory arms)
