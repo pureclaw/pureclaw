@@ -601,6 +601,11 @@ runChat consentChannel opts = do
                 _lh_logWarn logger $
                   "Session not found (corrupted metadata): " <> T.pack msg
                 exitFailure
+              Left ResumeInvalidId -> do
+                _lh_logWarn logger $
+                  "Session id is invalid (contains path traversal or forbidden characters): "
+                    <> T.pack sidRaw
+                exitFailure
           Nothing -> do
             let sid = SessionTypes.newSessionId mPrefix now
                 mAgent = fmap AgentDef._ad_name mAgentDef

@@ -257,6 +257,14 @@ spec = do
         Right _ -> expectationFailure "expected CorruptedMetadata, got: Right _"
         Left e  -> expectationFailure ("expected CorruptedMetadata, got: " <> show e)
 
+    it "resumeSession rejects a traversal id with ResumeInvalidId (no filesystem touch)" $
+      withSystemTempDirectory "pc-resume" $ \dir -> do
+        r <- resumeSession Nothing mkNoOpLogHandle dir (parseSessionId "../etc")
+        case r of
+          Left ResumeInvalidId -> pure ()
+          Left other           -> expectationFailure ("expected Left ResumeInvalidId, got Left " <> show other)
+          Right _              -> expectationFailure "expected Left ResumeInvalidId, got Right _"
+
   describe "mkNoOpSessionHandle" $ do
     it "is safe to save and record into" $ do
       sh <- mkNoOpSessionHandle
