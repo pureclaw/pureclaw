@@ -162,10 +162,13 @@ Route the frontend tab endpoints through the `TabRegistry`:
   (`close`/`dismiss`/`release`/`destroy`/`acknowledge`) to resolve `_ts_index` →
   `_tab_slot` → `_tab_ref` via `readTabs _fe_tabRegistry`:
   - `close` → `registryRemove _fe_tabRegistry slot`, valid for any tab kind. For a
-    `BoundSession` tab also `release` the runtime (`Exec`) and evict the
-    `SessionStore` cache entry so a closed-then-reopened session does not resurrect a
-    stale `SessionHandle`/runtime. The `session.json` stays on disk → the session
-    reappears under Recent Sessions.
+    `BoundSession` tab also `release` the runtime via the **shared `_env_exec`**
+    (`Exec.release` stops the per-tab runtime worker on last release). The
+    per-`runTabbedLoop`-local `SessionStore` (a `sid → SessionHandle` *context-seed
+    cache*) is **not** reachable from `FrontendEnv` and is **not evicted** this phase:
+    a stale cache entry is benign because the handle re-reads metadata and reopens
+    `transcript.jsonl` per turn, so a reopened session does not resurrect wrong state.
+    The `session.json` stays on disk → the session reappears under Recent Sessions.
   - `dismiss`/`release`/`destroy`/`acknowledge` are **harness-only**: on a
     `BoundHarness` tab they run the existing harness teardown; on a `BoundSession`
     tab they return a clear `"not a harness tab"` 4xx (and the UI should suppress
@@ -196,8 +199,13 @@ focus is per-surface.
   server/loop start, so the first WS `lists` snapshot already reflects restored tabs.
   Reconcile keeps: a `BoundSession` tab **iff its `session.json` exists** — this is
   **defense-in-depth against a hand-edited or partially-written `tabs.json`** that
-  references a session that was deleted out-of-band (not against an unsaved session,
-  which can't happen); a `BoundHarness` tab iff `_pd_harnessLive`.
+  references a session deleted out-of-band (not against an unsaved session, which
+  can't happen); a `BoundHarness` tab iff `_pd_harnessLive`. The session-existence
+  check is a **new injected `PersistDeps` seam** `_pd_sessionExists :: SessionId ->
+  IO Bool` (consistent with the module's injected-seam convention; `reconcileTabs`
+  must not touch the filesystem directly). Wire it in `Commands.hs` boot to
+  `doesFileExist (sessionsDir </> unSessionId sid </> "session.json")`; tests inject
+  a pure predicate.
 - **Traversal guard (security):** `SessionId` is opaque and `resumeSession`/
   `openSessionFromDisk` path-join it **with no validation**. Promote a single
   **strict** canonical validator `isValidSessionId` to the leaf `Core.Types`
@@ -231,9 +239,9 @@ focus is per-surface.
 | `Frontend/API.hs` | import + re-export `TabsView`; `_fe_tabRegistry`/`_fe_cursors` fields; thin IO wrapper gathering lookups → `tabSnapshotsFromRegistry`; recentSessions+archived exclusion reads registry tabs; **tab-action endpoints resolve index against the TabRegistry slot** (close any kind; dismiss/release/destroy/acknowledge harness-only with a `"not a harness tab"` 4xx backstop); `_fe_maxTabs` pre-check; drop `_fe_tabCount` | lists IO wrapper + frontend tab endpoints |
 | `Agent/Env.hs` (+`TabSubsystem`) | add `_env_onTabsChanged :: IO ()` (default `pure ()`) | the change-notify seam |
 | `Routing/TabDispatch.hs` | `_td_onTabsChanged` deps field; call after `cmdNt`/`cmdNew`/`cmdClose`/`cmdRename`/wizard-bind | chat-side mutation notify |
-| `Tabs/Wiring.hs` | call notify after its registry mutations; on close release the runtime + evict the `SessionStore` (add a remove op — owned here; the frontend close path reaches it via the shared `_env_exec`/store, see §D) | live-loop notify |
+| `Tabs/Wiring.hs` | call notify after its registry mutations; close releases the runtime via the shared `_env_exec` (no `SessionStore` eviction — it's `runTabbedLoop`-local + benign-if-stale, see §D) | live-loop notify |
 | `Core/Types.hs` | the one strict `isValidSessionId` (leaf) | session-id validation |
-| `Tabs/Persist.hs` | `parseRef` rejects an invalid `SessionId` (strict guard); `reconcileTabs` drops `BoundSession` tabs whose `session.json` is absent. (Both reachable in tests via `loadTabs` — no new exports needed.) | persistence codec + reconcile |
+| `Tabs/Persist.hs` | add `PersistDeps._pd_sessionExists :: SessionId -> IO Bool`; `parseRef` rejects an invalid `SessionId` (strict guard); `reconcileTabs` drops `BoundSession` tabs failing `_pd_sessionExists`. (Both reachable in tests via `loadTabs` — no new exports needed.) | persistence codec + reconcile |
 | `Session/Handle.hs` | `resumeSession`/`openSessionFromDisk` validate the id (safe-by-construction); drop the local validator copy in favor of `Core.Types` | loader safety |
 | `CLI/Commands.hs` | set `_fe_tabRegistry`/`_fe_cursors`; set `_env_onTabsChanged = saveTabs + broadcastLists`; `loadTabs`+reconcile after `bootReconstruct`, before server start | wiring |
 | React frontend | **surface slot-exhaustion**: the non-branch new-tab create path (`App.tsx`) must read the 4xx error body and render an actionable message (e.g. *"All N tab slots in use — close a tab to free one"*) instead of the current silent no-op. Harness-only controls already self-suppress on session rows via existing data-gating (`isDead`/`isExited`/`origin==='adopted'`/`extModified`/`attachCommand` all false-empty; Destroy needs `kind==='harness'`) — **no new guard code**; Archive + Close intentionally remain. Verify `mapTabInfo` maps a session tab (kind `provider`, status `idle`, origin `""`) cleanly with no green "running" dot. | rendering + error surfacing |
@@ -286,7 +294,12 @@ Backend (TDD, `-Werror`/hlint clean, 95% coverage gate):
 - **Strict id validation**: `Core.Types.isValidSessionId` rejects leading-dot,
   `..`, `/`, control/NUL, and non-`[a-zA-Z0-9_-]` ids; `parseRef` drops a tab whose
   id fails it (tested via `loadTabs` decoding a hand-written `tabs.json` with a
-  leading-dot / control-char / absolute-looking id — not just `..`).
+  leading-dot / control-char / absolute-looking id — not just `..`). **Round-trip
+  safeguard**: a property test asserting `isValidSessionId (unSessionId (newSessionId
+  …))` so a future id-format change can't silently make all live sessions
+  unresumable (verified today: `newSessionId` emits `YYYYMMDD-HHMMSS-mmm` +
+  sanitized prefix — digits/hyphens only). Also route `resolveBranchSeed` through the
+  one strict validator when collapsing the copies.
 - **Persistence**: `saveTabs`→`loadTabs`+reconcile round-trip driven **directly via
   the `Persist` module** (no new exports — through `loadTabs`); reconcile drops a
   dead-harness tab AND a `BoundSession` tab whose `session.json` is absent, keeps a
