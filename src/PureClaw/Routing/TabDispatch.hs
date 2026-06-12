@@ -54,6 +54,12 @@ import PureClaw.Harness.Registry (HarnessId)
 import PureClaw.Routing.Parse qualified as Parse
 import PureClaw.Routing.Types qualified as RT
 import PureClaw.Core.Types (SessionId)
+import PureClaw.Session.Kind
+  ( HarnessFlavour (..)
+  , HarnessSpec (..)
+  , TerminalBackend (..)
+  , fixedFlavourLookup
+  )
 import PureClaw.Tabs
   ( TabRegistry (..)
   , readTabs
@@ -133,6 +139,11 @@ data TabDispatchDeps = TabDispatchDeps
     -- (@\/tabs@, @\/relay@, @\/N@ switch, default text). Allows callers (e.g.
     -- "PureClaw.CLI.Commands") to rebroadcast\/persist the registry without
     -- creating a dependency from @Routing\/Tabs@ onto @Frontend@.
+  , _td_spawnHarness    :: !(HarnessSpec -> IO (Either Text (TabRef, Text)))
+    -- ^ Spawn a fresh harness, persist + link its session, and return the new
+    -- tab's @('TabRef', label)@ (or a user-facing error). Used by the harness
+    -- arm of 'cmdTabNew' (@\/tab new harness@). Wired from
+    -- 'PureClaw.Agent.Env._env_startHarness' in "PureClaw.Tabs.Wiring".
   }
 
 -- ---------------------------------------------------------------------------
@@ -454,16 +465,18 @@ cmdTab ctx args = do
 -- distinct from bare @\/tab@ (the attach wizard) and is dispatched /before/ it,
 -- so @\/tab new@ never opens the wizard.
 --
--- For WU-A only the default-provider session kinds are live; the harness and
--- shell-family kinds emit a "not yet supported" placeholder (harness arrives in
--- WU-B). An unrecognised keyword emits a short usage hint.
+-- The default-provider session kinds (@ai@\/@provider@\/bare) mint a fresh
+-- session; @harness@ (optionally with an explicit flavour, e.g.
+-- @\/tab new harness claude-code@) spawns a real harness via '_td_spawnHarness'
+-- (WU-B). The remaining shell-family kinds emit a "not yet supported"
+-- placeholder; an unrecognised keyword emits a short usage hint.
 cmdTabNew :: Ctx -> [Text] -> IO ()
 cmdTabNew ctx rest = case kindKeyword of
   -- bare / "ai" / "provider": mint a default-provider session (mirrors 'cmdNt').
   Nothing         -> mintDefault
   Just "ai"       -> mintDefault
   Just "provider" -> mintDefault
-  Just "harness"  -> emit ctx (tabNewUnsupportedMsg "harness")
+  Just "harness"  -> spawnHarness ctx flavourArgs
   Just "shell"    -> emit ctx (tabNewUnsupportedMsg "shell")
   Just "ssh"      -> emit ctx (tabNewUnsupportedMsg "ssh")
   Just "tmux"     -> emit ctx (tabNewUnsupportedMsg "tmux")
@@ -472,11 +485,37 @@ cmdTabNew ctx rest = case kindKeyword of
     kindKeyword = case rest of
       (k : _) -> Just (T.toLower k)
       []      -> Nothing
+    -- Args following the @harness@ keyword (the optional flavour word).
+    flavourArgs = drop 1 rest
     mintDefault = do
       mNew <- _td_newDefaultSession (_ctx_deps ctx)
       case mNew of
         Left msg     -> emit ctx msg
         Right newRef -> bindNewTab ctx newRef defaultSessionName "new tab"
+
+-- | @\/tab new harness [\<flavour\>]@: build a default 'HarnessSpec' (flavour
+-- from the optional argument, defaulting to @claude-code@; local backend; no
+-- cwd\/args\/ids) and spawn it through '_td_spawnHarness'. On success bind the
+-- returned 'TabRef' into a new tab; on failure emit the error.
+spawnHarness :: Ctx -> [Text] -> IO ()
+spawnHarness ctx flavourArgs = do
+  result <- _td_spawnHarness (_ctx_deps ctx) spec
+  case result of
+    Left msg          -> emit ctx msg
+    Right (ref, label) -> bindNewTab ctx ref label "new harness"
+  where
+    flavour = case flavourArgs of
+      (f : _) -> fixedFlavourLookup (T.toLower f)
+      []      -> HClaudeCode
+    spec = HarnessSpec
+      { _h_flavour           = flavour
+      , _h_backend           = TbLocal
+      , _h_cwd               = Nothing
+      , _h_args              = []
+      , _h_harnessId         = Nothing
+      , _h_claudeSessionUuid = Nothing
+      , _h_canonicalCwd      = Nothing
+      }
 
 -- ---------------------------------------------------------------------------
 -- Stage 3: routing grammar
@@ -731,7 +770,7 @@ relayBadModeMsg :: Text
 relayBadModeMsg = "unknown relay mode — use focused, activity, or all"
 
 -- | @\/tab new \<kind\>@ for a kind that is recognised but not yet wired
--- (harness arrives in WU-B; shell\/ssh\/tmux later).
+-- (shell\/ssh\/tmux; harness landed in WU-B).
 tabNewUnsupportedMsg :: Text -> Text
 tabNewUnsupportedMsg kind = "/tab new " <> kind <> " is not yet supported"
 

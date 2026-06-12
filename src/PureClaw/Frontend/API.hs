@@ -4,6 +4,7 @@ module PureClaw.Frontend.API
     -- * Environment
   , FrontendEnv (..)
   , StartedHarness (..)
+  , spawnHarnessSession
   , ReleaseTmux (..)
   , productionReleaseTmux
   , productionKillWindow
@@ -1713,6 +1714,45 @@ createHarnessTab
   -> (Response -> IO ResponseReceived)
   -> IO ResponseReceived
 createHarnessTab env tabKind spec sk respond = do
+  spawned <- spawnHarnessSession env spec sk
+  case spawned of
+    Left err -> respond $ harnessErrorResponse err
+    Right (sid, hid, updatedMeta, key) -> do
+      -- Bind the harness into the first-class TabRegistry (WU7) — only a
+      -- successful spawn consumes a tab slot. The returned slot is the tab's
+      -- display index in the response; the label is the spawn's window key.
+      -- 'SlotsFull' here (a lost race against a concurrent create after the
+      -- pre-check in 'handleNewTab') maps to the cap 409; the harness window is
+      -- already up, but the tab cannot be surfaced, so report the cap.
+      appended <- registryAppend (_fe_tabRegistry env) (BoundHarness hid) key
+      case appended of
+        Left SlotsFull ->
+          respond $ jsonResponse status409
+            (object ["error" .= ("maximum tab count reached" :: Text)])
+        Left (AlreadyBound slot) ->
+          finishHarnessTab env updatedMeta sid slot tabKind respond
+        Right slot ->
+          finishHarnessTab env updatedMeta sid slot tabKind respond
+
+-- | The reusable spawn+persist+link core extracted from 'createHarnessTab'
+-- (WU-B). Creates a fresh harness-backed session, spawns the tmux harness via
+-- '_fe_startHarness', and — only on success — persists the real 'TbTmux'
+-- coordinates + durable ids into '_sm_kind' and links the registry entry back
+-- to the session. A failed spawn rolls back the just-created session directory
+-- and returns 'Left', so a fallible spawn never strands a session dir.
+--
+-- Returns the new session id, its durable 'Registry.HarnessId', the post-spawn
+-- 'SessionMeta' (carrying the real 'TbTmux' backend for live broadcast), and
+-- the harness key (@_shh_key@ — the tmux window name, used as the tab label).
+-- This is the seam both the web 'createHarnessTab' endpoint and the TUI
+-- @\/tab new harness@ dispatcher route through (via
+-- 'PureClaw.Agent.Env._env_startHarness').
+spawnHarnessSession
+  :: FrontendEnv
+  -> HarnessSpec    -- ^ requested harness spec (backend replaced on success)
+  -> SessionKind    -- ^ the SkHarness kind to seed _sm_kind with
+  -> IO (Either HarnessError (SessionId, Registry.HarnessId, SessionMeta, Text))
+spawnHarnessSession env spec sk = do
   now <- getCurrentTime
   let sid  = newSessionId Nothing now
       meta = SessionMeta
@@ -1741,7 +1781,7 @@ createHarnessTab env tabKind spec sk respond = do
       -- Roll back the session dir created above. A missing dir must not
       -- throw, so swallow IO errors from the cleanup.
       _ <- try @IOException (removeDirectoryRecursive (_sh_dir sh))
-      respond $ harnessErrorResponse err
+      pure (Left err)
     Right st -> do
       -- Persist the real tmux coordinates AND the durable HarnessId returned by
       -- the spawn (WU7, D7.2). The id is the primary routing anchor (resolved
@@ -1762,29 +1802,14 @@ createHarnessTab env tabKind spec sk respond = do
       -- orchestrator knows both the 'HarnessId' and the 'sid'. Without the link
       -- the tab's session_id is null and the right pane shows "No session
       -- associated yet" (the adopt path already links via '_he_sessionId'). Set
-      -- it before 'broadcastLists' so the live lists snapshot already carries it.
+      -- it before any broadcast so the live lists snapshot already carries it.
       Registry.modifyEntry (_fe_harnessRegistry env) (_shh_id st)
         (\e -> e { Registry._he_sessionId = Just (unSessionId sid) })
       -- Read back the post-spawn meta so the live broadcast carries the real
       -- TbTmux backend (the persisted session.json above is already correct;
       -- the original 'meta' still holds the placeholder backend).
       updatedMeta <- readIORef (_sh_meta sh)
-      -- Bind the harness into the first-class TabRegistry (WU7) — only a
-      -- successful spawn consumes a tab slot. The returned slot is the tab's
-      -- display index in the response; the label is the spawn's window key.
-      -- 'SlotsFull' here (a lost race against a concurrent create after the
-      -- pre-check in 'handleNewTab') maps to the cap 409; the harness window is
-      -- already up, but the tab cannot be surfaced, so report the cap.
-      appended <- registryAppend (_fe_tabRegistry env)
-                    (BoundHarness (_shh_id st)) (_shh_key st)
-      case appended of
-        Left SlotsFull ->
-          respond $ jsonResponse status409
-            (object ["error" .= ("maximum tab count reached" :: Text)])
-        Left (AlreadyBound slot) ->
-          finishHarnessTab env updatedMeta sid slot tabKind respond
-        Right slot ->
-          finishHarnessTab env updatedMeta sid slot tabKind respond
+      pure (Right (sid, _shh_id st, updatedMeta, _shh_key st))
 
 -- | Finish a harness tab create after the harness id was bound into the
 -- 'TabRegistry': publish the post-spawn meta to the broker (carrying the real

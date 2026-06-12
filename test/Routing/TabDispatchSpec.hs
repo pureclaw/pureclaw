@@ -47,6 +47,11 @@ import PureClaw.Routing.TabDispatch
   ( TabDispatchDeps (..)
   , handleInbound
   )
+import PureClaw.Session.Kind
+  ( HarnessFlavour (..)
+  , HarnessSpec (..)
+  , TerminalBackend (..)
+  )
 import PureClaw.Tabs
   ( TabRegistry
   , newTabRegistry
@@ -84,6 +89,8 @@ data Fakes = Fakes
   , f_wizard      :: IORef (Map ConversationKey WizardState)
   , f_tabsChanged :: IORef Int
     -- ^ Incremented once per call to '_td_onTabsChanged'.
+  , f_spawned     :: IORef [HarnessSpec]
+    -- ^ Records each 'HarnessSpec' passed to '_td_spawnHarness'.
   }
 
 -- | How the injected @newDefaultSession@ behaves.
@@ -96,6 +103,11 @@ data SendBehaviour
   = SendOk                 -- ^ Always returns @Right ()@.
   | SendErr TabError       -- ^ Always returns @Left err@.
 
+-- | How the injected @_td_spawnHarness@ behaves.
+data SpawnBehaviour
+  = SpawnsRef TabRef Text  -- ^ Returns @Right (ref, label)@.
+  | SpawnErr Text          -- ^ Returns @Left msg@.
+
 -- | Build a fresh 'Fakes' with the given default-session behaviour and the
 -- given wizard candidate lists.
 mkFakes
@@ -104,17 +116,19 @@ mkFakes
   -> [(SessionId, Text)]    -- ^ recent sessions
   -> (HarnessId -> Bool)    -- ^ liveness probe
   -> IO Fakes
-mkFakes defB = mkFakesEx defB SendOk
+mkFakes defB = mkFakesEx defB SendOk (SpawnErr "no harness spawn configured")
 
--- | Extended variant of 'mkFakes' that also controls @_td_sendTo@ behaviour.
+-- | Extended variant of 'mkFakes' that also controls @_td_sendTo@ and
+-- @_td_spawnHarness@ behaviour.
 mkFakesEx
   :: DefaultBehaviour
   -> SendBehaviour
+  -> SpawnBehaviour
   -> [(HarnessId, Text)]    -- ^ recent harnesses
   -> [(SessionId, Text)]    -- ^ recent sessions
   -> (HarnessId -> Bool)    -- ^ liveness probe
   -> IO Fakes
-mkFakesEx defB sendB harnesses sessions liveFn = do
+mkFakesEx defB sendB spawnB harnesses sessions liveFn = do
   emits       <- newIORef []
   sends       <- newIORef []
   ensures     <- newIORef []
@@ -124,6 +138,7 @@ mkFakesEx defB sendB harnesses sessions liveFn = do
   cursors     <- newIORef emptyCursors
   wizard      <- newIORef Map.empty
   tabsChanged <- newIORef (0 :: Int)
+  spawned     <- newIORef []
   let deps = TabDispatchDeps
         { _td_tabs           = reg
         , _td_cursors        = cursors
@@ -146,6 +161,11 @@ mkFakesEx defB sendB harnesses sessions liveFn = do
         , _td_routingConfig   = RConfig.defaultRoutingConfig
         , _td_fallthrough     = \k c -> modifyIORef' fall (++ [(k, c)])
         , _td_onTabsChanged   = modifyIORef' tabsChanged (+1)
+        , _td_spawnHarness    = \hSpec -> do
+            modifyIORef' spawned (++ [hSpec])
+            pure $ case spawnB of
+              SpawnsRef r label -> Right (r, label)
+              SpawnErr msg      -> Left msg
         }
   pure Fakes
     { f_deps        = deps
@@ -158,16 +178,25 @@ mkFakesEx defB sendB harnesses sessions liveFn = do
     , f_cursors     = cursors
     , f_wizard      = wizard
     , f_tabsChanged = tabsChanged
+    , f_spawned     = spawned
     }
 
 -- | A simple default-mint 'Fakes' (no wizard candidates, all harnesses live).
 simpleFakes :: DefaultBehaviour -> IO Fakes
 simpleFakes defB = mkFakes defB [] [] (const True)
 
+-- | A 'Fakes' whose @_td_spawnHarness@ follows the given 'SpawnBehaviour' (no
+-- wizard candidates, all harnesses live). The default-session minter is wired
+-- but irrelevant to the harness arm.
+spawnFakes :: SpawnBehaviour -> IO Fakes
+spawnFakes spawnB =
+  mkFakesEx (MintsRef (sess "unused")) SendOk spawnB [] [] (const True)
+
 -- | Simple fakes where @_td_sendTo@ always returns the given 'TabError'.
 simpleFakesWithSendErr :: TabError -> IO Fakes
 simpleFakesWithSendErr err =
-  mkFakesEx (MintsRef (sess "x")) (SendErr err) [] [] (const True)
+  mkFakesEx (MintsRef (sess "x")) (SendErr err)
+    (SpawnErr "no harness spawn configured") [] [] (const True)
 
 -- ---------------------------------------------------------------------------
 -- Convenience accessors
@@ -194,6 +223,9 @@ released f = readIORef (f_releases f)
 
 falls :: Fakes -> IO [(ConversationKey, Slash.SlashCommand)]
 falls f = readIORef (f_fallthrough f)
+
+spawnedSpecs :: Fakes -> IO [HarnessSpec]
+spawnedSpecs f = readIORef (f_spawned f)
 
 -- | The slot a conversation's cursor currently resolves to.
 cursorSlot :: Fakes -> ConversationKey -> IO (Maybe Int)
@@ -255,6 +287,7 @@ spec = do
   newSpec
   ntSpec
   tabNewSpec
+  tabNewHarnessSpec
   closeSpec
   tabsSpec
   renameSpec
@@ -393,15 +426,6 @@ tabNewSpec = describe "cmdTabNew (/tab new)" $ do
     ensured f `shouldReturn` []
     readIORef (f_tabsChanged f) `shouldReturn` 0
 
-  it "/tab new harness is not yet supported (WU-A placeholder)" $ do
-    f <- simpleFakes (MintsRef (sess "fresh"))
-    handleInbound (f_deps f) convA "/tab new harness"
-    out <- lastEmit f
-    out `shouldSatisfy` T.isInfixOf "not yet supported"
-    tl <- readTabs (f_reg f)
-    toList tl `shouldBe` []
-    readIORef (f_tabsChanged f) `shouldReturn` 0
-
   it "/tab new shell is not yet supported" $ do
     f <- simpleFakes (MintsRef (sess "fresh"))
     handleInbound (f_deps f) convA "/tab new shell"
@@ -463,6 +487,57 @@ tabNewSpec = describe "cmdTabNew (/tab new)" $ do
     Map.member convA wiz `shouldBe` True
     out <- lastEmit f
     out `shouldSatisfy` T.isInfixOf "Attach a tab"
+
+-- ---------------------------------------------------------------------------
+-- /tab new harness (WU-B)
+-- ---------------------------------------------------------------------------
+
+tabNewHarnessSpec :: Spec
+tabNewHarnessSpec = describe "cmdTabNew harness (/tab new harness)" $ do
+  it "spawns a claude-code/local harness, binds the tab, ensures, switches" $ do
+    let hid = harn "1"
+    f <- spawnFakes (SpawnsRef (BoundHarness hid) "claude-code-0")
+    handleInbound (f_deps f) convA "/tab new harness"
+    -- _td_spawnHarness called exactly once with a default claude-code/local spec
+    specs <- spawnedSpecs f
+    map _h_flavour specs `shouldBe` [HClaudeCode]
+    map _h_backend specs `shouldBe` [TbLocal]
+    map _h_cwd specs `shouldBe` [Nothing]
+    map _h_args specs `shouldBe` [[]]
+    map _h_harnessId specs `shouldBe` [Nothing]
+    -- registry gains exactly one tab bound to the spawned BoundHarness ref
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [BoundHarness hid]
+    ensured f `shouldReturn` [BoundHarness hid]
+    cursorSlot f convA `shouldReturn` Just 0
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+    lastEmit f `shouldReturn` "new harness /0"
+
+  it "/tab new harness claude-code (explicit flavour) behaves the same" $ do
+    let hid = harn "2"
+    f <- spawnFakes (SpawnsRef (BoundHarness hid) "claude-code-0")
+    handleInbound (f_deps f) convA "/tab new harness claude-code"
+    specs <- spawnedSpecs f
+    map _h_flavour specs `shouldBe` [HClaudeCode]
+    map _h_backend specs `shouldBe` [TbLocal]
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [BoundHarness hid]
+    ensured f `shouldReturn` [BoundHarness hid]
+    cursorSlot f convA `shouldReturn` Just 0
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+    lastEmit f `shouldReturn` "new harness /0"
+
+  it "on spawn failure emits the error, creates no tab" $ do
+    f <- spawnFakes (SpawnErr "harness spawn failed: tmux not available")
+    handleInbound (f_deps f) convA "/tab new harness"
+    -- the spawn was attempted exactly once
+    specs <- spawnedSpecs f
+    length specs `shouldBe` 1
+    lastEmit f `shouldReturn` "harness spawn failed: tmux not available"
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
+    ensured f `shouldReturn` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
 
 -- ---------------------------------------------------------------------------
 -- /close

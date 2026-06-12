@@ -60,7 +60,15 @@ import PureClaw.Session.Handle
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Frontend.API (broadcastLists, mkStreamGuard, productionReleaseTmux, productionKillWindow)
+import PureClaw.Frontend.API
+  ( broadcastLists
+  , mkStreamGuard
+  , productionReleaseTmux
+  , productionKillWindow
+  , spawnHarnessSession
+  )
+import PureClaw.Handles.Harness (HarnessError (..))
+import PureClaw.Tabs.Types (TabRef (..))
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
@@ -729,6 +737,22 @@ runChat consentChannel opts = do
                   cursors <- readIORef (_ts_cursors tabSub)
                   ignoreExc (saveTabs (pureclawDir </> "state") tl cursors)
                   broadcastLists frontendEnv
+              -- WU-B (#?): the production harness-spawn seam the @\/tab new
+              -- harness@ dispatcher routes through. Reuses the frontend's
+              -- 'spawnHarnessSession' (spawn + persist + registry link), then
+              -- projects its result onto the dispatcher's @('TabRef', label)@
+              -- contract: the durable 'Registry.HarnessId' becomes a
+              -- 'BoundHarness' ref and the harness window key becomes the tab
+              -- label. A 'HarnessError' is rendered to user-facing 'Text'. The
+              -- action references 'frontendEnv' lazily through this recursive
+              -- @let@ group (a thunked closure, never forced at construction
+              -- time — mirrors '_env_onTabsChanged' above).
+              , _env_startHarness     = \spec -> do
+                  r <- spawnHarnessSession frontendEnv spec (SessionTypes.SkHarness spec)
+                  pure $ either
+                    (Left . harnessErrText)
+                    (\(_sid, hid, _meta, key) -> Right (BoundHarness hid, key))
+                    r
               }
         -- Start the frontend server and the activity probe loop under
         -- structured 'Async.withAsync' scopes so both are automatically
@@ -1177,6 +1201,16 @@ resolveApiKey Nothing vaultKeyName vaultOpt = do
 -- is recoverable on the next mutation.
 ignoreExc :: IO () -> IO ()
 ignoreExc act = act `catch` \(_ :: SomeException) -> pure ()
+
+-- | Render a 'HarnessError' to a concise user-facing 'Text' for the
+-- @\/tab new harness@ dispatcher (WU-B). Mirrors the surface
+-- 'PureClaw.Frontend.API.harnessErrorResponse' uses, but as plain text for the
+-- chat banner rather than an HTTP body.
+harnessErrText :: HarnessError -> T.Text
+harnessErrText err = case err of
+  HarnessNotAuthorized ce    -> "harness not authorized: " <> T.pack (show ce)
+  HarnessBinaryNotFound bin  -> "harness binary not found: " <> bin
+  HarnessTmuxNotAvailable det -> "tmux not available: " <> det
 
 -- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
 -- absent, locked, or does not contain the key.

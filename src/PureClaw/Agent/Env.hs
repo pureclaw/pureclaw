@@ -5,6 +5,8 @@ module PureClaw.Agent.Env
   , envTranscript
     -- * Default helpers (WU3 — Tabbed Chat)
   , defaultEnvFork
+    -- * Default helpers (WU-B — /tab new harness)
+  , noStartHarness
     -- * Tab subsystem bundle (Tabs-as-View 8c.2)
   , TabSubsystem (..)
   , newTabSubsystem
@@ -36,6 +38,7 @@ import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Plugin
 import PureClaw.Session.Handle (SessionHandle (..))
+import PureClaw.Session.Kind (HarnessSpec)
 import PureClaw.Tabs (TabRegistry, newTabRegistry)
 import PureClaw.Tabs.Exec (Exec, newExec)
 import {-# SOURCE #-} PureClaw.Tabs.RelayWriter
@@ -178,6 +181,16 @@ data AgentEnv = AgentEnv
     -- @'pure' ()@. Wired to rebroadcast\/persist the registry in
     -- "PureClaw.CLI.Commands" (WU8). Keeping the callback here prevents
     -- @Routing\/Tabs@ from depending on @Frontend@.
+  , _env_startHarness :: !(HarnessSpec -> IO (Either Text (TabRef, Text)))
+    -- ^ Dispatcher-reachable seam that spawns a fresh harness, persists its
+    -- session, links it into the registry, and returns the new tab's
+    -- @('TabRef', label)@ on success (or a user-facing error 'Text'). The
+    -- dispatcher's @\/tab new harness@ arm
+    -- ("PureClaw.Routing.TabDispatch.cmdTabNew") routes through this. Mirrors
+    -- '_env_onTabsChanged': the default ('noStartHarness') is the unwired stub
+    -- and the real closure is wired in "PureClaw.CLI.Commands" (WU-B) over
+    -- 'PureClaw.Frontend.API.spawnHarnessSession'. Kept here so @Routing\/Tabs@
+    -- need not depend on @Frontend@.
   }
 
 -- | Read the active session's transcript handle.
@@ -205,6 +218,14 @@ defaultEnvFork body = do
     { _trun_cancel = Async.cancel a
     , _trun_wait   = void (Async.wait a)
     }
+
+-- | Default '_env_startHarness' implementation: the unwired stub. Returns a
+-- @'Left'@ explaining that harness spawning has not been wired (the seam is
+-- only live in "PureClaw.CLI.Commands", where it is replaced by the real
+-- closure over 'PureClaw.Frontend.API.spawnHarnessSession'). Tests and any
+-- non-CLI construction site default to this.
+noStartHarness :: HarnessSpec -> IO (Either Text (TabRef, Text))
+noStartHarness _ = pure (Left "harness spawn not wired")
 
 -- ---------------------------------------------------------------------------
 -- Tab subsystem bundle (Tabs-as-View 8c.2)

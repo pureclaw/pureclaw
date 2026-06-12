@@ -524,6 +524,7 @@ mkTabDispatchDeps env execDeps store = TabDispatchDeps
   , _td_routingConfig     = _env_routingConfig env
   , _td_fallthrough       = fallthrough env store
   , _td_onTabsChanged     = _env_onTabsChanged env
+  , _td_spawnHarness      = _env_startHarness env
   }
 
 -- | Emit a dispatcher banner\/reply to a conversation's registered sink. The
