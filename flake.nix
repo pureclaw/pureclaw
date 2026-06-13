@@ -41,9 +41,19 @@
                 age-plugin-yubikey
                 git
                 ripgrep
-                signal-cli
                 tmux
               ];
+              # signal-cli is intentionally NOT provided by the flake. Signal's
+              # servers reject pre-0.14 clients (499 DeprecatedVersionException,
+              # May 2026), and the nixpkgs 0.14.3 build ships a broken native
+              # libsignal pairing that throws "getServerGuid(...) must not be
+              # null" (NPE) on every sealed-sender inbound message — so the
+              # gateway can't receive. Install signal-cli >= 0.14.5 system-wide
+              # (macOS: `brew install signal-cli`; Linux: distro/upstream
+              # release) and ensure it is on PATH for `pureclaw gateway`. The
+              # dev shell inherits the caller's PATH, so a system signal-cli is
+              # picked up. Revisit in-flake pinning once nixpkgs ships a working
+              # signal-cli >= 0.14.5.
             };
           })
         ];
