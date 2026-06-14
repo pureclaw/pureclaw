@@ -15,7 +15,7 @@ import PureClaw.Channels.Telegram (TelegramConfig (..))
 import PureClaw.CLI.Commands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
-import PureClaw.Handles.Log (LogHandle (..))
+import PureClaw.Handles.Log (LogHandle (..), LogLevel (..))
 import PureClaw.Security.Policy
 
 -- A LogHandle that records warnings into an IORef for assertions.
@@ -122,6 +122,19 @@ spec = do
 
     it "rejects invalid memory backend" $
       parseArgs ["--memory", "invalid"] `shouldBe` Nothing
+
+    it "parses --log-level flag" $ do
+      case parseArgs ["--log-level", "debug"] of
+        Just opts -> _co_logLevel opts `shouldBe` Just LlDebug
+        Nothing -> expectationFailure "parse failed"
+
+    it "log-level defaults to Nothing (resolved at runtime)" $ do
+      case parseArgs [] of
+        Just opts -> _co_logLevel opts `shouldBe` Nothing
+        Nothing -> expectationFailure "parse failed"
+
+    it "rejects invalid log level" $
+      parseArgs ["--log-level", "verbose"] `shouldBe` Nothing
 
     it "parses --soul flag" $ do
       case parseArgs ["--soul", "my-soul.md"] of

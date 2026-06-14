@@ -148,6 +148,7 @@ data ChatOptions = ChatOptions
   , _co_autonomy      :: Maybe AutonomyLevel
   , _co_channel       :: Maybe String
   , _co_memory        :: Maybe MemoryBackend
+  , _co_logLevel      :: Maybe LogLevel
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
   , _co_noVault       :: Bool
@@ -200,6 +201,11 @@ chatOptionsParser = ChatOptions
       ( long "memory"
      <> help "Memory backend: none, sqlite, markdown (default: none)"
       ))
+  <*> optional (option parseLogLevelOpt
+      ( long "log-level"
+     <> metavar "LEVEL"
+     <> help "Minimum log severity: debug, info, warn, error (default: info)"
+      ))
   <*> optional (strOption
       ( long "soul"
      <> help "Path to SOUL.md identity file (default: ./SOUL.md if it exists)"
@@ -251,6 +257,12 @@ providerToText Anthropic  = "anthropic"
 providerToText OpenAI     = "openai"
 providerToText OpenRouter = "openrouter"
 providerToText Ollama     = "ollama"
+
+-- | Parse a log level from a CLI string, failing with a clear message.
+parseLogLevelOpt :: ReadM LogLevel
+parseLogLevelOpt = eitherReader $ \s -> case parseLogLevel s of
+  Just lvl -> Right lvl
+  Nothing  -> Left $ "Unknown log level: " <> s <> ". Choose: debug, info, warn, error"
 
 -- | Parse a memory backend from a CLI string.
 parseMemoryBackend :: ReadM MemoryBackend
@@ -409,7 +421,7 @@ runImport opts mPositional = do
 -- fail closed for non-interactive runs (design §8 B2 / SEC-1).
 runChat :: ConsentChannel -> ChatOptions -> IO ()
 runChat consentChannel opts = do
-  logger <- mkStderrLogHandle
+  logger <- mkStderrLogHandleAt (fromMaybe LlInfo (_co_logLevel opts))
 
   -- --session and --prefix are mutually exclusive. We enforce this
   -- post-parse because optparse-applicative's <|> would make one
