@@ -134,17 +134,17 @@ spec = do
       -- Should indicate no provider is configured
       err `shouldContain` "No providers configured"
 
-    it "shows a helpful message when sending a chat message with no active tab" $ do
+    it "shows provider setup guidance when sending a chat message with no provider configured" $ do
       bin <- findPureclaw
-      -- Send a non-slash message. Under the Tabs-as-View model (GitHub #79,
-      -- 8c.2 flip) a plain chat message with no active tab is routed by the
-      -- per-conversation dispatcher, which tells the user how to start/attach a
-      -- tab rather than crashing. (Pre-flip this surfaced the "no provider"
-      -- message; the end-to-end CLISpec rewrite is 8d.)
+      -- Send a non-slash message. Under the Tabs-as-View model (GitHub #79) a
+      -- plain chat message with no active tab now AUTO-STARTS a default session
+      -- (restoring the implicit "just works" session). With no credentials the
+      -- default-session mint fails for lack of a provider, so the dispatcher
+      -- surfaces the actionable setup guidance rather than crashing.
       (exitCode, out, err) <- runPureclaw bin "Hello world\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      -- Should guide the user to open or attach a tab.
-      out `shouldContain` "no active tab"
+      -- Should guide the user to configure a provider.
+      out `shouldContain` "No provider configured"
 
     it "shows a warning when --autonomy full is set" $ do
       bin <- findPureclaw

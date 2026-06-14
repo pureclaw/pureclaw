@@ -544,6 +544,13 @@ doInject :: Ctx -> TabIndex -> Text -> IO ()
 doInject ctx idx text = withSlot ctx idx $ \tab -> do
   let ref = _tab_ref tab
   setCursorTo ctx ref
+  deliver ctx ref text
+
+-- | Route @text@ to @ref@'s runtime, surfacing a delivery failure as the §14
+-- copy. Shared by 'doInject', 'doDefault', and the auto-start path so the
+-- send-then-handle-error shape lives in exactly one place.
+deliver :: Ctx -> TabRef -> Text -> IO ()
+deliver ctx ref text = do
   result <- sendTo ctx ref text
   case result of
     Right () -> pure ()
@@ -558,14 +565,16 @@ withSlot ctx idx k = do
     Just tab -> k tab
     Nothing  -> emit ctx (outOfRangeMsg idx (length (toList tl)))
 
--- | Plain text: route to the conversation's active tab. Empty cursor → spawn
--- hint; a 'Dead' tombstone → deferred death warning + clear + drop (§8).
+-- | Plain text: route to the conversation's active tab. No active tab →
+-- auto-start a fresh default session and route the text to it (the implicit
+-- "just works" session — matches a fresh conversation's pre-Tabs behaviour); a
+-- 'Dead' tombstone → deferred death warning + clear + drop (§8).
 doDefault :: Ctx -> Text -> IO ()
 doDefault ctx text = do
   cs <- readIORef (_td_cursors (_ctx_deps ctx))
   tl <- readTabs (_td_tabs (_ctx_deps ctx))
   case resolveCursorSlot (_ctx_conv ctx) cs tl of
-    Nothing   -> emit ctx emptyCursorMsg
+    Nothing   -> autoStartDefault ctx text
     Just slot -> do
       -- 'resolveCursorSlot' returns the slot by resolving the cursor's ref
       -- against the list, so the tab is guaranteed present here; the impossible
@@ -578,11 +587,38 @@ doDefault ctx text = do
           -- (never route it into the dead harness).
           emit ctx (deferredDeathMsg (_tab_name tab))
           modifyCursor ctx (clearCursor (_ctx_conv ctx))
-        else do
-          result <- sendTo ctx (_tab_ref tab) text
-          case result of
-            Right () -> pure ()
-            Left err -> emit ctx ("couldn't deliver your message — " <> unPublicTabError (toPublicTabError err))
+        else deliver ctx (_tab_ref tab) text
+
+-- | No active tab + plain text: mint a fresh default session, append a tab for
+-- it, focus the conversation on it, and route the text — restoring the implicit
+-- "just works" default session. No @new tab \/N@ confirmation is emitted (the
+-- user sent a chat message, not @\/nt@); the new tab still becomes visible via
+-- 'notifyChanged'. @'Left' msg@ (no provider\/model configured) surfaces the
+-- existing setup guidance, exactly like 'cmdNt'.
+autoStartDefault :: Ctx -> Text -> IO ()
+autoStartDefault ctx text = do
+  mNew <- _td_newDefaultSession (_ctx_deps ctx)
+  case mNew of
+    Left msg     -> emit ctx msg
+    Right ref    -> do
+      res <- registryAppend (_td_tabs (_ctx_deps ctx)) ref defaultSessionName
+      case res of
+        -- Slot exhaustion: surface the §14 copy with no state change.
+        Left SlotsFull -> emit ctx slotsFullMsg
+        -- 'Right' (the freshly-bound slot) and 'Left (AlreadyBound _)' (which is
+        -- structurally impossible for a freshly-minted ref) both route the text
+        -- to the ref — focus + deliver — rather than crash on the latter.
+        _              -> routeToNew ctx ref text
+
+-- | Focus the conversation on a freshly-bound @ref@, ensure its runtime, notify
+-- listeners, and route @text@ to it. Shared by the two reachable arms of
+-- 'autoStartDefault'.
+routeToNew :: Ctx -> TabRef -> Text -> IO ()
+routeToNew ctx ref text = do
+  ensure ctx ref
+  setCursorTo ctx ref
+  notifyChanged ctx
+  deliver ctx ref text
 
 -- ---------------------------------------------------------------------------
 -- Cursor / wizard / registry mutation helpers (all 'Ctx'-saturated)
@@ -706,10 +742,6 @@ defaultSessionName = "session"
 -- ---------------------------------------------------------------------------
 -- Pinned copy (design §14)
 -- ---------------------------------------------------------------------------
-
--- | Empty cursor + default text (§14).
-emptyCursorMsg :: Text
-emptyCursorMsg = "no active tab — /new to start one or /tab to attach"
 
 -- | @\/N@ out of range (§14). @n@ = current tab count.
 outOfRangeMsg :: TabIndex -> Int -> Text

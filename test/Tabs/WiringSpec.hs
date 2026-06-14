@@ -57,6 +57,7 @@ import PureClaw.Session.Handle
   , noOpOnFirstStreamDoneRef
   )
 import PureClaw.Session.Types qualified as SessionTypes
+import PureClaw.Tabs (readTabs, resolveCursorSlot, toList)
 import PureClaw.Tabs.RelayWriter (lookupSink)
 import PureClaw.Tabs.Wiring
   ( effectiveRegistry
@@ -340,6 +341,15 @@ readSource env = do
 cliKey :: Text -> (ChannelKind, ConversationId)
 cliKey conv = (CkCli, ConversationId conv)
 
+-- | Whether a CLI conversation's cursor currently resolves to a live tab in the
+-- env's registry. Proves that conversation's plain-text iteration auto-started
+-- (and focused) a default session.
+hasActiveTab :: AgentEnv -> Text -> IO Bool
+hasActiveTab env conv = do
+  cs <- readIORef (_env_cursors env)
+  tl <- readTabs (_env_tabRegistry env)
+  pure (isJust (resolveCursorSlot (cliKey conv) cs tl))
+
 -- | Assert that @needle@ is a substring of @haystack@ (Text).
 shouldContain' :: Text -> Text -> Expectation
 shouldContain' haystack needle =
@@ -478,18 +488,23 @@ spec = do
 
     it "iterates the loop over every scripted message" $
       withSystemTempDirectory "pc-wiring" $ \tmp -> do
-        -- Two plain-text messages with NO active tab each emit the "no active
-        -- tab" banner; observing it twice proves both iterations ran.
+        -- Two plain-text messages on DISTINCT conversations, each with NO active
+        -- tab, now each auto-start a default session and focus their own
+        -- conversation on it (a provider + model are configured). Both
+        -- conversations ending with an active cursor proves both iterations
+        -- ran. (ReplyProvider replies cleanly so the routed send does not raise
+        -- on the worker thread.)
         let msgs =
               [ mkInbound "conv-a" "alice" "one"
-              , mkInbound "conv-a" "alice" "two"
+              , mkInbound "conv-b" "bob"   "two"
               ]
-        th <- mkTabbedEnv tmp msgs
+        th <- mkTabbedEnvWith tmp msgs (Just (MkProvider ReplyProvider))
+                              (Just (ModelId "mock"))
         completed <- runLoopBounded th
         completed `shouldBe` True
-        sent <- readIORef (_clog_sent (_th_log th))
-        let banner = "no active tab — /new to start one or /tab to attach"
-        length (filter (== banner) sent) `shouldBe` 2
+        let env = _th_env th
+        hasActiveTab env "conv-a" `shouldReturn` True
+        hasActiveTab env "conv-b" `shouldReturn` True
 
     it "terminates cleanly on EOF (empty script, receive throws immediately)" $
       withSystemTempDirectory "pc-wiring" $ \tmp -> do
@@ -501,21 +516,23 @@ spec = do
 
     it "handles a whitespace-only inbound without crashing and continues" $
       withSystemTempDirectory "pc-wiring" $ \tmp -> do
-        -- Whitespace-only is silently skipped (no parse-error emitted); a
-        -- following plain message still produces the no-active-tab banner,
-        -- proving the loop did not crash on the blank message.
+        -- Whitespace-only is silently skipped (no parse-error emitted, no tab);
+        -- a following plain message auto-starts a default session (provider +
+        -- model configured), proving the loop did not crash on the blank
+        -- message. Exactly one tab is created — by the second message only.
         let msgs =
               [ mkInbound "conv-a" "alice" "   "
               , mkInbound "conv-a" "alice" "after"
               ]
-        th <- mkTabbedEnv tmp msgs
+        th <- mkTabbedEnvWith tmp msgs (Just (MkProvider ReplyProvider))
+                              (Just (ModelId "mock"))
         completed <- runLoopBounded th
         completed `shouldBe` True
         sent <- readIORef (_clog_sent (_th_log th))
         let parseErr = "could not parse that — /tabs to list, /help for commands"
-            banner   = "no active tab — /new to start one or /tab to attach"
         sent `shouldNotContain` [parseErr]
-        sent `shouldContain` [banner]
+        tl <- readTabs (_env_tabRegistry (_th_env th))
+        length (toList tl) `shouldBe` 1
 
     it "silently skips whitespace-only input and still captures source (pureclaw-z9h)" $
       withSystemTempDirectory "pc-wiring" $ \tmp -> do

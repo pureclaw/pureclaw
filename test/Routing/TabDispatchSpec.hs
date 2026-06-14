@@ -827,11 +827,41 @@ defaultSpec = describe "default text" $ do
     handleInbound (f_deps f) convA "just chatting"
     sentTexts f `shouldReturn` [(r0, "just chatting")]
 
-  it "with no active tab emits the empty-cursor §14 copy" $ do
+  it "with no active tab auto-starts a default session and routes the text" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     handleInbound (f_deps f) convA "hello"
-    lastEmit f `shouldReturn` "no active tab — /new to start one or /tab to attach"
+    -- A tab is created (0 → 1) bound to the minted session ...
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "x"]
+    -- ... the conversation now focuses it, the runtime is ensured, the
+    -- tabs-changed callback fires once, and the text is routed to the new ref.
+    cursorSlot f convA `shouldReturn` Just 0
+    ensured f `shouldReturn` [sess "x"]
+    readIORef (f_tabsChanged f) `shouldReturn` 1
+    sentTexts f `shouldReturn` [(sess "x", "hello")]
+    -- No empty-cursor banner and no "new tab /N" confirmation.
+    emitted f `shouldReturn` []
+
+  it "with no active tab and no default provider emits guidance, creates no tab" $ do
+    f <- simpleFakes NoDefault
+    handleInbound (f_deps f) convA "hello"
+    lastEmit f `shouldReturn` noDefaultGuidance
+    tl <- readTabs (f_reg f)
+    toList tl `shouldBe` []
     sentTexts f `shouldReturn` []
+    readIORef (f_tabsChanged f) `shouldReturn` 0
+
+  it "with no active tab when all 36 slots are full emits slot-exhaustion, sends nothing" $ do
+    -- convA has no cursor, but every slot is occupied: the auto-start mints a
+    -- ref, the append hits SlotsFull, and the §14 copy is surfaced unchanged.
+    f <- simpleFakes (MintsRef (sess "overflow"))
+    mapM_ (\n -> appendSession f ("s" <> tshowI n) ("t" <> tshowI n)) [0 .. 35 :: Int]
+    handleInbound (f_deps f) convA "hello"
+    lastEmit f `shouldReturn` "all 36 tab slots in use — /close one first"
+    tl <- readTabs (f_reg f)
+    length (toList tl) `shouldBe` 36
+    sentTexts f `shouldReturn` []
+    ensured f `shouldReturn` []
 
   it "on a Dead tombstone: deferred warning, clear, DROP (no send)" $ do
     f <- simpleFakes (MintsRef (sess "x"))
@@ -958,16 +988,20 @@ edgeSpec = describe "edge cases" $ do
   it "a closed tab's cursor on another conversation is cleared by compaction" $ do
     -- convA and convB both focus slot 0; convB closes it. The removed ref's
     -- cursor is dropped for every conversation that pointed at it (I3), so
-    -- convA's next default text falls back to the empty-cursor hint.
-    f <- simpleFakes (MintsRef (sess "x"))
+    -- convA's cursor genuinely resolves to nothing afterwards. convA's next
+    -- plain text then auto-starts a fresh default session and routes to it.
+    f <- simpleFakes (MintsRef (sess "fresh"))
     _ <- appendSession f "s0" "a"
     handleInbound (f_deps f) convA "/0"
     handleInbound (f_deps f) convB "/0"
     handleInbound (f_deps f) convB "/close"        -- removes slot 0
-    cursorSlot f convA `shouldReturn` Nothing
+    cursorSlot f convA `shouldReturn` Nothing       -- cursor genuinely cleared
     handleInbound (f_deps f) convA "stranded"
-    lastEmit f `shouldReturn` "no active tab — /new to start one or /tab to attach"
-    sentTexts f `shouldReturn` []
+    -- A new default tab is minted and the text routed to it (not a banner).
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "fresh"]
+    cursorSlot f convA `shouldReturn` Just 0
+    sentTexts f `shouldReturn` [(sess "fresh", "stranded")]
 
 -- ---------------------------------------------------------------------------
 -- _td_onTabsChanged notify seam
