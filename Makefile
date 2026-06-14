@@ -37,5 +37,5 @@ frontend-build:
 gateway-dev: frontend-build
 	$(NIX) cabal run pureclaw -- gateway run
 
-tui:
+tui: frontend-build
 	$(NIX) cabal run pureclaw -- tui
