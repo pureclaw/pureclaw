@@ -1,6 +1,8 @@
 module PureClaw.Channels.CLI
   ( -- * CLI channel
     mkCLIChannelHandle
+    -- * Conversation derivation
+  , cliConversationId
   ) where
 
 import Data.Maybe qualified
@@ -31,7 +33,7 @@ mkCLIChannelHandle mCompleter = do
         case mLine of
           Nothing   -> ioError (userError "EOF")  -- Ctrl-D: agent loop catches this
           Just line -> pure IncomingMessage
-            { _im_source  = mkMessageSource CkCli (Just (UserId "cli-user")) mempty
+            { _im_source  = mkMessageSource CkCli cliConversationId (Just (UserId "cli-user")) mempty
             , _im_content = T.pack line
             }
     , _ch_send = \msg -> do
@@ -56,6 +58,12 @@ mkCLIChannelHandle mCompleter = do
         mLine <- HL.runInputT settings (HL.getPassword Nothing (T.unpack promptText))
         pure (maybe "" T.pack mLine)
     }
+
+-- | The conversation id for the local CLI channel. The CLI is a single local
+-- conversation, so the id is a constant derived from the transport (the
+-- process's own stdin), never from message content.
+cliConversationId :: ConversationId
+cliConversationId = ConversationId "cli"
 
 -- | Path to the haskeline history file: @~\/.pureclaw\/history@.
 -- Creates the directory if it does not exist.

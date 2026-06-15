@@ -1,17 +1,24 @@
 -- |
 -- Module      : Routing.ParseSpec
--- Description : P-series DoDs for the Tabbed Chat parser (WU2).
+-- Description : P-series DoDs for the Tabbed Chat parser (WU2 + 8d.b).
 --
 -- WU0 scaffolded every P-series item as @pending@. WU2 flips P1–P17
 -- and P15a to real assertions paired with the parser implementation
 -- in 'PureClaw.Routing.Parse'.
 --
--- P18 (the LLM-free invariant property test) remains @pending@ — its
--- dispatcher-integrated form lands in WU5 once the fake-provider
--- recording seam (T1) is plumbed through the dispatcher.
+-- WU8d.b (this revision) re-registers the spec against the current
+-- codebase. The deleted PureClaw.Routing.Dispatcher / Routing.Registry
+-- / Harness.Registry imports have been removed.
+--
+-- P18 has been recast as a pure parseInput property: for any input
+-- matching the switch | inject | slash-cmd branches of the grammar,
+-- 'Parse.parseInput' must NEVER return @Right (Default _)@ — 'Default'
+-- is the only category that routes to the provider. The original
+-- dispatcher-integration form is obsolete; TabDispatchSpec already
+-- covers dispatch routing.
 --
 -- DoD identifiers (P1..P18, P15a) appear in each test's description so
--- WU5 can find P18, and downstream WUs can grep for the others.
+-- downstream WUs can grep for them.
 --
 -- == Test-shape note (WU2 deviation)
 --
@@ -29,12 +36,6 @@
 -- parser-validation layer.
 module Routing.ParseSpec (spec) where
 
-import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
-import Data.IORef (newIORef, writeIORef)
-import Data.IntMap.Strict qualified as IntMap
-import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
-import Data.Maybe (fromJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Test.Hspec
@@ -43,44 +44,16 @@ import Test.QuickCheck
   , Property
   , elements
   , forAll
-  , ioProperty
   , listOf1
   , oneof
   , withMaxSuccess
   )
 
-import PureClaw.Agent.AgentDef (AgentDef)
-import PureClaw.Agent.Env
 import PureClaw.Agent.SlashCommands qualified as Slash
-import PureClaw.Core.Types
 import PureClaw.Core.Types qualified as Core
-import PureClaw.Handles.Harness (HarnessHandle)
-import PureClaw.Harness.Registry qualified as Registry
-import PureClaw.Handles.Log
 import PureClaw.Handles.Tab qualified as Tab
-import PureClaw.MCP (McpServer)
-import PureClaw.Providers.Class (SomeProvider (..))
-import PureClaw.Routing.Config (defaultRoutingConfig)
-import PureClaw.Routing.Dispatcher qualified as Dispatcher
 import PureClaw.Routing.Parse qualified as Parse
-import PureClaw.Routing.Registry (insertTab)
 import PureClaw.Routing.Types qualified as RT
-import PureClaw.Security.Policy
-import PureClaw.Security.Vault (VaultHandle)
-import PureClaw.Security.Vault.Plugin
-import PureClaw.Session.Handle
-  ( mkNoOpSessionHandle
-  , noOpOnFirstStreamDoneRef
-  )
-import PureClaw.Tools.Registry (emptyRegistry)
-import Test.Fake.ChannelHandle
-  ( fakeChannelHandle
-  , newFakeChannel
-  )
-import Test.Fake.Provider
-  ( newFakeProvider
-  , peekRecorded
-  )
 
 
 -- | A 'RT.RoutingConfig' value sufficient for parser tests.
@@ -283,8 +256,8 @@ spec = do
       parse "/bg   do thing  " `shouldBe`
         Right (RT.ParsedSlashCmd (Slash.CmdBg "do thing"))
 
-    it "P18: LLM-free invariant — property test: switch | inject | slash-cmd inputs never invoke Provider.complete (uses T1 fake provider)" $
-      withMaxSuccess 200 prop_P18_llm_free
+    it "P18: LLM-free invariant — pure-parser property: switch | inject | slash-cmd inputs are never classified as Default (the only provider-routing category)"
+      prop_P18_llm_free
 
   describe "parseInput — additional grammar invariants" $ do
 
@@ -584,84 +557,27 @@ spec = do
 
 
 -- ---------------------------------------------------------------------------
--- P18 — LLM-free invariant property test
+-- P18 — LLM-free invariant property test (pure-parser form, 8d.b)
 -- ---------------------------------------------------------------------------
 
--- | Property: for any input matching the routing grammar's
--- @switch | inject | slash-cmd@ branches, driving it through
--- 'Dispatcher.dispatchOne' MUST NOT invoke the provider's @complete@.
--- We verify this by wiring a 'FakeProvider' (T1 recording seam) into
--- '_env_provider' and checking the recorded-request list is empty after
--- each dispatched input.
+-- | P18: pure-parser invariant — @switch | inject | slash-cmd@ inputs
+-- are NEVER classified as @Default@ by 'Parse.parseInput'.
+--
+-- The 'Default' category is the only one that routes to the provider
+-- (LLM). This property asserts the parser-layer guarantee: any input
+-- that looks like a switch (@\/N@), inject (@\/N payload@), or a
+-- slash-command (@\/word…@) must never fall through to 'RT.Default'.
+--
+-- Note: The original P18 was a dispatcher-integration test (fake
+-- provider + record-and-check). That form is obsolete;
+-- Routing.TabDispatchSpec covers dispatch routing. The parser-layer
+-- invariant is the meaningful statement at this level.
 prop_P18_llm_free :: Property
-prop_P18_llm_free = forAll genNonDefaultInput $ \input -> ioProperty $ do
-  env <- mkP18Env
-  fp  <- newFakeProvider
-  writeIORef (_env_provider env) (Just (MkProvider fp))
-  -- Synthetic tab at index 0 with a no-op send (we want to assert
-  -- Provider.complete is never called, not that send is wired).
-  let th = Tab.TabHandle
-        { Tab._tabHandle_index        = fromJust (Tab.mkTabIndex 0)
-        , Tab._tabHandle_name         = Tab.TabName "p18"
-        , Tab._tabHandle_kind         = Tab.KindAi
-        , Tab._tabHandle_status       = pure Tab.Active
-        , Tab._tabHandle_send         = \_ -> pure (Right ())
-        , Tab._tabHandle_enqueueSlash = \_ -> pure (Right ())
-        , Tab._tabHandle_close        = \_ -> pure ()
-        }
-  _ <- insertTab (_env_tabs env) (fromJust (Tab.mkTabIndex 0)) th
-  ds <- Dispatcher.newDispatcherState env
-          (\_k _i _a -> pure (Right th))
-  Dispatcher.dispatchOne env ds (UserId "u") input
-  recorded <- peekRecorded fp
-  pure (null recorded)
-
--- | Build a 'AgentEnv' suitable for the LLM-free invariant test.
-mkP18Env :: IO AgentEnv
-mkP18Env = do
-  let routing = defaultRoutingConfig
-  fch <- newFakeChannel
-  providerRef    <- newIORef (Nothing :: Maybe SomeProvider)
-  modelRef       <- newIORef (Nothing :: Maybe ModelId)
-  vaultRef       <- newIORef (Nothing :: Maybe VaultHandle)
-  harnessRef     <- newIORef (Map.empty :: Map Text HarnessHandle)
-  harnessReg     <- Registry.newRegistry
-  targetRef      <- newIORef TargetProvider
-  windowIdxRef   <- newIORef 0
-  sessionRef     <- newIORef =<< mkNoOpSessionHandle
-  mcpRef         <- newIORef (Map.empty :: Map Text McpServer)
-  tabsRef        <- newIORef IntMap.empty
-  focusRef       <- newIORef Nothing
-  activeCountTv  <- newTVarIO 0
-  runnersRef     <- newIORef IntMap.empty
-  channelOutQ    <- newTBQueueIO 1024
-  pure AgentEnv
-    { _env_provider          = providerRef
-    , _env_model             = modelRef
-    , _env_channel           = fakeChannelHandle fch
-    , _env_logger            = mkNoOpLogHandle
-    , _env_systemPrompt      = Nothing
-    , _env_registry          = emptyRegistry
-    , _env_vault             = vaultRef
-    , _env_pluginHandle      = mkPluginHandle
-    , _env_policy            = defaultPolicy
-    , _env_harnesses         = harnessRef
-    , _env_harnessRegistry  = harnessReg
-    , _env_target            = targetRef
-    , _env_nextWindowIdx     = windowIdxRef
-    , _env_agentDef          = Nothing :: Maybe AgentDef
-    , _env_session           = sessionRef
-    , _env_onFirstStreamDone = noOpOnFirstStreamDoneRef
-    , _env_mcpServers        = mcpRef
-    , _env_tabs              = tabsRef
-    , _env_focus             = focusRef
-    , _env_activeCount       = activeCountTv
-    , _env_runners           = runnersRef
-    , _env_channelOutQ       = channelOutQ
-    , _env_routingConfig     = routing
-    , _env_fork              = defaultEnvFork
-    , _env_broker              = Nothing
-    }
+prop_P18_llm_free = withMaxSuccess 200 $
+  forAll genNonDefaultInput $ \input ->
+    case Parse.parseInput testRoutingConfig input of
+      Right (RT.Default _) -> False
+      _                    -> True
 
 -- | Generator for inputs that fall on the @switch | inject | slash-cmd@
 -- side of the routing grammar — i.e. NEVER the 'Default' branch.

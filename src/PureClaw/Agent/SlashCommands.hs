@@ -316,8 +316,8 @@ allCommandSpecs = sessionCommandSpecs ++ sessionFamilyCommandSpecs ++ providerCo
 -- | The @\/tab@ command family + @\/tabs@ alias (Tabbed Chat #51).
 --
 -- These specs let the LEGACY parser ('parseSlashCommand') recognise
--- the tab vocabulary so that a user running
--- 'PureClaw.Agent.Loop.runAgentLoop' (the single-tab CLI loop) sees
+-- the tab vocabulary so that a user running the CLI loop
+-- ('PureClaw.Tabs.Wiring.runTabbedLoop') sees
 -- a real handler rather than \"Unrecognized slash command\". The
 -- handlers themselves live in 'PureClaw.Routing.AutoSpawn'; the
 -- 'CmdTab' arm of 'executeSlashCommand' dispatches to them.
@@ -706,23 +706,6 @@ tabResumeP t =
               -> Just (CmdTab (TabResumeCmd (SessionId sid)))
             _ -> Nothing
      else Nothing
-
--- | True iff @t@ satisfies the S3 / P15a session-id invariants:
--- non-empty, no path-traversal markers, all characters in
--- @[a-zA-Z0-9_-]@.
-isValidSessionId :: Text -> Bool
-isValidSessionId t =
-  not (T.null t)
-    && not ("." `T.isPrefixOf` t)
-    && not (".." `T.isInfixOf` t)
-    && T.all isSessionIdChar t
-  where
-    isSessionIdChar c =
-      Char.isAsciiLower c
-        || Char.isAsciiUpper c
-        || Char.isDigit c
-        || c == '_'
-        || c == '-'
 
 -- | Parse @\/tab rename <N> <name>@. The name captures the remainder
 -- verbatim; 'PureClaw.Routing.Parse.sanitizeTabName' runs at handler
@@ -1234,10 +1217,10 @@ executeSlashCommand env (CmdMcp sub) ctx = do
 -- production paths NEVER call this branch.
 --
 -- This case remains as a defensive fallback for two situations:
--- (1) the legacy single-tab 'PureClaw.Agent.Loop.runAgentLoop' is in
--- use and the user typed a @\/tab*@ command (Tabbed Chat isn't wired
--- in that path); (2) an AI tab loop somehow received a 'CmdTab' via
--- '_tabHandle_enqueueSlash' (the I5 path) — defensive coverage.
+-- (1) a slash-command executor is driven outside the tabbed dispatcher
+-- and the user typed a @\/tab*@ command; (2) an AI tab loop somehow
+-- received a 'CmdTab' via '_tabHandle_enqueueSlash' (the I5 path) —
+-- defensive coverage.
 executeSlashCommand env (CmdTab _) ctx = do
   _ch_send (_env_channel env)
     (OutgoingMessage
@@ -1245,10 +1228,10 @@ executeSlashCommand env (CmdTab _) ctx = do
        \(PureClaw.Routing.Dispatcher.runDispatcher).")
   pure ctx
 
--- | Legacy single-tab fallback for @\/bg@. The real background-session
--- handling lives in the tabbed-chat dispatcher (issue #52, WU3); under
--- the single-tab 'PureClaw.Agent.Loop.runAgentLoop' path there is no
--- dispatcher to spawn a fresh session, so we emit an explanatory
+-- | Fallback arm for @\/bg@ when no dispatcher is in scope. The real
+-- background-session handling lives in the tabbed-chat dispatcher
+-- (issue #52, WU3); when a slash-command executor runs without that
+-- dispatcher to spawn a fresh session, we emit an explanatory
 -- message and leave the context unchanged. This arm is
 -- correctness-mandatory: @-Wincomplete-patterns@ is off in this
 -- project, so omitting it compiles clean and then crashes at runtime.

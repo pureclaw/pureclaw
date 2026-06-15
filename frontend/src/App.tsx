@@ -645,6 +645,9 @@ export default function App() {
   // so the user sees why nothing happened (e.g. a headless run → 403, or the
   // window no longer exists) and can adjust + retry.
   const [attachError, setAttachError] = useState<string | null>(null)
+  // Error from a failed normal new-tab create (non-branch, non-attach).
+  // Surfaced to let the user act (e.g. close a tab when the cap is hit).
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const handleNewTab = useCallback(() => {
     setSelectedId(null)
@@ -654,10 +657,11 @@ export default function App() {
     // Clicking New tab abandons any in-progress branch draft.
     setBranchDraft(null)
     setBranchError(null)
-    // Re-open the composer (and clear any prior attach error) for the new
+    // Re-open the composer (and clear any prior errors) for the new
     // compose session.
     setComposerDismissed(false)
     setAttachError(null)
+    setCreateError(null)
   }, [])
 
   // Branch from a transcript entry: slice the currently-displayed messages
@@ -691,6 +695,7 @@ export default function App() {
     setBranchError(null)
     setComposerDismissed(false)
     setAttachError(null)
+    setCreateError(null)
     setSelectedId(null)
     setNewTabFocusTick((n) => n + 1)
     window.history.pushState(null, '', '/')
@@ -807,13 +812,29 @@ export default function App() {
         body: JSON.stringify(body),
       })
       if (!res.ok) {
-        // Surface a visible error and RETAIN the branch draft so the user
-        // can retry (D14). A stale/deleted boundary entry yields a 404 here.
+        // Surface a visible error and RETAIN the draft/compose state so the
+        // user can act (retry, close a tab, etc.) without losing context.
+        const errBody = await res.json().catch(() => null) as { error?: string } | null
+        const errText = errBody?.error ?? null
         if (branchDraft) {
+          // D14: retain the branch draft so the user can retry.
           setBranchError('Could not create the branch — the source entry may no longer exist. Please try again.')
+        } else {
+          // Normal new-tab create: surface the backend error message.
+          // For the cap case, add a clear action hint.
+          const capHit = errText?.toLowerCase().includes('maximum tab') ?? false
+          setCreateError(
+            errText
+              ? capHit
+                ? `${errText} — close a tab to free a slot`
+                : errText
+              : 'Could not create tab',
+          )
         }
         return
       }
+      // Success: clear any prior create error.
+      setCreateError(null)
       // Success: the draft has done its job; clear it before switching.
       if (branchDraft) {
         setBranchDraft(null)
@@ -1097,7 +1118,7 @@ export default function App() {
           selectedId={selectedId}
           onBranch={selectedSession?.runtime === 'provider' ? handleBranch : undefined}
           prefixMessages={composing && branchDraft ? branchDraft.prefixMessages : undefined}
-          composeError={composing ? (branchDraft ? branchError : attachError) : null}
+          composeError={composing ? (branchDraft ? branchError : (attachError ?? createError)) : null}
           currentModel={modelDropdownValue}
           availableModels={[...transcriptModels, ...composerSpec.models]}
           onModelChange={modelDropdownValue !== null ? setModelOverride : undefined}

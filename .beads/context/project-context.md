@@ -1,72 +1,48 @@
-# Project Context (Orchestrator-maintained) — pureclaw-3oy: Harness Registry Phase 1
+# Project Context (Tabs-as-View Refactor — GitHub #79)
 
-Last updated: 2026-06-01 (orchestration start)
-
-Epic: **pureclaw-3oy**. Branch: **feat/harness-registry-p1**. Plan: `.beads/plans/harness-registry-phase1-plan.md`. Design: `docs/harness-registry.md`.
-
-## Tooling (Haskell / Nix flake)
-- **All** cabal/hlint commands MUST be prefixed: `nix develop . --command <...>`
-- Build / typecheck: `nix develop . --command cabal build` (GHC 9.12.1, GHC2021, `-Wall -Werror`, `-Wincomplete-record-updates`, `-Wmissing-export-lists`)
-- Lint: `nix develop . --command hlint src/ test/ app/` (must be clean)
-- Test: `nix develop . --command cabal test` — HSpec via **hand-rolled `test/Main.hs`** (NOT hspec-discover).
-  **New spec modules MUST be registered in BOTH `test/Main.hs` AND the `pureclaw.cabal` test stanza** (`other-modules`).
-- Coverage: `nix develop . --command cabal test --enable-coverage` — **95%** (lines/branches/functions/statements) per `.coverage-thresholds.json` (source of truth, NOT 100%). Staged-waiver mechanism exists but new Phase-1 code is fully exercisable (no waiver expected).
-- PTY firewall (pre-push): `bash scripts/check-pty-firewall.sh`
-- Stale build fix: `nix develop . --command bash -c "cabal clean && cabal build"`
-- Binary: `dist-newstyle/build/aarch64-osx/ghc-9.12.1/pureclaw-0.1.0.0/x/pureclaw/build/pureclaw/pureclaw`
+## Tooling
+- Language: Haskell GHC 9.12.1 (GHC2021), Nix flake
+- Build: `nix develop . --command cabal build`
+- Test: `nix develop . --command cabal test`
+- Coverage: `nix develop . --command cabal test --enable-coverage` (.coverage-thresholds.json = 95%)
+- Lint: `nix develop . --command hlint src test`
+- Quality: -Wall -Werror (relaxed locally to -Wwarn only at WU8 cutover, restored WU11)
 
 ## Conventions
-- Import style: `qualified as` (no explicit import lists except canonical `import Data.Set (Set)`)
-- Handle pattern (records of IO actions, field prefix `_handleName_*`); no effect systems; `ReaderT AppEnv IO` + explicit handles
-- Security types: smart constructors, value constructors NOT exported (`SafePath`, `AuthorizedCommand`, `ApiKey`)
-- `IORef` unless `TVar`/`MVar` is required for concurrency (registry IS a `TVar` per design)
-- New record fields must be added at ALL construction sites (`-Werror` enforces)
-- Hand-written Aeson codec with `.:?`/`.!=` tolerant decode + emit-when-Just (precedent: SessionMeta `_sm_agent`)
-- Coding agents load the `haskell` skill (haskell-coder); review agents load haskell-reviewer
-- TDD mandatory: failing test first (red), then implement (green), then refactor
-
-## Orchestrator decisions (binding for this execution)
-- **D-ADD-1: WU1 is ADDITIVE.** Changing existing Tmux.hs signatures (`captureWindow`,
-  `sendToWindow`, `startTmuxSession`, `stopHarnessWindow`, `renameWindow`) would break callers in
-  ClaudeCode.hs / ActivityProbe.hs / API.hs / SlashCommands.hs / CLI/Commands.hs, migrated only in
-  WU4/WU5. To keep every WU green (`-Wall -Werror`), WU1 ADDS new identity + name-targeting ops
-  alongside the existing index-based functions. Existing functions stay until later WUs migrate callers.
-  Any dead index-based ops are removed in WU9 cleanup.
-- **D-ADD-2: registry is additive** (per plan): new `_env_harnessRegistry`/`_fe_harnessRegistry` fields;
-  legacy `_env_harnesses`/`_fe_harnesses :: IORef (Map Text HarnessHandle)` and `_env_nextWindowIdx`
-  KEPT and maintained as synced derived views. No legacy consumer logic changes except frontend routing (WU6).
-- **D-SCOPE-WU6: WU6 touches ONLY persistence + frontend routing.** The plan's locked additive
-  decision (plan lines 38–50, user-chosen) says `Loop.TargetHarness`, `Core.Types`, `/status`/`/target`/`/msg`,
-  `Tab/Harness.lookupHarness`, `Session/Handle.resolveResumedTarget` and their tests stay UNCHANGED —
-  full legacy cutover is DEFERRED. This overrides the WU6 file-list's mention of `Core/Types.hs`/
-  `Agent/Loop.hs`. So WU6 = `Session/Kind.hs` (additive `_h_harnessId`) + `Frontend/API.hs`
-  (`harnessKeyFromKind`/`sendToHarness` → id-primary with NAME-fallback + PID-corroboration refusal) + tests.
-  The registry is EMPTY until WU4/WU5/WU7 populate it, so frontend id-routing MUST fall back to the
-  legacy name-keyed `_fe_harnesses` map — preserving PR #74's working first-prompt routing.
-
-## Work Units (beads ids) — execution order respects the DAG
-| WU | beads | Title | Deps |
-|----|-------|-------|------|
-| WU1 | pureclaw-3oy.1 | Tmux.hs identity ops + name targeting + capability check | — |
-| WU2 | pureclaw-3oy.2 | Harness.Registry module (HarnessId/HarnessEntry/TVar) | — |
-| WU2b | pureclaw-3oy.3 | _env/_fe_harnessRegistry field (additive, mechanical) | WU2 |
-| WU3 | pureclaw-3oy.4 | tmux auth seam (authorizeTmuxCommand) | WU1 |
-| WU4 | pureclaw-3oy.5 | ClaudeCode + SlashCommands harness-start: session/id/PIDs | WU1,WU2,WU2b,WU3 |
-| WU5 | pureclaw-3oy.6 | Reconcile loop + boot reconstruction | WU1,WU2,WU2b,WU4,WU6 |
-| WU6 | pureclaw-3oy.7 | Persistence + routing key migration | WU2,WU2b |
-| WU7 | pureclaw-3oy.8 | _fe_startHarness/createTab use registry + _tc_session | WU2b,WU4,WU6 |
-| WU8 | pureclaw-3oy.9 | Minimal Active-Tabs slice (user symptom) | WU2,WU2b,WU7 |
-| WU9 | pureclaw-3oy.10 | Coverage + integration sweep + dead-code cleanup | WU1..WU8 |
-
-Topological execution: (WU1‖WU2) → (WU2b‖WU3) → (WU6, then WU4) → (WU5‖WU7) → WU8 → WU9.
+- Handle pattern (records of IO actions); no effect systems (ReaderT/IO); IORef-by-default
+- Import style: `qualified as` (no explicit import lists except canonical like `import Data.Set (Set)`)
+- Security types: constructors not exported
+- New record fields must be added to ALL construction sites (-Werror)
+- TDD mandatory: failing test first, commit progression
 
 ## Completed Work Units
 | WU | Title | Key Files | Notes |
 |----|-------|-----------|-------|
-| (none yet) | | | |
+| WU7 | Per-conversation relay engine | src/PureClaw/Tabs/Relay.hs | relayOutput 3-mode fan-out, burst de-dup, name-first ping. Additive (replaces ChannelOut gate in WU8). 100% cov. commit 14cc2a8 |
+| WU6 | Attach wizard state machine | src/PureClaw/Tabs/Wizard.hs | mkWizardSnapshot/stepWizard, key-bound picks, vanished reprompt, slash-cancel. Additive (WU8 wires interception). 100% cov. commit f15b663 |
+| WU5 | SessionPool (refcounted) | src/PureClaw/Tabs/SessionPool.hs | acquire/release, one handle per SessionId, injected open/close. Additive (wired in WU8). 96% cov. commit 22ef367 |
+| WU4 | ConversationId through MessageSource | Core/Types.hs, Channels/{CLI,Telegram,Signal}, Handles/Channel + ~12 test files | _ms_conversation required arg; per-channel derivation (Telegram=chat id). commit a4c3e1b |
+| WU3 | Persistence + boot reconcile | src/PureClaw/Tabs/Persist.hs | saveTabs/loadTabs, state/tabs.json (0600/0700 atomic), reconcile drops dead-harness tabs. Strict guarded read; PersistDeps injected. 96% cov. commit aa389f9 |
+| WU2 | Per-conversation cursors + RelayMode | src/PureClaw/Tabs/Types.hs (+CursorState), Core/Types.hs (Ord ChannelKind) | ConversationKey, RelayMode, CursorState ops; cursors key by TabRef (I3). 100% cov. commit d1bdc54 |
+| WU1 | Core registry types + pure ops | src/PureClaw/Tabs/Types.hs, src/PureClaw/Tabs.hs, Core/Types.hs (ConversationId) | TabRef/TabStatus/Tab/opaque TabList (I1/I2/36-cap); TabRegistry IORef handle. 100% cov. commit ad3a1c9 |
 
-## Established Patterns (this codebase)
-- Hand-written Aeson codec, tolerant `.:?`/`.!=` decode, emit-when-Just (SessionMeta `_sm_agent`).
-- Set-once `atomicModifyIORef'` + save-iff-changed (`markBootstrapConsumed`, Session/Handle.hs).
-- Flat-string sum encoding (`flavourToText`, Session/Types.hs).
-- tmux server-sweep parsing via `tmux ... -F` format strings + tab-split (`listSessionWindows`).
+## Established Patterns
+- Test layout: test/<Area>/NameSpec.hs, module <Area>.NameSpec (NO PureClaw. prefix), spec :: Spec, registered in test/Main.hs + pureclaw.cabal test other-modules.
+- Coverage: HPC counts derived (Eq/Ord/Show) instance methods as expressions; exercise them with real assertions OR they show as uncovered. Self-verify via `hpc report` on the .tix before reporting done.
+- TabList is OPAQUE (constructor not exported) — callers can't break I1/I2.
+- COVERAGE STANDARD (discovered WU4): repo does NOT enforce every-module-95%. IO/transport modules sit far below (Channels.CLI 2%, Telegram 77%, Signal 72%) unwaived on main. Operative bar: NEW logic modules >=95% (Tabs.* all 100%/96%) + no regression on touched modules. Don't block on pre-existing IO debt.
+- Prefer total constructions (lazy infinite slotStream + NonEmpty) over partial head/error branches.
+- PROVENANCE on the tab path (8d.c / pureclaw-opr): the inbound MessageSource must be captured set-once onto
+  the conversation's ACTIVE BOUND session (cursor->ref->store->setSourceIfAbsent), NOT just _env_session
+  (foreground). The per-tab transcript provider (Wiring.startProvider) reads that bound session's _sm_source
+  per-request so phone+uuid land in BOTH session.json and transcript.jsonl. Mirrors legacy (Just (_im_source msg)).
+- CUTOVER DELTAS (intended, classified during 8d.c): the new tabbed path emits NO `model> ` reply prefix
+  (WU7 relay name-first ping replaces it) and drops ambient `_env_target=TargetHarness` IRC-prefixed routing
+  (superseded by tab-based BoundHarness routing). Per-tab provider output is relayed as streamed chunks
+  (_ch_sendChunk), not a single _ch_send — tests of the tabbed path must record both.
+- runTabbedLoop is unit-testable: build the 7 tab-subsystem fields via newTabSubsystem (Agent/Env.hs:252);
+  drive with a bounded fake channel that throws userError on drain (-> "Session ended" clean exit). See Tabs.WiringSpec.
+
+## Plan & Spec
+- Plan: docs/superpowers/plans/2026-06-08-tabs-as-view-refactor.md
+- Spec: docs/superpowers/specs/2026-06-08-tabs-as-view-refactor-design.md

@@ -134,14 +134,17 @@ spec = do
       -- Should indicate no provider is configured
       err `shouldContain` "No providers configured"
 
-    it "shows a helpful message when sending a chat message without a provider" $ do
+    it "shows provider setup guidance when sending a chat message with no provider configured" $ do
       bin <- findPureclaw
-      -- Send a non-slash message. Without a configured provider, the
-      -- binary should tell the user how to configure one, not crash.
+      -- Send a non-slash message. Under the Tabs-as-View model (GitHub #79) a
+      -- plain chat message with no active tab now AUTO-STARTS a default session
+      -- (restoring the implicit "just works" session). With no credentials the
+      -- default-session mint fails for lack of a provider, so the dispatcher
+      -- surfaces the actionable setup guidance rather than crashing.
       (exitCode, out, err) <- runPureclaw bin "Hello world\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
-      -- Should mention how to configure credentials
-      out `shouldContain` "provider"
+      -- Should guide the user to configure a provider.
+      out `shouldContain` "No provider configured"
 
     it "shows a warning when --autonomy full is set" $ do
       bin <- findPureclaw
@@ -410,7 +413,7 @@ spec = do
       exitCode `shouldNotBe` ExitSuccess
       err `shouldContain` "not found"
 
-    it "resumes a session and replays prior transcript entries into the agent context" $ do
+    it "resumes a named session cleanly and uses its on-disk transcript (8c.2: per-tab replay)" $ do
       bin <- findPureclaw
       withSystemTempDirectory "pureclaw-session-replay-test" $ \tmpDir -> do
         -- Build a session fixture directly on disk with two transcript
@@ -451,9 +454,16 @@ spec = do
         _th_record th (mkTxEntry "e2" Response "prior assistant reply")
         _th_flush th
         _th_close th
-        -- Now spawn the binary with --session <id> and /status; the
-        -- reported Messages count should include the two replayed
-        -- entries rather than the pre-fix value of 0.
+        -- Now spawn the binary with --session <id> and /status. Under the
+        -- Tabs-as-View model (GitHub #79, 8c.2 flip) the resumed transcript is
+        -- replayed lazily into each tab's runtime worker context (seeded via
+        -- 'loadRecentMessages' when the runtime starts), not eagerly into a
+        -- single foreground context. So /status — handled by the dispatcher
+        -- fallthrough over a fresh per-command context — no longer reflects the
+        -- replayed message count; what it MUST still show is that the named
+        -- session resumed cleanly and its on-disk transcript is in use.
+        -- (The per-tab Messages-count assertion is re-established in the 8d
+        -- end-to-end CLISpec rewrite.)
         let args = ["--no-vault", "--session", "replay-fixture-1"]
             pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "/status\n")))
                $ setStdout byteStringOutput
@@ -473,8 +483,12 @@ spec = do
             let outStr = T.unpack (TE.decodeUtf8 (LBS.toStrict out))
                 errStr = T.unpack (TE.decodeUtf8 (LBS.toStrict err))
             annotate errStr ec `shouldBe` annotate errStr ExitSuccess
-            -- The /status handler prints "  Messages: N" — must be 2.
-            outStr `shouldContain` "Messages:            2"
+            -- The named session resumed cleanly: /status renders and reports the
+            -- resumed session's on-disk transcript (the replay-fixture-1 dir),
+            -- confirming --session resolved + loaded the fixture rather than
+            -- starting a fresh session.
+            outStr `shouldContain` "replay-fixture-1"
+            outStr `shouldContain` "transcript.jsonl"
 
     it "logs a warning and falls back to TargetProvider when resuming an SkHarness session whose harness is not running" $ do
       bin <- findPureclaw
@@ -566,3 +580,64 @@ spec = do
               `shouldReturn` True
             oneDir `shouldNotBe` twoDir
           _ -> expectationFailure "missing expected session directories"
+
+  -- ---------------------------------------------------------------------------
+  -- Tabbed command surface — §14 teaching strings (8d item a)
+  -- ---------------------------------------------------------------------------
+  -- These tests drive the REAL binary with no provider configured.  Every
+  -- assertion targets a deterministic §14 copy string that is emitted
+  -- regardless of credentials.  Provider-dependent behaviour (tab creation,
+  -- live chat turns) stays unit-covered in TabDispatchSpec / WiringSpec /
+  -- SignalFlowSpec with fakes.
+  -- ---------------------------------------------------------------------------
+
+  describe "tabbed command surface" $ do
+
+    -- /new with no provider → provider setup guidance (Wiring.hs:563)
+    it "/new with no provider configured shows provider setup guidance" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/new\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "No provider configured"
+      out `shouldContain` "/provider <PROVIDER>"
+
+    -- /5 with 0 tabs → out-of-range §14 copy (TabDispatch.hs:628-630)
+    it "/5 with no tabs shows the out-of-range §14 message" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/5\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "/5: out of range"
+      out `shouldContain` "you have 0 tabs"
+      out `shouldContain` "/tabs to list"
+
+    -- /tabs with 0 tabs → just the relay-mode line (TabDispatch.hs:347-352)
+    it "/tabs with no tabs renders the relay-mode line without crashing" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/tabs\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      -- With zero tabs the only output is the trailing relay line.
+      out `shouldContain` "Relay mode: focused"
+
+    -- /relay with no arg → current relay mode (TabDispatch.hs:657-658)
+    it "/relay with no argument shows the current relay mode" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/relay\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "relay mode:"
+      out `shouldContain` "focused | activity | all"
+
+    -- /help → help text (already covered in "CLI startup"; verify in this
+    -- describe too so the tabbed surface §14 block is self-contained)
+    it "/help shows the slash-command reference" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/help\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "Slash commands:"
+
+    -- Unknown slash → parse-error §14 copy (TabDispatch.hs:662)
+    it "an unknown slash command shows the parse-error §14 copy" $ do
+      bin <- findPureclaw
+      (exitCode, out, err) <- runPureclaw bin "/zzz\n" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "could not parse that"
+      out `shouldContain` "/help for commands"

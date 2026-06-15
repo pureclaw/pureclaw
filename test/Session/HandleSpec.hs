@@ -28,6 +28,7 @@ import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
 import PureClaw.Agent.Compaction (compactionMetadataKey)
 import PureClaw.Core.Types
   ( ChannelKind (..)
+  , ConversationId (..)
   , MessageTarget (..)
   , ModelId (..)
   , SessionId (..)
@@ -256,6 +257,14 @@ spec = do
         Right _ -> expectationFailure "expected CorruptedMetadata, got: Right _"
         Left e  -> expectationFailure ("expected CorruptedMetadata, got: " <> show e)
 
+    it "resumeSession rejects a traversal id with ResumeInvalidId (no filesystem touch)" $
+      withSystemTempDirectory "pc-resume" $ \dir -> do
+        r <- resumeSession Nothing mkNoOpLogHandle dir (parseSessionId "../etc")
+        case r of
+          Left ResumeInvalidId -> pure ()
+          Left other           -> expectationFailure ("expected Left ResumeInvalidId, got Left " <> show other)
+          Right _              -> expectationFailure "expected Left ResumeInvalidId, got Right _"
+
   describe "mkNoOpSessionHandle" $ do
     it "is safe to save and record into" $ do
       sh <- mkNoOpSessionHandle
@@ -377,7 +386,7 @@ spec = do
   describe "setSourceIfAbsent" $ do
     it "sets _sm_source when currently Nothing and persists to session.json" $ withTmp $ \base -> do
       let meta = mkMeta "src-1" t0
-          src  = mkMessageSource CkSignal (Just (UserId "+15551234567")) mempty
+          src  = mkMessageSource CkSignal (ConversationId "+15551234567") (Just (UserId "+15551234567")) mempty
       sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
       _sm_source <$> readIORef (_sh_meta sh) `shouldReturn` Nothing
       setSourceIfAbsent sh src
@@ -394,8 +403,8 @@ spec = do
       -- Build a SessionHandle whose _sh_save increments a counter, so we can
       -- assert the "iff changed" optimization: the second call must not save.
       saveCount <- newIORef (0 :: Int)
-      let firstSrc  = mkMessageSource CkSignal (Just (UserId "+15550000001")) mempty
-          secondSrc = mkMessageSource CkTelegram (Just (UserId "99999")) mempty
+      let firstSrc  = mkMessageSource CkSignal (ConversationId "+15550000001") (Just (UserId "+15550000001")) mempty
+          secondSrc = mkMessageSource CkTelegram (ConversationId "99999") (Just (UserId "99999")) mempty
       metaRef <- newIORef ((mkMeta "src-2" t0) { _sm_source = Nothing })
       noOp <- mkNoOpSessionHandle
       let sh = SessionHandle

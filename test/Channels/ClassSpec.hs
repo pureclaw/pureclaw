@@ -26,7 +26,7 @@ spec = do
   describe "Channel typeclass" $ do
     it "toHandle produces a working ChannelHandle" $ do
       let msg = IncomingMessage
-                  (mkMessageSource CkCli (Just (UserId "u1")) mempty) "hello"
+                  (mkMessageSource CkCli (ConversationId "cli") (Just (UserId "u1")) mempty) "hello"
           ch  = TestChannel msg
           h   = toHandle ch
       received <- _ch_receive h
@@ -35,7 +35,7 @@ spec = do
   describe "SomeChannel" $ do
     it "wraps a Channel and extracts a handle" $ do
       let msg  = IncomingMessage
-                   (mkMessageSource CkCli (Just (UserId "u2")) mempty) "world"
+                   (mkMessageSource CkCli (ConversationId "cli") (Just (UserId "u2")) mempty) "world"
           some = MkChannel (TestChannel msg)
           h    = someChannelHandle some
       received <- _ch_receive h

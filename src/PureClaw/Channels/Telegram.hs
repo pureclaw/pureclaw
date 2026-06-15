@@ -11,6 +11,8 @@ module PureClaw.Channels.Telegram
   , TelegramMessage (..)
   , TelegramChat (..)
   , TelegramUser (..)
+    -- * Conversation derivation
+  , conversationIdForTelegram
     -- * BotFather command registration (Tabbed Chat O3)
   , botFatherCommands
   , registerBotFatherCommands
@@ -132,7 +134,8 @@ receiveUpdate tc = do
     then do
       writeIORef (_tch_lastChat tc) (Just chatId)
       pure IncomingMessage
-        { _im_source  = mkMessageSource CkTelegram (Just (UserId userId)) flds
+        { _im_source  = mkMessageSource CkTelegram (conversationIdForTelegram msg)
+                          (Just (UserId userId)) flds
         , _im_content = content
         }
     else do
@@ -140,6 +143,18 @@ receiveUpdate tc = do
         "Blocked Telegram message from unauthorized sender (user "
           <> userId <> ", chat " <> T.pack (show chatId) <> ")"
       receiveUpdate tc
+
+-- | Derive the 'ConversationId' for a Telegram message from its CHAT id
+-- (@_tcht_id . _tm_chat@), NOT the sender's user id (@_tm_from@).
+--
+-- Using the chat id means every sender in a group chat shares one
+-- 'ConversationId' (and therefore one tab cursor), which is the intended
+-- behaviour. It also avoids the UserId conflation the allow-list work warns
+-- about: the conversation key is a property of the conversation, not of who
+-- spoke. The id is server-derived from the authenticated Bot API payload.
+conversationIdForTelegram :: TelegramMessage -> ConversationId
+conversationIdForTelegram msg =
+  ConversationId (T.pack (show (_tcht_id (_tm_chat msg))))
 
 -- | Send a message to the last active chat via the Telegram Bot API.
 sendMessage :: TelegramChannel -> OutgoingMessage -> IO ()

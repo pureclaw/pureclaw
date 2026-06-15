@@ -68,19 +68,25 @@ library
     -- Routing
     PureClaw.Routing.Types
     PureClaw.Routing.Parse
-    PureClaw.Routing.Registry
     PureClaw.Routing.Config
-    PureClaw.Routing.ChannelOut
-    PureClaw.Routing.Dispatcher
-    PureClaw.Routing.LegacyDispatch
-    PureClaw.Routing.AutoSpawn
-    PureClaw.Routing.Dashboard
     PureClaw.Routing.PromptRenderer
     PureClaw.Routing.Onboarding
+    -- Tabs-as-View (GitHub #79) — first-class tab registry
+    PureClaw.Tabs
+    PureClaw.Tabs.Types
+    PureClaw.Tabs.Persist
+    PureClaw.Tabs.SessionPool
+    PureClaw.Tabs.Wizard
+    PureClaw.Tabs.Relay
+    PureClaw.Tabs.RelayWriter
+    PureClaw.Tabs.Exec
+    -- Tabs-as-View (GitHub #79) 8c.1 — real per-ref runtime constructors
+    PureClaw.Tabs.Runtimes
+    -- Tabs-as-View (GitHub #79) 8b.4 — per-conversation routing brain
+    PureClaw.Routing.TabDispatch
+    -- Tabs-as-View (GitHub #79) 8c.2 — live wiring flip
+    PureClaw.Tabs.Wiring
     -- Tab factories (Tabbed Chat — WU6/WU7/WU8)
-    PureClaw.Tab.Ai
-    PureClaw.Tab.Harness
-    PureClaw.Tab.Backend
     PureClaw.Tab.Container
     -- Backend
     PureClaw.Backend.Pty
@@ -130,6 +136,7 @@ library
     PureClaw.Agent.Completion
     PureClaw.Agent.Env
     PureClaw.Agent.Loop
+    PureClaw.Agent.Turn
     PureClaw.Agent.Context
     PureClaw.Agent.Memory
     PureClaw.Agent.Compaction
@@ -167,6 +174,7 @@ library
     -- Frontend
     PureClaw.Frontend.Activity.Types
     PureClaw.Frontend.API
+    PureClaw.Frontend.TabsView
     PureClaw.Frontend.Server
     PureClaw.Frontend.BroadcastingTranscript
     PureClaw.Frontend.Stream
@@ -251,6 +259,8 @@ test-suite pureclaw-test
   other-modules:
     Auth.AnthropicOAuthSpec
     Core.TypesSpec
+    Core.SessionIdValidatorSpec
+    Core.MessageSourceSpec
     Security.SecretsSpec
     Core.ErrorsSpec
     Security.PolicySpec
@@ -269,7 +279,8 @@ test-suite pureclaw-test
     Agent.ContextSpec
     Providers.AnthropicSpec
     Agent.CompletionSpec
-    Agent.LoopSpec
+    Agent.BackgroundSpec
+    Agent.TurnSpec
     Channels.CLISpec
     CLI.CommandsSpec
     CLI.ConfigSpec
@@ -332,6 +343,7 @@ test-suite pureclaw-test
     Integration.SignalFlowSpec
     Integration.CLISpec
     Integration.ImportRoundTripSpec
+    Integration.TabsSyncSpec
     Transcript.TypesSpec
     Transcript.CombinatorSpec
     Transcript.ProviderSpec
@@ -363,21 +375,35 @@ test-suite pureclaw-test
     Harness.RegistrySpec
     Harness.TmuxSpec
     -- WU0 (tabbed-chat) red-phase scaffold specs
+    -- Routing.ParseSpec removed in 8c.3: it imported the deleted
+    -- PureClaw.Routing.Dispatcher / PureClaw.Routing.Registry modules.
+    -- 8d.b re-adds a rewritten ParseSpec (pure-parser form, P18 recasted).
     Routing.ParseSpec
-    Handles.TabSpec
-    Routing.RegistrySpec
     Routing.ConfigSpec
-    Routing.DispatcherSpec
-    Routing.ChannelOutSpec
-    Routing.AutoSpawnSpec
-    Routing.LegacyDispatchSpec
-    Tab.AiSpec
-    Tab.HarnessSpec
-    Tab.BackendSpec
     Tab.ContainerSpec
-    Coexistence.SlashCmdSpec
-    Security.TabSpec
     Onboarding.StartSpec
+    -- Tabs-as-View (GitHub #79) WU1
+    Tabs.TypesSpec
+    -- Tabs-as-View (GitHub #79) WU2
+    Tabs.CursorSpec
+    -- Tabs-as-View (GitHub #79) WU3
+    Tabs.PersistSpec
+    -- Tabs-as-View (GitHub #79) WU5
+    Tabs.SessionPoolSpec
+    -- Tabs-as-View (GitHub #79) WU6
+    Tabs.WizardSpec
+    -- Tabs-as-View (GitHub #79) WU7
+    Tabs.RelaySpec
+    -- Tabs-as-View (GitHub #79) 8b.3a
+    Tabs.RelayWriterSpec
+    -- Tabs-as-View (GitHub #79) 8b.3b
+    Tabs.ExecSpec
+    -- Tabs-as-View (GitHub #79) 8c.1
+    Tabs.RuntimesSpec
+    -- Tabs-as-View (GitHub #79) 8b.4
+    Routing.TabDispatchSpec
+    -- Tabs-as-View (GitHub #79) 8d.c.3
+    Tabs.WiringSpec
     -- WU9 (HPureClaw depth limit)
     Routing.DepthLimitSpec
     -- WU2 (Session.Kind leaf module)
@@ -386,10 +412,11 @@ test-suite pureclaw-test
     Frontend.ServerSpec
     -- WU-7 (POST /api/tabs/new unified endpoint)
     Frontend.APISpec
+    -- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
+    Frontend.TabsViewSpec
     -- WU0 (tabbed-chat) test seams T1–T4
     Test.Fake.Provider
     Test.Fake.ChannelHandle
-    Test.Fake.TabFactory
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw
@@ -407,6 +434,8 @@ test-suite pureclaw-test
     http-client,
     http-client-tls,
     http-types,
+    mcp-client,
+    mcp-types,
     network,
     optparse-applicative,
     stm,

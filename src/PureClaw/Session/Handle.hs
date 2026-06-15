@@ -81,6 +81,7 @@ import PureClaw.Core.Types
   , MessageTarget (..)
   , ModelId (..)
   , SessionId (..)
+  , isValidSessionId
   , parseSessionId
   )
 import PureClaw.Frontend.BroadcastingTranscript
@@ -141,6 +142,10 @@ data ResumeError
   | ResumeCorruptedMetadata FilePath String
     -- ^ @session.json@ exists but does not parse as 'SessionMeta'.
     -- The second field is a human-readable recovery hint.
+  | ResumeInvalidId
+    -- ^ The supplied 'SessionId' is empty, contains @..@, or contains
+    -- a path separator — it would be unsafe to path-join onto a base
+    -- directory. Rejected before any filesystem access.
   deriving stock (Show, Eq)
 
 -- | Lookup result for 'resolveSessionRef'.
@@ -297,31 +302,34 @@ resumeSession
   -> FilePath
   -> SessionId
   -> IO (Either ResumeError SessionHandle)
-resumeSession mBroker logger baseDir sid = do
-  let dir    = baseDir </> T.unpack (unSessionId sid)
-      metaP  = dir </> "session.json"
-      txP    = dir </> "transcript.jsonl"
-  exists <- doesFileExist metaP
-  if not exists
-    then pure (Left (ResumeMissingMetadata metaP))
+resumeSession mBroker logger baseDir sid =
+  if not (isValidSessionId (unSessionId sid))
+    then pure (Left ResumeInvalidId)
     else do
-      raw <- LBS.readFile metaP
-      case Aeson.eitherDecode' raw of
-        Left err -> pure
-          (Left (ResumeCorruptedMetadata metaP
-            ("failed to parse session metadata: " <> err
-              <> " — recovery hint: inspect or remove " <> metaP)))
-        Right meta -> do
-          metaRef <- newIORef (meta :: SessionMeta)
-          tx <- mkBroadcastingFileTranscriptHandle mBroker sid logger txP
-          let save = saveMeta dir metaRef
-              tx'  = touchLastActive metaRef save tx
-          pure (Right SessionHandle
-            { _sh_meta       = metaRef
-            , _sh_transcript = tx'
-            , _sh_dir        = dir
-            , _sh_save       = save
-            })
+      let dir    = baseDir </> T.unpack (unSessionId sid)
+          metaP  = dir </> "session.json"
+          txP    = dir </> "transcript.jsonl"
+      exists <- doesFileExist metaP
+      if not exists
+        then pure (Left (ResumeMissingMetadata metaP))
+        else do
+          raw <- LBS.readFile metaP
+          case Aeson.eitherDecode' raw of
+            Left err -> pure
+              (Left (ResumeCorruptedMetadata metaP
+                ("failed to parse session metadata: " <> err
+                  <> " — recovery hint: inspect or remove " <> metaP)))
+            Right meta -> do
+              metaRef <- newIORef (meta :: SessionMeta)
+              tx <- mkBroadcastingFileTranscriptHandle mBroker sid logger txP
+              let save = saveMeta dir metaRef
+                  tx'  = touchLastActive metaRef save tx
+              pure (Right SessionHandle
+                { _sh_meta       = metaRef
+                , _sh_transcript = tx'
+                , _sh_dir        = dir
+                , _sh_save       = save
+                })
 
 -- ----------------------------------------------------------------------------
 -- Branch
@@ -370,17 +378,6 @@ data BranchSeed = BranchSeed
   }
   deriving stock (Show, Eq)
 
--- | Traversal-safety guard for a branch source session id. Mirrors
--- @PureClaw.Frontend.API.isValidSessionId@; replicated locally to avoid an
--- import cycle (the API module imports this module). Rejects the empty
--- string and anything containing @..@ or @\/@.
-isValidBranchSourceId :: Text -> Bool
-isValidBranchSourceId sid
-  | T.null sid = False
-  | T.isInfixOf ".." sid = False
-  | T.isInfixOf "/" sid = False
-  | otherwise = True
-
 -- | Resolve a 'BranchSpec' against the on-disk source session under
 -- @baseDir@, producing a 'BranchSeed' or a typed 'BranchError'.
 --
@@ -398,7 +395,7 @@ isValidBranchSourceId sid
 -- from any caller-supplied payload — so a branch cannot inject history.
 resolveBranchSeed :: FilePath -> BranchSpec -> IO (Either BranchError BranchSeed)
 resolveBranchSeed baseDir bs
-  | not (isValidBranchSourceId sourceId) =
+  | not (isValidSessionId sourceId) =
       pure (Left (BranchInvalidSourceId sourceId))
   | otherwise = do
       let dir   = baseDir </> T.unpack sourceId

@@ -76,19 +76,11 @@ module PureClaw.Handles.Tab
     -- without forward-referencing modules that do not yet exist.
   , SessionError (..)
   , PublicAuthError (..)
-    -- * Factory signatures (stubbed in WU1; bodies filled in by WU6\/7\/8)
-  , AiSpawnArgs (..)
-  , HarnessSpawnArgs (..)
-  , BackendSpawnArgs (..)
-  , mkTabAi
-  , mkTabHarness
-  , mkRawShellTab
   ) where
 
 import Data.Text (Text)
 import Data.Time (UTCTime)
 
-import PureClaw.Agent.SlashCommands qualified as Slash
 import PureClaw.Handles.Backend qualified as Backend
 import PureClaw.Core.Types (ModelId (..), ProviderId (..))
 import PureClaw.Session.Kind
@@ -326,12 +318,6 @@ data TabHandle = TabHandle
     --   @_rc_inputQueueBound@; overflow returns
     --   'Left' (e.g. 'TabConcurrencyLimit') so the dispatcher never
     --   blocks.
-  , _tabHandle_enqueueSlash  :: Slash.SlashCommand -> IO (Either TabError ())
-    -- ^ H13: enqueue a 'SlashCmd' input event. For AI sessions the tab
-    --   loop runs @executeSlashCommand@ against its own per-tab
-    --   context; for non-AI kinds the implementation returns
-    --   @Left ('TabUnsupportedCommand' cmd)@ immediately without
-    --   enqueueing.
   , _tabHandle_close         :: CloseMode -> IO ()
     -- ^ H6 \/ H7 \/ H8 \/ H9 \/ H10: idempotent, never throws,
     --   kind-specific semantics. The 'CloseMode' selects graceful
@@ -402,7 +388,6 @@ data TabError
   | TabNotFound !Int
   | TabConcurrencyLimit !Int
   | TabInvalidName !NameError
-  | TabUnsupportedCommand !Slash.SlashCommand
   deriving stock (Eq)
 
 -- | Hand-written 'Show' for 'TabError' per H14: constructor names only,
@@ -421,7 +406,6 @@ instance Show TabError where
     TabNotFound{}               -> "TabNotFound"
     TabConcurrencyLimit{}       -> "TabConcurrencyLimit"
     TabInvalidName{}            -> "TabInvalidName"
-    TabUnsupportedCommand{}     -> "TabUnsupportedCommand"
 
 
 -- ---------------------------------------------------------------------------
@@ -453,58 +437,3 @@ toPublicTabError e = PublicTabError $ case e of
   TabNotFound{}               -> "tab: not found"
   TabConcurrencyLimit{}       -> "tab: input queue full"
   TabInvalidName{}            -> "tab: invalid name"
-  TabUnsupportedCommand{}     -> "tab: command not supported on this tab kind"
-
-
--- ---------------------------------------------------------------------------
--- Factory signatures
--- ---------------------------------------------------------------------------
-
--- | Construction arguments for an AI tab.
---
--- WU1 lands the signature only; the field set is intentionally minimal
--- here and will be extended by WU6 ('PureClaw.Tab.Ai') when the AI tab
--- loop body lands. The record exists so the H2 type-shape test can
--- pin down @mkTabAi :: ... -> IO (Either TabError TabHandle)@ without
--- forward-referencing WU6's full argument list.
-data AiSpawnArgs = AiSpawnArgs
-  { _ai_requestedName :: !Text
-    -- ^ Caller-supplied friendly label before 'sanitizeTabName' (H11).
-  , _ai_background    :: !Bool
-    -- ^ True when spawned by @\/bg@; its completed turn is pushed to the
-    -- channel.
-  }
-  deriving stock (Eq, Show)
-
--- | Construction arguments for a harness tab. See 'AiSpawnArgs' note
--- on WU1 minimality; WU7 will extend.
-data HarnessSpawnArgs = HarnessSpawnArgs
-  { _harness_requestedName :: !Text
-  }
-  deriving stock (Eq, Show)
-
--- | Construction arguments for a backend (shell \/ ssh \/ tmux) tab.
--- WU8 will extend.
-data BackendSpawnArgs = BackendSpawnArgs
-  { _backend_requestedName :: !Text
-  , _backend_args          :: ![Text]
-  }
-  deriving stock (Eq, Show)
-
--- | AI tab factory. WU6 fills in the body.
-mkTabAi :: TabIndex -> AiSpawnArgs -> IO (Either TabError TabHandle)
-mkTabAi _ _ = error "PureClaw.Handles.Tab.mkTabAi: not implemented \
-                    \— filled in by WU6 (PureClaw.Tab.Ai)"
-
--- | Harness tab factory. WU7 fills in the body.
-mkTabHarness :: TabIndex -> HarnessSpawnArgs -> IO (Either TabError TabHandle)
-mkTabHarness _ _ = error "PureClaw.Handles.Tab.mkTabHarness: not implemented \
-                         \— filled in by WU7 (PureClaw.Tab.Harness)"
-
--- | Raw-shell tab factory (F4). Dispatches at construction time on
--- 'TerminalBackend' ('TbLocal' \/ 'TbSsh' \/ 'TbTmux'). WU8 fills in
--- the body.
-mkRawShellTab :: TabIndex -> TerminalBackend -> BackendSpawnArgs
-              -> IO (Either TabError TabHandle)
-mkRawShellTab _ _ _ = error "PureClaw.Handles.Tab.mkRawShellTab: not implemented \
-                            \— filled in by WU8 (PureClaw.Tab.Backend)"

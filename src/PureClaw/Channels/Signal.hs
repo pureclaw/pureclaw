@@ -9,6 +9,8 @@ module PureClaw.Channels.Signal
   , parseSignalEnvelope
   , SignalEnvelope (..)
   , SignalDataMessage (..)
+    -- * Conversation derivation
+  , conversationIdForSignal
   ) where
 
 import Control.Concurrent
@@ -133,9 +135,23 @@ receiveEnvelope sc = do
         Nothing   -> Map.empty
   writeIORef (_sch_lastSender sc) sender
   pure IncomingMessage
-    { _im_source  = mkMessageSource CkSignal (Just (UserId sender)) flds
+    { _im_source  = mkMessageSource CkSignal (conversationIdForSignal envelope)
+                      (Just (UserId sender)) flds
     , _im_content = content
     }
+
+-- | Derive the 'ConversationId' for a Signal envelope from its
+-- conversation/peer identifier.
+--
+-- signal-cli's current envelope shape (see 'SignalEnvelope') exposes only the
+-- peer @_se_source@ (a phone number or, failing that, a UUID) — there is no
+-- group-id field parsed yet. The conversation-level identifier is therefore
+-- the peer source: a 1:1 conversation is keyed by the contact. This is the
+-- single place to switch to a group id once signal-cli group envelopes are
+-- parsed. The id is server-derived from signal-cli output, never from message
+-- content.
+conversationIdForSignal :: SignalEnvelope -> ConversationId
+conversationIdForSignal = ConversationId . _se_source
 
 -- | Send a message via Signal, chunking if necessary.
 sendSignalMessage :: SignalChannel -> OutgoingMessage -> IO ()

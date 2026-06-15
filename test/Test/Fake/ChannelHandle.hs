@@ -99,7 +99,7 @@ feedIncoming fch im = atomically (writeTQueue (_fch_incoming fch) im)
 feedIncomingFromUser :: FakeChannel -> UserId -> Text -> IO ()
 feedIncomingFromUser fch uid t =
   feedIncoming fch
-    (IncomingMessage (mkMessageSource (CkOther "test") (Just uid) mempty) t)
+    (IncomingMessage (mkMessageSource (CkOther "test") (ConversationId "test") (Just uid) mempty) t)
 
 -- | Atomically drain all recorded events (oldest-first) and clear the log.
 drainEvents :: FakeChannel -> IO [(UTCTime, FakeChannelEvent)]

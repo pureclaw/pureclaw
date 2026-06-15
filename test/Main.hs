@@ -4,6 +4,8 @@ import Test.Hspec
 
 import qualified Auth.AnthropicOAuthSpec
 import qualified Core.TypesSpec
+import qualified Core.SessionIdValidatorSpec
+import qualified Core.MessageSourceSpec
 import qualified Core.ErrorsSpec
 import qualified Core.ConfigSpec
 import qualified Security.SecretsSpec
@@ -29,7 +31,8 @@ import qualified Agent.AgentDefSpec
 import qualified Agent.CompletionSpec
 import qualified Agent.ContextSpec
 import qualified Providers.AnthropicSpec
-import qualified Agent.LoopSpec
+import qualified Agent.BackgroundSpec
+import qualified Agent.TurnSpec
 import qualified Channels.CLISpec
 import qualified CLI.CommandsSpec
 import qualified CLI.ConfigSpec
@@ -85,6 +88,7 @@ import qualified Scheduler.HeartbeatSpec
 import qualified Integration.SignalFlowSpec
 import qualified Integration.CLISpec
 import qualified Integration.ImportRoundTripSpec
+import qualified Integration.TabsSyncSpec
 import qualified Transcript.TypesSpec
 import qualified Handles.TranscriptSpec
 import qualified Handles.HarnessSpec
@@ -112,20 +116,33 @@ import qualified Frontend.ServerSpec
 import qualified Frontend.APISpec
 
 -- WU0 (tabbed-chat) red-phase scaffold specs
+-- Routing.ParseSpec removed in 8c.3 (imports the deleted Routing.Dispatcher
+-- / Routing.Registry); 8d.b re-adds a rewritten ParseSpec (pure-parser form).
 import qualified Routing.ParseSpec
-import qualified Handles.TabSpec
-import qualified Routing.RegistrySpec
 import qualified Routing.ConfigSpec
-import qualified Routing.DispatcherSpec
-import qualified Routing.ChannelOutSpec
-import qualified Routing.AutoSpawnSpec
-import qualified Routing.LegacyDispatchSpec
-import qualified Tab.AiSpec
-import qualified Tab.HarnessSpec
-import qualified Tab.BackendSpec
-import qualified Coexistence.SlashCmdSpec
-import qualified Security.TabSpec
 import qualified Onboarding.StartSpec
+-- Tabs-as-View (GitHub #79) WU1
+import qualified Tabs.TypesSpec
+-- Tabs-as-View (GitHub #79) WU2
+import qualified Tabs.CursorSpec
+-- Tabs-as-View (GitHub #79) WU3
+import qualified Tabs.PersistSpec
+-- Tabs-as-View (GitHub #79) WU5
+import qualified Tabs.SessionPoolSpec
+-- Tabs-as-View (GitHub #79) WU6
+import qualified Tabs.WizardSpec
+-- Tabs-as-View (GitHub #79) WU7
+import qualified Tabs.RelaySpec
+-- Tabs-as-View (GitHub #79) 8b.3a
+import qualified Tabs.RelayWriterSpec
+-- Tabs-as-View (GitHub #79) 8b.3b
+import qualified Tabs.ExecSpec
+-- Tabs-as-View (GitHub #79) 8c.1
+import qualified Tabs.RuntimesSpec
+-- Tabs-as-View (GitHub #79) 8b.4
+import qualified Routing.TabDispatchSpec
+-- Tabs-as-View (GitHub #79) 8d.c.3
+import qualified Tabs.WiringSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -138,6 +155,8 @@ import qualified Frontend.StreamIntegrationSpec
 -- WU4 (activity probe loop)
 import qualified Frontend.ActivityProbeSpec
 -- Frontend.APISpec is already imported at the top of this block (from main)
+-- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
+import qualified Frontend.TabsViewSpec
 
 -- WU-10 (Container + Local harness factory arms)
 import qualified Tab.ContainerSpec
@@ -149,6 +168,8 @@ main :: IO ()
 main = hspec $ do
   describe "Auth.AnthropicOAuth" Auth.AnthropicOAuthSpec.spec
   describe "Core.Types" Core.TypesSpec.spec
+  describe "Core.SessionIdValidator" Core.SessionIdValidatorSpec.spec
+  describe "Core.MessageSource" Core.MessageSourceSpec.spec
   describe "Core.Errors" Core.ErrorsSpec.spec
   describe "Core.Config" Core.ConfigSpec.spec
   describe "Security.Secrets" Security.SecretsSpec.spec
@@ -174,7 +195,8 @@ main = hspec $ do
   describe "Agent.Context" Agent.ContextSpec.spec
   describe "Agent.Completion" Agent.CompletionSpec.spec
   describe "Providers.Anthropic" Providers.AnthropicSpec.spec
-  describe "Agent.Loop" Agent.LoopSpec.spec
+  describe "Agent.Background" Agent.BackgroundSpec.spec
+  describe "Agent.Turn" Agent.TurnSpec.spec
   describe "Channels.CLI" Channels.CLISpec.spec
   describe "CLI.Commands" CLI.CommandsSpec.spec
   describe "CLI.Config" CLI.ConfigSpec.spec
@@ -230,6 +252,7 @@ main = hspec $ do
   describe "Integration.SignalFlow" Integration.SignalFlowSpec.spec
   describe "Integration.CLI" Integration.CLISpec.spec
   describe "Integration.ImportRoundTrip" Integration.ImportRoundTripSpec.spec
+  describe "Integration.TabsSync" Integration.TabsSyncSpec.spec
   describe "Transcript.Types" Transcript.TypesSpec.spec
   describe "Handles.Transcript" Handles.TranscriptSpec.spec
   describe "Handles.Harness" Handles.HarnessSpec.spec
@@ -253,20 +276,31 @@ main = hspec $ do
   -- WU-7 (POST /api/tabs/new unified endpoint)
   describe "Frontend.API"          Frontend.APISpec.spec
   -- WU0 (tabbed-chat) red-phase scaffold specs
+  -- Routing.Parse spec removed in 8c.3; 8d.b re-adds it (pure-parser form).
   describe "Routing.Parse"        Routing.ParseSpec.spec
-  describe "Handles.Tab"          Handles.TabSpec.spec
-  describe "Routing.Registry"     Routing.RegistrySpec.spec
   describe "Routing.Config"       Routing.ConfigSpec.spec
-  describe "Routing.Dispatcher"   Routing.DispatcherSpec.spec
-  describe "Routing.ChannelOut"   Routing.ChannelOutSpec.spec
-  describe "Routing.AutoSpawn"    Routing.AutoSpawnSpec.spec
-  describe "Routing.LegacyDispatch" Routing.LegacyDispatchSpec.spec
-  describe "Tab.Ai"               Tab.AiSpec.spec
-  describe "Tab.Harness"          Tab.HarnessSpec.spec
-  describe "Tab.Backend"          Tab.BackendSpec.spec
-  describe "Coexistence.SlashCmd" Coexistence.SlashCmdSpec.spec
-  describe "Security.Tab"         Security.TabSpec.spec
   describe "Onboarding.Start"     Onboarding.StartSpec.spec
+  -- Tabs-as-View (GitHub #79) WU1
+  describe "Tabs.Types"           Tabs.TypesSpec.spec
+  -- Tabs-as-View (GitHub #79) WU2
+  describe "Tabs.Cursor"          Tabs.CursorSpec.spec
+  -- Tabs-as-View (GitHub #79) WU3
+  describe "Tabs.Persist"         Tabs.PersistSpec.spec
+  -- Tabs-as-View (GitHub #79) WU5
+  describe "Tabs.SessionPool"     Tabs.SessionPoolSpec.spec
+  -- Tabs-as-View (GitHub #79) WU6
+  describe "Tabs.Wizard"          Tabs.WizardSpec.spec
+  -- Tabs-as-View (GitHub #79) WU7
+  describe "Tabs.Relay"           Tabs.RelaySpec.spec
+  -- Tabs-as-View (GitHub #79) 8b.3a
+  describe "Tabs.RelayWriter"     Tabs.RelayWriterSpec.spec
+  -- Tabs-as-View (GitHub #79) 8b.3b
+  describe "Tabs.Exec"            Tabs.ExecSpec.spec
+  describe "Tabs.Runtimes"        Tabs.RuntimesSpec.spec
+  -- Tabs-as-View (GitHub #79) 8b.4
+  describe "Routing.TabDispatch" Routing.TabDispatchSpec.spec
+  -- Tabs-as-View (GitHub #79) 8d.c.3
+  describe "Tabs.Wiring"          Tabs.WiringSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)
@@ -280,6 +314,8 @@ main = hspec $ do
   -- WU4 (activity probe loop)
   describe "Frontend.ActivityProbe" Frontend.ActivityProbeSpec.spec
   -- Frontend.APISpec is registered earlier (from main's WU-7 unified endpoint)
+  -- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
+  describe "Frontend.TabsView" Frontend.TabsViewSpec.spec
   -- WU9 (HPureClaw depth limit)
   describe "Routing.DepthLimit"  Routing.DepthLimitSpec.spec
   -- WU-10 (Container + Local harness factory arms)

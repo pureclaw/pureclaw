@@ -4,6 +4,7 @@ module PureClaw.Frontend.API
     -- * Environment
   , FrontendEnv (..)
   , StartedHarness (..)
+  , spawnHarnessSession
   , ReleaseTmux (..)
   , productionReleaseTmux
   , productionKillWindow
@@ -31,6 +32,7 @@ module PureClaw.Frontend.API
   , ProviderInfo (..)
   , TabSnapshot (..)
     -- * Harness → tab snapshot mapping (WU8, exported for testing)
+    -- Re-exported from "PureClaw.Frontend.TabsView"
   , livenessToTabStatus
   , harnessOriginToText
   , harnessEntriesToTabs
@@ -69,6 +71,10 @@ import Network.Wai
 import System.Directory (doesFileExist, getFileSize, removeDirectoryRecursive, renameFile)
 import System.FilePath ((</>), takeDirectory)
 
+import PureClaw.Tabs (TabRegistry, readTabs, registryAppend, registryRemove)
+import PureClaw.Tabs.Types (CursorState, Tab (..), TabRef (..), TabsError (..), toList)
+import PureClaw.Tabs.Exec (Exec, release)
+
 import PureClaw.Agent.AgentDef
   ( AgentDef (..)
   , composeAgentPromptWithBootstrap
@@ -77,9 +83,15 @@ import PureClaw.Agent.AgentDef
   , unAgentName
   )
 import PureClaw.Agent.Context
-import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, unModelId, unSessionId)
+import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, isValidSessionId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
+import PureClaw.Frontend.TabsView
+  ( TabSnapshot (..)
+  , livenessToTabStatus
+  , harnessOriginToText
+  , tabSnapshotsFromRegistry
+  )
 import PureClaw.Frontend.StreamBroker
   ( BrokerEvent (..)
   , SessionActivity (..)
@@ -87,7 +99,7 @@ import PureClaw.Frontend.StreamBroker
   )
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Log
-import PureClaw.Handles.Tab (TabKind (..))
+import PureClaw.Handles.Tab (TabIndex, TabKind (..), unTabIndex)
 import PureClaw.Harness.Discovery (DiscoverableWindow, scanDiscoverableIO)
 import PureClaw.Harness.Reconcile (livenessToActivity)
 import PureClaw.Harness.Tmux qualified as Tmux
@@ -202,12 +214,9 @@ data FrontendEnv = FrontendEnv
     -- this to enforce '_bc_maxSubsPerOrigin' (DoD D30). 'Nothing' disables
     -- the WS endpoint entirely (it returns 503).
   , _fe_maxTabs      :: Int
-    -- ^ Maximum number of tabs allowed (A8 enforcement).
-  , _fe_tabCount     :: IORef Int
-    -- ^ Current number of open tabs.
-  , _fe_listTabs     :: IO [TabSnapshot]
-    -- ^ Callback returning a point-in-time snapshot of all open tabs.
-    -- Wired by the dispatcher; returns @[]@ when no tab registry exists.
+    -- ^ Maximum number of tabs allowed (A8 enforcement). Enforced against the
+    -- live '_fe_tabRegistry' length (WU7) — the registry is the single source
+    -- of truth for the open-tab count.
   , _fe_closeTab     :: Int -> IO (Either Text ())
     -- ^ Callback to close a tab by index. The dispatcher provides the
     -- real implementation; the default stub returns @Left \"not wired\"@.
@@ -244,6 +253,20 @@ data FrontendEnv = FrontendEnv
     -- before giving up. Defends against a model that keeps tool-calling
     -- without ever returning final text. Reaching the cap returns a
     -- placeholder response; it does not throw.
+  , _fe_tabRegistry :: TabRegistry
+    -- ^ The live first-class tab registry (WU6). 'tabsFromRegistry' reads
+    -- this alongside '_fe_harnessRegistry' to project the canonical
+    -- @GET \/api\/tabs@ list. Shares the SAME 'TabRegistry' as
+    -- 'AgentEnv._env_tabRegistry' so both views observe the same state.
+    -- Tests wire a fresh 'newTabRegistry' (empty on construction).
+  , _fe_cursors :: IORef CursorState
+    -- ^ Per-conversation cursor state (WU6 / WU7). Shared with the agent
+    -- loop. Unused in WU6 directly but added now to avoid a second
+    -- 'FrontendEnv' churn pass in WU7. Tests wire @newIORef emptyCursors@.
+  , _fe_exec :: Exec
+    -- ^ Refcounted per-'TabRef' runtime registry (WU6 / WU7). Unused in
+    -- WU6 directly but added now to allow WU7's close-path runtime release
+    -- without another 'FrontendEnv' churn pass. Tests wire 'newExec'.
   }
 
 -- | Result of successfully starting a harness via '_fe_startHarness'.
@@ -410,19 +433,6 @@ mkStreamGuard maxPer = do
     , _streamGuard_maxPerOrigin = maxPer
     }
 
--- | Shared session-ID validation used by every endpoint that consumes a
--- caller-supplied session id (HTTP @\/transcript@, @\/send@, @\/prompt@
--- and the WS @focus@ op). Rejects @..@ and @\/@ to foreclose path
--- traversal; rejects the empty string. Behavioural surface is intentionally
--- the same across the HTTP and WS paths so D26's "shared helper" property
--- holds: changing the rule here changes it everywhere.
-isValidSessionId :: Text -> Bool
-isValidSessionId sid
-  | T.null sid = False
-  | T.isInfixOf ".." sid = False
-  | T.isInfixOf "/" sid = False
-  | otherwise = True
-
 -- | JSON-serializable harness info for the frontend.
 data HarnessInfo = HarnessInfo
   { _hi_name     :: Text
@@ -466,76 +476,6 @@ instance ToJSON ProviderInfo where
     , "isDefault" .= _pi_isDefault pi_
     ] ++ maybe [] (\m -> ["defaultModel" .= m]) (_pi_defaultModel pi_)
 
--- | A point-in-time snapshot of a single tab, pre-resolved to
--- JSON-friendly text values. The snapshot callback in 'FrontendEnv'
--- produces these; the API layer simply serializes them.
-data TabSnapshot = TabSnapshot
-  { _ts_index     :: !Int
-  , _ts_kind      :: !Text
-    -- ^ @\"provider\"@, @\"harness\"@, or @\"raw_shell\"@.
-  , _ts_name      :: !Text
-    -- ^ Human-readable tab name.
-  , _ts_status    :: !Text
-    -- ^ Liveness word: @\"running\"@, @\"idle\"@, @\"exited\"@, or
-    -- @\"orphaned\"@ (Phase 2 split Exited\/Orphaned; see
-    -- 'livenessToTabStatus').
-  , _ts_sessionId :: !(Maybe Text)
-    -- ^ Session ID for session-backed tabs; 'Nothing' for raw shells.
-  , _ts_extModified :: !Bool
-    -- ^ The harness window was renamed out-of-band (the §7 ⚠ \"edited\"
-    -- pill). Orthogonal to liveness.
-  , _ts_stale :: !Bool
-    -- ^ Health could not be refreshed this cycle; the frontend holds the
-    -- last-known icon with a dimmed cue (§7).
-  , _ts_origin :: !Text
-    -- ^ How the harness entered the registry: @\"spawned\"@,
-    -- @\"discovered\"@, or @\"adopted\"@ (the §7 origin pill).
-  , _ts_attachCommand :: !(Maybe Text)
-    -- ^ Copyable @tmux attach@ command for live harness rows;
-    -- 'Nothing' for non-harness tabs.
-  }
-  deriving stock (Show, Eq)
-
--- | Serialize a 'TabSnapshot'. EXTEND-ONLY: the original Phase-1 keys
--- (@index@\/@kind@\/@name@\/@status@\/@session_id@) are emitted unchanged;
--- the Phase-2 health fields are ADDED as new snake_case keys
--- (@ext_modified@\/@stale@\/@origin@\/@attach_command@). Old consumers that
--- ignore unknown keys keep working.
-instance ToJSON TabSnapshot where
-  toJSON ts = object
-    [ "index"          .= _ts_index ts
-    , "kind"           .= _ts_kind ts
-    , "name"           .= _ts_name ts
-    , "status"         .= _ts_status ts
-    , "session_id"     .= _ts_sessionId ts
-    , "ext_modified"   .= _ts_extModified ts
-    , "stale"          .= _ts_stale ts
-    , "origin"         .= _ts_origin ts
-    , "attach_command" .= _ts_attachCommand ts
-    ]
-
--- | Map a registry 'Registry.Liveness' to the @TabSnapshot@ status vocabulary.
--- Phase 2 (§7) SPLITS the former \"crashed\" bucket: 'Registry.LivenessExited'
--- (the process exited; offer Restart\/Dismiss) and 'Registry.LivenessOrphaned'
--- (the window vanished out-of-band; greyed, offer Dismiss) now map to distinct
--- words so the frontend can render the state→visual table.
-livenessToTabStatus :: Registry.Liveness -> Text
-livenessToTabStatus lv = case lv of
-  Registry.LivenessIdle     -> "idle"
-  Registry.LivenessThinking -> "running"
-  Registry.LivenessExited   -> "exited"
-  Registry.LivenessOrphaned -> "orphaned"
-
--- | Map a registry 'Registry.HarnessOrigin' to the @TabSnapshot@ origin
--- vocabulary (the §7 origin pill): @\"spawned\"@ (we launched it),
--- @\"discovered\"@ (boot-reconstructed from a tagged window), or
--- @\"adopted\"@ (taken over from another controller).
-harnessOriginToText :: Registry.HarnessOrigin -> Text
-harnessOriginToText o = case o of
-  Registry.OriginSpawned    -> "spawned"
-  Registry.OriginDiscovered -> "discovered"
-  Registry.OriginAdopted    -> "adopted"
-
 -- | Project the harness registry's entries onto @TabSnapshot@s for the
 -- Active-Tabs list. Phase-1 minimal slice: only harness entries are surfaced
 -- (provider\/raw_shell tabs are the Phase-2 full tab model).
@@ -555,15 +495,22 @@ sortedHarnessEntries =
   List.sortOn
     (\e -> (Registry._he_label e, Registry.harnessIdToText (Registry._he_id e)))
 
--- | Resolve a display tab index to its 'Registry.HarnessEntry' using the SAME
--- ordering '/api/tabs' publishes ('sortedHarnessEntries'). 'Nothing' for an
--- out-of-range index. The caller passes the current registry snapshot.
-tabIndexToEntry :: [Registry.HarnessEntry] -> Int -> Maybe Registry.HarnessEntry
-tabIndexToEntry entries idx
-  | idx < 0   = Nothing
-  | otherwise = case drop idx (sortedHarnessEntries entries) of
-      (e : _) -> Just e
-      []      -> Nothing
+-- | Resolve a display tab index to the 'TabRegistry' slot occupying it (WU7).
+-- This replaces the old '/api/tabs' position-against-'sortedHarnessEntries'
+-- aliasing: now that provider AND harness tabs interleave in one ordered
+-- 'TabList', a tab-action endpoint must target the registry slot whose
+-- '_tab_slot' display index equals @idx@, NOT the n-th harness entry.
+--
+-- Returns @Just (slot, ref)@ — the validated 'TabIndex' and the bound 'TabRef'
+-- — for the tab at display index @idx@, or 'Nothing' when no tab occupies it.
+-- The slot is read back from the matched 'Tab' (so callers pass it straight to
+-- 'registryRemove'\/'release' without re-validating the raw 'Int').
+resolveRegistrySlot :: FrontendEnv -> Int -> IO (Maybe (TabIndex, TabRef))
+resolveRegistrySlot env idx = do
+  tabs <- toList <$> readTabs (_fe_tabRegistry env)
+  pure $ case [ t | t <- tabs, unTabIndex (_tab_slot t) == idx ] of
+    (t : _) -> Just (_tab_slot t, _tab_ref t)
+    []      -> Nothing
 
 harnessEntriesToTabs :: [Registry.HarnessEntry] -> [TabSnapshot]
 harnessEntriesToTabs entries =
@@ -692,10 +639,26 @@ harnessInfoOfEntry e = HarnessInfo
   , _hi_activity = livenessToActivity (Registry._he_liveness e)
   }
 
+-- | Build the live tab list from the backend 'TabRegistry' enriched with
+-- 'Registry.HarnessEntry' data for harness-backed tabs (WU6). This is the
+-- canonical source of the @GET \/api\/tabs@ response: 'tabSnapshotsFromRegistry'
+-- does the pure projection; we read both registries here so the function is
+-- pure and testable without IO.
+--
+-- The 'harnOf' lookup function finds a 'Registry.HarnessEntry' by its
+-- 'Registry.HarnessId' using a linear scan of the current registry snapshot
+-- (the registry is small in practice).
+tabsFromRegistry :: FrontendEnv -> IO [TabSnapshot]
+tabsFromRegistry env = do
+  tl      <- readTabs (_fe_tabRegistry env)
+  entries <- Registry.snapshot (_fe_harnessRegistry env)
+  let harnOf hid = List.find ((== hid) . Registry._he_id) entries
+  pure (tabSnapshotsFromRegistry tl harnOf)
+
 -- | Return all currently open tabs as a JSON array.
 handleListTabs :: FrontendEnv -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleListTabs env respond = do
-  tabs <- _fe_listTabs env
+  tabs <- tabsFromRegistry env
   respond $ jsonResponse status200 tabs
 
 -- | On-demand discovery of adoptable (PureClaw-unmarked) tmux windows
@@ -790,42 +753,94 @@ handleAdopt env req respond = do
                       , "session_id"  .= (mEntry >>= Registry._he_sessionId)
                       ])
 
--- | Close a tab by index via the '_fe_closeTab' callback.
+-- | @POST \/api\/tabs\/{index}\/close@ — close a tab of ANY kind (WU7). The
+-- display index is resolved against the first-class 'TabRegistry' slot
+-- ('resolveRegistrySlot'), NOT against the harness-entry ordering, so it targets
+-- exactly the row @GET \/api\/tabs@ shows at that index even once provider and
+-- harness tabs interleave. On a non-numeric index responds @400@; on a slot with
+-- no tab responds @404@.
+--
+-- Close removes the tab from the registry and tears down its binding, but —
+-- unlike Destroy — NEVER kills a tmux window:
+--
+--   * 'BoundSession' (provider\/raw-shell) → 'release' the per-ref runtime via
+--     '_fe_exec' (decrements the refcount; stops the runtime on the last hold),
+--     then drop the tab.
+--   * 'BoundHarness' → deregister the harness from the legacy '_fe_harnesses'
+--     map and the harness registry and drop the tab, but leave the tmux window
+--     + process running (PureClaw simply stops surfacing it as a tab). The
+--     backing @session.json@\/transcript are retained.
 handleCloseTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleCloseTab env tidxText respond =
   case reads (T.unpack tidxText) :: [(Int, String)] of
     [(idx, "")] -> do
-      result <- _fe_closeTab env idx
-      case result of
-        Right () -> do
+      mResolved <- resolveRegistrySlot env idx
+      case mResolved of
+        Nothing ->
+          respond $ jsonResponse status404
+            (object ["error" .= ("No tab at index " <> tidxText)])
+        Just (slot, ref) -> do
+          case ref of
+            BoundSession _ ->
+              -- Stop the runtime backing this session ref (refcounted; the last
+              -- release tears it down). Harmless if no runtime was ever ensured.
+              release (_fe_exec env) ref
+            BoundHarness hid -> do
+              -- Drop the harness binding from both legacy + durable stores, but
+              -- DO NOT kill the window (Close never kills — that is Destroy).
+              mEntry <- Registry.lookupById (_fe_harnessRegistry env) hid
+              Maybe.maybe (pure ())
+                (modifyIORef' (_fe_harnesses env) . Map.delete . Registry._he_label)
+                mEntry
+              Registry.deleteEntry (_fe_harnessRegistry env) hid
+          registryRemove (_fe_tabRegistry env) slot
           broadcastLists env
           respond $ jsonResponse status200 (object ["closed" .= True])
-        Left errMsg ->
-          respond $ jsonResponse status404 (object ["error" .= errMsg])
     _ ->
       respond $ jsonResponse status400 (object ["error" .= ("Invalid tab index" :: Text)])
 
--- | Parse a display tab index and resolve it against the CURRENT registry
--- snapshot using the same ordering '/api/tabs' publishes
--- ('tabIndexToEntry'\/'sortedHarnessEntries'). On a non-numeric index responds
--- @400@; on an out-of-range index responds @404@; otherwise runs the action
--- with the resolved entry. Shared by Dismiss\/Acknowledge so both agree on
--- which row an index names.
+-- | Parse a display tab index, resolve it against the CURRENT 'TabRegistry'
+-- slot ('resolveRegistrySlot'), and run a HARNESS-ONLY action with the bound
+-- 'Registry.HarnessEntry' (WU7). The resolution moved from harness-entry
+-- position to registry slot: now that provider and harness tabs interleave in
+-- one ordered list, a @POST \/api\/tabs\/{n}\/...@ action targets exactly the
+-- row @GET \/api\/tabs@ shows at index @n@.
+--
+-- Responses:
+--
+--   * non-numeric index → @400@ \"Invalid tab index\";
+--   * no tab at the slot → @404@ \"No tab at index n\";
+--   * the slot binds a 'BoundSession' (a provider\/raw-shell tab) → @400@
+--     \"not a harness tab\" (Dismiss\/Release\/Destroy\/Acknowledge are
+--     harness-only — a session tab is removed via Close, not these);
+--   * the slot binds a 'BoundHarness' whose entry has vanished from the
+--     harness registry → @404@ \"No tab at index n\";
+--   * otherwise runs @act@ with the resolved 'Registry.HarnessEntry' (the
+--     existing teardown bodies are unchanged — only the resolution differs).
 withResolvedTab
   :: FrontendEnv
   -> Text
   -> (Response -> IO ResponseReceived)
-  -> (Registry.HarnessEntry -> IO ResponseReceived)
+  -> (TabIndex -> Registry.HarnessEntry -> IO ResponseReceived)
   -> IO ResponseReceived
 withResolvedTab env tidxText respond act =
   case reads (T.unpack tidxText) :: [(Int, String)] of
     [(idx, "")] -> do
-      entries <- Registry.snapshot (_fe_harnessRegistry env)
-      case tabIndexToEntry entries idx of
-        Just e  -> act e
+      mResolved <- resolveRegistrySlot env idx
+      case mResolved of
         Nothing ->
           respond $ jsonResponse status404
             (object ["error" .= ("No tab at index " <> tidxText)])
+        Just (_, BoundSession _) ->
+          respond $ jsonResponse status400
+            (object ["error" .= ("not a harness tab" :: Text)])
+        Just (slot, BoundHarness hid) -> do
+          mEntry <- Registry.lookupById (_fe_harnessRegistry env) hid
+          case mEntry of
+            Just e  -> act slot e
+            Nothing ->
+              respond $ jsonResponse status404
+                (object ["error" .= ("No tab at index " <> tidxText)])
     _ ->
       respond $ jsonResponse status400 (object ["error" .= ("Invalid tab index" :: Text)])
 
@@ -837,9 +852,12 @@ withResolvedTab env tidxText respond act =
 -- 'FrontendEnv'), so no extra callback is needed.
 handleDismissTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleDismissTab env tidxText respond =
-  withResolvedTab env tidxText respond $ \e -> do
+  withResolvedTab env tidxText respond $ \slot e -> do
     Registry.deleteEntry (_fe_harnessRegistry env) (Registry._he_id e)
     modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
+    -- Remove the tab from the first-class registry too (WU7) so the dismissed
+    -- harness no longer projects a dangling row into GET /api/tabs.
+    registryRemove (_fe_tabRegistry env) slot
     broadcastLists env
     respond $ jsonResponse status200 (object ["dismissed" .= True])
 
@@ -903,7 +921,7 @@ handleReleaseTab env tidxText req respond = do
   -- it but leaves the tmux window + processes running. The corroborate-before-
   -- mutate gate inside 'releaseHarnessEntry' is the safety control, not the
   -- origin.
-  withResolvedTab env tidxText respond $ \e -> releaseHarnessEntry env e respond
+  withResolvedTab env tidxText respond $ \slot e -> releaseHarnessEntry env slot e respond
 
 -- | The corroborate-then-act core of Release, for a harness of ANY origin.
 -- Re-reads the live @\@pcl_id@ BEFORE any mutation (SEC-3) and branches:
@@ -912,8 +930,8 @@ handleReleaseTab env tidxText req respond = do
 -- stores, the window survives, and the transcript\/@session.json@ are retained
 -- (C2).
 releaseHarnessEntry
-  :: FrontendEnv -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-releaseHarnessEntry env e respond = do
+  :: FrontendEnv -> TabIndex -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+releaseHarnessEntry env slot e respond = do
   let session  = Registry._he_session e
       window   = Registry._he_windowName e
       expected = Registry.harnessIdToText (Registry._he_id e)
@@ -928,7 +946,7 @@ releaseHarnessEntry env e respond = do
       -- so it is dot-free and the @session:name@ rename target is unambiguous.
       _rt_clearMarker rt session window
       _rt_renameWindow rt session window (releasedWindowName window)
-      deregister env e
+      deregister env slot e
       broadcastLists env
       respond $ jsonResponse status200 (object ["released" .= True])
     else do
@@ -942,7 +960,7 @@ releaseHarnessEntry env e respond = do
           <> Maybe.fromMaybe "<none>" liveMarker
           <> ", expected " <> expected
           <> "); deregistering WITHOUT unmarking"
-      deregister env e
+      deregister env slot e
       broadcastLists env
       respond $ jsonResponse status200
         (object
@@ -950,13 +968,16 @@ releaseHarnessEntry env e respond = do
           , "note"     .= ("window no longer corroborated; deregistered without unmarking" :: Text)
           ])
 
--- | Remove an entry from BOTH the registry and the legacy '_fe_harnesses' map
--- (shared by both Release branches). Mirrors Dismiss's deregistration; NEVER
--- touches @session.json@\/the transcript (retention — design §8 C2).
-deregister :: FrontendEnv -> Registry.HarnessEntry -> IO ()
-deregister env e = do
+-- | Remove an entry from the harness registry, the legacy '_fe_harnesses' map,
+-- AND the first-class 'TabRegistry' at @slot@ (WU7 — so a released\/destroyed
+-- harness no longer projects a dangling tab row). Shared by both Release
+-- branches and Destroy. Mirrors Dismiss's deregistration; NEVER touches
+-- @session.json@\/the transcript (retention — design §8 C2).
+deregister :: FrontendEnv -> TabIndex -> Registry.HarnessEntry -> IO ()
+deregister env slot e = do
   Registry.deleteEntry (_fe_harnessRegistry env) (Registry._he_id e)
   modifyIORef' (_fe_harnesses env) (Map.delete (Registry._he_label e))
+  registryRemove (_fe_tabRegistry env) slot
 
 -- | Request body for @POST \/api\/tabs\/{index}\/destroy@. @confirm_adopted@
 -- must be @true@ to destroy an 'Registry.OriginAdopted' harness — killing a
@@ -997,14 +1018,14 @@ handleDestroyTab env tidxText req respond = do
   let confirmAdopted = case Aeson.eitherDecode body of
         Right dr -> _dr_confirmAdopted dr
         Left _   -> False
-  withResolvedTab env tidxText respond $ \e ->
+  withResolvedTab env tidxText respond $ \slot e ->
     case Registry._he_origin e of
       Registry.OriginAdopted | not confirmAdopted ->
         -- Server-side enforcement of the kill-adopted confirmation: the UI gate
         -- is not trusted. No tmux op, no deregistration.
         respond $ jsonResponse status409
           (object ["error" .= ("adopted harness requires confirm_adopted" :: Text)])
-      _ -> destroyHarnessEntry env e respond
+      _ -> destroyHarnessEntry env slot e respond
 
 -- | The corroborate-then-kill core of Destroy, for an entry already cleared by
 -- the adopted gate. Re-reads the live @\@pcl_id@ BEFORE killing (SEC-3); kills
@@ -1012,8 +1033,8 @@ handleDestroyTab env tidxText req respond = do
 -- way the session is archived (transcript retained) and the entry leaves both
 -- stores.
 destroyHarnessEntry
-  :: FrontendEnv -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-destroyHarnessEntry env e respond = do
+  :: FrontendEnv -> TabIndex -> Registry.HarnessEntry -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+destroyHarnessEntry env slot e respond = do
   let session  = Registry._he_session e
       window   = Registry._he_windowName e
       expected = Registry.harnessIdToText (Registry._he_id e)
@@ -1044,7 +1065,7 @@ destroyHarnessEntry env e respond = do
         Left err -> _lh_logWarn (_fe_logger env) $
           "destroy: could not archive session " <> sid <> ": " <> T.pack (show err)
     Nothing -> pure ()
-  deregister env e
+  deregister env slot e
   broadcastLists env
   respond $ jsonResponse status200 $ object $
     ("destroyed" .= True)
@@ -1057,7 +1078,7 @@ destroyHarnessEntry env e respond = do
 -- loop's 'mergeReconcile'.
 handleAcknowledgeTab :: FrontendEnv -> Text -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleAcknowledgeTab env tidxText respond =
-  withResolvedTab env tidxText respond $ \e -> do
+  withResolvedTab env tidxText respond $ \_slot e -> do
     Registry.modifyEntry (_fe_harnessRegistry env) (Registry._he_id e)
       (\x -> x { Registry._he_extModified = False })
     broadcastLists env
@@ -1084,7 +1105,7 @@ handleRecentSessions env respond = do
   -- Collect session IDs that are currently shown in an active tab so
   -- the same session does not appear in both "Active Tabs" and
   -- "Recent Sessions" simultaneously.
-  tabs <- _fe_listTabs env
+  tabs <- tabsFromRegistry env
       -- Only NON-harness tabs (provider / raw-shell, shown under "Active Tabs")
       -- dedupe their session out of "Recent Sessions". A harness tab keeps its
       -- controls entry under "Running Harnesses" AND, intentionally, its backing
@@ -1116,7 +1137,11 @@ handleArchivedSessions env respond = do
   let baseDir = _fe_sessionsDir env
   -- Load all sessions with a generous limit; filter to archived-only.
   metas <- listSessions baseDir Nothing 1000
-  let archived = filter _sm_archived metas
+  -- Exclude sessions that are bound to a non-harness tab: a tab binding
+  -- wins over the archived flag (WU6 — the session is open and active).
+  tabs <- tabsFromRegistry env
+  let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s, _ts_kind = k } <- tabs, k /= "harness"]
+      archived = filter (\m -> _sm_archived m && unSessionId (_sm_id m) `notElem` activeTabSids) metas
       infos = map (`toSessionInfo` Nothing) archived
   respond $ jsonResponse status200 infos
 
@@ -1132,7 +1157,7 @@ computeListsSnapshot :: FrontendEnv -> IO Aeson.Value
 computeListsSnapshot env = do
   let limit   = _fe_recentLimit env
       baseDir = _fe_sessionsDir env
-  tabs <- _fe_listTabs env
+  tabs <- tabsFromRegistry env
   -- Recent sessions: exclude archived, exclude active-tab-backed, exclude
   -- empty transcripts, enrich with first-message snippet — same pipeline
   -- as handleRecentSessions.
@@ -1157,8 +1182,12 @@ computeListsSnapshot env = do
   let recentInfos = zipWith toSessionInfo chosen snippets
   -- Archived: all archived sessions, sorted by lastActive descending
   -- (listSessions already sorts; we just filter).
+  -- Exclude sessions that are bound to a non-harness tab: tab binding wins
+  -- over the archived flag (WU6 — the session is open and active in a tab).
   archivedMetas <- listSessions baseDir Nothing 1000
-  let archivedChosen = filter _sm_archived archivedMetas
+  let archivedChosen = filter
+        (\m -> _sm_archived m && unSessionId (_sm_id m) `notElem` activeTabSids)
+        archivedMetas
   archivedSnippets <- traverse (firstMessageSnippet baseDir) archivedChosen
   let archivedInfos = zipWith toSessionInfo archivedChosen archivedSnippets
   pure $ object
@@ -1490,11 +1519,22 @@ instance ToJSON NewTabResponse where
     , "kind"       .= _ntresp_kind r
     ]
 
+-- | The current open-tab count: the length of the live 'TabRegistry' (WU7 —
+-- the registry is the single source of truth, replacing the dropped
+-- '_fe_tabCount' counter).
+currentTabCount :: FrontendEnv -> IO Int
+currentTabCount env = length . toList <$> readTabs (_fe_tabRegistry env)
+
+-- | True when the registry is at (or above) the '_fe_maxTabs' cap, so a new
+-- tab cannot be created (A8).
+atTabCap :: FrontendEnv -> IO Bool
+atTabCap env = (>= _fe_maxTabs env) <$> currentTabCount env
+
 -- | Handle POST /api/tabs/new.
 --
 -- Creates a new tab (session-backed or raw shell), enforces the maxTabs
--- limit (A8), and returns a JSON response with the tab index, session
--- ID (if any), and kind description.
+-- limit (A8) against the live 'TabRegistry' length, and returns a JSON
+-- response with the tab index, session ID (if any), and kind description.
 handleNewTab :: FrontendEnv -> Request -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 handleNewTab env req respond = do
   body <- consumeBody req
@@ -1505,9 +1545,9 @@ handleNewTab env req respond = do
     Right (NewTabRequest tabKind mBranch) ->
       case mBranch of
         Nothing -> do
-          -- A8: enforce maxTabs limit
-          curCount <- readIORef (_fe_tabCount env)
-          if curCount >= _fe_maxTabs env
+          -- A8: enforce maxTabs limit (registry length vs _fe_maxTabs).
+          capped <- atTabCap env
+          if capped
             then respond $ jsonResponse status409
                    (object ["error" .= ("maximum tab count reached" :: Text)])
             else createTab env tabKind Nothing respond
@@ -1521,8 +1561,8 @@ handleNewTab env req respond = do
               case seedResult of
                 Left err -> respond (branchErrorResponse err)
                 Right seed -> do
-                  curCount <- readIORef (_fe_tabCount env)
-                  if curCount >= _fe_maxTabs env
+                  capped <- atTabCap env
+                  if capped
                     then respond $ jsonResponse status409
                            (object ["error" .= ("maximum tab count reached" :: Text)])
                     else createTab env tabKind (Just seed) respond
@@ -1548,22 +1588,15 @@ branchErrorResponse err = case err of
 -- session is seeded from a branch source (see 'createBranchedSession');
 -- with 'Nothing' the behaviour is identical to a fresh New-tab session.
 createTab :: FrontendEnv -> TabKind -> Maybe BranchSeed -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-createTab env tabKind mSeed respond = do
-  -- Read the slot index for the response; the actual bump is deferred for
-  -- the harness path so a failed tmux spawn never consumes a slot (the
-  -- count has no decrement). Provider / raw-shell paths bump immediately,
-  -- preserving their existing behaviour byte-for-byte.
-  curCount <- readIORef (_fe_tabCount env)
+createTab env tabKind mSeed respond =
   case tabKind of
     -- Harness sessions must actually spawn the tmux harness before the tab
     -- is considered created. A branch seed only ever targets a provider
     -- session (handleNewTab rejects non-provider branch targets), so a
     -- seeded harness cannot occur here.
     TkSession sk@(SkHarness spec) ->
-      createHarnessTab env tabKind spec sk curCount respond
+      createHarnessTab env tabKind spec sk respond
     TkSession sk -> do
-      -- Bump tab count
-      writeIORef (_fe_tabCount env) (curCount + 1)
       -- Create a session for session-backed tabs
       now <- getCurrentTime
       mModel <- readIORef (_fe_model env)
@@ -1611,31 +1644,61 @@ createTab env tabKind mSeed respond = do
       case mSeed of
         Just seed -> mapM_ (_th_record (_sh_transcript sh)) (_bseed_prefix seed)
         Nothing -> pure ()
-      -- Publish the new-session signal to the live stream broker (D18). The
-      -- sidebar uses this to render the session row without polling. The
-      -- no-broker path is intentional ('Nothing' preserves the legacy
-      -- behaviour for one-off scripts and tests). Previously this lived in
-      -- the now-410'd POST /api/sessions/new handler; it moved here when
-      -- the session-tab unification merged on main.
-      case _fe_broker env of
-        Just broker ->
-          _streamBroker_publish broker
-            (ActivityChanged (_sm_id meta) (SaSessionCreated meta))
-        Nothing -> pure ()
-      broadcastLists env
-      respond $ jsonResponse status200 NewTabResponse
-        { _ntresp_tabIndex  = curCount
-        , _ntresp_sessionId = Just (unSessionId sid)
-        , _ntresp_kind      = tabKindLabel tabKind
-        }
-    TkRawShell _backend -> do
-      -- Bump tab count
-      writeIORef (_fe_tabCount env) (curCount + 1)
-      respond $ jsonResponse status200 NewTabResponse
-        { _ntresp_tabIndex  = curCount
-        , _ntresp_sessionId = Nothing
-        , _ntresp_kind      = tabKindLabel tabKind
-        }
+      -- Bind the session into the first-class TabRegistry (WU7). The returned
+      -- slot is the tab's display index in the response. A label of the agent
+      -- name (else the session id) drives the sidebar title. The cap was
+      -- pre-checked in 'handleNewTab'; 'registryAppend' re-checks defensively
+      -- and a 'SlotsFull' (a lost race against a concurrent create) maps to the
+      -- same cap 409.
+      let tabName = maybe (unSessionId sid) unAgentName metaAgent
+      appended <- registryAppend (_fe_tabRegistry env) (BoundSession sid) tabName
+      case appended of
+        Left SlotsFull ->
+          respond $ jsonResponse status409
+            (object ["error" .= ("maximum tab count reached" :: Text)])
+        Left (AlreadyBound slot) ->
+          -- A fresh session id is never already bound; treat the impossible
+          -- collision as success at the existing slot rather than failing.
+          finishProviderTab env meta sid slot tabKind respond
+        Right slot ->
+          finishProviderTab env meta sid slot tabKind respond
+    TkRawShell _backend ->
+      -- Raw-shell tabs are not yet bound into the first-class TabRegistry
+      -- (deferred): they carry no 'TabRef' (no SessionId/HarnessId). Report a
+      -- slot index of the current registry length so the response shape is
+      -- preserved; no registry mutation occurs.
+      do
+        slotIdx <- currentTabCount env
+        respond $ jsonResponse status200 NewTabResponse
+          { _ntresp_tabIndex  = slotIdx
+          , _ntresp_sessionId = Nothing
+          , _ntresp_kind      = tabKindLabel tabKind
+          }
+
+-- | Finish a provider tab create after the session was bound into the
+-- 'TabRegistry': publish the new-session broker signal, broadcast the lists
+-- snapshot, and respond with the bound slot as the tab index (WU7).
+finishProviderTab
+  :: FrontendEnv -> SessionMeta -> SessionId -> TabIndex -> TabKind
+  -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+finishProviderTab env meta sid slot tabKind respond = do
+  -- Publish the new-session signal to the live stream broker (D18). The
+  -- sidebar uses this to render the session row without polling. The
+  -- no-broker path is intentional ('Nothing' preserves the legacy
+  -- behaviour for one-off scripts and tests). Previously this lived in
+  -- the now-410'd POST /api/sessions/new handler; it moved here when
+  -- the session-tab unification merged on main.
+  case _fe_broker env of
+    Just broker ->
+      _streamBroker_publish broker
+        (ActivityChanged (_sm_id meta) (SaSessionCreated meta))
+    Nothing -> pure ()
+  broadcastLists env
+  respond $ jsonResponse status200 NewTabResponse
+    { _ntresp_tabIndex  = unTabIndex slot
+    , _ntresp_sessionId = Just (unSessionId sid)
+    , _ntresp_kind      = tabKindLabel tabKind
+    }
 
 -- | Create a harness-backed tab: persist the session, spawn the tmux
 -- harness via '_fe_startHarness', and only on success persist the real
@@ -1648,10 +1711,48 @@ createHarnessTab
   -> TabKind        -- ^ original request kind (for the response label)
   -> HarnessSpec    -- ^ requested harness spec (backend replaced on success)
   -> SessionKind    -- ^ the SkHarness kind to seed _sm_kind with
-  -> Int            -- ^ current tab count = response slot index
   -> (Response -> IO ResponseReceived)
   -> IO ResponseReceived
-createHarnessTab env tabKind spec sk curCount respond = do
+createHarnessTab env tabKind spec sk respond = do
+  spawned <- spawnHarnessSession env spec sk
+  case spawned of
+    Left err -> respond $ harnessErrorResponse err
+    Right (sid, hid, updatedMeta, key) -> do
+      -- Bind the harness into the first-class TabRegistry (WU7) — only a
+      -- successful spawn consumes a tab slot. The returned slot is the tab's
+      -- display index in the response; the label is the spawn's window key.
+      -- 'SlotsFull' here (a lost race against a concurrent create after the
+      -- pre-check in 'handleNewTab') maps to the cap 409; the harness window is
+      -- already up, but the tab cannot be surfaced, so report the cap.
+      appended <- registryAppend (_fe_tabRegistry env) (BoundHarness hid) key
+      case appended of
+        Left SlotsFull ->
+          respond $ jsonResponse status409
+            (object ["error" .= ("maximum tab count reached" :: Text)])
+        Left (AlreadyBound slot) ->
+          finishHarnessTab env updatedMeta sid slot tabKind respond
+        Right slot ->
+          finishHarnessTab env updatedMeta sid slot tabKind respond
+
+-- | The reusable spawn+persist+link core extracted from 'createHarnessTab'
+-- (WU-B). Creates a fresh harness-backed session, spawns the tmux harness via
+-- '_fe_startHarness', and — only on success — persists the real 'TbTmux'
+-- coordinates + durable ids into '_sm_kind' and links the registry entry back
+-- to the session. A failed spawn rolls back the just-created session directory
+-- and returns 'Left', so a fallible spawn never strands a session dir.
+--
+-- Returns the new session id, its durable 'Registry.HarnessId', the post-spawn
+-- 'SessionMeta' (carrying the real 'TbTmux' backend for live broadcast), and
+-- the harness key (@_shh_key@ — the tmux window name, used as the tab label).
+-- This is the seam both the web 'createHarnessTab' endpoint and the TUI
+-- @\/tab new harness@ dispatcher route through (via
+-- 'PureClaw.Agent.Env._env_startHarness').
+spawnHarnessSession
+  :: FrontendEnv
+  -> HarnessSpec    -- ^ requested harness spec (backend replaced on success)
+  -> SessionKind    -- ^ the SkHarness kind to seed _sm_kind with
+  -> IO (Either HarnessError (SessionId, Registry.HarnessId, SessionMeta, Text))
+spawnHarnessSession env spec sk = do
   now <- getCurrentTime
   let sid  = newSessionId Nothing now
       meta = SessionMeta
@@ -1680,7 +1781,7 @@ createHarnessTab env tabKind spec sk curCount respond = do
       -- Roll back the session dir created above. A missing dir must not
       -- throw, so swallow IO errors from the cleanup.
       _ <- try @IOException (removeDirectoryRecursive (_sh_dir sh))
-      respond $ harnessErrorResponse err
+      pure (Left err)
     Right st -> do
       -- Persist the real tmux coordinates AND the durable HarnessId returned by
       -- the spawn (WU7, D7.2). The id is the primary routing anchor (resolved
@@ -1701,26 +1802,34 @@ createHarnessTab env tabKind spec sk curCount respond = do
       -- orchestrator knows both the 'HarnessId' and the 'sid'. Without the link
       -- the tab's session_id is null and the right pane shows "No session
       -- associated yet" (the adopt path already links via '_he_sessionId'). Set
-      -- it before 'broadcastLists' so the live lists snapshot already carries it.
+      -- it before any broadcast so the live lists snapshot already carries it.
       Registry.modifyEntry (_fe_harnessRegistry env) (_shh_id st)
         (\e -> e { Registry._he_sessionId = Just (unSessionId sid) })
       -- Read back the post-spawn meta so the live broadcast carries the real
       -- TbTmux backend (the persisted session.json above is already correct;
       -- the original 'meta' still holds the placeholder backend).
       updatedMeta <- readIORef (_sh_meta sh)
-      -- Only a successful spawn consumes a tab slot.
-      writeIORef (_fe_tabCount env) (curCount + 1)
-      case _fe_broker env of
-        Just broker ->
-          _streamBroker_publish broker
-            (ActivityChanged (_sm_id updatedMeta) (SaSessionCreated updatedMeta))
-        Nothing -> pure ()
-      broadcastLists env
-      respond $ jsonResponse status200 NewTabResponse
-        { _ntresp_tabIndex  = curCount
-        , _ntresp_sessionId = Just (unSessionId sid)
-        , _ntresp_kind      = tabKindLabel tabKind
-        }
+      pure (Right (sid, _shh_id st, updatedMeta, _shh_key st))
+
+-- | Finish a harness tab create after the harness id was bound into the
+-- 'TabRegistry': publish the post-spawn meta to the broker (carrying the real
+-- TbTmux backend), broadcast the lists snapshot, and respond with the bound
+-- slot as the tab index (WU7).
+finishHarnessTab
+  :: FrontendEnv -> SessionMeta -> SessionId -> TabIndex -> TabKind
+  -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+finishHarnessTab env updatedMeta sid slot tabKind respond = do
+  case _fe_broker env of
+    Just broker ->
+      _streamBroker_publish broker
+        (ActivityChanged (_sm_id updatedMeta) (SaSessionCreated updatedMeta))
+    Nothing -> pure ()
+  broadcastLists env
+  respond $ jsonResponse status200 NewTabResponse
+    { _ntresp_tabIndex  = unTabIndex slot
+    , _ntresp_sessionId = Just (unSessionId sid)
+    , _ntresp_kind      = tabKindLabel tabKind
+    }
 
 -- | Map a 'HarnessError' to its HTTP response. An authorization failure is
 -- a client-side 403; a missing harness binary or unavailable tmux is a

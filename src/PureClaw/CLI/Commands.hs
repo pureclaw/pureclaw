@@ -17,12 +17,10 @@ module PureClaw.CLI.Commands
   ) where
 
 import Control.Concurrent.Async qualified as Async
-import Control.Concurrent.STM (newTBQueueIO, newTVarIO)
-import Control.Exception (IOException, SomeException, bracket_, try)
+import Control.Exception (IOException, SomeException, bracket_, catch, try)
 import Control.Monad (filterM, unless, when)
 import Data.ByteString (ByteString)
 import Data.Either (fromRight)
-import Data.IntMap.Strict qualified as IntMap
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -47,21 +45,30 @@ import PureClaw.Agent.AgentDef qualified as AgentDef
 import PureClaw.Agent.Completion
 import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
-import PureClaw.Agent.Loop
+import PureClaw.Tabs (overwriteTabs, readTabs)
+import PureClaw.Tabs.Persist (PersistDeps (..), loadTabs, saveTabs)
+import PureClaw.Tabs.Wiring (runTabbedLoop)
 import PureClaw.Agent.SlashCommands
 import PureClaw.Routing.Config qualified as Routing
 import PureClaw.Routing.Types qualified as Routing
 import PureClaw.Session.Handle
   ( ResumeError (..)
   , SessionHandle (..)
-  , loadRecentMessages
   , markBootstrapConsumed
   , mkSessionHandle
   , resolveResumedTarget
   , resumeSession
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Frontend.API (mkStreamGuard, harnessEntriesToTabs, productionReleaseTmux, productionKillWindow)
+import PureClaw.Frontend.API
+  ( broadcastLists
+  , mkStreamGuard
+  , productionReleaseTmux
+  , productionKillWindow
+  , spawnHarnessSession
+  )
+import PureClaw.Handles.Harness (HarnessError (..))
+import PureClaw.Tabs.Types (TabRef (..))
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
@@ -616,6 +623,11 @@ runChat consentChannel opts = do
                 _lh_logWarn logger $
                   "Session not found (corrupted metadata): " <> T.pack msg
                 exitFailure
+              Left ResumeInvalidId -> do
+                _lh_logWarn logger $
+                  "Session id is invalid (contains path traversal or forbidden characters): "
+                    <> T.pack sidRaw
+                exitFailure
           Nothing -> do
             let sid = SessionTypes.newSessionId mPrefix now
                 mAgent = fmap AgentDef._ad_name mAgentDef
@@ -644,12 +656,6 @@ runChat consentChannel opts = do
           currentMeta <- readIORef (_sh_meta sessionHandle)
           _lh_logInfo logger $ "Session: "
             <> unSessionId (SessionTypes._sm_id currentMeta)
-        -- After resume, load a bounded window of recent messages so
-        -- the agent has context to continue. Budget: 50 messages or
-        -- ~100K estimated tokens, whichever is smaller.
-        reloadedMessages <- case _co_session opts of
-          Just _  -> loadRecentMessages (_sh_transcript sessionHandle) 50 100000
-          Nothing -> pure []
         let th = _sh_transcript sessionHandle
         -- Discover any harnesses still running from a previous session
         (discoveredHarnesses, nextWindowIdx) <- discoverHarnesses th
@@ -685,18 +691,17 @@ runChat consentChannel opts = do
         onFirstStreamDoneRef <- newIORef
           =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         mcpRef <- newIORef Map.empty
-        -- WU3 (Tabbed Chat #51) — load routing config from disk and
-        -- pre-allocate the tab registry, focus pointer, active-count
-        -- TVar, runner placeholder map, and bounded channel-out queue.
-        -- All start empty / Nothing / 0; live tabs land in WU5+.
+        -- WU3 (Tabbed Chat #51) — load routing config from disk.
         routingCfg0    <- Routing.loadRoutingConfig pureclawDir
         let routingCfg = routingCfg0
               { Routing._rc_pureClawDepth = _co_depth opts }
-        tabsRef        <- newIORef IntMap.empty
-        focusRef       <- newIORef Nothing
-        activeCountTv  <- newTVarIO 0
-        runnersRef     <- newIORef IntMap.empty
-        channelOutQ    <- newTBQueueIO (fromIntegral (Routing._rc_channelOutQBound routingCfg))
+        -- Tabs-as-View (GitHub #79) — build the LIVE tab subsystem bundle
+        -- (tab registry, cursors, runtime registry, relay writer, sink
+        -- registry, wizard state, ref-tagged tab-output queue). The tab-output
+        -- queue reuses the channel-out queue bound. 'runTabbedLoop' (the new
+        -- production entry, wired below) drives these through
+        -- 'PureClaw.Routing.TabDispatch' + the relay-writer thread.
+        tabSub <- newTabSubsystem (Routing._rc_channelOutQBound routingCfg)
         -- Use lazy circular binding: delegateTaskTool captures env, and
         -- env.registry includes the delegate tool. Haskell's laziness
         -- makes this safe — the tool closure only forces env when invoked.
@@ -719,17 +724,48 @@ runChat consentChannel opts = do
               , _env_session      = sessionRef
               , _env_onFirstStreamDone = onFirstStreamDoneRef
               , _env_mcpServers   = mcpRef
-              , _env_tabs             = tabsRef
-              , _env_focus            = focusRef
-              , _env_activeCount      = activeCountTv
-              , _env_runners          = runnersRef
-              , _env_channelOutQ      = channelOutQ
               , _env_routingConfig    = routingCfg
               , _env_fork             = defaultEnvFork
               , _env_broker           = Just broker
+              -- Tabs-as-View (GitHub #79) — live tab subsystem fields.
+              , _env_tabRegistry      = _ts_tabRegistry tabSub
+              , _env_cursors          = _ts_cursors tabSub
+              , _env_exec             = _ts_exec tabSub
+              , _env_relayWriter      = _ts_relayWriter tabSub
+              , _env_sinks            = _ts_sinks tabSub
+              , _env_wizard           = _ts_wizard tabSub
+              , _env_tabOutQ          = _ts_tabOutQ tabSub
+              -- WU8 (#80): a chat-side tab mutation (e.g. @/nt@\/@/close@) now
+              -- (a) persists the tab view to @state\/tabs.json@ (best-effort —
+              -- a save failure is swallowed so it never crashes the loop) and
+              -- (b) broadcasts the refreshed sidebar lists to any WS
+              -- subscribers via 'frontendEnv'. The action references
+              -- 'frontendEnv' lazily through this recursive @let@ group; it is
+              -- a thunked 'IO' value, so the forward reference is never forced
+              -- at construction time (mirrors the existing @env <-> fullRegistry@
+              -- circular binding above).
+              , _env_onTabsChanged    = do
+                  tl      <- readTabs (_ts_tabRegistry tabSub)
+                  cursors <- readIORef (_ts_cursors tabSub)
+                  ignoreExc (saveTabs (pureclawDir </> "state") tl cursors)
+                  broadcastLists frontendEnv
+              -- WU-B (#?): the production harness-spawn seam the @\/tab new
+              -- harness@ dispatcher routes through. Reuses the frontend's
+              -- 'spawnHarnessSession' (spawn + persist + registry link), then
+              -- projects its result onto the dispatcher's @('TabRef', label)@
+              -- contract: the durable 'Registry.HarnessId' becomes a
+              -- 'BoundHarness' ref and the harness window key becomes the tab
+              -- label. A 'HarnessError' is rendered to user-facing 'Text'. The
+              -- action references 'frontendEnv' lazily through this recursive
+              -- @let@ group (a thunked closure, never forced at construction
+              -- time — mirrors '_env_onTabsChanged' above).
+              , _env_startHarness     = \spec -> do
+                  r <- spawnHarnessSession frontendEnv spec (SessionTypes.SkHarness spec)
+                  pure $ either
+                    (Left . harnessErrText)
+                    (\(_sid, hid, _meta, key) -> Right (BoundHarness hid, key))
+                    r
               }
-        -- Fill the envRef so the tab completer can access the live env
-        writeIORef envRef (Just env)
         -- Start the frontend server and the activity probe loop under
         -- structured 'Async.withAsync' scopes so both are automatically
         -- cancelled when the agent loop exits or throws (WU3 + WU4
@@ -738,8 +774,7 @@ runChat consentChannel opts = do
         -- @startWithChannel@ as the common parent, and both are
         -- guaranteed to be cancelled within 1 s of @runAgentLoopWith@
         -- returning or throwing.
-        feTabCountRef <- newIORef 0
-        let listModelsForProvider providerName =
+            listModelsForProvider providerName =
               case parseProviderMaybe (Just providerName) of
                 Nothing -> pure []
                 Just ptype -> do
@@ -766,7 +801,7 @@ runChat consentChannel opts = do
                         else Nothing
                   })
                 keepers
-        let frontendEnv = FrontendEnv
+            frontendEnv = FrontendEnv
               { _fe_harnesses    = harnessRef
               , _fe_harnessRegistry = harnessReg
               , _fe_consentChannel = consentChannel
@@ -786,8 +821,9 @@ runChat consentChannel opts = do
               , _fe_broker       = Just broker
               , _fe_streamGuard  = Just streamGuard
               , _fe_maxTabs      = Routing._rc_maxTabs routingCfg
-              , _fe_tabCount     = feTabCountRef
-              , _fe_listTabs     = harnessEntriesToTabs <$> Registry.snapshot harnessReg
+              , _fe_tabRegistry  = _ts_tabRegistry tabSub
+              , _fe_cursors      = _ts_cursors tabSub
+              , _fe_exec         = _ts_exec tabSub
               , _fe_closeTab     = \_ -> pure (Left "not wired")
               , _fe_startHarness = \spec transcript -> do
                   windowIdx <- readIORef windowIdxRef
@@ -840,6 +876,8 @@ runChat consentChannel opts = do
               , _fe_registry     = fullRegistry
               , _fe_maxToolIterations = 90
               }
+        -- Fill the envRef so the tab completer can access the live env.
+        writeIORef envRef (Just env)
         -- Boot reconstruction (WU5, D5.6): one tmux sweep builds the registry
         -- from windows carrying our @pcl_id (PCL-restart reconnect) and lazily
         -- stamps legacy claude-code-<idx> windows. The legacy '_env_harnesses'
@@ -860,13 +898,49 @@ runChat consentChannel opts = do
               { Reconcile._rd_evict = \_hid label ->
                   modifyIORef' harnessRef (Map.delete label)
               }
+        -- WU8 (#80): restore the persisted tab view BEFORE the frontend server
+        -- (and the tabbed loop) start, so the very first sidebar lists snapshot
+        -- already reflects the tabs from the previous run. 'loadTabs' decodes
+        -- @state\/tabs.json@ and reconciles each tab against ground truth:
+        --
+        --   * @_pd_discoveryReady = pure ()@ — the synchronous
+        --     'Reconcile.bootReconstruct' above has already completed one
+        --     harness-discovery sweep, so no further await is needed before
+        --     pruning dead-harness tabs.
+        --   * @_pd_harnessLive@ — a 'BoundHarness' tab survives only if its id
+        --     resolves to a registry entry whose reconciled liveness is not
+        --     'Registry.LivenessOrphaned' (no live window+PID).
+        --   * @_pd_sessionExists@ — a 'BoundSession' tab survives only if its
+        --     @session.json@ is still on disk.
+        --
+        -- The reconciled @(tabs, cursors)@ then SEED the shared subsystem cells
+        -- ('overwriteTabs' for the registry, 'writeIORef' for the cursors), so
+        -- chat @/N@ and the frontend observe the restored tabs identically.
+        let bootPersistDeps = PersistDeps
+              { _pd_stateDir       = pureclawDir </> "state"
+              , _pd_harnessLive    = \hid -> do
+                  mEntry <- Registry.lookupById harnessReg hid
+                  pure $ case mEntry of
+                    Just e  -> Registry._he_liveness e /= Registry.LivenessOrphaned
+                    Nothing -> False
+              , _pd_discoveryReady = pure ()
+              , _pd_sessionExists  = \sid ->
+                  doesFileExist (sessionsDir </> T.unpack (unSessionId sid) </> "session.json")
+              }
+        (loadedTabs, loadedCursors) <- loadTabs bootPersistDeps
+        overwriteTabs (_ts_tabRegistry tabSub) loadedTabs
+        writeIORef (_ts_cursors tabSub) loadedCursors
         Async.withAsync
           (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
           Async.withAsync
             (Reconcile.runReconcileLoopWith
                Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
             $ \_probeAsync ->
-            runAgentLoopWith env reloadedMessages
+            -- Tabs-as-View (GitHub #79) — the production entry is the tabbed
+            -- loop. It seeds each provider runtime's context from the session
+            -- transcript directly (via 'loadRecentMessages'), so a
+            -- foreground-wide message replay at boot is not needed here.
+            runTabbedLoop env
 
   case effectiveChannel of
     "signal" -> do
@@ -1131,6 +1205,24 @@ resolveApiKey Nothing vaultKeyName vaultOpt = do
   case vaultKey of
     Just bs -> pure (Just (mkApiKey bs))
     Nothing -> pure Nothing
+
+-- | Run an 'IO' action best-effort, swallowing any exception. Used by the WU8
+-- (#80) tab-change notify so a 'saveTabs' failure (disk full, permission
+-- error) degrades to a no-op instead of crashing the agent loop — the tab
+-- view is machine-local runtime state, not ground truth, so a missed persist
+-- is recoverable on the next mutation.
+ignoreExc :: IO () -> IO ()
+ignoreExc act = act `catch` \(_ :: SomeException) -> pure ()
+
+-- | Render a 'HarnessError' to a concise user-facing 'Text' for the
+-- @\/tab new harness@ dispatcher (WU-B). Mirrors the surface
+-- 'PureClaw.Frontend.API.harnessErrorResponse' uses, but as plain text for the
+-- chat banner rather than an HTTP body.
+harnessErrText :: HarnessError -> T.Text
+harnessErrText err = case err of
+  HarnessNotAuthorized ce    -> "harness not authorized: " <> T.pack (show ce)
+  HarnessBinaryNotFound bin  -> "harness binary not found: " <> bin
+  HarnessTmuxNotAvailable det -> "tmux not available: " <> det
 
 -- | Try to look up a key from the vault. Returns 'Nothing' if the vault is
 -- absent, locked, or does not contain the key.
