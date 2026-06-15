@@ -597,7 +597,7 @@ tabsSpec = describe "/tabs" $ do
     ls `shouldBe`
       [ "/0  alpha  session  live"
       , "/1  beta  harness  live"
-      , "relay: focused"
+      , "Relay mode: focused — you only see output from this tab."
       ]
 
   it "shows a Dead tombstone" $ do
@@ -608,7 +608,33 @@ tabsSpec = describe "/tabs" $ do
     out <- lastEmit f
     T.lines out `shouldBe`
       [ "/0  ghost  harness  dead"
-      , "relay: focused"
+      , "Relay mode: focused — you only see output from this tab."
+      ]
+
+  it "marks the conversation's focused tab with (focused)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    _ <- appendHarness f (harn "1") "beta"
+    handleInbound (f_deps f) convA "/1"   -- focus slot 1
+    handleInbound (f_deps f) convA "/tabs"
+    out <- lastEmit f
+    T.lines out `shouldBe`
+      [ "/0  alpha  session  live"
+      , "/1  beta  harness  live  (focused)"
+      , "Relay mode: focused — you only see output from this tab."
+      ]
+
+  it "/tab close K drops one tab so /tabs returns N-1" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    _ <- appendHarness f (harn "1") "beta"
+    -- N = 2 tabs; close slot 0 (0 <= K < N), beta renumbers to /0.
+    handleInbound (f_deps f) convA "/tab close 0"
+    handleInbound (f_deps f) convA "/tabs"
+    out <- lastEmit f
+    T.lines out `shouldBe`
+      [ "/0  beta  harness  live"
+      , "Relay mode: focused — you only see output from this tab."
       ]
 
 -- ---------------------------------------------------------------------------
@@ -638,6 +664,15 @@ renameSpec = describe "/rename" $ do
     handleInbound (f_deps f) convA "/rename whatever"
     lastEmit f `shouldReturn` "no tab to rename — /tabs to list"
 
+  it "/tab rename K NAME relabels the tab (not the attach wizard)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    _ <- appendHarness f (harn "1") "beta"
+    handleInbound (f_deps f) convA "/tab rename 1 joke"
+    tl <- readTabs (f_reg f)
+    map _tab_name (toList tl) `shouldBe` ["alpha", "joke"]
+    lastEmit f `shouldReturn` "renamed /1 joke"
+
 -- ---------------------------------------------------------------------------
 -- /relay
 -- ---------------------------------------------------------------------------
@@ -651,7 +686,7 @@ relaySpec = describe "/relay" $ do
     -- and it now sticks for the /tabs relay line
     handleInbound (f_deps f) convA "/tabs"
     out <- lastEmit f
-    last (T.lines out) `shouldBe` "relay: all"
+    last (T.lines out) `shouldBe` "Relay mode: all — full output from every tab."
 
   it "with no arg shows the current mode (§14 copy)" $ do
     f <- simpleFakes (MintsRef (sess "x"))

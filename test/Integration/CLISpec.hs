@@ -616,7 +616,7 @@ spec = do
       (exitCode, out, err) <- runPureclaw bin "/tabs\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       -- With zero tabs the only output is the trailing relay line.
-      out `shouldContain` "relay:"
+      out `shouldContain` "Relay mode: focused"
 
     -- /relay with no arg → current relay mode (TabDispatch.hs:657-658)
     it "/relay with no argument shows the current relay mode" $ do

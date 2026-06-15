@@ -233,7 +233,9 @@ handleNonWizard ctx raw =
     ("/tabs"   : _)    -> cmdTabs   ctx
     ("/rename" : args) -> cmdRename ctx args
     ("/relay"  : args) -> cmdRelay  ctx args
-    ("/tab" : "new" : rest) -> cmdTabNew ctx rest
+    ("/tab" : "new" : rest)    -> cmdTabNew ctx rest
+    ("/tab" : "close" : rest)  -> cmdClose  ctx rest
+    ("/tab" : "rename" : rest) -> cmdRename ctx rest
     ("/tab"    : args) -> cmdTab    ctx args
     _                  -> routeGrammar ctx raw
   where
@@ -368,21 +370,29 @@ cmdTabs :: Ctx -> IO ()
 cmdTabs ctx = do
   tl <- readTabs (_td_tabs (_ctx_deps ctx))
   cs <- readIORef (_td_cursors (_ctx_deps ctx))
-  let rows  = map tabRow (toList tl)
-      relay = relayLine (relayModeFor ctx cs)
+  let focused = resolveCursorSlot (_ctx_conv ctx) cs tl
+      rows    = map (tabRow focused) (toList tl)
+      relay   = relayLine (relayModeFor ctx cs)
   emit ctx (T.intercalate "\n" (rows ++ [relay]))
 
--- | Render one @\/tabs@ row.
-tabRow :: Tab -> Text
-tabRow t =
+-- | Render one @\/tabs@ row. The row for @focused@ (this conversation's cursor
+-- slot, if any) carries a trailing @(focused)@ marker so the user can see at a
+-- glance where plain text will go.
+tabRow :: Maybe TabIndex -> Tab -> Text
+tabRow focused t =
   "/" <> slotChar (_tab_slot t)
     <> "  " <> _tab_name t
     <> "  " <> kindLabel (_tab_ref t)
     <> "  " <> statusLabel (_tab_status t)
+    <> (if focused == Just (_tab_slot t) then "  (focused)" else "")
 
--- | The trailing relay-mode line shown by @\/tabs@.
+-- | The trailing relay-mode line shown by @\/tabs@. Phrased as a full sentence
+-- so a first-time user understands which tabs' output reaches them without
+-- having to learn the @relay@ jargon.
 relayLine :: RelayMode -> Text
-relayLine m = "relay: " <> relayWord m
+relayLine FocusedOnly    = "Relay mode: focused — you only see output from this tab."
+relayLine ActivityDigest = "Relay mode: activity — this tab in full, plus activity pings from others."
+relayLine Firehose       = "Relay mode: all — full output from every tab."
 
 -- ---------------------------------------------------------------------------
 -- /rename [N] <name>
