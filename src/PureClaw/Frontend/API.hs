@@ -1195,11 +1195,23 @@ computeListsSnapshot env = do
         archivedMetas
   archivedSnippets <- traverse (firstMessageSnippet baseDir) archivedChosen
   let archivedInfos = zipWith toSessionInfo archivedChosen archivedSnippets
+  -- Active-tab-backed sessions are deduped OUT of recentSessions above, and
+  -- the tab snapshot is meta-free, so the frontend has no SessionInfo to join
+  -- a tab's session_id against (breaking the chat-header edit pencil and the
+  -- rename-derived title for open tabs). Carry their full SessionInfo in a
+  -- dedicated "tabSessions" array — built the same way recentSessions is —
+  -- so the frontend can resolve them WITHOUT putting meta on the tab snapshot.
+  -- Non-harness only (harness-tab sessions stay listed under recentSessions);
+  -- archived sessions bound to a non-harness tab are still surfaced here.
+  let tabChosen = filter (\m -> unSessionId (_sm_id m) `elem` activeTabSids) allMetas
+  tabSnippets <- traverse (firstMessageSnippet baseDir) tabChosen
+  let tabSessionInfos = zipWith toSessionInfo tabChosen tabSnippets
   pure $ object
     [ "type"              .= ("lists" :: Text)
     , "tabs"              .= tabs
     , "recentSessions"    .= recentInfos
     , "archivedSessions"  .= archivedInfos
+    , "tabSessions"       .= tabSessionInfos
     ]
 
 -- | Compute and broadcast a lists snapshot to all WS subscribers.

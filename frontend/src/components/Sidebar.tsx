@@ -200,6 +200,7 @@ export function Sidebar({
   tabs,
   sessions,
   archivedSessions,
+  tabSessions = [],
   selectedId,
   sessionActivity,
   onSelectTab,
@@ -216,6 +217,10 @@ export function Sidebar({
   tabs: TabInfo[]
   sessions: SessionInfo[]
   archivedSessions: SessionInfo[]
+  /** SessionInfo for sessions backing an OPEN tab (deduped out of `sessions`).
+   *  Optional/defaulted so presentational tests can omit it; the live App always
+   *  supplies it so active-tab labels resolve. */
+  tabSessions?: SessionInfo[]
   selectedId: string | null
   sessionActivity?: Record<string, SessionActivityState>
   onSelectTab: (index: number) => void
@@ -239,7 +244,7 @@ export function Sidebar({
   // `label` then an ellipsis — never blank. Computed once here so both
   // ActiveTabs and RunningHarnesses share the SAME join.
   const tabLabel = (tab: TabInfo): string =>
-    tabDisplayLabel(tab, findSession(tab.session_id, sessions, archivedSessions))
+    tabDisplayLabel(tab, findSession(tab.session_id, sessions, archivedSessions, tabSessions))
 
   // A running harness appears under "Running Harnesses" (its status/Destroy
   // controls) AND, intentionally, its backing session is also listed under

@@ -395,7 +395,7 @@ function modelContextWindow(model: string | null): number {
 }
 
 export default function App() {
-  const { tabs, recentSessions: rawSessions, archivedSessions } = useListsStream()
+  const { tabs, recentSessions: rawSessions, archivedSessions, tabSessions } = useListsStream()
   const { agents } = useAgents()
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromPath)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
@@ -1087,7 +1087,7 @@ export default function App() {
 
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
-    ? deriveAgent(selectedId, tabs, sessions, archivedSessions)
+    ? deriveAgent(selectedId, tabs, sessions, archivedSessions, tabSessions)
     : null
 
   const taskTitle = displayAgent?.name ?? 'PureClaw'
@@ -1095,15 +1095,19 @@ export default function App() {
   // Compute session stats from transcript entries
   const sessionStats = useMemo(() => computeSessionStats(entries), [entries])
   const selectedSession = useMemo(() => {
+    // Also search tabSessions: an OPEN tab's session is deduped out of
+    // `sessions`/`archivedSessions`, so without this the chat-header edit pencil
+    // and rename-derived title would never resolve for a selected active tab.
     const base = sessions.find((s) => s.id === currentSessionId)
       ?? archivedSessions.find((s) => s.id === currentSessionId)
+      ?? tabSessions.find((s) => s.id === currentSessionId)
       ?? null
     if (!base) return null
     const override = descriptionOverrides.get(base.id)
     return override === undefined
       ? base
       : { ...base, description: override.length > 0 ? override : null }
-  }, [sessions, archivedSessions, currentSessionId, descriptionOverrides])
+  }, [sessions, archivedSessions, tabSessions, currentSessionId, descriptionOverrides])
 
   // Value shown in the input-row model dropdown. In a branch draft the
   // default is the source prefix's last model (U8, the same value U4
@@ -1128,6 +1132,7 @@ export default function App() {
           tabs={tabs}
           sessions={sessions}
           archivedSessions={archivedSessions}
+          tabSessions={tabSessions}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
           onSelectTab={handleSelectTab}
@@ -1201,6 +1206,7 @@ function deriveAgent(
   tabs: import('./types').TabInfo[],
   sessions: import('./types').SessionInfo[],
   archivedSessions: import('./types').SessionInfo[],
+  tabSessions: import('./types').SessionInfo[],
 ) {
   const [type, ...rest] = selectedId.split(':')
   const id = rest.join(':')
@@ -1214,7 +1220,7 @@ function deriveAgent(
       // The tab title in the chat header / TopBar is the backing session's
       // title (identical to its Recent Sessions row), falling back to the
       // harness label — never blank. Same join as the sidebar rows.
-      name: tabDisplayLabel(tab, findSession(tab.session_id, sessions, archivedSessions)),
+      name: tabDisplayLabel(tab, findSession(tab.session_id, sessions, archivedSessions, tabSessions)),
       status: tab.status === 'running' ? 'thinking' as const
         : tab.status === 'idle' ? 'idle' as const
         : 'completed' as const,

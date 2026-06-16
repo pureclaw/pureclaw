@@ -1956,6 +1956,43 @@ spec = do
               ]
         descsForSid `shouldBe` [Aeson.String "Renamed Title"]
 
+    -- After the "unify tab name = session name" refactor, an ACTIVE TAB's
+    -- backing SessionInfo is deduped out of recentSessions AND the tab snapshot
+    -- is meta-free, so the frontend can join NOWHERE to resolve the tab's
+    -- session (chat-header pencil + renamed title vanish). The fix carries the
+    -- full SessionInfo for active-tab-backed sessions in a NEW "tabSessions"
+    -- array, while preserving the recentSessions dedup.
+    it "an active-tab session's SessionInfo appears in tabSessions (not recentSessions), carrying its description" $
+      withSystemTempDirectory "pureclaw-tabsessions" $ \tmpDir -> do
+        let sid = "test-20240101-120000-tabsess"
+        writeTestSession tmpDir sid False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Give the session a canonical description through the production endpoint.
+        (st, _) <- putJSON env ["api", "sessions", sid, "description"]
+          (Aeson.encode (object ["description" .= ("Renamed" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- Bind it as a non-harness (BoundSession) active tab.
+        _ <- registryAppend (_fe_tabRegistry env) (BoundSession (SessionId sid))
+        snap <- computeListsSnapshot env
+        let lookupArr key v = case v of
+              Aeson.Object km -> case KM.lookup (AesonKey.fromText key) km of
+                Just (Aeson.Array arr) -> toList' arr
+                _                      -> []
+              _ -> []
+        -- (a) The session's SessionInfo IS present in tabSessions, with its
+        --     id AND its description.
+        let tabDescsForSid =
+              [ d
+              | v <- lookupArr "tabSessions" snap
+              , lookupKey v "id" == Just (Aeson.String sid)
+              , Just d <- [lookupKey v "description"]
+              ]
+        tabDescsForSid `shouldBe` [Aeson.String "Renamed"]
+        -- (b) The dedup is preserved: the sid is NOT in recentSessions.
+        let recentIds = [ t | v <- lookupArr "recentSessions" snap
+                             , Just (Aeson.String t) <- [lookupKey v "id"] ]
+        recentIds `shouldSatisfy` notElem sid
+
   -- -----------------------------------------------------------------------
   -- Task 7 (item 3): the web-seam /tab rename round-trip is reflected in BOTH
   -- session.json (proven by "Task D" above) AND, end to end, the GET /api/tabs

@@ -77,15 +77,22 @@ export function tabDisplayLabel(tab: TabInfo, session: SessionInfo | null | unde
   return tab.label ?? '…'
 }
 
-/** Find the session backing a tab id across both the live (recents) and
- *  archived lists. Returns undefined when the id is null/unknown. */
+/** Find the session backing a tab id across the live (recents), archived, and
+ *  active-tab lists. `tabSessions` carries the SessionInfo for sessions that
+ *  back an open tab — those are deduped OUT of recents/archived by the backend
+ *  and the tab snapshot is meta-free, so without consulting it an OPEN tab's
+ *  session would resolve nowhere (no chat-header pencil, stale title). Returns
+ *  undefined when the id is null/unknown. */
 export function findSession(
   id: string | null | undefined,
   sessions: SessionInfo[],
   archivedSessions: SessionInfo[],
+  tabSessions: SessionInfo[] = [],
 ): SessionInfo | undefined {
   if (!id) return undefined
-  return sessions.find((s) => s.id === id) ?? archivedSessions.find((s) => s.id === id)
+  return sessions.find((s) => s.id === id)
+    ?? archivedSessions.find((s) => s.id === id)
+    ?? tabSessions.find((s) => s.id === id)
 }
 
 /** Liveness of a tab/harness. `exited` (harness process died, window still

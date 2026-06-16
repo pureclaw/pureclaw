@@ -13,6 +13,7 @@ interface HookState {
   tabs: TabInfo[]
   recentSessions: SessionInfo[]
   archivedSessions: SessionInfo[]
+  tabSessions: SessionInfo[]
   agents: AgentInfo[]
   // Transcript entries keyed by the session id useTranscript is asked for.
   transcripts: Record<string, TranscriptEntry[]>
@@ -22,6 +23,7 @@ const state: HookState = {
   tabs: [],
   recentSessions: [],
   archivedSessions: [],
+  tabSessions: [],
   agents: [],
   transcripts: {},
 }
@@ -62,6 +64,7 @@ vi.mock('../hooks/useListsStream', () => ({
     tabs: state.tabs,
     recentSessions: state.recentSessions,
     archivedSessions: state.archivedSessions,
+    tabSessions: state.tabSessions,
   }),
 }))
 
@@ -216,6 +219,7 @@ beforeEach(() => {
   state.tabs = []
   state.recentSessions = []
   state.archivedSessions = []
+  state.tabSessions = []
   state.agents = []
   state.transcripts = {}
   focusSpy.mockReset()
@@ -888,5 +892,51 @@ describe('App slash-command response (Task 8)', () => {
       expect(document.getElementById('msg-pending-thinking')).toBeNull()
     })
     expect(document.querySelector('.typing-dot')).toBeNull()
+  })
+})
+
+describe('Active-tab session resolution (chat-header pencil + renamed title)', () => {
+  // Regression: selecting an OPEN tab must surface the chat-header edit pencil
+  // and the rename-derived title. The tab's backing session is deduped OUT of
+  // recentSessions/archivedSessions by the backend and the tab snapshot is
+  // meta-free, so the session arrives ONLY via the `tabSessions` list. If App
+  // doesn't consult it, `selectedSession` is null → no pencil, stale title.
+  function providerTab(index: number, sessionId: string): TabInfo {
+    return {
+      index,
+      kind: 'session:provider',
+      label: null,
+      status: 'idle',
+      session_id: sessionId,
+    }
+  }
+
+  it('shows the edit pencil + renamed title for a selected active tab whose session is only in tabSessions', async () => {
+    mockFetchOk('x')
+    state.tabs = [providerTab(0, 'open-sid')]
+    // Session present ONLY in tabSessions — NOT recents/archived — with a
+    // user-set description (the rename) that should drive the header title.
+    state.tabSessions = [{ ...providerSession('open-sid'), description: 'Renamed Via Tab' }]
+    window.history.replaceState(null, '', '/tab/0')
+    const utils = render(<App />)
+    // The editable-title button (and its pencil glyph) render only when the
+    // selected session resolves — proving App found it in tabSessions.
+    await waitFor(() => {
+      expect(utils.container.querySelector('.editable-title-pencil')).not.toBeNull()
+    })
+    // ...and the title text is the renamed description, not a stale fallback.
+    expect(utils.container.querySelector('.editable-title')).toHaveTextContent('Renamed Via Tab')
+  })
+
+  it('does NOT show the pencil when the active tab session is absent everywhere (control)', async () => {
+    mockFetchOk('x')
+    state.tabs = [providerTab(0, 'open-sid')]
+    state.tabSessions = [] // session resolves nowhere
+    window.history.replaceState(null, '', '/tab/0')
+    const utils = render(<App />)
+    await waitFor(() => {
+      expect(utils.container).toBeTruthy()
+    })
+    expect(utils.container.querySelector('.editable-title-pencil')).toBeNull()
   })
 })
