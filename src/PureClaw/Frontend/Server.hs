@@ -8,6 +8,7 @@ module PureClaw.Frontend.Server
   , mkFrontendSettings
     -- * Host binding
   , isLoopbackHost
+  , nonLoopbackWarning
     -- * Middleware
   , corsMiddleware
   , corsAllowedOrigin
@@ -89,6 +90,19 @@ mkFrontendSettings cfg =
 isLoopbackHost :: String -> Bool
 isLoopbackHost h = map Char.toLower h `elem` ["127.0.0.1", "localhost", "::1", "[::1]"]
 
+-- | The non-loopback exposure warning for a config's bind host, if one is
+-- warranted. 'Nothing' for a loopback bind (no warning); 'Just' a loud
+-- message for any other host, naming the @\/mcp connect@ RCE risk. The
+-- decision lives here (pure, tested) so 'runFrontend' only does the IO log.
+nonLoopbackWarning :: FrontendConfig -> Maybe Text
+nonLoopbackWarning cfg
+  | isLoopbackHost (_fsc_bindHost cfg) = Nothing
+  | otherwise = Just $
+      "Frontend bound to non-loopback host " <> T.pack (_fsc_bindHost cfg)
+        <> " — the FULL slash-command surface (including local code execution "
+        <> "via /mcp connect) is reachable by anything that can reach this "
+        <> "address. Use only on trusted networks."
+
 -- | The bound-host origin, i.e. @http:\/\/\<bindHost\>:\<port\>@.
 boundHostOrigin :: FrontendConfig -> Text
 boundHostOrigin cfg =
@@ -168,14 +182,7 @@ runFrontend cfg mEnv logger = do
   logInfo $ "  Serving: " <> T.pack (_fsc_staticDir cfg)
   logInfo $ "  URL:     http://" <> T.pack (_fsc_bindHost cfg)
               <> ":" <> T.pack (show (_fsc_port cfg))
-  if isLoopbackHost (_fsc_bindHost cfg)
-    then pure ()
-    else _lh_logWarn logger $
-           "Frontend bound to non-loopback host "
-             <> T.pack (_fsc_bindHost cfg)
-             <> " — the FULL slash-command surface (including local code "
-             <> "execution via /mcp connect) is reachable by anything that "
-             <> "can reach this address. Use only on trusted networks."
+  mapM_ (_lh_logWarn logger) (nonLoopbackWarning cfg)
   counterTv <- newTVarIO 0
   let cap = 1024 :: Int
       settings = Warp.setOnOpen  (onOpenCounter counterTv cap)

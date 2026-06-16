@@ -1,6 +1,7 @@
 module Frontend.ServerSpec (spec) where
 
 import Data.IORef
+import Data.Text qualified as T
 import Network.HTTP.Types qualified as HTTP
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp qualified as Warp
@@ -170,6 +171,17 @@ spec = do
 
     it "matches a hostname case-insensitively" $
       isLoopbackHost "Localhost" `shouldBe` True
+
+  describe "nonLoopbackWarning" $ do
+    it "is silent for a loopback bind" $
+      nonLoopbackWarning defaultFrontendConfig `shouldBe` Nothing
+
+    it "warns about /mcp connect exposure for a non-loopback bind" $
+      case nonLoopbackWarning (defaultFrontendConfig { _fsc_bindHost = "0.0.0.0" }) of
+        Just w -> do
+          T.unpack w `shouldContain` "/mcp connect"
+          T.unpack w `shouldContain` "trusted networks"
+        Nothing -> expectationFailure "expected a warning for a non-loopback bind"
 
   describe "corsAllowedOrigin" $ do
     it "echoes an allowed origin (default localhost)" $
