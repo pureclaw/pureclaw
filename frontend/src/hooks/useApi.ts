@@ -4,12 +4,17 @@ import type { AgentInfo, DiscoverableWindow, HarnessInfo, SessionInfo, TabInfo, 
 const POLL_INTERVAL = 3000
 
 /** Raw `/api/tabs` (and WS `lists`) wire shape: the backend emits the new
- *  health fields in snake_case. `index`/`kind`/`name`/`status`/`session_id`
- *  are already in their final shape; the rest map to camelCase TabInfo keys. */
+ *  health fields in snake_case. `index`/`kind`/`label`/`status`/`session_id`
+ *  are already in their final shape; the rest map to camelCase TabInfo keys.
+ *
+ *  `label` is a HARNESS-ONLY fallback (the tmux window/session name), null for
+ *  session-backed tabs — the snapshot no longer sends a display `name`. The
+ *  tab's display label is derived from the backing session instead (see
+ *  `tabDisplayLabel`). */
 export interface TabInfoWire {
   index: number
   kind: string
-  name: string
+  label: string | null
   status: string
   session_id: string | null
   ext_modified?: boolean
@@ -20,12 +25,13 @@ export interface TabInfoWire {
 
 /** Normalize a backend tab object to the camelCase `TabInfo` shape the UI
  *  renders. Tolerant of Phase-1 objects lacking the new fields (back-compat):
- *  flags default to false, attachCommand to null, origin to undefined. */
+ *  flags default to false, attachCommand to null, origin to undefined,
+ *  label to null. */
 export function mapTabInfo(wire: TabInfoWire): TabInfo {
   return {
     index: wire.index,
     kind: wire.kind,
-    name: wire.name,
+    label: wire.label ?? null,
     status: wire.status as TabStatus,
     session_id: wire.session_id,
     extModified: wire.ext_modified ?? false,

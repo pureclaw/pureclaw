@@ -7,7 +7,7 @@ describe('mapTabInfo', () => {
     const wire = {
       index: 4,
       kind: 'session:harness',
-      name: 'claude-code-abc',
+      label: 'claude-code-abc',
       status: 'exited',
       session_id: 'sess-9',
       ext_modified: true,
@@ -18,7 +18,7 @@ describe('mapTabInfo', () => {
     expect(mapTabInfo(wire)).toEqual({
       index: 4,
       kind: 'session:harness',
-      name: 'claude-code-abc',
+      label: 'claude-code-abc',
       status: 'exited',
       session_id: 'sess-9',
       extModified: true,
@@ -28,18 +28,39 @@ describe('mapTabInfo', () => {
     })
   })
 
+  it('maps a null label (session-backed tab, no harness fallback)', () => {
+    const wire = {
+      index: 1,
+      kind: 'session:provider',
+      label: null,
+      status: 'idle',
+      session_id: 'sess-1',
+    }
+    expect(mapTabInfo(wire)).toEqual({
+      index: 1,
+      kind: 'session:provider',
+      label: null,
+      status: 'idle',
+      session_id: 'sess-1',
+      extModified: false,
+      stale: false,
+      origin: undefined,
+      attachCommand: null,
+    })
+  })
+
   it('tolerates a Phase-1 wire object missing the new fields (back-compat)', () => {
     const wire = {
       index: 0,
       kind: 'shell:bash',
-      name: 'bash',
+      label: 'bash',
       status: 'idle',
       session_id: null,
     }
     expect(mapTabInfo(wire)).toEqual({
       index: 0,
       kind: 'shell:bash',
-      name: 'bash',
+      label: 'bash',
       status: 'idle',
       session_id: null,
       extModified: false,

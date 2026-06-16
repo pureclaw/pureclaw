@@ -3,11 +3,15 @@ import { describe, it, expect, vi } from 'vitest'
 import { Sidebar } from '../Sidebar'
 import type { SessionInfo, TabInfo } from '../../types'
 
-function makeTabs(...overrides: Partial<TabInfo>[]): TabInfo[] {
+/** Tabs no longer carry a `name`; the display label derives from the backing
+ *  session (else the harness `label` fallback). The old `name` overrides are
+ *  mapped onto `label` so these tests, which mostly pass no matching session,
+ *  still render the expected row text via the fallback. */
+function makeTabs(...overrides: (Partial<TabInfo> & { name?: string })[]): TabInfo[] {
   return overrides.map((o, i) => ({
     index: o.index ?? i,
     kind: o.kind ?? 'session:provider',
-    name: o.name ?? `tab-${i}`,
+    label: o.label ?? o.name ?? `tab-${i}`,
     status: o.status ?? 'idle',
     session_id: o.session_id ?? `sess-${i}`,
   }))
@@ -188,11 +192,14 @@ describe('Sidebar lifecycle transitions', () => {
         )}
       />,
     )
-    // The harness's session is listed under Recent Sessions (clickable row).
-    expect(screen.getByText('harness session')).toBeInTheDocument()
-    // The harness controls row is still present under Running Harnesses.
+    // The harness controls row is still present under Running Harnesses, and
+    // its label now derives from the backing session's title (identical to its
+    // Recent Sessions row) — NOT the harness fallback name.
     const section = screen.getByTestId('running-harnesses-section')
-    expect(within(section).getByText('claude-code-0')).toBeInTheDocument()
+    expect(within(section).getByText('harness session')).toBeInTheDocument()
+    // The same session is also listed under Recent Sessions (clickable row), so
+    // 'harness session' appears twice across the sidebar.
+    expect(screen.getAllByText('harness session').length).toBeGreaterThanOrEqual(2)
     // Unrelated provider sessions are unaffected.
     expect(screen.getByText('plain session')).toBeInTheDocument()
   })

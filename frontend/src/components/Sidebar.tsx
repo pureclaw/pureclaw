@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { SessionInfo, TabInfo } from '../types'
-import { sessionDisplayTitle, sessionSubtitle } from '../types'
+import { findSession, sessionDisplayTitle, sessionSubtitle, tabDisplayLabel } from '../types'
 import type { SessionActivityState } from '../types/stream'
 import { ActiveTabs } from './ActiveTabs'
 import { RunningHarnesses } from './RunningHarnesses'
@@ -234,6 +234,13 @@ export function Sidebar({
   const harnessTabs = tabs.filter((t) => t.kind === 'harness')
   const otherTabs = tabs.filter((t) => t.kind !== 'harness')
 
+  // A tab's display label = its backing session's title (so it reads
+  // identically to its Recent Sessions row), falling back to the harness
+  // `label` then an ellipsis — never blank. Computed once here so both
+  // ActiveTabs and RunningHarnesses share the SAME join.
+  const tabLabel = (tab: TabInfo): string =>
+    tabDisplayLabel(tab, findSession(tab.session_id, sessions, archivedSessions))
+
   // A running harness appears under "Running Harnesses" (its status/Destroy
   // controls) AND, intentionally, its backing session is also listed under
   // "Recent Sessions" so the user can jump straight to the conversation. The
@@ -252,6 +259,7 @@ export function Sidebar({
           tabs={otherTabs}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
+          tabLabel={tabLabel}
           onSelectTab={onSelectTab}
           onNewTab={onNewTab}
           onCloseTab={onCloseTab}
@@ -265,6 +273,7 @@ export function Sidebar({
           tabs={harnessTabs}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
+          tabLabel={tabLabel}
           onSelectTab={onSelectTab}
           onCloseTab={onCloseTab}
           onArchiveTab={onArchiveTab}

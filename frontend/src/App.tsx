@@ -12,6 +12,7 @@ import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStre
 import { useSessionActivityStream } from './hooks/useSessionActivityStream'
 import { streamClient } from './lib/streamClient'
 import type { Message, MessageContent, TranscriptEntry, ToolCallInfo } from './types'
+import { findSession, tabDisplayLabel } from './types'
 
 /** Parse the current URL path into a selectedId, or null for root. */
 function selectedIdFromPath(): string | null {
@@ -1086,7 +1087,7 @@ export default function App() {
 
   // Derive a display agent for the chat area from the selection
   const displayAgent = selectedId
-    ? deriveAgent(selectedId, tabs, sessions)
+    ? deriveAgent(selectedId, tabs, sessions, archivedSessions)
     : null
 
   const taskTitle = displayAgent?.name ?? 'PureClaw'
@@ -1199,6 +1200,7 @@ function deriveAgent(
   selectedId: string,
   tabs: import('./types').TabInfo[],
   sessions: import('./types').SessionInfo[],
+  archivedSessions: import('./types').SessionInfo[],
 ) {
   const [type, ...rest] = selectedId.split(':')
   const id = rest.join(':')
@@ -1209,7 +1211,10 @@ function deriveAgent(
     if (!tab) return null
     return {
       id: `tab:${tab.index}`,
-      name: tab.name,
+      // The tab title in the chat header / TopBar is the backing session's
+      // title (identical to its Recent Sessions row), falling back to the
+      // harness label — never blank. Same join as the sidebar rows.
+      name: tabDisplayLabel(tab, findSession(tab.session_id, sessions, archivedSessions)),
       status: tab.status === 'running' ? 'thinking' as const
         : tab.status === 'idle' ? 'idle' as const
         : 'completed' as const,

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { SessionInfo, TabInfo, TabStatus } from '../types'
-import { sessionDisplayTitle } from '../types'
+import { sessionDisplayTitle, tabDisplayLabel } from '../types'
 
 const statusLabel: Record<TabStatus, string> = {
   running: 'Running',
@@ -79,7 +79,7 @@ export function HarnessControls({
       <div className="flex flex-col gap-5" style={{ maxWidth: 560 }}>
         <div className="flex items-center gap-2">
           <span className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
-            {tab.name}
+            {tabDisplayLabel(tab, session)}
           </span>
           {tab.origin && (
             <span

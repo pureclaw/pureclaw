@@ -625,7 +625,7 @@ describe('App tab actions wiring (D4.7)', () => {
     return {
       index,
       kind: 'session:harness',
-      name: `exited-${index}`,
+      label: `exited-${index}`,
       status: 'exited',
       session_id: `sess-${index}`,
     }
@@ -646,7 +646,7 @@ describe('App tab actions wiring (D4.7)', () => {
     state.tabs = [{
       index: 3,
       kind: 'session:harness',
-      name: 'edited-3',
+      label: 'edited-3',
       status: 'idle',
       session_id: 'sess-3',
       extModified: true,
@@ -664,7 +664,10 @@ describe('App harness controls view (RH/HC)', () => {
     return {
       index,
       kind: 'harness',
-      name: `claude-code-${index}`,
+      // Harness fallback label. With no backing session in the recents list the
+      // row renders this; when a session resolves the row shows the session
+      // title instead.
+      label: `claude-code-${index}`,
       status: 'running',
       session_id: `sess-${index}`,
       origin: 'spawned',
@@ -675,12 +678,16 @@ describe('App harness controls view (RH/HC)', () => {
   it('selecting a running harness shows the controls view (Destroy), not a transcript', async () => {
     mockFetchOk('x')
     state.tabs = [runningHarness(0)]
-    state.recentSessions = [harnessSession('sess-0')]
+    // The harness's backing session: its title now drives the harness row's
+    // label (identical to its Recent Sessions row), so the row reads "harness
+    // chat" rather than the fallback "claude-code-0".
+    state.recentSessions = [{ ...harnessSession('sess-0'), description: 'harness chat' }]
     state.transcripts['sess-0'] = [userEntry('e1', 'harness transcript text')]
     const utils = render(<App />)
 
-    // Click the harness row in the Running Harnesses section.
-    fireEvent.click(utils.getByText('claude-code-0'))
+    // The harness row (and its Recent Sessions twin) both read "harness chat";
+    // click the first to open the controls view.
+    fireEvent.click(utils.getAllByText('harness chat')[0]!)
 
     await waitFor(() => {
       expect(utils.getByRole('button', { name: /destroy harness/i })).toBeInTheDocument()
