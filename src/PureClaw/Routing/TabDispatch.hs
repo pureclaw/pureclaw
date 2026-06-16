@@ -30,6 +30,8 @@ module PureClaw.Routing.TabDispatch
     TabDispatchDeps (..)
     -- * The router
   , handleInbound
+    -- * Parsed-command entry point
+  , runTabCommand
   ) where
 
 import Data.Char qualified as Char
@@ -70,10 +72,13 @@ import PureClaw.Tabs
 import PureClaw.Tabs.Types
   ( ConversationKey
   , CursorState (..)
+  , ForceMode (..)
   , RelayMode (..)
   , Tab (..)
+  , TabKindArg (..)
   , TabList
   , TabRef (..)
+  , TabSlashCommand (..)
   , TabStatus (..)
   , TabsError (..)
   , clearCursor
@@ -173,6 +178,51 @@ handleInbound deps convKey raw = do
   case Map.lookup convKey wiz of
     Just st -> handleWizardReply ctx st raw
     Nothing -> handleNonWizard ctx raw
+
+-- ---------------------------------------------------------------------------
+-- Parsed-command entry point
+-- ---------------------------------------------------------------------------
+
+-- | Execute a parsed @\/tab@ command against the shared tab subsystem, with an
+-- explicit conversation key (the web path supplies a synthetic key; the
+-- TUI\/channel path supplies the real one). Reuses the same helpers the
+-- flat-verb handlers use, so every surface produces identical results.
+--
+-- This is /additive/: it does not change the flat-verb handlers
+-- ('cmdClose' \/ 'cmdRename' \/ …) and is not yet wired into the live loop —
+-- a later task connects it to @executeSlashCommand@.
+runTabCommand :: TabDispatchDeps -> ConversationKey -> TabSlashCommand -> IO ()
+runTabCommand deps conv cmd =
+  let ctx = Ctx deps conv
+      -- The parser already validated each index against the configured cap, so
+      -- 'mkTabIndex' is total here; the impossible 'Nothing' is folded into
+      -- 'error' (mirroring the convention the rest of this module uses).
+      idx n = Maybe.fromMaybe
+                (impossible "runTabCommand: parser-validated tab index out of range")
+                (mkTabIndex n)
+  in case cmd of
+       TabListCmd             -> cmdTabs   ctx
+       TabRenameCmd n name    -> doRename  ctx (idx n) name
+       TabCloseCmd _ ForceYes -> emit ctx closeForceMsg   -- mirror /close's --force rejection
+       TabCloseCmd n ForceNo  -> closeSlot ctx (idx n)
+       TabFocusCmd n          -> doSwitch  ctx (idx n)
+       TabResumeCmd sid       -> bindNewTab ctx (BoundSession sid) defaultSessionName "attached"
+       TabNewCmd mKind mArg   -> cmdTabNew ctx (kindWords mKind ++ argWords mArg)
+  where
+    -- Reconstruct the @[Text]@ 'cmdTabNew' re-parses: the kind keyword (if any)
+    -- followed by the remaining argument words.
+    kindWords = maybe [] (\k -> [tabKindArgText k])
+    argWords  = maybe [] T.words
+
+-- | Render a 'TabKindArg' back to the lowercase keyword 'cmdTabNew' recognises
+-- (the inverse of 'PureClaw.Agent.SlashCommands.parseTabKindArg').
+tabKindArgText :: TabKindArg -> Text
+tabKindArgText TkaAi       = "ai"
+tabKindArgText TkaProvider = "provider"
+tabKindArgText TkaHarness  = "harness"
+tabKindArgText TkaShell    = "shell"
+tabKindArgText TkaSsh      = "ssh"
+tabKindArgText TkaTmux     = "tmux"
 
 -- ---------------------------------------------------------------------------
 -- Stage 1: wizard interception

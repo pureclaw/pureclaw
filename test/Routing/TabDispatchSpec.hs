@@ -46,6 +46,7 @@ import PureClaw.Routing.Config qualified as RConfig
 import PureClaw.Routing.TabDispatch
   ( TabDispatchDeps (..)
   , handleInbound
+  , runTabCommand
   )
 import PureClaw.Session.Kind
   ( HarnessFlavour (..)
@@ -62,9 +63,12 @@ import PureClaw.Tabs
 import PureClaw.Tabs.Types
   ( ConversationKey
   , CursorState
+  , ForceMode (..)
   , RelayMode (..)
   , Tab (..)
+  , TabKindArg (..)
   , TabRef (..)
+  , TabSlashCommand (..)
   , TabStatus (..)
   , emptyCursors
   , resolveCursorSlot
@@ -299,6 +303,7 @@ spec = do
   fallthroughSpec
   edgeSpec
   onTabsChangedSpec
+  runTabCommandSpec
 
 -- ---------------------------------------------------------------------------
 -- /new
@@ -1070,6 +1075,79 @@ onTabsChangedSpec = describe "_td_onTabsChanged" $ do
     _ <- appendSession f "s0" "a"
     handleInbound (f_deps f) convA "/tabs"
     readIORef (f_tabsChanged f) `shouldReturn` 0
+
+-- ---------------------------------------------------------------------------
+-- runTabCommand (parsed-command entry point, reuses flat-verb helpers)
+-- ---------------------------------------------------------------------------
+
+runTabCommandSpec :: Spec
+runTabCommandSpec = describe "runTabCommand" $ do
+  it "TabRenameCmd renames a slot (same observable as /tab rename)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    _ <- appendHarness f (harn "1") "beta"
+    runTabCommand (f_deps f) convA (TabRenameCmd 1 "joke")
+    tl <- readTabs (f_reg f)
+    map _tab_name (toList tl) `shouldBe` ["alpha", "joke"]
+    lastEmit f `shouldReturn` "renamed /1 joke"
+
+  it "TabCloseCmd N ForceNo removes the slot (same as /close N)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    r0 <- appendSession f "s0" "alpha"
+    _ <- appendSession f "s1" "beta"
+    runTabCommand (f_deps f) convA (TabCloseCmd 0 ForceNo)
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "s1"]
+    released f `shouldReturn` [r0]
+    lastEmit f `shouldReturn` "closed /0"
+
+  it "TabCloseCmd N ForceYes rejects with the --force copy (no removal)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    runTabCommand (f_deps f) convA (TabCloseCmd 0 ForceYes)
+    lastEmit f `shouldReturn`
+      "/close has no --force (tabs never destroy sessions or harnesses)"
+    tl <- readTabs (f_reg f)
+    length (toList tl) `shouldBe` 1
+    released f `shouldReturn` []
+
+  it "TabListCmd emits the tab listing" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    runTabCommand (f_deps f) convA TabListCmd
+    out <- lastEmit f
+    out `shouldSatisfy` T.isInfixOf "alpha"
+
+  it "TabFocusCmd N focuses that slot (same as /N switch)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "a"
+    _ <- appendSession f "s1" "b"
+    runTabCommand (f_deps f) convA (TabFocusCmd 1)
+    cursorSlot f convA `shouldReturn` Just 1
+    lastEmit f `shouldReturn` "switched to /1"
+
+  it "TabNewCmd (ai) mints a default session, binds a tab" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    runTabCommand (f_deps f) convA (TabNewCmd (Just TkaAi) Nothing)
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "fresh"]
+    lastEmit f `shouldReturn` "new tab /0"
+
+  it "TabNewCmd Nothing (bare) also mints a default session" $ do
+    f <- simpleFakes (MintsRef (sess "fresh"))
+    runTabCommand (f_deps f) convA (TabNewCmd Nothing Nothing)
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [sess "fresh"]
+    lastEmit f `shouldReturn` "new tab /0"
+
+  it "TabResumeCmd binds the given session as a new attached tab" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    runTabCommand (f_deps f) convA (TabResumeCmd (SessionId "past"))
+    tl <- readTabs (f_reg f)
+    map _tab_ref (toList tl) `shouldBe` [BoundSession (SessionId "past")]
+    ensured f `shouldReturn` [BoundSession (SessionId "past")]
+    cursorSlot f convA `shouldReturn` Just 0
+    lastEmit f `shouldReturn` "attached /0"
 
 -- ---------------------------------------------------------------------------
 -- Helpers
