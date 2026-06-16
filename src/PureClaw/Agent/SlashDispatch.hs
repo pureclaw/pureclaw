@@ -78,9 +78,9 @@ renderParseError raw err = case err of
     firstWord = T.takeWhile (/= ' ') (T.stripStart raw)
 
 -- | Tracking issue for interactive-command support in the web UI. Embedded in
--- the deferral message. Task 9 replaces this placeholder with the real URL.
+-- the deferral message shown when a prompting command is invoked over the web.
 interactiveIssueUrl :: Text
-interactiveIssueUrl = "https://github.com/OWNER/REPO/issues/PENDING"
+interactiveIssueUrl = "https://github.com/pureclaw/pureclaw/issues/84"
 
 -- | Execute one line of user input against a lazily-built scoped env.
 --
