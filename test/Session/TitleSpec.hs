@@ -13,6 +13,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import PureClaw.Agent.AgentDef (mkAgentName)
 import PureClaw.Core.Types (ModelId (..), ProviderId (..), SessionId (..))
 import PureClaw.Session.Kind (ProviderSpec (..), SessionKind (..))
 import PureClaw.Session.Title (sessionTitle)
@@ -35,6 +36,23 @@ spec = describe "sessionTitle" $ do
       let meta = (baseMeta (T.pack sid)) { _sm_description = Nothing }
       t <- sessionTitle dir meta
       T.unpack t `shouldContain` "hello world"
+
+  it "uses the model auto-summary when there is no description" $
+    withSystemTempDirectory "title" $ \dir -> do
+      let meta = (baseMeta "s-sum")
+                   { _sm_description = Nothing, _sm_autoSummary = Just "model summary" }
+      t <- sessionTitle dir meta
+      t `shouldBe` "model summary"
+
+  it "falls back to the agent name when no description, summary, or transcript" $
+    withSystemTempDirectory "title" $ \dir -> do
+      let meta = (baseMeta "s-agent")
+                   { _sm_description = Nothing
+                   , _sm_autoSummary = Nothing
+                   , _sm_agent       = either (const Nothing) Just (mkAgentName "my-agent")
+                   }
+      t <- sessionTitle dir meta
+      t `shouldBe` "my-agent"
 
   it "falls back to a session-id prefix with no description and no transcript" $
     withSystemTempDirectory "title" $ \dir -> do
