@@ -35,7 +35,7 @@ sessionTitle :: FilePath -> SessionMeta -> IO Text   -- baseDir, meta -> the dis
 -- = _sm_description ?? _sm_autoSummary ?? firstMessageSnippet(baseDir, meta) ?? agent ?? id-prefix
 ```
 
-`firstMessageSnippet` (currently private in `Frontend.API`) moves into this shared module; `Frontend.API` and the TUI both call `sessionTitle`. This guarantees identical defaults everywhere (and keeps the `sessionDisplayTitle` cascade in `frontend/src/types.ts` as the single client-side mirror). The TUI's `sessionLabel`/`tabRow` use `sessionTitle`.
+`firstMessageSnippet` (currently private in `Frontend.API`) moves into this shared module; `Frontend.API` and the TUI both call `sessionTitle`. This guarantees identical defaults everywhere. The **TS mirror stays pure**: `sessionDisplayTitle` in `frontend/src/types.ts` keeps using the backend-computed `firstMessageSnippet` already on the wire (`_si_firstMessageSnippet`) — do NOT port the IO/transcript read to TS. Only the Haskell surfaces call the IO `sessionTitle`. The TUI's `sessionLabel`/`recentSessions`/`tabRow` switch to `sessionTitle`.
 
 ### 1. Name source: the session title (principles 1 & 2)
 
@@ -56,8 +56,8 @@ A custom name is `_sm_description`, written via the existing `PUT /api/sessions/
   ```haskell
   , _td_setSessionDescription :: SessionId -> Maybe Text -> IO (Either Text ())
   ```
-  `/tab rename <slot> <name>` (`doRename`) resolves the slot → `SessionId` locally (via `registryLookupSlot` + `_tab_ref`), runs `Parse.sanitizeTabName` TUI-side, then calls the seam; a `Left err` surfaces a user-facing message (gateway down / 4xx / no session). The production seam is wired in `CLI/Commands.hs` (where the HTTP `Manager` + gateway URL already live for `probeGatewayUp`) to `PUT /api/sessions/{id}/description`; tests inject a fake. The gateway persists to shared `session.json` and broadcasts to the browser. (For TUI `/tabs` to SHOW titles, add a companion read — either a `_td_sessionTitle :: SessionId -> IO Text` seam wired to the shared `sessionTitle` helper, or reuse the existing `_td_recentSessions` pairs — pinned in the plan; either way it uses §0's shared derivation, not a duplicate.)
-- **Description length cap (security):** `handleSetDescription` (`API.hs:1247`) must clamp the description to a sane max (the snippet path is already bounded at 120 chars; the user override is not, and it now displays in more places). The title renders as a React-escaped text child everywhere (no `dangerouslySetInnerHTML`).
+  `/tab rename <slot> <name>` (`doRename`) resolves the slot → `SessionId` locally (via `registryLookupSlot` + `_tab_ref`), runs `Parse.sanitizeTabName` TUI-side, then calls the seam; a `Left err` surfaces a user-facing message (gateway down / 4xx / no session). The production seam is wired in `CLI/Commands.hs` (where the HTTP `Manager` + gateway URL already live for `probeGatewayUp`) to `PUT /api/sessions/{id}/description`; tests inject a fake. The gateway persists to shared `session.json` and broadcasts to the browser. For TUI `/tabs` to SHOW titles, **reuse the existing `_td_recentSessions :: IO [(SessionId, Text)]`** (lower blast radius — it already returns titles and is already being switched to `sessionTitle` in §0) rather than adding a new `_td_sessionTitle` seam; `tabRow` resolves each session tab's title from that list.
+- **Description length cap (security):** `handleSetDescription` (`API.hs:1247`) clamps the override to a concrete max — **120 chars**, matching the existing `snippetCharBudget` so the override and the default snippet share one bound (the user override is currently unbounded and now displays in more places). The title renders as a React-escaped text child everywhere (no `dangerouslySetInnerHTML`).
 
 ### 3. Default (principle 2)
 
