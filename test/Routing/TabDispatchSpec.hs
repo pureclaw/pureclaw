@@ -692,6 +692,15 @@ renameSpec = describe "/rename" $ do
     es <- emitted f
     last es `shouldSatisfy` ("invalid tab name" `T.isPrefixOf`)
 
+  it "emits the seam's error when setting the session description fails" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "old"
+    -- Override the seam to fail (e.g. gateway down / session missing); the
+    -- dispatcher must surface that message verbatim to the user.
+    let deps' = (f_deps f) { _td_setSessionDescription = \_ _ -> pure (Left "boom") }
+    handleInbound deps' convA "/rename 0 new-name"
+    lastEmit f `shouldReturn` "boom"
+
   it "/tab rename K NAME sets the session description (not the attach wizard)" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     _ <- appendSession f "s0" "alpha"
