@@ -1152,16 +1152,18 @@ executeSlashCommand env (CmdMcp sub) ctx = do
 -- intercepts every 'CmdTab' before it reaches this executor, so
 -- production paths NEVER call this branch.
 --
--- This case remains as a defensive fallback for two situations:
--- (1) a slash-command executor is driven outside the tabbed dispatcher
--- and the user typed a @\/tab*@ command; (2) an AI tab loop somehow
--- received a 'CmdTab' via '_tabHandle_enqueueSlash' (the I5 path) —
--- defensive coverage.
-executeSlashCommand env (CmdTab _) ctx = do
-  _ch_send (_env_channel env)
-    (OutgoingMessage
-       "Tab commands require the tabbed-chat dispatcher \
-       \(PureClaw.Routing.Dispatcher.runDispatcher).")
+-- Task C2 (web @\/tab@ dispatch): the web chat path runs slash commands
+-- through this executor (NOT the per-conversation tabbed loop), so a
+-- @\/tab@ typed into the web chat box reaches here. We forward it to the
+-- '_env_runTabCommand' seam, passing this (SCOPED, web) env's
+-- '_env_channel' as the reply channel — the production wiring overrides
+-- @_td_emit@ to send the dispatcher reply to that capture channel so
+-- 'PureClaw.Frontend.API.runSlashInput' returns it. @Nothing@ → the seam
+-- falls back to its wired web 'ConversationKey'. Non-web construction sites
+-- default '_env_runTabCommand' to 'noRunTabCommand' (a no-op), preserving
+-- the prior defensive-fallback behaviour without the dead-letter banner.
+executeSlashCommand env (CmdTab sub) ctx = do
+  _env_runTabCommand env (_env_channel env) Nothing sub
   pure ctx
 
 -- | Fallback arm for @\/bg@ when no dispatcher is in scope. The real

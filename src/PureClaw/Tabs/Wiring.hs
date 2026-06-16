@@ -53,7 +53,7 @@ import Control.Exception qualified as E
 import Control.Monad (forever)
 import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -137,10 +137,9 @@ type SessionStore = IORef (Map Core.SessionId Session.SessionHandle)
 -- | The Tabs-as-View production loop (replaces 'runAgentLoopWith' at the 8c.2
 -- flip). Forks the relay-writer thread, registers the CLI sink, then reads the
 -- channel and dispatches each inbound message per conversation.
-runTabbedLoop :: AgentEnv -> IO ()
-runTabbedLoop env = do
+runTabbedLoop :: AgentEnv -> SessionStore -> IO ()
+runTabbedLoop env store = do
   _lh_logInfo logger "Tabbed agent loop started"
-  store <- newIORef Map.empty
   let execDeps   = mkExecDeps env store
       relayDeps  = RelayWriterDeps
         { _rw_sinks   = _env_sinks env
@@ -156,12 +155,12 @@ runTabbedLoop env = do
   let dispatchDeps = mkTabDispatchDeps env execDeps store
   -- Read the first inbound message to learn the CLI conversation key, register
   -- its sink, then loop. (b) + (c).
-  loop store dispatchDeps
+  loop dispatchDeps
   where
     channel = _env_channel env
     logger  = _env_logger env
 
-    loop store dispatchDeps = do
+    loop dispatchDeps = do
       receiveResult <- try @E.IOException (_ch_receive channel)
       case receiveResult of
         Left _    -> _lh_logInfo logger "Session ended"
@@ -183,10 +182,10 @@ runTabbedLoop env = do
           -- mirroring legacy dispatchMsg's T.null(T.strip) guard (pureclaw-z9h).
           -- Source capture above is preserved even for empty content.
           if T.null (T.strip (_im_content msg))
-            then loop store dispatchDeps
+            then loop dispatchDeps
             else do
               Dispatch.handleInbound dispatchDeps convKey (_im_content msg)
-              loop store dispatchDeps
+              loop dispatchDeps
 
 -- | The 'ConversationKey' for a message source: its channel + conversation id
 -- (invariant I3 — the dispatcher keys cursors\/relay by this pair).

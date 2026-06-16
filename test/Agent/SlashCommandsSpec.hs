@@ -35,6 +35,7 @@ import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Tabs.Types (ConversationKey)
 import PureClaw.Tools.Registry
 import PureClaw.Transcript.Types
 
@@ -379,6 +380,27 @@ spec = do
       case sent of
         Just t  -> T.unpack t `shouldContain` "cleared"
         Nothing -> expectationFailure "Expected message"
+
+    -- Task C2 (web /tab dispatch): a CmdTab reaching executeSlashCommand (the
+    -- web chat path) must be forwarded to the '_env_runTabCommand' seam — with
+    -- this env's '_env_channel' as the reply channel and 'Nothing' for the
+    -- conversation (the production wiring falls back to its web ConversationKey).
+    -- Here we install a SPY seam and assert it was reached with the parsed
+    -- command and channel-ignored conversation argument.
+    it "/tab forwards CmdTab to the _env_runTabCommand seam (web path)" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      spyRef  <- newIORef (Nothing :: Maybe (Maybe ConversationKey, TabSlashCommand))
+      env0 <- mkEnv sentRef
+      let env = env0
+            { _env_runTabCommand = \_chan mConv c ->
+                writeIORef spyRef (Just (mConv, c))
+            }
+          renameCmd = TabRenameCmd 0 "x"
+          ctx = emptyContext Nothing
+      ctx' <- executeSlashCommand env (CmdTab renameCmd) ctx
+      ctx' `shouldBe` ctx  -- /tab forwarding does not mutate the context
+      recorded <- readIORef spyRef
+      recorded `shouldBe` Just (Nothing, renameCmd)
 
     it "/new preserves usage counters" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)

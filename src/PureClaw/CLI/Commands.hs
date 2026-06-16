@@ -47,7 +47,8 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Tabs (overwriteTabs, readTabs)
 import PureClaw.Tabs.Persist (PersistDeps (..), loadTabs, saveTabs)
-import PureClaw.Tabs.Wiring (runTabbedLoop)
+import PureClaw.Tabs.Wiring (SessionStore, mkExecDeps, mkTabDispatchDeps, runTabbedLoop)
+import PureClaw.Routing.TabDispatch (TabDispatchDeps (..), runTabCommand)
 import PureClaw.Agent.SlashCommands
 import PureClaw.Routing.Config qualified as Routing
 import PureClaw.Routing.Types qualified as Routing
@@ -700,6 +701,13 @@ runChat consentChannel opts = do
         onFirstStreamDoneRef <- newIORef
           =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         mcpRef <- newIORef Map.empty
+        -- Task C2 (web /tab dispatch): the ONE shared session-handle pool the
+        -- tabbed loop ('runTabbedLoop') and the web @\/tab@ seam both bind
+        -- through. Created here (rather than privately inside 'runTabbedLoop')
+        -- so @/tab new@\/@/tab resume@ typed into the web chat box mutate the
+        -- SAME pool the loop drives — without it the two paths would
+        -- split-brain the session pool.
+        tabStore <- newIORef Map.empty :: IO SessionStore
         -- WU3 (Tabbed Chat #51) — load routing config from disk.
         routingCfg0    <- Routing.loadRoutingConfig pureclawDir
         let routingCfg = routingCfg0
@@ -715,6 +723,15 @@ runChat consentChannel opts = do
         -- env.registry includes the delegate tool. Haskell's laziness
         -- makes this safe — the tool closure only forces env when invoked.
         let fullRegistry = uncurry registerTool (delegateTaskTool env) registry
+            -- Task C2: the deps for the web @\/tab@ seam, built over the SAME
+            -- shared @tabStore@ the tabbed loop uses (mkExecDeps/mkTabDispatchDeps
+            -- close over @env@ lazily, exactly like '_env_onTabsChanged' /
+            -- '_env_startHarness' forward-reference 'frontendEnv').
+            tabExecDeps     = mkExecDeps env tabStore
+            tabDispatchDeps = mkTabDispatchDeps env tabExecDeps tabStore
+            -- The 'ConversationKey' the web path runs @\/tab@ against when the
+            -- caller supplies none (the web chat box has no 'ConversationKey').
+            webConvKey      = (CkWeb, ConversationId "web")
             env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -774,10 +791,19 @@ runChat consentChannel opts = do
                     (Left . harnessErrText)
                     (\(_sid, hid, _meta, key) -> Right (BoundHarness hid, key))
                     r
-              -- Task B: the dispatcher-reachable @\/tab@ command seam.
-              -- Defaulted to the unwired stub here; the real closure over the
-              -- shared @runTabCommand@ is wired in Task C.
-              , _env_runTabCommand    = noRunTabCommand
+              -- Task C2: the dispatcher-reachable @\/tab@ command seam, wired to
+              -- the shared @runTabCommand@ over @tabDispatchDeps@. The web path
+              -- captures dispatcher output via the scoped /capture/ channel
+              -- @chan@ (its '_env_channel'), NOT '_env_sinks' — so @_td_emit@ is
+              -- overridden to send the reply text to @chan@ rather than the
+              -- conversation's sink. @Nothing@ (no caller 'ConversationKey')
+              -- falls back to @webConvKey@.
+              , _env_runTabCommand    = \chan mConv cmd ->
+                  runTabCommand
+                    (tabDispatchDeps
+                       { _td_emit = \_ t -> _ch_send chan (OutgoingMessage t) })
+                    (fromMaybe webConvKey mConv)
+                    cmd
               }
         -- Start the frontend server and the activity probe loop under
         -- structured 'Async.withAsync' scopes so both are automatically
@@ -961,7 +987,7 @@ runChat consentChannel opts = do
             -- loop. It seeds each provider runtime's context from the session
             -- transcript directly (via 'loadRecentMessages'), so a
             -- foreground-wide message replay at boot is not needed here.
-            runTabbedLoop env
+            runTabbedLoop env tabStore
 
   case effectiveChannel of
     "signal" -> do
