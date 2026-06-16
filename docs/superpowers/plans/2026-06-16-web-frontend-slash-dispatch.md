@@ -43,23 +43,14 @@
 
 **Files:**
 - Modify: `src/PureClaw/Handles/Channel.hs`
-- Test: `test/Handles/ChannelSpec.hs` (create; register in `pureclaw.cabal` test suite `other-modules`)
+- Test: `test/Handles/ChannelSpec.hs` (**ALREADY EXISTS** and is registered in `pureclaw.cabal:276` with `mkNoOpChannelHandle`/`IncomingMessage`/`OutgoingMessage` describe blocks — APPEND a new describe block; do NOT recreate the module or drop the existing tests)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/Handles/ChannelSpec.hs`:
+In the EXISTING `test/Handles/ChannelSpec.hs`, add `mkCaptureChannelHandle` and `PublicError (..)` to the existing imports (the module already imports `PureClaw.Handles.Channel` and `Test.Hspec`; add `import Control.Exception (try)` and `import PureClaw.Core.Errors (PublicError (..))` if not present), and append this describe block to the existing `spec` (e.g. change the top-level `spec` to sequence the existing block and the new one with `do`):
 
 ```haskell
-module Handles.ChannelSpec (spec) where
-
-import Control.Exception (try, evaluate)
-import Test.Hspec
-
-import PureClaw.Core.Errors (PublicError (..))
-import PureClaw.Handles.Channel
-
-spec :: Spec
-spec = describe "mkCaptureChannelHandle" $ do
+  describe "mkCaptureChannelHandle" $ do
   it "buffers multiple _ch_send messages joined by newline" $ do
     (h, readOut) <- mkCaptureChannelHandle
     _ch_send h (OutgoingMessage "first")
@@ -96,9 +87,9 @@ spec = describe "mkCaptureChannelHandle" $ do
     (h, _) <- mkCaptureChannelHandle
     r <- try (_ch_receive h) :: IO (Either InteractiveUnsupported IncomingMessage)
     isLeft r `shouldBe` True
-  where
-    isLeft = either (const True) (const False)
 ```
+
+Use `Data.Either (isLeft)` (add the import) rather than a `where` clause, so this block appends cleanly without attaching a `where` to the existing module-level `spec`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -447,36 +438,50 @@ git commit -m "feat(slash-dispatch): runSlashInput seam with capture + interacti
 
 **Files:**
 - Modify: `src/PureClaw/Frontend/Server.hs`
-- Test: `test/Frontend/ServerSpec.hs` (create or extend; register in cabal)
+- Test: `test/Frontend/ServerSpec.hs` (**ALREADY EXISTS**, registered `pureclaw.cabal:412`. It contains `describe "mkFrontendSettings"`, `describe "corsMiddleware"`, and `describe "defaultFrontendConfig"`. Two existing assertions CONTRADICT the new default and MUST be rewritten — see Step 1.)
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Update the existing tests + add new ones**
+
+The existing `ServerSpec.hs` has assertions that encode the OLD all-interfaces default and the OLD hard-coded CORS origin. Update them, then add the new bind-host tests:
+
+1. **Rewrite the contradicting `mkFrontendSettings` host test** (`ServerSpec.hs:15`, currently `it "uses default host (all interfaces)"` asserting `Warp.getHost settings \`shouldBe\` "*4"`):
 
 ```haskell
-module Frontend.ServerSpec (spec) where
+    it "binds loopback by default" $ do
+      let settings = mkFrontendSettings defaultFrontendConfig
+      Warp.getHost settings `shouldBe` "127.0.0.1"
 
-import Test.Hspec
-import PureClaw.Frontend.Server
-
-spec :: Spec
-spec = describe "frontend bind host" $ do
-  it "defaults to loopback" $
-    _fsc_bindHost defaultFrontendConfig `shouldBe` "127.0.0.1"
-
-  it "classifies loopback hosts" $ do
-    isLoopbackHost "127.0.0.1" `shouldBe` True
-    isLoopbackHost "localhost" `shouldBe` True
-    isLoopbackHost "::1"       `shouldBe` True
-
-  it "flags non-loopback hosts (drives the startup WARN)" $ do
-    isLoopbackHost "0.0.0.0"     `shouldBe` False
-    isLoopbackHost "192.168.1.5" `shouldBe` False
-
-  it "CORS origin follows the configured bind host + port" $
-    corsAllowedOrigin (defaultFrontendConfig { _fsc_bindHost = "192.168.1.5", _fsc_port = 9000 })
-      `shouldBe` "http://192.168.1.5:9000"
+    it "binds the configured host" $ do
+      let settings = mkFrontendSettings (defaultFrontendConfig { _fsc_bindHost = "0.0.0.0" })
+      Warp.getHost settings `shouldBe` "*"   -- HostPreference "0.0.0.0" renders as "*"; confirm via Warp.getHost
 ```
 
-> Export `isLoopbackHost` and `corsAllowedOrigin` from `Server.hs` for testability. Confirm current default port is `8080` so the default-origin case stays `http://localhost:8080` if you also keep a localhost alias.
+> `Warp.getHost` returns a `HostPreference`; check how `"0.0.0.0"` renders (`"*"` vs `"0.0.0.0"`) and assert the actual value — adjust the literal to what `getHost` yields.
+
+2. **Update the CORS-origin test** (`ServerSpec.hs:71`, `it "uses the configured port in the origin"`, currently expecting `http://localhost:3456`). With the new default bind host `127.0.0.1`, the origin becomes `http://127.0.0.1:<port>`. Update its expected value to `http://127.0.0.1:3456` (and any other corsMiddleware test that asserts a `localhost` origin — the `corsMiddleware` block at lines 29-103 references `defaultFrontendConfig`, whose origin is now `http://127.0.0.1:<port>`).
+
+3. **Add a new `describe "bind host"` block** to the existing `spec`:
+
+```haskell
+  describe "bind host" $ do
+    it "defaults to loopback" $
+      _fsc_bindHost defaultFrontendConfig `shouldBe` "127.0.0.1"
+
+    it "classifies loopback hosts" $ do
+      isLoopbackHost "127.0.0.1" `shouldBe` True
+      isLoopbackHost "localhost" `shouldBe` True
+      isLoopbackHost "::1"       `shouldBe` True
+
+    it "flags non-loopback hosts (drives the startup WARN)" $ do
+      isLoopbackHost "0.0.0.0"     `shouldBe` False
+      isLoopbackHost "192.168.1.5" `shouldBe` False
+
+    it "CORS origin follows the configured bind host + port" $
+      corsAllowedOrigin (defaultFrontendConfig { _fsc_bindHost = "192.168.1.5", _fsc_port = 9000 })
+        `shouldBe` "http://192.168.1.5:9000"
+```
+
+> Export `isLoopbackHost` and `corsAllowedOrigin` from `Server.hs`. The existing `ServerSpec` already imports `PureClaw.Frontend.Server`, `Network.Wai.Handler.Warp qualified as Warp`, and `Test.Hspec` — no new imports needed for these.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -795,8 +800,8 @@ entryCountAtSend.current)`). A `kind:"slash"` response adds **no** transcript
 entry, so any site that does not special-case it leaves the spinner stranded and
 drops the slash output. The three sites:
 1. `useSendMessage(currentSessionId, refresh)` via `send(...)` (`App.tsx:476`, used by the main composer at `:600`).
-2. Direct `fetch(.../send)` for **branch creation** (`App.tsx:761`, after `setPendingMessage(trimmed)` at `:754`).
-3. Direct `fetch(.../send)` for a **new tab's first message** (`App.tsx:899`, after `setPendingMessage(trimmed)` at `:883`).
+2. Direct `fetch(.../send)` for the **adopt-window first message** (`App.tsx:761`, after `setPendingMessage(trimmed)` at `:754`).
+3. Direct `fetch(.../send)` for a **new-tab / branch first message** (`App.tsx:899`, after `setPendingMessage(trimmed)` at `:883`; covers both via the `isBranchSend` flag).
 
 - [ ] **Step 1: Read the current send paths**
 
