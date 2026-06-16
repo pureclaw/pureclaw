@@ -5,6 +5,7 @@ import { ChatArea } from './components/ChatArea'
 import { HarnessControls } from './components/HarnessControls'
 import { NewTabComposer } from './components/NewTabComposer'
 import { useTranscript, useSendMessage, useAgents, setSessionPrompt, setSessionArchived, setSessionDescription, closeTab, dismissTab, acknowledgeTab, releaseHarness, adoptWindow, destroyHarness } from './hooks/useApi'
+import type { SendResult } from './hooks/useApi'
 import { useListsStream } from './hooks/useListsStream'
 import { useNewTabSpec } from './hooks/useNewTabSpec'
 import { useTranscriptStream, reconcileEntries } from './hooks/useTranscriptStream'
@@ -481,6 +482,35 @@ export default function App() {
   // pendingMessage once the real transcript catches up.
   const [pendingMessageModel, setPendingMessageModel] = useState<string | null>(null)
   const entryCountAtSend = useRef(0)
+
+  // Transient slash-command output bubbles. A `kind:"slash"` send response
+  // adds NO transcript entry, so each bubble is held here (keyed + ordered by
+  // its send `seq`) and interleaved into the rendered messages by send order.
+  // These never persist — they vanish on reload (and on a session switch, see
+  // the reset effect below).
+  const [slashBubbles, setSlashBubbles] = useState<{ id: string; text: string; at: number }[]>([])
+  // Monotonic send sequence — orders slash bubbles relative to one another.
+  const seqRef = useRef(0)
+  // Slash output is tied to the focused session; clear it on a switch so a
+  // prior session's command output never bleeds into another's view.
+  useEffect(() => { setSlashBubbles([]) }, [currentSessionId])
+
+  // Route a parsed /send result. A `kind:"slash"` response is transient: we
+  // append a muted command-output bubble and clear the optimistic spinner
+  // immediately (no transcript entry will ever arrive to clear it). Returns
+  // true when the caller must NOT keep a pending spinner. Any other kind
+  // (assistant or an unknown/future value, per the open SendKind enum) falls
+  // through to the existing transcript-driven flow.
+  const handleSendResult = useCallback((res: SendResult | null, seq: number): boolean => {
+    if (res && res.kind === 'slash') {
+      setSlashBubbles((b) => [...b, { id: `slash-${seq}`, text: res.response, at: seq }])
+      setPendingMessage(null)
+      setPendingMessageModel(null)
+      return true
+    }
+    return false
+  }, [])
+
   const transcriptMessages = useMemo(() => transcriptToMessages(entries), [entries])
 
   // The most-recent `_te_model` COLUMN in the loaded transcript — the
@@ -553,9 +583,24 @@ export default function App() {
 
   const messages = useMemo(() => {
     const now = formatTimestamp(new Date().toISOString())
+    // Transient slash-command output rows, ordered by send seq. These are
+    // not in the transcript; they render as muted "command output" bubbles
+    // interleaved by send order (they were all sent after the current
+    // transcript content, so they sit at the bottom of the list).
+    const slashRows: Message[] = [...slashBubbles]
+      .sort((a, b) => a.at - b.at)
+      .map((sb) => ({
+        id: sb.id,
+        agentName: 'Command output',
+        agentStatus: 'idle' as const,
+        timestamp: now,
+        blocks: [{ id: sb.id + '-text', text: sb.text }],
+        slashBubble: true,
+      }))
     if (pendingMessage) {
       return [
         ...transcriptMessages,
+        ...slashRows,
         {
           id: 'pending-user',
           agentName: 'You',
@@ -576,6 +621,7 @@ export default function App() {
     if (sessionIsThinking) {
       return [
         ...transcriptMessages,
+        ...slashRows,
         {
           id: 'remote-thinking',
           agentName: thinkingAgentName,
@@ -586,8 +632,8 @@ export default function App() {
         },
       ]
     }
-    return transcriptMessages
-  }, [transcriptMessages, pendingMessage, sessionIsThinking, thinkingAgentName])
+    return [...transcriptMessages, ...slashRows]
+  }, [transcriptMessages, pendingMessage, sessionIsThinking, thinkingAgentName, slashBubbles])
 
   // Clear pending message when transcript gains new entries after the send
   useEffect(() => {
@@ -620,8 +666,14 @@ export default function App() {
     // the user hasn't overridden it, fall back to the most-recent
     // transcript `_te_model`; when that too is null, omit it (backend
     // falls back per §9.2).
-    send(message, modelOverride ?? lastTranscriptModel)
-  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions, sessions, modelOverride, lastTranscriptModel])
+    const seq = ++seqRef.current
+    const r = await send(message, modelOverride ?? lastTranscriptModel)
+    // A slash response adds NO transcript entry, so the transcript-growth
+    // effect that clears the optimistic spinner never fires — route the
+    // result through the helper, which renders the bubble and clears the
+    // spinner itself for kind:"slash".
+    handleSendResult(r, seq)
+  }, [send, entries.length, customPromptFile, currentSessionId, archivedSessions, sessions, modelOverride, lastTranscriptModel, handleSendResult])
 
   // Compose mode is implicit: selectedId === null means "no tab focused,
   // show the inline new-tab composer in the ChatArea". Clicking the "New
@@ -747,6 +799,7 @@ export default function App() {
         if (sid) {
           // Navigate into the adopted harness's conversation (mirrors the
           // new-session create flow), then send the typed first message.
+          const seq = ++seqRef.current
           if (trimmed.length > 0) {
             streamClient().focus(sid)
             entryCountAtSend.current = 0
@@ -758,11 +811,16 @@ export default function App() {
           window.history.pushState(null, '', pathFromSelectedId(newId))
           if (trimmed.length > 0) {
             try {
-              await fetch(`/api/sessions/${encodeURIComponent(sid)}/send`, {
+              const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/send`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: trimmed }),
               })
+              // A slash first message returns kind:"slash" with no transcript
+              // entry — route it so the bubble renders and the optimistic
+              // spinner is cleared (otherwise it would strand forever).
+              const sendBody = res.ok ? ((await res.json().catch(() => null)) as SendResult | null) : null
+              handleSendResult(sendBody, seq)
             } catch {
               // Best-effort: the conversation is open; the user can retry there.
             }
@@ -895,12 +953,18 @@ export default function App() {
         const firstSendModel = isBranchSend ? branchPrefixModel : composerSpec.model
         const sendBody: { message: string; model?: string } = { message: trimmed }
         if (firstSendModel && firstSendModel.trim()) sendBody.model = firstSendModel
+        const seq = ++seqRef.current
         try {
-          await fetch(`/api/sessions/${encodeURIComponent(tab.session_id)}/send`, {
+          const res = await fetch(`/api/sessions/${encodeURIComponent(tab.session_id)}/send`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(sendBody),
           })
+          // A slash first message returns kind:"slash" with no transcript
+          // entry — route it so the bubble renders and the optimistic
+          // spinner is cleared (otherwise it would strand forever).
+          const resultBody = res.ok ? ((await res.json().catch(() => null)) as SendResult | null) : null
+          handleSendResult(resultBody, seq)
         } catch {
           // Tab created; the message failed. The user can retry from
           // the new tab's transcript view.
@@ -911,7 +975,7 @@ export default function App() {
         refreshRef.current()
       }
     },
-    [composerSpec, branchDraft, modelOverride],
+    [composerSpec, branchDraft, modelOverride, handleSendResult],
   )
 
   // Sync state from browser back/forward navigation

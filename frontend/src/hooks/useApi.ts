@@ -226,6 +226,21 @@ export function useTranscript(sessionId: string | null) {
   return { entries, loading, refresh }
 }
 
+/** The `kind` discriminator the backend returns from POST
+ *  /api/sessions/{sid}/send. `"slash"` means the input was a slash command
+ *  whose response is TRANSIENT (never enters the transcript); `"assistant"`
+ *  means a normal turn whose reply lands in the transcript. Modelled as an
+ *  OPEN enum — the frontend must tolerate future/unknown kinds and route
+ *  them through the existing transcript-driven flow rather than asserting
+ *  the value is exactly one of the two known strings. */
+export type SendKind = 'slash' | 'assistant' | (string & {})
+
+/** Parsed 200 body of POST /api/sessions/{sid}/send. */
+export interface SendResult {
+  response: string
+  kind: SendKind
+}
+
 export function useSendMessage(sessionId: string | null, onComplete: () => void) {
   const [sending, setSending] = useState(false)
 
@@ -233,8 +248,15 @@ export function useSendMessage(sessionId: string | null, onComplete: () => void)
   // state, never persisted). When null/empty it is omitted from the body
   // so the backend falls back to the most-recent transcript `_te_model`
   // (else the global default) per §9.2.
-  const send = useCallback(async (message: string, model?: string | null) => {
-    if (!sessionId || sending) return
+  //
+  // Resolves to the parsed `{response, kind}` body on a 200 so the caller
+  // can route a `kind:"slash"` response into a transient command bubble
+  // (slash responses add NO transcript entry, so the transcript-growth
+  // spinner clear never fires for them). Resolves to null when there is
+  // no session, a send is already in flight, the response was non-ok, the
+  // body failed to parse, or the fetch threw.
+  const send = useCallback(async (message: string, model?: string | null): Promise<SendResult | null> => {
+    if (!sessionId || sending) return null
     setSending(true)
     try {
       const body: { message: string; model?: string } = { message }
@@ -247,9 +269,12 @@ export function useSendMessage(sessionId: string | null, onComplete: () => void)
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         console.error('Send failed:', err)
+        return null
       }
+      return (await res.json().catch(() => null)) as SendResult | null
     } catch (e) {
       console.error('Send error:', e)
+      return null
     } finally {
       setSending(false)
       onComplete()

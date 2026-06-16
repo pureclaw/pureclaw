@@ -367,3 +367,70 @@ describe('useSendMessage model body (U5)', () => {
     expect(body).toEqual({ message: 'hello' })
   })
 })
+
+describe('useSendMessage send result body', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => { globalThis.fetch = originalFetch })
+
+  it('resolves to the parsed {response, kind:"slash"} body on a 200', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ response: '/help output here', kind: 'slash' }),
+    })
+    const onComplete = vi.fn()
+    const { result } = renderHook(() => useSendMessage('sess-1', onComplete))
+    let resolved: unknown
+    await act(async () => {
+      resolved = await result.current.send('/help')
+    })
+    expect(resolved).toEqual({ response: '/help output here', kind: 'slash' })
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolves to the parsed {response, kind:"assistant"} body on a 200', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ response: 'hi there', kind: 'assistant' }),
+    })
+    const { result } = renderHook(() => useSendMessage('sess-1', vi.fn()))
+    let resolved: unknown
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toEqual({ response: 'hi there', kind: 'assistant' })
+  })
+
+  it('resolves to null on a non-ok response', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      json: () => Promise.resolve({ error: 'boom' }),
+    })
+    const { result } = renderHook(() => useSendMessage('sess-1', vi.fn()))
+    let resolved: unknown = 'unset'
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toBeNull()
+  })
+
+  it('resolves to null when the fetch throws', async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('net'))
+    const { result } = renderHook(() => useSendMessage('sess-1', vi.fn()))
+    let resolved: unknown = 'unset'
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toBeNull()
+  })
+
+  it('resolves to null when there is no session id', async () => {
+    globalThis.fetch = vi.fn()
+    const { result } = renderHook(() => useSendMessage(null, vi.fn()))
+    let resolved: unknown = 'unset'
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toBeNull()
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+})
