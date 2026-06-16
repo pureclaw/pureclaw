@@ -1,6 +1,7 @@
 module Tabs.WiringSpec (spec) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (throwIO)
 import Control.Monad qualified as M
@@ -212,8 +213,27 @@ trackingFork ref body = do
   pure runner
 
 -- | Cancel every tracked runner (idempotent; safe on already-finished asyncs).
+--
+-- A provider worker can be parked on an STM input queue whose only writer
+-- became unreachable when 'runTabbedLoop' returned on EOF. 'Async.cancel' of
+-- such a worker cannot reap it: its 'throwTo' races the RTS's
+-- @BlockedIndefinitelyOnSTM@ detector, which is slow (~40s) on macOS and never
+-- fires on Linux — the latter manifested as a 6-hour CI hang. So the cancels
+-- run concurrently under a single bound; a worker that does not reap in time is
+-- harmless (no reachable writer can feed it) and the RTS collects it. Without
+-- the bound, teardown — and thus the whole suite — could block forever.
 cancelAll :: IORef [TabRunner] -> IO ()
-cancelAll ref = readIORef ref >>= mapM_ _trun_cancel
+cancelAll ref = do
+  runners <- readIORef ref
+  M.void (timeout teardownBudgetMicros (Async.mapConcurrently_ _trun_cancel runners))
+
+-- | Upper bound on how long 'cancelAll' waits for all tracked runners to reap.
+-- Reachable runners (the relay writer, a live worker) cancel in microseconds, so
+-- this budget only bites for an orphaned worker that cannot be reaped at all —
+-- where waiting longer never helps. Kept small to keep teardown cheap; generous
+-- enough that a reachable worker mid-write always reaps well within it.
+teardownBudgetMicros :: Int
+teardownBudgetMicros = 500 * 1000
 
 -- ---------------------------------------------------------------------------
 -- Tabbed AgentEnv builder: real on-disk session + the 7 tab fields from
@@ -603,6 +623,31 @@ spec = do
         -- The action was read-and-cleared: the ref is now empty (no re-fire).
         cleared <- isNothing <$> readIORef (_env_onFirstStreamDone env)
         cleared `shouldBe` True
+
+    it "tears down provider-session runners promptly — no cancel hang (pureclaw-ctd)" $
+      withSystemTempDirectory "pc-wiring-teardown" $ \tmp -> do
+        -- Regression: a provider turn auto-starts a runtime whose worker parks
+        -- on an STM input queue. When 'runTabbedLoop' returns on EOF, that
+        -- queue's only writer (held by the loop-local session store) becomes
+        -- unreachable, so 'Async.cancel' of the worker cannot reap it — its
+        -- 'throwTo' races the RTS's BlockedIndefinitelyOnSTM detector, which is
+        -- slow (~40s) on macOS and NEVER fires on Linux (a 6-hour CI hang).
+        -- Teardown must therefore be bounded: it completes regardless.
+        let msgs =
+              [ mkInbound "conv-a" "alice" "/new"
+              , mkInbound "conv-a" "alice" "say hi"
+              ]
+        th <- mkTabbedEnvWith tmp msgs (Just (MkProvider ReplyProvider))
+                              (Just (ModelId "mock"))
+        let env = _th_env th
+        fired <- newEmptyMVar
+        writeIORef (_env_onFirstStreamDone env) (Just (putMVar fired ()))
+        _ <- timeout (5 * 1000000) (runTabbedLoop env)
+        -- Wait until the worker has run its turn and parked on its input queue
+        -- (the exact state in which the orphaned-queue cancel hang manifests).
+        _ <- timeout (5 * 1000000) (takeMVar fired)
+        tornDown <- timeout (5 * 1000000) (cancelAll (_th_runners th))
+        tornDown `shouldBe` Just ()
 
     it "/status reflects the active session transcript: messages + token totals (pureclaw-25k)" $
       withSystemTempDirectory "pc-wiring-status" $ \tmp -> do
