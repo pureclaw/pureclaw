@@ -1,20 +1,35 @@
----
-status: in-progress
-issue: 79
-spec: docs/superpowers/specs/2026-06-08-tabs-as-view-refactor-design.md
-plan: docs/superpowers/plans/2026-06-08-tabs-as-view-refactor.md
-design_review_gate: PASSED (2026-06-08)
-plan_review_gate: PASSED (2026-06-08, feasibility round 5)
-branch: feat/tabs-as-view-refactor
-execution_method: metaswarm-orchestrated (chosen 2026-06-08)
----
+# Active Plan
+<!-- approved: 2026-06-16 -->
+<!-- gate-iterations: 3 (all blockers fixed; Feasibility+Scope PASS every round) -->
+<!-- user-approved: true (execution: subagent-driven-development) -->
+<!-- status: in-progress -->
+<!-- design-review-gate: PASSED (5/5) -->
 
-# Approved: Tabs-as-View Refactor (GitHub #79)
+## Canonical plan
+Full implementation plan (10 tasks, TDD steps):
+  docs/superpowers/plans/2026-06-16-web-frontend-slash-dispatch.md
+Spec:
+  docs/superpowers/specs/2026-06-15-web-frontend-slash-dispatch-design.md
+Branch: feat/web-frontend-slash-dispatch
 
-Full plan: docs/superpowers/plans/2026-06-08-tabs-as-view-refactor.md (11 work units).
-Spec: docs/superpowers/specs/2026-06-08-tabs-as-view-refactor-design.md.
+## Goal
+Route the web frontend's handleSend through the same pre-inference slash-command
+classification + short-circuit the TUI/channels use, so /-commands never reach the
+LLM, with full command parity and a default-localhost trust boundary.
 
-Strategy: WU1-7 additive new modules; WU8 incremental migrate-first/delete-last
-cutover with -Werror locally relaxed (gitignored cabal.project.local -Wwarn);
-WU9 harness death; WU10 config+WARN+docs; WU11 restore -Werror + integration + gate.
-Trust model: single trusted operator. /new resets active tab; /nt new tab.
+## Task checklist
+- [ ] Task 1: Capture channel + InteractiveUnsupported (Handles/Channel.hs; append to existing ChannelSpec)
+- [ ] Task 2: Pure classifyInput (new Agent/SlashDispatch.hs)
+- [ ] Task 3: runSlashInput IO seam (capture + interactive deferral)
+- [ ] Task 4: Default-localhost bind + CORS-follows-host + fail-loud WARN (Server.hs; update existing ServerSpec)
+- [ ] Task 5: --bind CLI flag
+- [ ] Task 6: _fe_agentEnv field + shared mkTestAgentEnv (all 4 FrontendEnv sites)
+- [ ] Task 7: handleSend short-circuit + kind envelope (integration tests)
+- [ ] Task 8: Frontend kind-keyed transient bubble across ALL three send sites
+- [ ] Task 9: File interactive-commands GitHub issue + wire URL
+- [ ] Task 10: Coverage gate (cabal test --enable-coverage, 95% thresholds) + self-reflect + PR
+
+## Coverage
+.coverage-thresholds.json is source of truth: command `cabal test --enable-coverage`,
+thresholds 95 (lines/branches/functions/statements). Frontend.API is a staged waiver;
+new SlashDispatch + capture-channel modules must meet 95%.
