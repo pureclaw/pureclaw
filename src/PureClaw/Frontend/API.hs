@@ -1997,12 +1997,15 @@ handleSend env sid req respond = do
                               (_fe_sessionsDir env) meta
                     sref <- newIORef sh
                     pure (base { _env_channel = chan, _env_session = sref }, readOut)
-              slashRes <- runSlashInput base mkScoped userText
-              case slashRes of
-                SlashHandled out ->
+              slashOutcome <- try @SomeException (runSlashInput base mkScoped userText)
+              case slashOutcome of
+                Left e -> do
+                  _lh_logError (_fe_logger env) $ "Slash dispatch error: " <> T.pack (show e)
+                  respond $ jsonResponse status500 (object ["error" .= ("Command failed" :: Text)])
+                Right (SlashHandled out) ->
                   respond $ jsonResponse status200
                     (object ["response" .= out, "kind" .= ("slash" :: Text)])
-                SlashPassThrough _ -> do
+                Right (SlashPassThrough _) -> do
                   -- Non-slash input: the existing harness/provider path,
                   -- behaviour-identical, now tagged "kind" = "assistant".
                   --
