@@ -7,6 +7,7 @@ import Data.Text qualified as T
 import PureClaw.Agent.SlashCommands (SlashCommand (..))
 import PureClaw.Agent.SlashDispatch
 import PureClaw.Routing.Config (defaultRoutingConfig)
+import PureClaw.Routing.Types qualified as RT
 
 spec :: Spec
 spec = describe "classifyInput" $ do
@@ -37,3 +38,16 @@ spec = describe "classifyInput" $ do
     case classifyInput rc "/tab resume not a valid id!!" of
       ClassMessage m -> T.unpack m `shouldContain` "session id"
       other          -> expectationFailure ("expected ClassMessage, got " <> show other)
+
+  it "renders empty input distinctly" $
+    case classifyInput rc "" of
+      ClassMessage m -> T.unpack m `shouldContain` "Empty"
+      other          -> expectationFailure ("expected ClassMessage, got " <> show other)
+
+  it "renders an out-of-range tab index distinctly" $
+    -- index 5 exceeds a reduced tab cap, so parseInput yields
+    -- ParseErrorIndexOutOfRange (defaultRoutingConfig's cap is 36).
+    let rcSmall = rc { RT._rc_maxTabs = 1 }
+     in case classifyInput rcSmall "/5" of
+          ClassMessage m -> T.unpack m `shouldContain` "doesn't exist"
+          other          -> expectationFailure ("expected ClassMessage, got " <> show other)
