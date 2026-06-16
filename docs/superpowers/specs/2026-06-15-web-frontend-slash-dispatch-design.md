@@ -137,6 +137,17 @@ escalation for them):
   the full slash-command surface (including local code execution via
   `/mcp connect`) to anything that can reach that address**; use only on trusted
   networks.
+- **Fail loud on non-loopback bind.** When the configured bind host is not a
+  loopback address, emit a startup `WARN` to stderr (mirroring the existing
+  channel allow-list `AllowAll` warning pattern and the project's "fail loud"
+  principle) so an operator who opts into wide exposure gets a runtime reminder,
+  not just docs. The danger is also stated inline in the CLI flag's `--help`
+  text (the closest point-of-decision), not only in prose.
+- **CORS must follow the bind host.** `corsMiddleware`
+  (`Server.hs:75-91`) currently hard-codes `Allow-Origin` to
+  `http://localhost:<port>`. For a non-loopback bind the frontend's own requests
+  would otherwise be rejected, making the opt-in unusable; the allowed origin
+  must reflect the configured host so the opt-in path actually works.
 - This closes the design-review security blocker without subsetting commands:
   wide exposure becomes an informed choice rather than a silent default. A proper
   per-caller **auth/pairing model** for non-loopback binds is acknowledged as a
@@ -321,7 +332,15 @@ frontend keys rendering off `kind`, removing the brittle client-side
   shown for slash dispatch.
 - The slash bubble renders as a muted **system/command** style with a small
   "command output — not saved" affordance, so its disappearance on reload is not
-  surprising.
+  surprising. The transient state holds an **ordered list** appended in send
+  order (so `/help` then `/status` shows both, newest last), interleaved with
+  real turns by time. In v1, output emitted via `_ch_sendError` renders in the
+  same muted bubble as success output (no distinct error styling — a conscious
+  v1 decision; styling is the S5 future refinement).
+- The client treats `kind` as an **open enum**: unknown values fall back to
+  default (assistant) rendering rather than asserting the two-value union, so the
+  future interactive path can add a third kind (e.g. `slash-prompt`) without
+  breaking older clients.
 
 > Module layering: `Frontend.API` imports `Agent.SlashDispatch` / `Agent.Env` /
 > `Routing.Parse`; none import `Frontend.API` (finding #2). No cycle.
