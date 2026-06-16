@@ -5,7 +5,7 @@ import Data.Either (isLeft)
 import Data.Text (Text)
 import Test.Hspec
 
-import PureClaw.Core.Errors (PublicError (..))
+import PureClaw.Core.Errors
 import PureClaw.Core.Types
 import PureClaw.Handles.Channel
 

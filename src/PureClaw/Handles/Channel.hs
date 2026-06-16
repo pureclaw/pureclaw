@@ -122,6 +122,8 @@ mkCaptureChannelHandle = do
   buf <- newIORef []  -- reversed list of emitted fragments
   let append t = modifyIORef' buf (t :)
       handle = ChannelHandle
+        -- '_ch_receive'/'_ch_readSecret' take no label, so they throw with a
+        -- parenthesized sentinel identifying the method (not a user-facing prompt).
         { _ch_receive      = throwIO (InteractiveUnsupported "(receive)")
         , _ch_send         = \(OutgoingMessage t) -> append t
         , _ch_sendError    = append . renderPublicError
