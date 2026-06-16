@@ -171,12 +171,18 @@ Add `import qualified PureClaw.Session.Title as Title`. Delete `sessionLabel` (n
 - [ ] **Step 3: Implement.**
   - Add to `TabDispatchDeps` (`TabDispatch.hs`): `, _td_setSessionDescription :: !(SessionId -> Maybe Text -> IO (Either Text ()))`.
   - Rewrite `doRename` so that for a `BoundSession` slot it resolves the `SessionId` (via `registryLookupSlot` + `_tab_ref`), runs `Parse.sanitizeTabName name` (TUI-side), and on success calls `_td_setSessionDescription sid (Just clean)`, emitting the result (`Right () -> "renamed /N <clean>"`, `Left err -> err`). Remove the `rebindSlot`-relabel for session tabs. (Harness/raw-shell rename: out of scope here — emit "rename applies to session tabs" or leave as today; pin in self-review.)
-  - `mkTabDispatchDeps` (`Wiring.hs`): add `_td_setSessionDescription = <seam>`. The production impl is supplied by `CLI/Commands.hs` via a new `AgentEnv` field OR threaded directly — simplest: add `_env_setSessionDescription :: SessionId -> Maybe Text -> IO (Either Text ())` to `AgentEnv` (default `\_ _ -> pure (Left "not wired")`), wire `_td_setSessionDescription = _env_setSessionDescription env` in `mkTabDispatchDeps`, and set the real closure in `CLI/Commands.hs`.
-  - `CLI/Commands.hs`: the production `_env_setSessionDescription` does an HTTP `PUT http://127.0.0.1:<port>/api/sessions/<sid>/description` with body `{"description": <name>}` using the existing `manager` (the one `probeGatewayUp` uses), mapping non-2xx / exceptions to `Left <user message>`.
+  - **Thread the closure as a parameter — do NOT add an `AgentEnv` field** (adding one would break ~41 full `AgentEnv {...}` literals in `test/Agent/SlashCommandsSpec.hs` + `test/Tabs/WiringSpec.hs` under `-Wmissing-fields`). Instead:
+    - `mkTabDispatchDeps :: AgentEnv -> ExecDeps -> SessionStore -> (SessionId -> Maybe Text -> IO (Either Text ())) -> TabDispatchDeps` — add the closure param and set `_td_setSessionDescription = <closure>`.
+    - `runTabbedLoop :: AgentEnv -> SessionStore -> (SessionId -> Maybe Text -> IO (Either Text ())) -> IO ()` — add the param and pass it to its internal `mkTabDispatchDeps`.
+    - Update ALL `mkTabDispatchDeps` call sites (its internal use in `runTabbedLoop`; the web-seam use in `CLI/Commands.hs` from the `_env_runTabCommand` wiring; and `test/Frontend/APISpec.hs`'s `mkRunTabCommandSeam (mkTabDispatchDeps …)` site) and ALL `runTabbedLoop` callers (`CLI/Commands.hs`; `test/Integration/SignalFlowSpec.hs`; `test/Tabs/WiringSpec.hs`) — tests pass a fake/no-op `\_ _ -> pure (Right ())`.
+  - **`CLI/Commands.hs` builds the closure per `ServerMode`** (already in scope — the tui-requires-gateway change added it):
+    - `ServeFrontend` (gateway process owns the frontend): set the description **in-process** — `\sid mDesc -> do { r <- setDescription sessionsDir sid mDesc; case r of { Right () -> broadcastLists frontendEnv >> pure (Right ()); Left e -> pure (Left (renderSetDescErr e)) } }`. No self-HTTP.
+    - `RequireGateway` (tui process): HTTP `PUT http://127.0.0.1:<port>/api/sessions/<sid>/description` body `{"description": <name>}` via the existing `manager` (the one `probeGatewayUp` uses), mapping non-2xx / exceptions to `Left <user message>`. The gateway persists + broadcasts.
+    Pass this closure into `runTabbedLoop env tabStore <closure>` and the web-seam `mkTabDispatchDeps … <closure>`.
 
 - [ ] **Step 4: Clamp the description** — in `Frontend/API.hs` `handleSetDescription`, clamp `mDesc` to `snippetCharBudget` (120) chars before `setDescription` (so the override shares the snippet bound). Add a test in `test/Frontend/APISpec.hs`: a 500-char description is stored truncated to ≤120.
 
-- [ ] **Step 5: Run tests → PASS; full build (-Werror: all `AgentEnv` construction sites get `_env_setSessionDescription`; `mkTestAgentEnv` uses the default).** Commit:
+- [ ] **Step 5: Run tests → PASS; full build (-Werror clean — NO `AgentEnv` field added, so the SlashCommandsSpec/WiringSpec literals are untouched; only the `mkTabDispatchDeps`/`runTabbedLoop` signatures + their enumerated call sites change).** Commit:
 ```bash
 git add -A src/ test/
 git commit -m "feat(tabs): /tab rename re-targets session description via injectable gateway seam; cap description at 120"
@@ -265,11 +271,17 @@ git commit -m "refactor(tabs): remove _tab_name and _ts_name; tab labels derive 
 
 ---
 
+## Resolved during planning (verified by review)
+
+- `TranscriptEntry` is already a leaf type in `PureClaw.Transcript.Types` (NOT in `API.hs`) — so moving `firstMessageSnippet` into `Session.Title` has **no import cycle**. `Session.Title` imports `Transcript.Types` + `Session.Types` + Aeson/Text/System.IO.
+- The `AgentName -> Text` accessor is `unAgentName`; `_sm_autoSummary`/`_sm_description`/`_sm_agent`/`_sm_id` are the real `SessionMeta` field names.
+- `sessionLabel` (Wiring.hs) has exactly ONE caller (`recentSessions`) — safe to delete in Task 2.
+- `Parse.sanitizeTabName :: Text -> Either NameError Text` exists (Task 3).
+- `test/Tabs/PersistSpec.hs` ALREADY EXISTS — Task 4 Step 1 ADDS a test to it (not "create"). Note `parseTab` currently uses `o .: "name"` (a REQUIRED key) — it MUST switch to `.:?`/ignore, else even the project's own new files (which stop writing "name") fail to parse.
+
 ## Open verification items (resolve during implementation)
 
-- `TranscriptEntry` location (move to a leaf if it's in `API.hs`) — Task 1.
-- `AgentName -> Text` accessor; `_sm_autoSummary` field name — Task 1.
-- Whether `sessionLabel` has callers other than `recentSessions` — Task 2.
-- Harness rename behavior (out of scope here — emit a clear message) — Task 3.
-- Exact pencil CSS line numbers — Task 6.
-- Coverage waiver status of `Frontend.API`/`Tabs.Wiring` vs the new `TabDispatch`/`Session.Title` logic — Task 7.
+- Harness rename behavior (out of scope here — emit a clear "rename applies to session tabs" message) — Task 3.
+- `_td_recentSessions` is capped at the 50 most-recent sessions (`listSessions dir Nothing 50`). A tab bound to an older session won't be found in the recents list → `tabRow` falls back to the slot/harness label (never blank), which is acceptable; if exact titles for old open tabs matter, widen the cap or do a point lookup — note in Task 4 self-review.
+- Exact pencil CSS line numbers (`App.css:607-615`) — Task 6.
+- Coverage: `Session.Title` + the new `tabRow`/`doRename`/seam branches in `TabDispatch` are NOT waived (95%); cover the seam success+error arms with fakes — Task 7.
