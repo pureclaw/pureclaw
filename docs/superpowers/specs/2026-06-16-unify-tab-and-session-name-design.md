@@ -36,7 +36,7 @@ Everywhere a tab/session label is displayed, it resolves to `sessionDisplayTitle
 
 A custom name is `_sm_description`, written via the existing `PUT /api/sessions/{id}/description` (the single canonical writer; the web pencil already uses it).
 
-- **Web:** the rename affordance lives in **Active Tabs**. The existing chat-header pencil edits the focused active tab's session title; to satisfy "anything in Active Tabs," add an inline rename to each Active Tab sidebar item (double-click / pencil), which sets that session's description via the same endpoint. (Final affordance shape is a UI detail for the plan; the data path is fixed: it sets `_sm_description`.)
+- **Web:** the rename affordance is the existing **chat-header pencil** (it edits the focused active tab's session title via `PUT /description`). **Decision:** the pencil is currently revealed only on hover (`ChatArea.tsx` / the `editable-title-pencil` CSS) — make it **always visible** to improve discoverability. No per-tab inline rename is added; the focused active tab's pencil is sufficient.
 - **TUI:** `/tab rename <slot> <name>` resolves the slot to its `SessionId` (locally), then sets that session's description **by calling the gateway's `PUT /api/sessions/{id}/description`** (the TUI now requires a running gateway, so it can always reach it). The gateway persists to shared `session.json` and broadcasts to the browser.
 
 ### 3. Default (principle 2)
@@ -54,7 +54,16 @@ A rename in either surface sets `_sm_description` on the shared `session.json` v
 ## Explicitly out of scope
 
 - The tab **registry** split-brain — *which* sessions are open as tabs, their **slots / order / membership** — remains per-process. This change unifies only the **name**. (A separate effort if the user wants full registry sharing / the gateway-as-single-source-of-truth thin-client.)
-- Physically deleting the `_tab_name` field from `tabs.json`/`Tab`: optional follow-up. This design stops *using* it for the display name; whether to remove the field (and any harness-label fallback) is an implementation decision for the plan, weighed against blast radius. Harness tabs may retain a label fallback for the (rare) case where their session title is unavailable.
+
+## Remove the `_tab_name` field (decided)
+
+`_tab_name` is **deleted**, not just bypassed:
+
+- Remove it from the `Tab` record (`Tabs/Types.hs`) and from `tabs.json` serialization (`Persist.hs` `encodeTab`/`parseTab`). **Back-compat:** `parseTab` must tolerate (ignore) a `"name"` key in existing `tabs.json` files so older state loads cleanly; the name now derives from the session, so dropping the stored value is harmless.
+- Update all construction/mutation sites that set it (`registryAppend`/`appendTab`/`rebindSlot`/`bindNewTab`/`cmdTabNew`) to no longer take/store a name.
+- `/tab rename` (`doRename`) no longer relabels the registry — it re-targets the session description (see §2).
+- Remove `_ts_name` from the tab snapshot (`TabsView.hs`) since its only source was `_tab_name`; the frontend derives the label from the session (the snapshot already carries `sessionId`). This is a wire-contract change — update the frontend `TabInfo`/`mapTabInfo` accordingly.
+- **Harness tabs:** their name becomes their `SkHarness` session's title. The first-message snippet may be unhelpful for a harness, so define a sensible fallback in the session-title resolution (e.g. the harness flavour / window label) when the session title is empty — to be pinned in the plan.
 
 ## Affected surfaces (from investigation)
 
