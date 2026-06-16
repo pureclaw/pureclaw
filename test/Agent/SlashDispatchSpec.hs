@@ -2,15 +2,27 @@ module Agent.SlashDispatchSpec (spec) where
 
 import Test.Hspec
 
+import Data.Text (Text)
 import Data.Text qualified as T
 
+import PureClaw.Agent.Env (AgentEnv (..))
 import PureClaw.Agent.SlashCommands (SlashCommand (..))
 import PureClaw.Agent.SlashDispatch
+import PureClaw.Handles.Channel (mkCaptureChannelHandle)
 import PureClaw.Routing.Config (defaultRoutingConfig)
 import PureClaw.Routing.Types qualified as RT
+import Support.AgentEnv (mkTestAgentEnv)
+
+scopedCapture :: AgentEnv -> IO (AgentEnv, IO Text)
+scopedCapture base = do
+  (h, readOut) <- mkCaptureChannelHandle
+  pure (base { _env_channel = h }, readOut)
 
 spec :: Spec
-spec = describe "classifyInput" $ do
+spec = classifyInputSpec >> runSlashInputSpec
+
+classifyInputSpec :: Spec
+classifyInputSpec = describe "classifyInput" $ do
   let rc = defaultRoutingConfig
 
   it "passes ordinary chat through" $
@@ -51,3 +63,33 @@ spec = describe "classifyInput" $ do
      in case classifyInput rcSmall "/5" of
           ClassMessage m -> T.unpack m `shouldContain` "doesn't exist"
           other          -> expectationFailure ("expected ClassMessage, got " <> show other)
+
+runSlashInputSpec :: Spec
+runSlashInputSpec = describe "runSlashInput" $ do
+  it "passes ordinary chat through without building a scoped env" $ do
+    env <- mkTestAgentEnv
+    res <- runSlashInput env (error "mkScoped must not be called for passthrough") "hello there"
+    res `shouldBe` SlashPassThrough "hello there"
+
+  it "returns the captured output of a command" $ do
+    env <- mkTestAgentEnv
+    res <- runSlashInput env (scopedCapture env) "/help"
+    case res of
+      SlashHandled out -> out `shouldSatisfy` (not . T.null)
+      _                -> expectationFailure "expected SlashHandled"
+
+  it "short-circuits Switch/Inject without building a scoped env" $ do
+    env <- mkTestAgentEnv
+    res <- runSlashInput env (error "mkScoped must not be called for Switch") "/0"
+    case res of
+      SlashHandled _ -> pure ()
+      _              -> expectationFailure "expected SlashHandled"
+
+  it "converts InteractiveUnsupported into a deferral incl. buffered output" $ do
+    env <- mkTestAgentEnv
+    res <- runSlashInput env (scopedCapture env) "/vault setup"
+    case res of
+      SlashHandled out -> do
+        T.unpack out `shouldContain` "interactive"
+        T.unpack out `shouldContain` "/issues/"
+      _ -> expectationFailure "expected SlashHandled deferral"

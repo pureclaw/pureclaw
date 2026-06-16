@@ -9,20 +9,27 @@
 -- classified identically across every front end, and recognised
 -- commands / short-circuit messages never reach the LLM.
 --
--- The IO half ('runSlashInput') lands in a later task; it is
--- deliberately NOT defined or exported here.
+-- The IO half ('runSlashInput') classifies input and executes a
+-- recognised command against a lazily-built scoped env, returning the
+-- captured output.
 module PureClaw.Agent.SlashDispatch
   ( SlashResult (..)
   , SlashClass (..)
   , classifyInput
+  , runSlashInput
   ) where
 
+import Control.Exception (try)
 import Data.Text (Text)
 import Data.Text qualified as T
 
-import PureClaw.Agent.SlashCommands (SlashCommand)
+import PureClaw.Agent.Context (Context, addMessage, emptyContext)
+import PureClaw.Agent.Env (AgentEnv (..), envTranscript)
+import PureClaw.Agent.SlashCommands (SlashCommand, executeSlashCommand)
+import PureClaw.Handles.Channel (InteractiveUnsupported (..))
 import PureClaw.Routing.Parse qualified as Parse
 import PureClaw.Routing.Types qualified as RT
+import PureClaw.Session.Handle (loadRecentMessages)
 
 -- | Outcome the transport acts on. 'SlashHandled' must NOT reach
 -- inference.
@@ -68,3 +75,46 @@ renderParseError raw err = case err of
   _ -> "Unknown command: " <> firstWord <> ". Try /help."
   where
     firstWord = T.takeWhile (/= ' ') (T.stripStart raw)
+
+-- | Tracking issue for interactive-command support in the web UI. Embedded in
+-- the deferral message. Task 9 replaces this placeholder with the real URL.
+interactiveIssueUrl :: Text
+interactiveIssueUrl = "https://github.com/OWNER/REPO/issues/PENDING"
+
+-- | Execute one line of user input against a lazily-built scoped env.
+--
+-- @mkScoped@ builds (scoped env, output reader): the env's '_env_channel' is a
+-- capture channel and '_env_session' the target session. It is invoked ONLY for
+-- a recognized command, so passthrough chat and short-circuit messages pay no
+-- scoping cost.
+runSlashInput :: AgentEnv -> IO (AgentEnv, IO Text) -> Text -> IO SlashResult
+runSlashInput base mkScoped raw =
+  case classifyInput (_env_routingConfig base) raw of
+    ClassPass t      -> pure (SlashPassThrough t)
+    ClassMessage t   -> pure (SlashHandled t)
+    ClassCommand cmd -> do
+      (scoped, readOut) <- mkScoped
+      ctx <- buildContext scoped
+      outcome <- try (executeSlashCommand scoped cmd ctx)
+        :: IO (Either InteractiveUnsupported Context)
+      case outcome of
+        Right _ -> SlashHandled <$> readOut
+        Left (InteractiveUnsupported _) ->
+          SlashHandled . deferralMessage cmd <$> readOut
+
+-- | Build a Context from the scoped session's transcript so read-only commands
+-- (e.g. /status) report accurate counts. The Context returned by the command is
+-- discarded (output is transient).
+buildContext :: AgentEnv -> IO Context
+buildContext env = do
+  tx <- envTranscript env
+  history <- loadRecentMessages tx 50 100000
+  pure (foldl (flip addMessage) (emptyContext Nothing) history)
+
+-- | Render the user-facing deferral text for an interactive command, preserving
+-- any output the command buffered before it tried to prompt.
+deferralMessage :: SlashCommand -> Text -> Text
+deferralMessage _cmd buffered =
+  let note = "This command needs interactive input, which the web UI doesn't \
+             \support yet (tracking: " <> interactiveIssueUrl <> "). Use the CLI for now."
+   in if T.null buffered then note else buffered <> "\n" <> note
