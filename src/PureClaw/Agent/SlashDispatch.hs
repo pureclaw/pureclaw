@@ -17,6 +17,7 @@ module PureClaw.Agent.SlashDispatch
   , SlashClass (..)
   , classifyInput
   , runSlashInput
+  , deferralMessage
   ) where
 
 import Control.Exception (try)

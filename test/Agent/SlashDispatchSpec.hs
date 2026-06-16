@@ -19,7 +19,7 @@ scopedCapture base = do
   pure (base { _env_channel = h }, readOut)
 
 spec :: Spec
-spec = classifyInputSpec >> runSlashInputSpec
+spec = classifyInputSpec >> runSlashInputSpec >> deferralMessageSpec
 
 classifyInputSpec :: Spec
 classifyInputSpec = describe "classifyInput" $ do
@@ -92,4 +92,23 @@ runSlashInputSpec = describe "runSlashInput" $ do
       SlashHandled out -> do
         T.unpack out `shouldContain` "interactive"
         T.unpack out `shouldContain` "/issues/"
+        -- The buffered menu (sent before the interactive prompt) must be
+        -- preserved ahead of the deferral note, so a regression that drops
+        -- `buffered` from the deferral fails here.
+        T.unpack out `shouldContain` "Choose your vault authentication method:"
       _ -> expectationFailure "expected SlashHandled deferral"
+
+deferralMessageSpec :: Spec
+deferralMessageSpec = describe "deferralMessage" $ do
+  it "is the note alone when there is no buffered output" $ do
+    let m = deferralMessage CmdHelp ""
+    T.unpack m `shouldContain` "interactive"
+    T.unpack m `shouldContain` "/issues/"
+    -- No buffered prefix: the message starts with the note itself.
+    T.unpack m `shouldStartWith` "This command needs interactive input"
+
+  it "prepends buffered output before the note" $ do
+    let m = deferralMessage CmdHelp "BUFFERED"
+    T.unpack m `shouldContain` "BUFFERED\n"
+    T.unpack m `shouldContain` "interactive"
+    T.unpack m `shouldStartWith` "BUFFERED"
