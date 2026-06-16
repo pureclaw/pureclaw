@@ -65,6 +65,7 @@ import qualified Agent.MemorySpec
 import qualified Agent.CompactionSpec
 import qualified Agent.ContextTrackerSpec
 import qualified Agent.SlashCommandsSpec
+import qualified Agent.SlashDispatchSpec
 import qualified Providers.OpenAISpec
 import qualified Providers.OllamaSpec
 import qualified Providers.OpenRouterSpec
@@ -229,6 +230,7 @@ main = hspec $ do
   describe "Agent.Compaction" Agent.CompactionSpec.spec
   describe "Agent.ContextTracker" Agent.ContextTrackerSpec.spec
   describe "Agent.SlashCommands" Agent.SlashCommandsSpec.spec
+  describe "Agent.SlashDispatch" Agent.SlashDispatchSpec.spec
   describe "Providers.OpenAI" Providers.OpenAISpec.spec
   describe "Providers.Ollama" Providers.OllamaSpec.spec
   describe "Providers.OpenRouter" Providers.OpenRouterSpec.spec

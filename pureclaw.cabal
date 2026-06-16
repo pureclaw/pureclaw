@@ -143,6 +143,7 @@ library
     PureClaw.Agent.ContextTracker
     PureClaw.Agent.Identity
     PureClaw.Agent.SlashCommands
+    PureClaw.Agent.SlashDispatch
     -- Session
     PureClaw.Session.Handle
     PureClaw.Session.Kind
@@ -320,6 +321,7 @@ test-suite pureclaw-test
     Agent.CompactionSpec
     Agent.ContextTrackerSpec
     Agent.SlashCommandsSpec
+    Agent.SlashDispatchSpec
     Providers.OpenAISpec
     Providers.OllamaSpec
     Providers.OpenRouterSpec
