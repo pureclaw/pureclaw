@@ -940,9 +940,12 @@ runChat consentChannel opts = do
         (loadedTabs, loadedCursors) <- loadTabs bootPersistDeps
         overwriteTabs (_ts_tabRegistry tabSub) loadedTabs
         writeIORef (_ts_cursors tabSub) loadedCursors
+            -- Bind host precedence: --bind flag, else config-file bind_host,
+            -- else the loopback default.
         let feCfg = defaultFrontendConfig
                       { _fsc_bindHost =
-                          fromMaybe (_fsc_bindHost defaultFrontendConfig) (_co_bind opts)
+                          fromMaybe (_fsc_bindHost defaultFrontendConfig)
+                            (_co_bind opts <|> fmap T.unpack (_fc_bindHost fileCfg))
                       }
         Async.withAsync
           (runFrontend feCfg (Just frontendEnv) logger) $ \_serverAsync ->
