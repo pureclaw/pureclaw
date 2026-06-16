@@ -799,8 +799,10 @@ export default function App() {
         if (sid) {
           // Navigate into the adopted harness's conversation (mirrors the
           // new-session create flow), then send the typed first message.
-          const seq = ++seqRef.current
+          // Only consume a send `seq` when a message is actually sent.
+          let seq = 0
           if (trimmed.length > 0) {
+            seq = ++seqRef.current
             streamClient().focus(sid)
             entryCountAtSend.current = 0
             setPendingMessageModel(null)

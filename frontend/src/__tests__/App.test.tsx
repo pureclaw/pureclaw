@@ -842,3 +842,44 @@ describe('App slot-exhaustion (WU9)', () => {
     expect(utils.queryByLabelText('Tab kind')).toBeTruthy()
   })
 })
+
+describe('App slash-command response (Task 8)', () => {
+  it('a kind:"slash" /send response renders a transient bubble AND clears the optimistic thinking spinner', async () => {
+    mockFetchOk('x')
+    // The main composer's send goes through the mocked useSendMessage hook.
+    // A slash command resolves to a transient `{response, kind:"slash"}` body
+    // that adds NO transcript entry — so the only thing that can clear the
+    // optimistic pending spinner is handleSendResult.
+    sendSpy.mockResolvedValue({ response: 'help text', kind: 'slash' })
+
+    // Render focused on a provider session so the bottom input drives App's
+    // handleSend (the existing-session path), not the new-tab composer.
+    state.recentSessions = [providerSession('s-1')]
+    state.transcripts['s-1'] = [userEntry('e1', 'prior message')]
+    window.history.replaceState(null, '', '/session/s-1')
+    const utils = render(<App />)
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/help' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+    })
+
+    // The slash command was dispatched through the send hook.
+    expect(sendSpy).toHaveBeenCalledWith('/help', expect.anything())
+
+    // (a) A transient slash bubble appears with the command output.
+    const bubble = await utils.findByTestId('slash-bubble')
+    expect(bubble).toHaveTextContent('help text')
+    expect(bubble).toHaveTextContent(/command output\s*—\s*not saved/i)
+
+    // (b) The optimistic pending/thinking spinner is NOT left stranded — a
+    // slash response yields no transcript entry, so handleSendResult must
+    // clear it explicitly. The pending-thinking block (id="msg-pending-thinking")
+    // and its typing-dot spinner must be gone.
+    await waitFor(() => {
+      expect(document.getElementById('msg-pending-thinking')).toBeNull()
+    })
+    expect(document.querySelector('.typing-dot')).toBeNull()
+  })
+})
