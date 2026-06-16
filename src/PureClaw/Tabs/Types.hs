@@ -98,9 +98,6 @@ data Tab = Tab
     --   never set directly by callers — derived by 'appendTab'\/'removeSlot'.
   , _tab_ref    :: !TabRef
     -- ^ The bound ground-truth entity (unique across the list, I2).
-  , _tab_name   :: !Text
-    -- ^ Friendly label. (Sanitisation is the caller's responsibility — this
-    --   module stores the text verbatim.)
   , _tab_status :: !TabStatus
     -- ^ Liveness of the binding.
   }
@@ -138,15 +135,18 @@ emptyTabs = TabList []
 toList :: TabList -> [Tab]
 toList (TabList ts) = ts
 
--- | Append a new tab binding @ref@ with label @name@ at the next free slot.
+-- | Append a new tab binding @ref@ at the next free slot.
 --
 -- * If @ref@ is already bound, returns @'Left' ('AlreadyBound' i)@ where @i@
 --   is its current slot (I2 — no duplicate refs).
 -- * If all 36 slots are taken, returns @'Left' 'SlotsFull'@.
 -- * Otherwise the new tab lands at slot @length@ (preserving I1) with status
 --   'Live', and the new slot index is returned alongside the updated list.
-appendTab :: TabRef -> Text -> TabList -> Either TabsError (TabIndex, TabList)
-appendTab ref name tl@(TabList ts) =
+--
+-- Tabs no longer carry a friendly label of their own — a tab's display title
+-- derives from its bound session (or a harness label fallback) at render time.
+appendTab :: TabRef -> TabList -> Either TabsError (TabIndex, TabList)
+appendTab ref tl@(TabList ts) =
   case lookupRef ref tl of
     Just i  -> Left (AlreadyBound i)
     Nothing ->
@@ -158,7 +158,7 @@ appendTab ref name tl@(TabList ts) =
              -- (with a provisional slot 'reindex' overwrites) and 'reindex' to
              -- stamp contiguous slots @0..n@ (I1). The new tab is last, so its
              -- slot is the last stamped index, read back via 'NE.last'.
-             let placed = NE.fromList (reindex (ts ++ [Tab firstSlot ref name Live]))
+             let placed = NE.fromList (reindex (ts ++ [Tab firstSlot ref Live]))
              in Right (_tab_slot (NE.last placed), TabList (NE.toList placed))
 
 -- | The infinite stream of valid slots @0, 1, 2, …@ as a 'NonEmpty'. Built
@@ -211,10 +211,10 @@ setStatus ref status (TabList ts) =
         then t { _tab_status = status }
         else t
 
--- | Rebind the tab at @slot@ to a new @ref@ and @name@, /in place/ — the
--- slot, and the slots of every other tab, are unchanged (I1 preserved). The
--- rebound tab's status is reset to 'Live'. This backs @\/new@'s "reset the
--- active tab to a fresh session" semantics (design §6.1).
+-- | Rebind the tab at @slot@ to a new @ref@, /in place/ — the slot, and the
+-- slots of every other tab, are unchanged (I1 preserved). The rebound tab's
+-- status is reset to 'Live'. This backs @\/new@'s "reset the active tab to a
+-- fresh session" semantics (design §6.1).
 --
 -- The new @ref@ is dedup-checked against I2:
 --
@@ -227,8 +227,8 @@ setStatus ref status (TabList ts) =
 -- If no tab occupies @slot@, this is a no-op returning the list unchanged
 -- (@'Right'@) — callers that already verified an active tab never hit this,
 -- but it keeps the function total.
-rebindSlot :: TabIndex -> TabRef -> Text -> TabList -> Either TabsError TabList
-rebindSlot slot ref name tl@(TabList ts) =
+rebindSlot :: TabIndex -> TabRef -> TabList -> Either TabsError TabList
+rebindSlot slot ref tl@(TabList ts) =
   case lookupSlot slot tl of
     Nothing -> Right tl
     Just _  ->
@@ -238,7 +238,7 @@ rebindSlot slot ref name tl@(TabList ts) =
   where
     upd t =
       if unTabIndex (_tab_slot t) == unTabIndex slot
-        then t { _tab_ref = ref, _tab_name = name, _tab_status = Live }
+        then t { _tab_ref = ref, _tab_status = Live }
         else t
 
 -- ---------------------------------------------------------------------------

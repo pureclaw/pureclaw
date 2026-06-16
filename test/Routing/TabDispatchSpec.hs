@@ -279,18 +279,20 @@ harn t = case parseHarnessId (pad t) of
     -- Pad a short tag into a valid UUID string deterministically.
     pad s = "00000000-0000-0000-0000-0000000000" <> T.justifyRight 2 '0' s
 
--- | Append a session tab labelled @name@; return its ref.
+-- | Append a session tab; return its ref. Tabs no longer carry a label of
+-- their own; the @_name@ argument is retained for call-site readability.
 appendSession :: Fakes -> Text -> Text -> IO TabRef
-appendSession f sid name = do
+appendSession f sid _name = do
   let r = sess sid
-  _ <- registryAppend (f_reg f) r name
+  _ <- registryAppend (f_reg f) r
   pure r
 
--- | Append a harness tab; return its ref.
+-- | Append a harness tab; return its ref. The @_name@ argument is retained for
+-- call-site readability (tabs carry no label of their own).
 appendHarness :: Fakes -> HarnessId -> Text -> IO TabRef
-appendHarness f hid name = do
+appendHarness f hid _name = do
   let r = BoundHarness hid
-  _ <- registryAppend (f_reg f) r name
+  _ <- registryAppend (f_reg f) r
   pure r
 
 -- ---------------------------------------------------------------------------
@@ -603,16 +605,28 @@ closeSpec = describe "/close" $ do
 
 tabsSpec :: Spec
 tabsSpec = describe "/tabs" $ do
-  it "lists each tab with slot/name/kind/status plus the relay-mode line" $ do
-    f <- simpleFakes (MintsRef (sess "x"))
+  it "lists each tab with slot/title/kind/status plus the relay-mode line" $ do
+    -- A session row's display title derives from the session (resolved via
+    -- _td_recentSessions); a harness row falls back to the slot.
+    f <- mkFakes (MintsRef (sess "x")) [] [(SessionId "s0", "Alpha Title")] (const True)
     _ <- appendSession f "s0" "alpha"
     _ <- appendHarness f (harn "1") "beta"
     handleInbound (f_deps f) convA "/tabs"
     out <- lastEmit f
     let ls = T.lines out
     ls `shouldBe`
-      [ "/0  alpha  session  live"
-      , "/1  beta  harness  live"
+      [ "/0  Alpha Title  session  live"
+      , "/1  /1  harness  live"
+      , "Relay mode: focused — you only see output from this tab."
+      ]
+
+  it "falls back to the slot for a session with no recent-session title" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    handleInbound (f_deps f) convA "/tabs"
+    out <- lastEmit f
+    T.lines out `shouldBe`
+      [ "/0  /0  session  live"
       , "Relay mode: focused — you only see output from this tab."
       ]
 
@@ -623,20 +637,20 @@ tabsSpec = describe "/tabs" $ do
     handleInbound (f_deps f) convA "/tabs"
     out <- lastEmit f
     T.lines out `shouldBe`
-      [ "/0  ghost  harness  dead"
+      [ "/0  /0  harness  dead"
       , "Relay mode: focused — you only see output from this tab."
       ]
 
   it "marks the conversation's focused tab with (focused)" $ do
-    f <- simpleFakes (MintsRef (sess "x"))
+    f <- mkFakes (MintsRef (sess "x")) [] [(SessionId "s0", "Alpha Title")] (const True)
     _ <- appendSession f "s0" "alpha"
     _ <- appendHarness f (harn "1") "beta"
     handleInbound (f_deps f) convA "/1"   -- focus slot 1
     handleInbound (f_deps f) convA "/tabs"
     out <- lastEmit f
     T.lines out `shouldBe`
-      [ "/0  alpha  session  live"
-      , "/1  beta  harness  live  (focused)"
+      [ "/0  Alpha Title  session  live"
+      , "/1  /1  harness  live  (focused)"
       , "Relay mode: focused — you only see output from this tab."
       ]
 
@@ -649,7 +663,7 @@ tabsSpec = describe "/tabs" $ do
     handleInbound (f_deps f) convA "/tabs"
     out <- lastEmit f
     T.lines out `shouldBe`
-      [ "/0  beta  harness  live"
+      [ "/0  /0  harness  live"
       , "Relay mode: focused — you only see output from this tab."
       ]
 
@@ -666,8 +680,9 @@ renameSpec = describe "/rename" $ do
     -- The session description is updated via the injected seam (the canonical,
     -- cross-process name); the per-process tab label is NOT relabelled.
     descCalls f `shouldReturn` [(SessionId "s0", Just "new-name")]
+    -- Tabs carry no label of their own; the tab binding is untouched by rename.
     tl <- readTabs (f_reg f)
-    map _tab_name (toList tl) `shouldBe` ["old"]
+    map _tab_ref (toList tl) `shouldBe` [sess "s0"]
     lastEmit f `shouldReturn` "renamed /0 new-name"
 
   it "renames the active session tab when no slot is given" $ do
@@ -723,8 +738,9 @@ renameSpec = describe "/rename" $ do
     _ <- appendHarness f (harn "1") "beta"
     handleInbound (f_deps f) convA "/rename 1 joke"
     descCalls f `shouldReturn` []
+    -- Tabs carry no label of their own; the bindings are untouched.
     tl <- readTabs (f_reg f)
-    map _tab_name (toList tl) `shouldBe` ["alpha", "beta"]
+    map _tab_ref (toList tl) `shouldBe` [sess "s0", BoundHarness (harn "1")]
     lastEmit f `shouldReturn` "rename applies to session tabs only"
 
 -- ---------------------------------------------------------------------------
@@ -958,8 +974,9 @@ defaultSpec = describe "default text" $ do
     handleInbound (f_deps f) convA "/0"            -- focus it
     registrySetStatus (f_reg f) r0 Dead            -- harness dies
     handleInbound (f_deps f) convA "ping"
+    -- Tabs carry no label of their own; the warning names the tab by its slot.
     lastEmit f `shouldReturn`
-      "⚠ \"claude-code\" exited while you were away — message not sent; resend when ready"
+      "⚠ \"/0\" exited while you were away — message not sent; resend when ready"
     sentTexts f `shouldReturn` []                  -- message dropped
     cursorSlot f convA `shouldReturn` Nothing      -- cursor cleared
 
@@ -1055,10 +1072,11 @@ edgeSpec = describe "edge cases" $ do
     handleInbound (f_deps f) convA "/a"            -- switch to slot 10
     cursorSlot f convA `shouldReturn` Just 10
     lastEmit f `shouldReturn` "switched to /a"
-    -- /tabs renders the slot-10 row with an 'a' coordinate
+    -- /tabs renders the slot-10 row with an 'a' coordinate (the title falls
+    -- back to the same slot coordinate — these sessions have no recent title)
     handleInbound (f_deps f) convA "/tabs"
     out <- lastEmit f
-    out `shouldSatisfy` T.isInfixOf "/a  t10"
+    out `shouldSatisfy` T.isInfixOf "/a  /a  session  live"
     -- close it by its letter coordinate
     handleInbound (f_deps f) convA "/close a"
     lastEmit f `shouldReturn` "closed /a"
@@ -1070,7 +1088,6 @@ edgeSpec = describe "edge cases" $ do
     handleInbound (f_deps f) convA "1"            -- pick the only candidate (a session)
     tl <- readTabs (f_reg f)
     map _tab_ref (toList tl) `shouldBe` [BoundSession (SessionId "past")]
-    map _tab_name (toList tl) `shouldBe` ["session"]
     ensured f `shouldReturn` [BoundSession (SessionId "past")]
     lastEmit f `shouldReturn` "attached /0"
 
@@ -1151,11 +1168,12 @@ runTabCommandSpec = describe "runTabCommand" $ do
     released f `shouldReturn` []
 
   it "TabListCmd emits the tab listing" $ do
-    f <- simpleFakes (MintsRef (sess "x"))
+    -- The session row's title derives from the session (via _td_recentSessions).
+    f <- mkFakes (MintsRef (sess "x")) [] [(SessionId "s0", "Alpha Title")] (const True)
     _ <- appendSession f "s0" "alpha"
     runTabCommand (f_deps f) convA TabListCmd
     out <- lastEmit f
-    out `shouldSatisfy` T.isInfixOf "alpha"
+    out `shouldSatisfy` T.isInfixOf "Alpha Title"
 
   it "TabFocusCmd N focuses that slot (same as /N switch)" $ do
     f <- simpleFakes (MintsRef (sess "x"))

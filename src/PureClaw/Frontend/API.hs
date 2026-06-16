@@ -525,7 +525,7 @@ harnessEntriesToTabs entries =
     toTab idx e = TabSnapshot
       { _ts_index         = idx
       , _ts_kind          = "harness"
-      , _ts_name          = Registry._he_label e
+      , _ts_label         = Just (Registry._he_label e)
       , _ts_status        = livenessToTabStatus (Registry._he_liveness e)
       , _ts_sessionId     = Registry._he_sessionId e
       , _ts_extModified   = Registry._he_extModified e
@@ -1595,13 +1595,12 @@ createTab env tabKind mSeed respond =
         Just seed -> mapM_ (_th_record (_sh_transcript sh)) (_bseed_prefix seed)
         Nothing -> pure ()
       -- Bind the session into the first-class TabRegistry (WU7). The returned
-      -- slot is the tab's display index in the response. A label of the agent
-      -- name (else the session id) drives the sidebar title. The cap was
-      -- pre-checked in 'handleNewTab'; 'registryAppend' re-checks defensively
-      -- and a 'SlotsFull' (a lost race against a concurrent create) maps to the
-      -- same cap 409.
-      let tabName = maybe (unSessionId sid) unAgentName metaAgent
-      appended <- registryAppend (_fe_tabRegistry env) (BoundSession sid) tabName
+      -- slot is the tab's display index in the response. Tabs carry no label of
+      -- their own — the sidebar title derives from the bound session. The cap
+      -- was pre-checked in 'handleNewTab'; 'registryAppend' re-checks
+      -- defensively and a 'SlotsFull' (a lost race against a concurrent create)
+      -- maps to the same cap 409.
+      appended <- registryAppend (_fe_tabRegistry env) (BoundSession sid)
       case appended of
         Left SlotsFull ->
           respond $ jsonResponse status409
@@ -1667,14 +1666,15 @@ createHarnessTab env tabKind spec sk respond = do
   spawned <- spawnHarnessSession env spec sk
   case spawned of
     Left err -> respond $ harnessErrorResponse err
-    Right (sid, hid, updatedMeta, key) -> do
+    Right (sid, hid, updatedMeta, _key) -> do
       -- Bind the harness into the first-class TabRegistry (WU7) — only a
       -- successful spawn consumes a tab slot. The returned slot is the tab's
-      -- display index in the response; the label is the spawn's window key.
+      -- display index in the response. Tabs carry no label of their own — the
+      -- harness label fallback comes from the registry entry at render time.
       -- 'SlotsFull' here (a lost race against a concurrent create after the
       -- pre-check in 'handleNewTab') maps to the cap 409; the harness window is
       -- already up, but the tab cannot be surfaced, so report the cap.
-      appended <- registryAppend (_fe_tabRegistry env) (BoundHarness hid) key
+      appended <- registryAppend (_fe_tabRegistry env) (BoundHarness hid)
       case appended of
         Left SlotsFull ->
           respond $ jsonResponse status409

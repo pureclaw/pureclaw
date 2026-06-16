@@ -105,7 +105,7 @@ spec = do
       reg <- newTabRegistry
       let sid = SessionId "cli-20240101-120000-dualw"
       -- The frontend write path: append a BoundSession tab.
-      appended <- registryAppend reg (BoundSession sid) "claude-opus"
+      appended <- registryAppend reg (BoundSession sid)
       slot <- case appended of
         Left err   -> fail ("unexpected append failure: " <> show err)
         Right slot -> pure slot
@@ -125,7 +125,7 @@ spec = do
         writeSessionJson sessionsDir sid
         -- Persist a tab view (the chat surface's saveTabs on /nt).
         srcReg <- newTabRegistry
-        _ <- registryAppend srcReg (BoundSession sid) "claude-opus"
+        _ <- registryAppend srcReg (BoundSession sid)
         srcTabs <- readTabs srcReg
         saveTabs stateDir srcTabs emptyCursors
         -- Boot: load + reconcile, then SEED a FRESH shared registry.
@@ -145,8 +145,8 @@ spec = do
         createDirectoryIfMissing True stateDir
         writeSessionJson sessionsDir present  -- only the present session exists
         srcReg <- newTabRegistry
-        _ <- registryAppend srcReg (BoundSession present) "present"
-        _ <- registryAppend srcReg (BoundSession absent) "absent"
+        _ <- registryAppend srcReg (BoundSession present)
+        _ <- registryAppend srcReg (BoundSession absent)
         srcTabs <- readTabs srcReg
         saveTabs stateDir srcTabs emptyCursors
         (loadedTabs, _) <- loadTabs (bootDeps stateDir sessionsDir)
@@ -159,10 +159,10 @@ spec = do
       let old = SessionId "cli-20240101-120000-old"
           new = SessionId "cli-20240101-120000-new"
       reg <- newTabRegistry
-      _ <- registryAppend reg (BoundSession old) "old"
+      _ <- registryAppend reg (BoundSession old)
       -- Build the replacement list out-of-band.
       replReg <- newTabRegistry
-      _ <- registryAppend replReg (BoundSession new) "new"
+      _ <- registryAppend replReg (BoundSession new)
       replacement <- readTabs replReg
       overwriteTabs reg replacement
       afterTabs <- toList <$> readTabs reg
@@ -172,7 +172,7 @@ spec = do
       reg <- newTabRegistry
       let sid = SessionId "cli-20240101-120000-slot0"
       srcReg <- newTabRegistry
-      _ <- registryAppend srcReg (BoundSession sid) "s"
+      _ <- registryAppend srcReg (BoundSession sid)
       tabs <- readTabs srcReg
       overwriteTabs reg tabs
       case mkTabIndex 0 of

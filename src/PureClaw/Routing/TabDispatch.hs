@@ -219,7 +219,7 @@ runTabCommand deps conv cmd =
        TabCloseCmd _ ForceYes -> emit ctx closeForceMsg   -- mirror /close's --force rejection
        TabCloseCmd n ForceNo  -> closeSlot ctx (idx n)
        TabFocusCmd n          -> doSwitch  ctx (idx n)
-       TabResumeCmd sid       -> bindNewTab ctx (BoundSession sid) defaultSessionName "attached"
+       TabResumeCmd sid       -> bindNewTab ctx (BoundSession sid) "attached"
        TabNewCmd mKind mArg   -> cmdTabNew ctx (kindWords mKind ++ argWords mArg)
   where
     -- Reconstruct the @[Text]@ 'cmdTabNew' re-parses: the kind keyword (if any)
@@ -290,16 +290,11 @@ handleWizardReply ctx st raw = do
 -- already-bound ref), ensure its runtime, focus the conversation, confirm.
 bindWizardTarget :: Ctx -> WizardTarget -> IO ()
 bindWizardTarget ctx target =
-  bindNewTab ctx ref (targetLabel target) "attached"
+  bindNewTab ctx ref "attached"
   where
     ref = case target of
       AttachHarness h -> BoundHarness h
       ReopenSession s -> BoundSession s
-
--- | A terse default label for a freshly-attached wizard target.
-targetLabel :: WizardTarget -> Text
-targetLabel (AttachHarness _) = "harness"
-targetLabel (ReopenSession _) = "session"
 
 -- ---------------------------------------------------------------------------
 -- Stage 2 + 3: non-wizard dispatch
@@ -360,7 +355,7 @@ resetActiveTab ctx slot = do
       let oldRef = _tab_ref (Maybe.fromMaybe (impossible "resetActiveTab: slot vanished") mOld)
           tl'    = either (impossible "resetActiveTab: fresh ref already bound")
                           id
-                          (rebindSlot slot newRef defaultSessionName tl)
+                          (rebindSlot slot newRef tl)
       writeTabs ctx tl'
       release ctx oldRef
       ensure ctx newRef
@@ -379,19 +374,20 @@ cmdNt ctx = do
   mNew <- _td_newDefaultSession (_ctx_deps ctx)
   case mNew of
     Left msg     -> emit ctx msg
-    Right newRef -> bindNewTab ctx newRef defaultSessionName "new tab"
+    Right newRef -> bindNewTab ctx newRef "new tab"
 
 -- ---------------------------------------------------------------------------
 -- Shared: append-or-switch a new tab + confirm
 -- ---------------------------------------------------------------------------
 
--- | Append a tab binding @ref@ (label @name@), ensure its runtime, focus the
--- conversation on it, and emit @\<verb\> \/\<slot\>@. If @ref@ is already
--- bound (I2), switch to the existing tab instead of duplicating. Slot
--- exhaustion emits the §14 copy with no state change.
-bindNewTab :: Ctx -> TabRef -> Text -> Text -> IO ()
-bindNewTab ctx ref name verb = do
-  res <- registryAppend (_td_tabs (_ctx_deps ctx)) ref name
+-- | Append a tab binding @ref@, ensure its runtime, focus the conversation on
+-- it, and emit @\<verb\> \/\<slot\>@. If @ref@ is already bound (I2), switch to
+-- the existing tab instead of duplicating. Slot exhaustion emits the §14 copy
+-- with no state change. Tabs carry no label of their own — the display title
+-- derives from the bound session (or a harness label) at render time.
+bindNewTab :: Ctx -> TabRef -> Text -> IO ()
+bindNewTab ctx ref verb = do
+  res <- registryAppend (_td_tabs (_ctx_deps ctx)) ref
   case res of
     Left SlotsFull          -> emit ctx slotsFullMsg
     Left (AlreadyBound cur) -> do
@@ -452,23 +448,35 @@ closeSlot ctx slot = do
 -- relay mode.
 cmdTabs :: Ctx -> IO ()
 cmdTabs ctx = do
-  tl <- readTabs (_td_tabs (_ctx_deps ctx))
-  cs <- readIORef (_td_cursors (_ctx_deps ctx))
-  let focused = resolveCursorSlot (_ctx_conv ctx) cs tl
-      rows    = map (tabRow focused) (toList tl)
-      relay   = relayLine (relayModeFor ctx cs)
+  tl     <- readTabs (_td_tabs (_ctx_deps ctx))
+  cs     <- readIORef (_td_cursors (_ctx_deps ctx))
+  titles <- _td_recentSessions (_ctx_deps ctx)
+  let focused    = resolveCursorSlot (_ctx_conv ctx) cs tl
+      titleOf sid = lookup sid titles
+      rows       = map (tabRow focused titleOf) (toList tl)
+      relay      = relayLine (relayModeFor ctx cs)
   emit ctx (T.intercalate "\n" (rows ++ [relay]))
 
 -- | Render one @\/tabs@ row. The row for @focused@ (this conversation's cursor
 -- slot, if any) carries a trailing @(focused)@ marker so the user can see at a
 -- glance where plain text will go.
-tabRow :: Maybe TabIndex -> Tab -> Text
-tabRow focused t =
+--
+-- Tabs no longer carry a label of their own — a row's display title derives
+-- from the bound session (resolved via @titleOf@) for a 'BoundSession', or
+-- falls back to the slot for a 'BoundHarness' (or a session with no recorded
+-- title). The fallback keeps every row non-blank.
+tabRow :: Maybe TabIndex -> (SessionId -> Maybe Text) -> Tab -> Text
+tabRow focused titleOf t =
   "/" <> slotChar (_tab_slot t)
-    <> "  " <> _tab_name t
+    <> "  " <> title
     <> "  " <> kindLabel (_tab_ref t)
     <> "  " <> statusLabel (_tab_status t)
     <> (if focused == Just (_tab_slot t) then "  (focused)" else "")
+  where
+    slot  = "/" <> slotChar (_tab_slot t)
+    title = case _tab_ref t of
+      BoundSession sid -> Maybe.fromMaybe slot (titleOf sid)
+      BoundHarness _   -> slot
 
 -- | The trailing relay-mode line shown by @\/tabs@. Phrased as a full sentence
 -- so a first-time user understands which tabs' output reaches them without
@@ -587,7 +595,7 @@ cmdTabNew ctx rest = case kindKeyword of
       mNew <- _td_newDefaultSession (_ctx_deps ctx)
       case mNew of
         Left msg     -> emit ctx msg
-        Right newRef -> bindNewTab ctx newRef defaultSessionName "new tab"
+        Right newRef -> bindNewTab ctx newRef "new tab"
 
 -- | @\/tab new harness [\<flavour\>]@: build a default 'HarnessSpec' (flavour
 -- from the optional argument, defaulting to @claude-code@; local backend; no
@@ -597,8 +605,8 @@ spawnHarness :: Ctx -> [Text] -> IO ()
 spawnHarness ctx flavourArgs = do
   result <- _td_spawnHarness (_ctx_deps ctx) spec
   case result of
-    Left msg          -> emit ctx msg
-    Right (ref, label) -> bindNewTab ctx ref label "new harness"
+    Left msg        -> emit ctx msg
+    Right (ref, _label) -> bindNewTab ctx ref "new harness"
   where
     flavour = case flavourArgs of
       (f : _) -> fixedFlavourLookup (T.toLower f)
@@ -680,8 +688,9 @@ doDefault ctx text = do
       if _tab_status tab == Dead
         then do
           -- §8 deferred death warning: warn, clear the cursor, DROP the text
-          -- (never route it into the dead harness).
-          emit ctx (deferredDeathMsg (_tab_name tab))
+          -- (never route it into the dead harness). Tabs carry no label of
+          -- their own anymore, so the warning names the tab by its slot.
+          emit ctx (deferredDeathMsg ("/" <> slotChar (_tab_slot tab)))
           modifyCursor ctx (clearCursor (_ctx_conv ctx))
         else deliver ctx (_tab_ref tab) text
 
@@ -697,7 +706,7 @@ autoStartDefault ctx text = do
   case mNew of
     Left msg     -> emit ctx msg
     Right ref    -> do
-      res <- registryAppend (_td_tabs (_ctx_deps ctx)) ref defaultSessionName
+      res <- registryAppend (_td_tabs (_ctx_deps ctx)) ref
       case res of
         -- Slot exhaustion: surface the §14 copy with no state change.
         Left SlotsFull -> emit ctx slotsFullMsg
@@ -829,11 +838,6 @@ kindLabel (BoundHarness _) = "harness"
 statusLabel :: TabStatus -> Text
 statusLabel Live = "live"
 statusLabel Dead = "dead"
-
--- | The default label for a freshly-minted default-provider session tab
--- (@\/new@ \/ @\/nt@). Wizard-bound tabs use 'targetLabel' instead.
-defaultSessionName :: Text
-defaultSessionName = "session"
 
 -- ---------------------------------------------------------------------------
 -- Pinned copy (design §14)

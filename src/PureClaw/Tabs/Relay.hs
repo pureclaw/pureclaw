@@ -58,7 +58,6 @@ module PureClaw.Tabs.Relay
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Data.Text qualified as T
 
 import PureClaw.Handles.Tab (unTabIndex)
@@ -67,11 +66,9 @@ import PureClaw.Tabs.Types
   ( ConversationKey
   , CursorState (..)
   , RelayMode (..)
-  , Tab (..)
   , TabList
   , TabRef
   , lookupRef
-  , lookupSlot
   , relayModeFor
   , toList
   )
@@ -134,19 +131,13 @@ relayEvent deps cs globalDefault tl pinged src event =
     srcSlot :: Maybe Int
     srcSlot = unTabIndex <$> lookupRef src tl
 
-    -- The source tab's friendly name, if it is in the list.
-    srcName :: Maybe Text
-    srcName = do
-      i <- lookupRef src tl
-      _tab_name <$> lookupSlot i tl
-
-    -- A name-first activity ping for the source tab at its current slot, as a
-    -- 'BannerLine'. 'Nothing' when the source ref is absent (no name/slot).
+    -- A slot-keyed activity ping for the source tab, as a 'BannerLine'.
+    -- 'Nothing' when the source ref is absent (no slot). Tabs carry no label of
+    -- their own anymore, so the source is named by its current slot.
     activityPing :: Maybe ChannelEvent
     activityPing = do
-      name <- srcName
       slot <- srcSlot
-      pure (BannerLine (name <> " (/" <> T.pack (show slot) <> ") has new output"))
+      pure (BannerLine ("/" <> T.pack (show slot) <> " has new output"))
 
     -- How many tabs exist right now. A single-tab CLI stays unlabelled; a
     -- multi-tab session labels focused bursts so the speaker is identifiable.
@@ -155,12 +146,11 @@ relayEvent deps cs globalDefault tl pinged src event =
 
     -- A concise speaker label for the source tab at its current slot, as a
     -- 'BannerLine' (tab identity only — NO "has new output" activity suffix).
-    -- 'Nothing' when the source ref is absent (no name/slot).
+    -- 'Nothing' when the source ref is absent (no slot).
     focusedLabel :: Maybe ChannelEvent
     focusedLabel = do
-      name <- srcName
       slot <- srcSlot
-      pure (BannerLine (name <> " (/" <> T.pack (show slot) <> ")"))
+      pure (BannerLine ("/" <> T.pack (show slot)))
 
     deliver :: ConversationKey -> ChannelEvent -> IO ()
     deliver = _rl_sink deps

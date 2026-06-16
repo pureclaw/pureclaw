@@ -76,10 +76,12 @@ mkEntry hid label = Registry.HarnessEntry
   }
 
 -- | Build a 'TabList' with a single Live tab. Uses the exported 'appendTab'
--- pure operation; panics on error (only safe for unique refs in tests).
+-- pure operation; panics on error (only safe for unique refs in tests). Tabs
+-- no longer carry a label of their own; the @_name@ argument is retained for
+-- call-site readability and ignored.
 singleLiveTab :: TabRef -> Text -> TabsTypes.TabList
-singleLiveTab ref name =
-  case appendTab ref name emptyTabs of
+singleLiveTab ref _name =
+  case appendTab ref emptyTabs of
     Right (_, tl) -> tl
     Left  _       -> error "singleLiveTab: unexpected allocation error"
 
@@ -114,7 +116,9 @@ spec = do
             _ts_origin ts        `shouldBe` ""
             _ts_attachCommand ts `shouldBe` Nothing
             _ts_index ts         `shouldBe` 0
-            _ts_name ts          `shouldBe` "My Session"
+            -- Provider tabs carry no label fallback; the title derives from the
+            -- session (via _ts_sessionId) at the frontend.
+            _ts_label ts         `shouldBe` Nothing
           other -> expectationFailure ("expected 1 snapshot, got " <> show (length other))
 
     -- 2. BoundSession with Dead status → exited
@@ -144,6 +148,9 @@ spec = do
         case snaps of
           [ts] -> do
             _ts_kind ts          `shouldBe` "harness"
+            -- Harness tabs keep a label fallback (the registry entry's label)
+            -- so they never render blank even when the session id is Nothing.
+            _ts_label ts         `shouldBe` Just "claude-code"
             _ts_status ts        `shouldBe` livenessToTabStatus Registry.LivenessThinking
             _ts_status ts        `shouldBe` "running"
             _ts_origin ts        `shouldBe` "discovered"
@@ -180,6 +187,8 @@ spec = do
             _ts_status ts        `shouldBe` "exited"
             _ts_stale ts         `shouldBe` True
             _ts_sessionId ts     `shouldBe` Nothing
+            -- No registry entry survives, so there is no label fallback either.
+            _ts_label ts         `shouldBe` Nothing
             _ts_origin ts        `shouldBe` ""
             _ts_attachCommand ts `shouldBe` Nothing
           other -> expectationFailure ("expected 1 snapshot, got " <> show (length other))
@@ -191,14 +200,15 @@ spec = do
         -- session metadata (_sm_source, channelUserId, credentials) can
         -- possibly appear in a TabSnapshot by construction.  This test
         -- confirms the projected provider-tab fields are exactly the
-        -- Tab-derived values: name from _tab_name, sid from the ref,
-        -- kind "provider", status idle — nothing else.
+        -- Tab-derived values: no label fallback (the title derives from the
+        -- session), sid from the ref, kind "provider", status idle — nothing
+        -- else.
         let tl    = singleLiveTab (BoundSession sid1) "Protected"
             snaps = tabSnapshotsFromRegistry tl noHarness
         case snaps of
           [ts] -> do
             _ts_kind ts          `shouldBe` "provider"
-            _ts_name ts          `shouldBe` "Protected"
+            _ts_label ts         `shouldBe` Nothing
             _ts_status ts        `shouldBe` "idle"
             _ts_sessionId ts     `shouldBe` Just "session-abc"
             _ts_origin ts        `shouldBe` ""
@@ -216,7 +226,7 @@ spec = do
     describe "Multi-tab slot order" $ do
       it "snapshots are in slot order (index 0, 1)" $ do
         let tl0  = singleLiveTab (BoundSession sid1) "Tab0"
-            tl   = case appendTab (BoundSession (SessionId "session-def")) "Tab1" tl0 of
+            tl   = case appendTab (BoundSession (SessionId "session-def")) tl0 of
                      Right (_, tl') -> tl'
                      Left  _        -> error "appendTab failed"
             snaps = tabSnapshotsFromRegistry tl noHarness

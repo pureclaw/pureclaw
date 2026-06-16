@@ -26,7 +26,6 @@ module PureClaw.Tabs
   ) where
 
 import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, newIORef, readIORef)
-import Data.Text (Text)
 
 import PureClaw.Handles.Tab (TabIndex)
 import PureClaw.Tabs.Types
@@ -51,12 +50,12 @@ readTabs (TabRegistry ref) = readIORef ref
 overwriteTabs :: TabRegistry -> TabList -> IO ()
 overwriteTabs (TabRegistry ref) = atomicWriteIORef ref
 
--- | Append a tab binding @ref@ with label @name@, atomically. Returns the new
--- slot, or the pure 'TabsError' (dedup\/cap) without mutating on rejection.
-registryAppend :: TabRegistry -> TabRef -> Text -> IO (Either TabsError TabIndex)
-registryAppend (TabRegistry ref) tabRef name =
+-- | Append a tab binding @ref@, atomically. Returns the new slot, or the pure
+-- 'TabsError' (dedup\/cap) without mutating on rejection.
+registryAppend :: TabRegistry -> TabRef -> IO (Either TabsError TabIndex)
+registryAppend (TabRegistry ref) tabRef =
   atomicModifyIORef' ref $ \tl ->
-    case appendTab tabRef name tl of
+    case appendTab tabRef tl of
       Left err          -> (tl, Left err)
       Right (slot, tl') -> (tl', Right slot)
 

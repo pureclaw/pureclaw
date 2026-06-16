@@ -69,13 +69,13 @@ uuidFor n =
   where
     pad2 k = let s = show (k `mod` 100) in replicate (2 - length s) '0' <> s
 
--- | Build a 'TabList' by appending refs @0..k-1@ with placeholder names.
+-- | Build a 'TabList' by appending refs @0..k-1@.
 buildList :: Int -> TabList
 buildList k = go 0 emptyTabs
   where
     go i tl
       | i >= k = tl
-      | otherwise = case appendTab (refN i) ("tab" <> T.pack (show i)) tl of
+      | otherwise = case appendTab (refN i) tl of
           Right (_, tl') -> go (i + 1) tl'
           Left _         -> tl
 

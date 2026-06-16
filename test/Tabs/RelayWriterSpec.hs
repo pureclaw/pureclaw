@@ -87,9 +87,11 @@ idx n = case mkTabIndex n of
 anyIdx :: TabIndex
 anyIdx = idx 0
 
--- | Append a named tab, panicking on the impossible-here error.
+-- | Append a tab, panicking on the impossible-here error. Tabs no longer carry
+-- a label of their own; the @_name@ argument is retained only for call-site
+-- readability (it is ignored).
 append1 :: TabRef -> Text -> TabList -> TabList
-append1 ref name tl = case appendTab ref name tl of
+append1 ref _name tl = case appendTab ref tl of
   Right (_, tl') -> tl'
   Left e         -> error ("append1: " <> show e)
 
@@ -230,7 +232,7 @@ spec = do
       mapM_ (processOutput deps w (refN 0)) streamBurst
       recorded <- readIORef calls
       length recorded `shouldBe` 1
-      recorded `shouldBe` [Sent (OutgoingMessage "alpha (/0) has new output")]
+      recorded `shouldBe` [Sent (OutgoingMessage "/0 has new output")]
 
     it "FocusedOnly background gets no channel calls (DoD 3)" $ do
       reg <- newSinkRegistry
@@ -305,9 +307,9 @@ spec = do
       -- ping(1) + focused FullMsg(1) + ping-again(1) = the focused FullMsg plus
       -- two pings.
       final `shouldBe`
-        [ Sent (OutgoingMessage "alpha (/0) has new output")
+        [ Sent (OutgoingMessage "/0 has new output")
         , Sent (OutgoingMessage "focused")
-        , Sent (OutgoingMessage "alpha (/0) has new output")
+        , Sent (OutgoingMessage "/0 has new output")
         ]
 
   describe "processOutput on a NON-STREAMING channel (emitToConversation arms)" $ do

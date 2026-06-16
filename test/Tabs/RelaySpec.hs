@@ -71,9 +71,11 @@ sidN n = mkStreamId (fromIntegral n)
 anyIdx :: TabIndex
 anyIdx = idx 0
 
--- | Append a named tab, panicking on the impossible-here error.
+-- | Append a tab, panicking on the impossible-here error. Tabs no longer carry
+-- a label of their own; the @_name@ argument is retained only so the call sites
+-- read as documentation of the fixture (it is ignored).
 append1 :: TabRef -> Text -> TabList -> TabList
-append1 ref name tl = case appendTab ref name tl of
+append1 ref _name tl = case appendTab ref tl of
   Right (_, tl') -> tl'
   Left e         -> error ("append1: " <> show e)
 
@@ -92,15 +94,17 @@ withCursors = foldr (\(k, r) cs -> setCursor k r cs) emptyCursors
 withRelay :: ConversationKey -> RelayMode -> CursorState -> CursorState
 withRelay k m cs = cs { _cs_relay = Map.insert k m (_cs_relay cs) }
 
--- | The activity-ping event the engine is contracted to produce.
+-- | The activity-ping event the engine is contracted to produce. Tabs no
+-- longer carry a label of their own, so the source is named by its current
+-- slot only; the @_name@ argument is retained for call-site readability.
 ping :: Text -> Int -> ChannelEvent
-ping name slot = BannerLine (name <> " (/" <> T.pack (show slot) <> ") has new output")
+ping _name slot = BannerLine ("/" <> T.pack (show slot) <> " has new output")
 
 -- | The focused speaker-label event the engine is contracted to produce when
 -- more than one tab exists (a tab-identity label, WITHOUT the activity-ping
--- "has new output" suffix).
+-- "has new output" suffix). Slot-only, matching the engine.
 focusLabel :: Text -> Int -> ChannelEvent
-focusLabel name slot = BannerLine (name <> " (/" <> T.pack (show slot) <> ")")
+focusLabel _name slot = BannerLine ("/" <> T.pack (show slot))
 
 -- | Unsafe 'TabIndex' for tests (the int is always in range here).
 idx :: Int -> TabIndex
