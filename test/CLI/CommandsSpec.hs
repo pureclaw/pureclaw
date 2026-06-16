@@ -1,9 +1,15 @@
 module CLI.CommandsSpec (spec) where
 
+import Control.Exception (bracket)
 import Data.IORef
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Types (status200)
+import Network.Socket qualified as Socket
+import Network.Wai (responseLBS)
+import Network.Wai.Handler.Warp qualified as Warp
 import Options.Applicative
 import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
@@ -15,6 +21,7 @@ import PureClaw.Channels.Telegram (TelegramConfig (..))
 import PureClaw.CLI.Commands
 import PureClaw.CLI.Config
 import PureClaw.Core.Types
+import PureClaw.Frontend.Server (FrontendConfig (..), defaultFrontendConfig)
 import PureClaw.Handles.Log (LogHandle (..), LogLevel (..))
 import PureClaw.Security.Policy
 
@@ -378,3 +385,27 @@ spec = do
         contents `shouldContain` "[signal]"
         contents `shouldContain` "edf52444-6e27-4a42-a9ad-9f4f4aca9b26"
         warns `shouldContain` "no allow-list configured"
+
+  -- Step 1 of gateway-as-single-source-of-truth: `pureclaw tui` probes for an
+  -- already-running gateway via 'probeGatewayUp' before entering the
+  -- interactive loop. These tests pin the probe behaviour deterministically
+  -- (no real binary spawn, no fixed-port collisions): an ephemeral Warp server
+  -- standing in for the gateway frontend.
+  describe "probeGatewayUp" $ do
+    it "returns False when nothing is listening on the configured port" $ do
+      mgr <- HTTP.newManager HTTP.defaultManagerSettings
+      -- Grab a free port, immediately release it, then probe it: with no
+      -- listener the connection is refused and the probe must report down.
+      port <- bracket Warp.openFreePort (Socket.close . snd) (pure . fst)
+      let cfg = defaultFrontendConfig { _fsc_port = port }
+      probeGatewayUp mgr cfg `shouldReturn` False
+
+    it "returns True when a server answers on the configured port" $ do
+      mgr <- HTTP.newManager HTTP.defaultManagerSettings
+      -- A minimal app standing in for the gateway frontend: any 2xx response
+      -- means a gateway is listening (the real frontend serves GET /api/tabs).
+      let app _req respond =
+            respond (responseLBS status200 [] "[]")
+      Warp.testWithApplication (pure app) $ \port -> do
+        let cfg = defaultFrontendConfig { _fsc_port = port }
+        probeGatewayUp mgr cfg `shouldReturn` True

@@ -3,8 +3,11 @@ module PureClaw.CLI.Commands
     runCLI
     -- * Command types (exported for testing)
   , Command (..)
+  , ServerMode (..)
   , ChatOptions (..)
   , chatOptionsParser
+    -- * Gateway liveness probe (exported for testing)
+  , probeGatewayUp
     -- * Enums (exported for testing)
   , ProviderType (..)
   , MemoryBackend (..)
@@ -302,6 +305,18 @@ data Command
   | CmdImport ImportOptions (Maybe FilePath)  -- ^ Import an OpenClaw state directory
   deriving stock (Show, Eq)
 
+-- | Whether a chat session should serve the frontend\/web server itself, or
+-- require an already-running gateway to be reachable.
+--
+-- This is step 1 of making the gateway the single source of truth: @pureclaw
+-- gateway run@ ('ServeFrontend') still starts the embedded frontend server,
+-- while @pureclaw tui@ ('RequireGateway') no longer starts its own server and
+-- instead probes for a running gateway, erroring out if none is reachable.
+data ServerMode
+  = ServeFrontend    -- ^ Start the embedded frontend server (gateway mode).
+  | RequireGateway   -- ^ Do not serve a frontend; require an external gateway.
+  deriving stock (Show, Eq)
+
 -- | Full CLI parser with subcommands.
 cliParserInfo :: ParserInfo Command
 cliParserInfo = info (commandParser <**> helper)
@@ -355,8 +370,8 @@ runCLI = do
     -- unattended mode with no human picking a window ('CmdImport', and any
     -- future cron\/daemon\/background mode) maps to 'ConsentHeadless' so
     -- adoption fails closed.
-    CmdTui opts     -> runChat ConsentInteractive opts { _co_channel = Just "cli" }
-    CmdGateway opts -> runChat ConsentWeb opts
+    CmdTui opts     -> runChat ConsentInteractive RequireGateway opts { _co_channel = Just "cli" }
+    CmdGateway opts -> runChat ConsentWeb ServeFrontend opts
     CmdImport opts mPos -> runImport opts mPos
 
 -- | Import an OpenClaw state directory.
@@ -436,8 +451,8 @@ runImport opts mPositional = do
 -- gateway\/headless modes pass 'ConsentHeadless'. It is stored on the
 -- 'FrontendEnv' as '_fe_consentChannel' so the @POST \/api\/adopt@ endpoint can
 -- fail closed for non-interactive runs (design §8 B2 / SEC-1).
-runChat :: ConsentChannel -> ChatOptions -> IO ()
-runChat consentChannel opts = do
+runChat :: ConsentChannel -> ServerMode -> ChatOptions -> IO ()
+runChat consentChannel serverMode opts = do
   logger <- mkStderrLogHandleAt (fromMaybe LlInfo (_co_logLevel opts))
 
   -- --session and --prefix are mutually exclusive. We enforce this
@@ -975,17 +990,36 @@ runChat consentChannel opts = do
                           fromMaybe (_fsc_bindHost defaultFrontendConfig)
                             (_co_bind opts <|> fmap T.unpack (_fc_bindHost fileCfg))
                       }
-        Async.withAsync
-          (runFrontend feCfg (Just frontendEnv) logger) $ \_serverAsync ->
-          Async.withAsync
-            (Reconcile.runReconcileLoopWith
-               Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
-            $ \_probeAsync ->
             -- Tabs-as-View (GitHub #79) — the production entry is the tabbed
             -- loop. It seeds each provider runtime's context from the session
             -- transcript directly (via 'loadRecentMessages'), so a
             -- foreground-wide message replay at boot is not needed here.
-            runTabbedLoop env tabStore
+        let withReconcileLoop body =
+              Async.withAsync
+                (Reconcile.runReconcileLoopWith
+                   Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
+                (const body)
+        case serverMode of
+          -- Gateway mode: start the embedded frontend server alongside the
+          -- reconcile loop and the tabbed loop, exactly as before.
+          ServeFrontend ->
+            Async.withAsync
+              (runFrontend feCfg (Just frontendEnv) logger) $ \_serverAsync ->
+              withReconcileLoop (runTabbedLoop env tabStore)
+          -- TUI mode (step 1 of gateway-as-single-source-of-truth): do NOT
+          -- start an embedded frontend. Require a gateway to be reachable;
+          -- if none is, print a clear error and exit non-zero before entering
+          -- the interactive loop.
+          RequireGateway -> do
+            up <- probeGatewayUp manager feCfg
+            if up
+              then withReconcileLoop (runTabbedLoop env tabStore)
+              else do
+                _lh_logError logger $
+                  "No PureClaw gateway is running at http://127.0.0.1:"
+                    <> T.pack (show (_fsc_port feCfg))
+                    <> ". Start one with `pureclaw gateway run` before launching the TUI."
+                exitFailure
 
   case effectiveChannel of
     "signal" -> do
@@ -1124,6 +1158,21 @@ buildPolicy Nothing cmds =
     , _sp_autonomy              = Full
     , _sp_allowedRemoteCommands = AllowList Set.empty
     }
+
+-- | True iff a gateway frontend is reachable at the configured loopback
+-- address. Used by @pureclaw tui@ to require a running gateway before
+-- entering the interactive loop (step 1 of gateway-as-single-source-of-truth).
+--
+-- The frontend serves @GET \/api\/tabs@ once it is up, so a successful HTTP
+-- response (any status) means a gateway is listening. We probe 127.0.0.1 — a
+-- gateway bound to either 0.0.0.0 or 127.0.0.1 accepts loopback — on the
+-- configured port.
+probeGatewayUp :: HTTP.Manager -> FrontendConfig -> IO Bool
+probeGatewayUp mgr cfg = do
+  let url = "http://127.0.0.1:" <> show (_fsc_port cfg) <> "/api/tabs"
+  req <- HTTP.parseRequest url
+  r <- try (HTTP.httpNoBody req mgr) :: IO (Either HTTP.HttpException (HTTP.Response ()))
+  pure (either (const False) (const True) r)
 
 -- | Resolve the LLM provider from the provider type.
 -- Checks CLI flag first, then the vault for the API key.
