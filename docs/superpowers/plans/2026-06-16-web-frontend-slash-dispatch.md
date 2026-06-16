@@ -21,7 +21,8 @@
 | `src/PureClaw/Frontend/Server.hs` | `_fsc_bindHost` config, `setHost`, CORS follows host, non-loopback WARN | Modify |
 | `src/PureClaw/Frontend/API.hs` | `_fe_agentEnv` field; `handleSend` short-circuit; `kind` envelope | Modify |
 | `src/PureClaw/CLI/Commands.hs` | `--bind` flag → config; populate `_fe_agentEnv` | Modify |
-| `frontend/src/useApi.ts`, `frontend/src/App.tsx` | Read body; `kind`-keyed transient bubble | Modify |
+| `frontend/src/hooks/useApi.ts`, `frontend/src/App.tsx` | Read body; `kind`-keyed transient bubble; cover ALL three send sites | Modify |
+| `frontend/src/hooks/__tests__/useApi.test.ts` (+ an App-level test) | vitest: `kind:"slash"` returned + no stranded spinner | Modify |
 | `test/Agent/SlashDispatchSpec.hs` | Unit tests for classify + run | Create |
 | `test/Handles/ChannelSpec.hs` (or existing) | Capture channel unit tests | Create/Modify |
 | `test/Frontend/ServerSpec.hs` (or existing) | Bind-host + CORS tests | Create/Modify |
@@ -374,7 +375,7 @@ Add imports:
 import Control.Exception (try)
 import PureClaw.Agent.Env (AgentEnv (..), envTranscript)
 import PureClaw.Agent.SlashCommands (SlashCommand (..), executeSlashCommand)
-import PureClaw.Core.Types (emptyContext, addMessage)  -- confirm exact module/exports
+import PureClaw.Agent.Context (emptyContext, addMessage)  -- emptyContext :: Maybe Text -> Context; addMessage :: Message -> Context -> Context
 import PureClaw.Handles.Channel (InteractiveUnsupported (..))
 import PureClaw.Session.Handle (loadRecentMessages)
 ```
@@ -413,7 +414,7 @@ runSlashInput base mkScoped raw =
 -- | Build a Context from the scoped session's transcript so read-only
 -- commands (e.g. /status) report accurate counts. The returned Context from
 -- the command is discarded (output is transient).
-buildContext :: AgentEnv -> IO _   -- ^ Context (use the concrete type)
+buildContext :: AgentEnv -> IO Context
 buildContext env = do
   tx <- envTranscript env
   history <- loadRecentMessages tx 50 100000
@@ -426,7 +427,7 @@ deferralMessage _cmd buffered =
   in if T.null buffered then note else buffered <> "\n" <> note
 ```
 
-> Replace the `_` in `buildContext :: AgentEnv -> IO _` with the concrete `Context` type and fix the import (`grep -n "emptyContext ::\|addMessage ::\|type Context\|data Context" src/PureClaw/Core/Types.hs`). Mirror `doCompletion` (`API.hs:2274`) which does `foldl (flip addMessage) (emptyContext systemPrompt) history`. Keep `issueUrlMarker` in the test as a substring of `interactiveIssueUrl` (e.g. `"/issues/"`).
+> `Context`, `emptyContext`, and `addMessage` are in `PureClaw.Agent.Context` (verified: `Context.hs:45,49`) — NOT `Core.Types`. `API.hs` already imports `Agent.Context`. This mirrors `doCompletion` (`API.hs:2274`): `foldl (flip addMessage) (emptyContext systemPrompt) history`. Keep `issueUrlMarker` in the test as a substring of `interactiveIssueUrl` (e.g. `"/issues/"`).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -530,14 +531,14 @@ In `corsMiddleware`, replace the hard-coded `origin` with `encodeUtf8 (corsAllow
 ```haskell
   if isLoopbackHost (_fsc_bindHost cfg)
     then pure ()
-    else _lh_logError logger $
-      "WARNING: web frontend bound to non-loopback host " <> T.pack (_fsc_bindHost cfg)
+    else _lh_logWarn logger $
+      "web frontend bound to non-loopback host " <> T.pack (_fsc_bindHost cfg)
         <> " — the FULL slash-command surface (including local code execution via "
         <> "/mcp connect) is reachable by anything that can reach this address. "
         <> "Use only on trusted networks."
 ```
 
-> Confirm the logger field/function name for stderr-level output (`grep -n "_lh_logError\|logError\|_lh_" src/PureClaw/Handles/Log.hs`). Confirm `Warp.setHost` is exported by the Warp version in use (`grep -rn "setHost" ~/.cabal 2>/dev/null` or check Warp docs); it takes a `HostPreference` which has an `IsString` instance, hence `fromString`.
+> `_lh_logWarn` is the WARN-level logger field (verified `Log.hs:26`; it prefixes "WARN"). `Warp.setHost :: HostPreference -> Settings -> Settings` is available in the Warp version in use (3.4.x); `HostPreference` has an `IsString` instance, hence `fromString`.
 
 - [ ] **Step 4: Run test + full build**
 
@@ -652,8 +653,9 @@ In `API.hs`, add to `FrontendEnv` (after `_fe_maxToolIterations`, keep it LAZY �
 ```haskell
   , _fe_agentEnv :: AgentEnv
     -- ^ Shared base env; '_env_channel'/'_env_session' are overridden
-    -- per request by the slash-dispatch caller. Lazy back-edge (mirrors the
-    -- existing _env_onTabsChanged/_env_startHarness thunks).
+    -- per request by the slash-dispatch caller. Leave LAZY (no bang): in
+    -- Commands.hs 'env' and 'frontendEnv' are bound in the same recursive
+    -- 'let', so this back-edge ties the knot without forcing at construction.
 ```
 
 Add `import PureClaw.Agent.Env (AgentEnv (..))` to `API.hs` if not present (verify no cycle: `Agent.Env` does not import `Frontend.API`).
@@ -779,43 +781,96 @@ git commit -m "feat(frontend): short-circuit slash commands in handleSend; add r
 
 ---
 
-## Task 8: Frontend rendering (`kind`-keyed transient bubble)
+## Task 8: Frontend rendering (`kind`-keyed transient bubble) — ALL three send sites
 
 **Files:**
-- Modify: `frontend/src/useApi.ts`, `frontend/src/App.tsx`
+- Modify: `frontend/src/hooks/useApi.ts`, `frontend/src/App.tsx`
+- Test: `frontend/src/hooks/__tests__/useApi.test.ts`
 
-- [ ] **Step 1: Read the current send path**
+**Context — there are THREE send sites in `App.tsx`, not one.** All POST to
+`/api/sessions/{sid}/send`, and EACH sets `setPendingMessage(trimmed)` before the
+request, relying on the optimistic `pending-thinking` block being cleared when the
+transcript grows (`App.tsx:594`, `if (pendingMessage && entries.length >
+entryCountAtSend.current)`). A `kind:"slash"` response adds **no** transcript
+entry, so any site that does not special-case it leaves the spinner stranded and
+drops the slash output. The three sites:
+1. `useSendMessage(currentSessionId, refresh)` via `send(...)` (`App.tsx:476`, used by the main composer at `:600`).
+2. Direct `fetch(.../send)` for **branch creation** (`App.tsx:761`, after `setPendingMessage(trimmed)` at `:754`).
+3. Direct `fetch(.../send)` for a **new tab's first message** (`App.tsx:899`, after `setPendingMessage(trimmed)` at `:883`).
 
-Read `frontend/src/useApi.ts` (`useSendMessage`, ~lines 236-257) and `frontend/src/App.tsx` (`handleSend`, the optimistic `pending-*` blocks, and `transcriptToMessages`). Note: `useSendMessage` currently ignores the 200 body.
+- [ ] **Step 1: Read the current send paths**
 
-- [ ] **Step 2: Plumb the response body**
+Read `frontend/src/hooks/useApi.ts` (`useSendMessage`, ~lines 229-245 — currently ignores the 200 body) and `frontend/src/App.tsx` around lines 476, 594-618, 752-761, 878-899 (the three send sites + the optimistic `pending-*` machinery + `transcriptToMessages`).
 
-In `useSendMessage`, parse the 200 JSON and return `{ response, kind }` to the caller. Type it as an open enum:
+- [ ] **Step 2: Write the failing test**
+
+In `frontend/src/hooks/__tests__/useApi.test.ts` (vitest; follow the existing file's `vi.fn`/`global.fetch` mock pattern), assert `useSendMessage` surfaces the `kind` field:
 
 ```ts
-type SendKind = "slash" | "assistant" | string;  // open: unknown -> assistant fallback
-interface SendResult { response: string; kind: SendKind; }
+it("returns the response body kind so the caller can detect a slash result", async () => {
+  viMockFetchJson({ response: "Commands: ...", kind: "slash" });   // helper in this file
+  const { result } = renderHook(() => useSendMessage("s1", () => {}));
+  const r = await act(() => result.current.send("/help"));
+  expect(r).toEqual({ response: "Commands: ...", kind: "slash" });
+});
 ```
 
-- [ ] **Step 3: Render the transient slash bubble**
+Run: `cd frontend && npx vitest run useApi` — Expected: FAIL (`send` returns `void` today).
 
-In `App.tsx`, hold an ordered transient list separate from the transcript-derived memo:
+- [ ] **Step 3: Plumb the response body through `useSendMessage`**
+
+Parse the 200 JSON and return it. Open-enum the kind so unknown values fall back to assistant:
 
 ```ts
-const [slashBubbles, setSlashBubbles] = useState<{ id: string; text: string }[]>([]);
+export type SendKind = "slash" | "assistant" | (string & {});
+export interface SendResult { response: string; kind: SendKind; }
+// in useSendMessage: on res.ok, `const body = await res.json(); return body as SendResult;`
+// keep the existing error-path behavior unchanged.
 ```
 
-In `handleSend`: when `kind === "slash"`, append `{ id, text: response }` to `slashBubbles` and do NOT engage the `pending-*`/thinking optimistic flow; otherwise use the existing assistant flow (treat unknown `kind` as assistant). Render `slashBubbles` interleaved by send order with a muted "command output — not saved" style. They are component state, so they clear on reload (intended).
+Run: `cd frontend && npx vitest run useApi` — Expected: PASS.
 
-- [ ] **Step 4: Verify**
+- [ ] **Step 4: Centralize `kind`-aware handling and apply it to ALL three sites**
 
-Build the frontend per its existing tooling (`grep -n "\"build\"\|\"test\"\|vite\|jest\|vitest" frontend/package.json`). If a test runner exists, add a test asserting a `kind:"slash"` response renders a command bubble and adds no transcript turn; otherwise verify via the `visual-review` skill / manual run. Run the app (`run` skill) and confirm `/help` shows a command bubble and is not sent to the model.
+In `App.tsx`, add the transient bubble state and one helper that every send site
+routes its result through, so the spinner is suppressed for slash results:
 
-- [ ] **Step 5: Commit**
+```ts
+const [slashBubbles, setSlashBubbles] = useState<{ id: string; text: string; at: number }[]>([]);
+
+// Call with the parsed send result (from useSendMessage or a direct fetch).
+// Returns true if it was a slash result (caller must NOT keep a pending spinner).
+function handleSendResult(res: SendResult | null, seq: number): boolean {
+  if (res && res.kind === "slash") {
+    setSlashBubbles(b => [...b, { id: `slash-${seq}`, text: res.response, at: seq }]);
+    setPendingMessage(null);      // clear the optimistic spinner immediately
+    setPendingMessageModel(null);
+    return true;
+  }
+  return false;                   // assistant (or unknown) -> existing transcript-driven flow
+}
+```
+
+- Site 1 (`useSendMessage`): `const r = await send(message); handleSendResult(r, Date.now());`
+- Site 2 (branch, `:761`) and Site 3 (new-tab, `:899`): after the `await fetch(...)`, parse the body and call `handleSendResult(await res.json(), Date.now())`. For these two, gate the `setPendingMessage(trimmed)` so that when the result is slash the spinner is cleared (the helper does this).
+
+Render `slashBubbles` interleaved by `at` with the existing message list, in a muted **system/command** style with a small "command output — not saved" label. Unknown `kind` falls through to the assistant path (graceful for the future `slash-prompt` kind). `slashBubbles` is component state, so it clears on reload (intended).
+
+- [ ] **Step 5: Write the regression test for the stranded-spinner bug**
+
+Add a test (in `useApi.test.ts` or an `App`-level test if the suite has React Testing Library — `grep -n "@testing-library/react\|renderHook" frontend/src/**/*.test.ts*`) asserting that a slash send does NOT leave a pending spinner. At minimum, a hook/unit test that `handleSendResult({response, kind:"slash"}, n)` returns `true` and a non-slash result returns `false`; if an App-level harness exists, assert that submitting `/help` as a new-tab first message renders a command bubble and shows no thinking indicator.
+
+Run: `cd frontend && npx vitest run` — Expected: PASS.
+
+- [ ] **Step 6: Manual confirmation**
+
+Run the app (`run` skill) and confirm: typing `/help` in the main composer, in a new tab's first message, and in a branch all show a command bubble, clear immediately (no stuck spinner), and never reach the model.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add frontend/src/useApi.ts frontend/src/App.tsx
-git commit -m "feat(frontend-ui): render kind=slash responses as transient command bubbles"
+git add frontend/src/hooks/useApi.ts frontend/src/App.tsx frontend/src/hooks/__tests__/useApi.test.ts
+git commit -m "feat(frontend-ui): kind=slash transient bubbles across all three send sites"
 ```
 
 ---
@@ -877,10 +932,14 @@ gh pr create --title "Unified pre-inference slash-command dispatch for the web f
 
 ## Open verification items (resolve during implementation, do not block planning)
 
-- Exact `RoutingConfig` default constructor name (`Routing.Config`).
-- `SlashCommand` `Eq`/`Show` derivation (affects Task 2 test assertion style).
-- Concrete `Context` type + `emptyContext`/`addMessage` module (Task 3 `buildContext`).
-- `Warp.setHost` availability + `HostPreference` `IsString` (Task 4).
-- Logger stderr function name `_lh_logError` (Task 4).
-- Frontend test runner presence (Task 8).
-- Exact coverage enforcement command (Task 10).
+Resolved during planning (verified):
+- `RoutingConfig` default is `defaultRoutingConfig` (`Routing/Config.hs:85`).
+- `SlashCommand` derives `(Show, Eq)` (`SlashCommands.hs:302`) — `shouldBe (ClassCommand CmdHelp)` is valid.
+- `Context`/`emptyContext`/`addMessage` are in `PureClaw.Agent.Context` (`Context.hs:45,49`).
+- `Warp.setHost` + `HostPreference` `IsString` available (Warp 3.4.x).
+- WARN logger field is `_lh_logWarn` (`Log.hs:26`).
+- Frontend test runner is **vitest** (`package.json`; existing `hooks/__tests__/useApi.test.ts`).
+
+Still to confirm at implementation time:
+- Exact coverage enforcement command (`grep coverage .githooks/pre-push`) — Task 10.
+- The harness-handle "recorded input" accessor used to assert no keystrokes were relayed (Task 7 harness test).
