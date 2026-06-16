@@ -2408,6 +2408,156 @@ spec = do
         sent `shouldBe` ["will throw"]
 
   -- -----------------------------------------------------------------------
+  -- Task 7: slash-command short-circuit in handleSend
+  -- -----------------------------------------------------------------------
+  describe "POST /api/sessions/{sid}/send (slash short-circuit — Task 7)" $ do
+    -- 1. /help is handled by the shared slash dispatch: kind "slash", a
+    --    non-empty response, the provider is NEVER called, and no Request/
+    --    Response transcript entries are appended.
+    it "handles /help without calling the provider or touching the transcript" $ do
+      withSystemTempDirectory "pureclaw-slash-help" $ \tmpDir -> do
+        let sid = "sess-slash-help"
+        writeTestSession tmpDir sid False
+        linesBefore <- transcriptLineCount tmpDir sid
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "should-not-be-used"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/help" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> T.null txt `shouldBe` False
+          _ -> expectationFailure "expected a string 'response' field"
+        -- The provider was never invoked.
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+        -- No transcript entries were appended.
+        linesAfter <- transcriptLineCount tmpDir sid
+        linesAfter `shouldBe` linesBefore
+
+    -- 2. /status short-circuits even when no provider/model is configured on
+    --    the shared base env — the dispatch precedes the provider guard, so
+    --    there is no 503.
+    it "handles /status without a 503 even when no provider is configured" $ do
+      withSystemTempDirectory "pureclaw-slash-status" $ \tmpDir -> do
+        let sid = "sess-slash-status"
+        writeTestSession tmpDir sid False
+        -- _fe_provider / _fe_model AND the shared _fe_agentEnv default to
+        -- Nothing in the test env, so a 503 would mean the guard ran first.
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/status" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+
+    -- 3. A plain message reaches the provider and is tagged kind "assistant".
+    it "routes a plain message to the provider and tags it kind assistant" $ do
+      withSystemTempDirectory "pureclaw-slash-plain" $ \tmpDir -> do
+        let sid = "sess-slash-plain"
+        writeTestSession tmpDir sid False
+        fakeProv <- newFakeProvider
+        queueResponse fakeProv CompletionResponse
+          { _crsp_content = [TextBlock "canned answer"]
+          , _crsp_model   = ModelId "claude-sonnet-4-20250514"
+          , _crsp_usage   = Nothing
+          }
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "claude-sonnet-4-20250514"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hello" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "assistant")
+        lookupKey' respBody "response" `shouldBe` Just (Aeson.String "canned answer")
+        recorded <- peekRecorded fakeProv
+        length recorded `shouldBe` 1
+
+    -- 4. A harness session + /help: the slash dispatch short-circuits BEFORE
+    --    the harness branch, so the response is the slash help text and NO
+    --    keystrokes are relayed to the harness handle.
+    it "handles /help on a harness session without relaying keystrokes" $ do
+      withSystemTempDirectory "pureclaw-slash-harness" $ \tmpDir -> do
+        let sid = "sess-slash-harness"
+            key = "claude-code-0"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "harness echo"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/help" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        -- It is the slash help text, NOT the harness echo.
+        lookupKey' respBody "response"
+          `shouldNotBe` Just (Aeson.String "harness echo")
+        -- No keystrokes reached the harness handle.
+        sent <- readIORef sentRef
+        sent `shouldBe` []
+
+    -- 5. Unknown / unrecognised slash forms short-circuit with kind "slash"
+    --    and never call the provider.
+    it "short-circuits /0 and /foo with kind slash and no provider call" $ do
+      withSystemTempDirectory "pureclaw-slash-unknown" $ \tmpDir -> do
+        let sid = "sess-slash-unknown"
+        writeTestSession tmpDir sid False
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "should-not-be-used"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        let postSlash raw = postJSON env ["api", "sessions", sid, "send"]
+              (Aeson.encode (object ["message" .= (raw :: Text)]))
+        (st0, body0) <- postSlash "/0"
+        st0 `shouldBe` HTTP.status200
+        lookupKey' body0 "kind" `shouldBe` Just (Aeson.String "slash")
+        (stF, bodyF) <- postSlash "/foo"
+        stF `shouldBe` HTTP.status200
+        lookupKey' bodyF "kind" `shouldBe` Just (Aeson.String "slash")
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+
+    -- 6. /vault setup is a recognised command that needs interactive input;
+    --    against the capture channel it surfaces the deferral message
+    --    containing both "interactive" and the tracking "/issues/" URL.
+    it "defers /vault setup with an interactive-unsupported message" $ do
+      withSystemTempDirectory "pureclaw-slash-vault" $ \tmpDir -> do
+        let sid = "sess-slash-vault"
+        writeTestSession tmpDir sid False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/vault setup" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> do
+            ("interactive" `T.isInfixOf` txt) `shouldBe` True
+            ("/issues/" `T.isInfixOf` txt) `shouldBe` True
+          _ -> expectationFailure "expected a string 'response' field"
+
+    -- 7. Two distinct sessions each get their own freshly-scoped session ref
+    --    per request: /status to each responds independently with kind "slash".
+    it "scopes the session per request across two distinct sids" $ do
+      withSystemTempDirectory "pureclaw-slash-iso" $ \tmpDir -> do
+        let sidA = "sess-slash-a"
+            sidB = "sess-slash-b"
+        writeTestSession tmpDir sidA False
+        writeTestSession tmpDir sidB False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (stA, bodyA) <- postJSON env ["api", "sessions", sidA, "send"]
+          (Aeson.encode (object ["message" .= ("/status" :: Text)]))
+        stA `shouldBe` HTTP.status200
+        lookupKey' bodyA "kind" `shouldBe` Just (Aeson.String "slash")
+        (stB, bodyB) <- postJSON env ["api", "sessions", sidB, "send"]
+          (Aeson.encode (object ["message" .= ("/status" :: Text)]))
+        stB `shouldBe` HTTP.status200
+        lookupKey' bodyB "kind" `shouldBe` Just (Aeson.String "slash")
+
+  -- -----------------------------------------------------------------------
   -- WU6: id-primary routing with name fallback + PID-corroboration refusal
   -- -----------------------------------------------------------------------
   describe "POST /api/sessions/{sid}/send (id-primary routing — WU6)" $ do
@@ -3855,6 +4005,16 @@ readSessionTranscript baseDir sid = do
     raw <- LBS.readFile p
     let ls = filter (not . LBS.null) (LBS.split 0x0a raw)
     pure (foldr (\x acc -> maybe acc (: acc) (Aeson.decode' x)) [] ls)
+
+-- | Count the non-empty lines in a session's @transcript.jsonl@. Used by the
+-- slash short-circuit tests to assert a handled command appended nothing.
+transcriptLineCount :: FilePath -> Text -> IO Int
+transcriptLineCount baseDir sid = do
+  let p = baseDir </> T.unpack sid </> "transcript.jsonl"
+  ok <- doesFileExist p
+  if not ok then pure 0 else do
+    raw <- LBS.readFile p
+    pure (length (filter (not . LBS.null) (LBS.split 0x0a raw)))
 
 -- | List the entries under a sessions base dir, ignoring a missing base
 -- dir. Used to assert a failed harness spawn left no session directory

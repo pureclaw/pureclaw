@@ -84,6 +84,8 @@ import PureClaw.Agent.AgentDef
   )
 import PureClaw.Agent.Env (AgentEnv (..))
 import PureClaw.Agent.Context
+import PureClaw.Agent.SlashDispatch (SlashResult (..), runSlashInput)
+import PureClaw.Handles.Channel (mkCaptureChannelHandle)
 import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, isValidSessionId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
@@ -1972,37 +1974,68 @@ handleSend env sid req respond = do
             Left _ ->
               respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"message\": \"...\"}" :: Text)])
             Right (SendRequest userText reqModel) -> do
-              -- Branch on the session's kind BEFORE the provider/model guard:
-              -- an AI-Harness session must route to its live tmux harness even
-              -- on an instance with no LLM provider configured. A failure to
-              -- load the meta (missing/malformed) falls through to the
-              -- provider path, preserving prior behaviour.
+              -- Load the session meta ONCE up front: it is needed both by the
+              -- slash short-circuit (to build a request-scoped session) and by
+              -- the harness/provider pass-through below. The transcript-exists
+              -- 404 check above already proves the session exists, so 'mMeta'
+              -- is 'Just' on every reachable path here.
               mMeta <- tryLoad (_fe_sessionsDir env) (T.unpack sid)
-              let mKind = _sm_kind <$> mMeta
-              case mKind >>= harnessKeyFromKind of
-                Just key -> do
-                  -- The dual-written tmux window name is the legacy name-fallback
-                  -- key; an id-shaped @key@ resolves via the registry first and
-                  -- falls back to this name (WU6).
-                  let fallbackName = mKind >>= harnessWindowFromKind
-                  sendToHarness env sid key fallbackName userText transcriptPath respond
-                Nothing -> do
-                  mProvider <- readIORef (_fe_provider env)
-                  mModel <- readIORef (_fe_model env)
-                  case (mProvider, mModel) of
-                    (Nothing, _) ->
-                      respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
-                    (_, Nothing) ->
-                      respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
-                    (Just provider, Just model) -> do
-                      result <- try @SomeException $
-                        doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
-                      case result of
-                        Left e -> do
-                          _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
-                          respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
-                        Right respText ->
-                          respond $ jsonResponse status200 (object ["response" .= respText])
+              -- Slash short-circuit (Task 7): classify the input against the
+              -- shared dispatcher BEFORE any harness/provider work. A
+              -- recognized command runs against a fresh capture channel + a
+              -- request-scoped session handle and never reaches inference; its
+              -- output is returned verbatim and NEVER persisted/inferred.
+              let base = _fe_agentEnv env
+                  -- Forced ONLY by 'runSlashInput' for a recognized command, so
+                  -- passthrough chat / short-circuit messages pay no scoping
+                  -- cost. The 'maybe' fallback is a total defensive guard for a
+                  -- session whose meta vanished between the 404 check and here.
+                  mkScoped = do
+                    (chan, readOut) <- mkCaptureChannelHandle
+                    meta <- maybe (ioError (userError "session meta vanished")) pure mMeta
+                    sh   <- mkSessionHandle (_fe_broker env) (_fe_logger env)
+                              (_fe_sessionsDir env) meta
+                    sref <- newIORef sh
+                    pure (base { _env_channel = chan, _env_session = sref }, readOut)
+              slashRes <- runSlashInput base mkScoped userText
+              case slashRes of
+                SlashHandled out ->
+                  respond $ jsonResponse status200
+                    (object ["response" .= out, "kind" .= ("slash" :: Text)])
+                SlashPassThrough _ -> do
+                  -- Non-slash input: the existing harness/provider path,
+                  -- behaviour-identical, now tagged "kind" = "assistant".
+                  --
+                  -- Branch on the session's kind BEFORE the provider/model guard:
+                  -- an AI-Harness session must route to its live tmux harness even
+                  -- on an instance with no LLM provider configured. A failure to
+                  -- load the meta (missing/malformed) falls through to the
+                  -- provider path, preserving prior behaviour.
+                  let mKind = _sm_kind <$> mMeta
+                  case mKind >>= harnessKeyFromKind of
+                    Just key -> do
+                      -- The dual-written tmux window name is the legacy name-fallback
+                      -- key; an id-shaped @key@ resolves via the registry first and
+                      -- falls back to this name (WU6).
+                      let fallbackName = mKind >>= harnessWindowFromKind
+                      sendToHarness env sid key fallbackName userText transcriptPath respond
+                    Nothing -> do
+                      mProvider <- readIORef (_fe_provider env)
+                      mModel <- readIORef (_fe_model env)
+                      case (mProvider, mModel) of
+                        (Nothing, _) ->
+                          respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
+                        (_, Nothing) ->
+                          respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
+                        (Just provider, Just model) -> do
+                          result <- try @SomeException $
+                            doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
+                          case result of
+                            Left e -> do
+                              _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
+                              respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
+                            Right respText ->
+                              respond $ jsonResponse status200 (object ["response" .= respText, "kind" .= ("assistant" :: Text)])
 
 -- | Route a user message to a live tmux harness handle (WU3, defect #2).
 -- This is the harness analogue of 'doCompletion': it is the SOLE recorder
@@ -2158,7 +2191,7 @@ routeViaHandle env sid hh userText transcriptPath postSend respond = do
       -- minor latency — but is exception-proof at the source, so it cannot fail
       -- the send the user is about to receive.
       postSend
-      respond $ jsonResponse status200 (object ["response" .= resp])
+      respond $ jsonResponse status200 (object ["response" .= resp, "kind" .= ("assistant" :: Text)])
 
 -- | Lazy migration (D6.5): if a corroborated registry entry's label matches
 -- @windowName@, persist its 'Registry.HarnessId' onto the session's
