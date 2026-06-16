@@ -194,11 +194,14 @@ handleInbound deps convKey raw = do
 runTabCommand :: TabDispatchDeps -> ConversationKey -> TabSlashCommand -> IO ()
 runTabCommand deps conv cmd =
   let ctx = Ctx deps conv
-      -- The parser already validated each index against the configured cap, so
-      -- 'mkTabIndex' is total here; the impossible 'Nothing' is folded into
-      -- 'error' (mirroring the convention the rest of this module uses).
+      -- The parser guarantees a non-negative decimal index ('parseDecimalIndex'
+      -- rejects non-digits), and 'mkTabIndex' only checks the floor (n >= 0), so
+      -- the 'Nothing' arm is genuinely unreachable here. (An over-cap index is
+      -- NOT rejected at parse time — it resolves to a graceful "no tab" message
+      -- at registry-lookup time inside the handlers.) The impossible 'Nothing'
+      -- is folded into 'error' per this module's convention.
       idx n = Maybe.fromMaybe
-                (impossible "runTabCommand: parser-validated tab index out of range")
+                (impossible "runTabCommand: non-negative parser index unexpectedly rejected")
                 (mkTabIndex n)
   in case cmd of
        TabListCmd             -> cmdTabs   ctx
