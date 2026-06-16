@@ -48,7 +48,7 @@ import PureClaw.Agent.Identity
 import PureClaw.Tabs (overwriteTabs, readTabs)
 import PureClaw.Tabs.Persist (PersistDeps (..), loadTabs, saveTabs)
 import PureClaw.Tabs.Wiring (SessionStore, mkExecDeps, mkTabDispatchDeps, runTabbedLoop)
-import PureClaw.Routing.TabDispatch (TabDispatchDeps (..), runTabCommand)
+import PureClaw.Routing.TabDispatch (mkRunTabCommandSeam)
 import PureClaw.Agent.SlashCommands
 import PureClaw.Routing.Config qualified as Routing
 import PureClaw.Routing.Types qualified as Routing
@@ -797,13 +797,11 @@ runChat consentChannel opts = do
               -- @chan@ (its '_env_channel'), NOT '_env_sinks' — so @_td_emit@ is
               -- overridden to send the reply text to @chan@ rather than the
               -- conversation's sink. @Nothing@ (no caller 'ConversationKey')
-              -- falls back to @webConvKey@.
-              , _env_runTabCommand    = \chan mConv cmd ->
-                  runTabCommand
-                    (tabDispatchDeps
-                       { _td_emit = \_ t -> _ch_send chan (OutgoingMessage t) })
-                    (fromMaybe webConvKey mConv)
-                    cmd
+              -- falls back to @webConvKey@. The seam is built by the named,
+              -- unit-tested 'mkRunTabCommandSeam' helper (Task D) so the
+              -- override + fallback logic lives in one place and is exercised
+              -- end to end by the test suite.
+              , _env_runTabCommand    = mkRunTabCommandSeam tabDispatchDeps webConvKey
               }
         -- Start the frontend server and the activity probe loop under
         -- structured 'Async.withAsync' scopes so both are automatically

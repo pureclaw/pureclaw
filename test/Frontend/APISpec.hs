@@ -82,10 +82,13 @@ import PureClaw.Tools.Registry
   )
 import Test.Fake.Provider (FakeProvider, newFakeProvider, peekRecorded, queueResponse, queueResponses)
 import Support.AgentEnv (mkTestAgentEnv)
-import PureClaw.Handles.Tab (unTabIndex)
-import PureClaw.Tabs (newTabRegistry, readTabs, registryAppend)
+import PureClaw.Agent.Env (AgentEnv (..))
+import PureClaw.Handles.Tab (mkTabIndex, unTabIndex)
+import PureClaw.Tabs (TabRegistry, newTabRegistry, readTabs, registryAppend, registryLookupSlot)
 import PureClaw.Tabs.Exec (newExec)
 import PureClaw.Tabs.Types (Tab (..), TabRef (..), emptyCursors, toList)
+import PureClaw.Tabs.Wiring qualified as Wiring
+import PureClaw.Routing.TabDispatch (mkRunTabCommandSeam)
 
 spec :: Spec
 spec = do
@@ -2558,6 +2561,64 @@ spec = do
         lookupKey' bodyB "kind" `shouldBe` Just (Aeson.String "slash")
 
   -- -----------------------------------------------------------------------
+  -- Task D: a web @/tab@ command, sent over the HTTP send endpoint, mutates
+  -- the SHARED 'TabRegistry' end to end. This closes the gap left by the
+  -- earlier tasks: those proved the dispatcher seam was wired into
+  -- 'executeSlashCommand', but no test exercised the PRODUCTION-equivalent
+  -- wiring ('mkRunTabCommandSeam' over deps whose '_td_tabs' is the registry
+  -- the frontend exposes) all the way from the HTTP body to a registry
+  -- mutation + the captured dispatcher reply.
+  --
+  -- The shared default test env wires '_env_runTabCommand = noRunTabCommand'
+  -- (a no-op), so each test here builds a bespoke env whose '_fe_agentEnv'
+  -- shares ONE 'TabRegistry'/cursors/exec with the 'FrontendEnv' and whose
+  -- '_env_runTabCommand' is the real 'mkRunTabCommandSeam' over deps built on
+  -- that same env (exactly how "PureClaw.CLI.Commands" wires production).
+  describe "POST /api/sessions/{sid}/send (web /tab mutates the shared registry — Task D)" $ do
+    it "renames slot 0 in the shared TabRegistry and returns the dispatcher reply" $ do
+      withSystemTempDirectory "pureclaw-webtab-rename" $ \tmpDir -> do
+        let sid = "20240101-000000-001"
+        writeTestSession tmpDir sid False
+        (env, tabReg) <- mkWebTabSeamEnv tmpDir
+        -- Seed a tab at slot 0 (named "orig") in the SHARED registry.
+        _ <- registryAppend tabReg (BoundSession (SessionId "s-orig")) "orig"
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/tab rename 0 newname" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- (a) The slash short-circuit fired and surfaced the dispatcher reply.
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> ("renamed" `T.isInfixOf` txt) `shouldBe` True
+          _ -> expectationFailure "expected a string 'response' field"
+        -- (b) The SHARED registry now shows slot 0 named "newname".
+        slot0 <- registryLookupSlot tabReg
+                   (fromMaybe (error "mkTabIndex 0") (mkTabIndex 0))
+        fmap _tab_name slot0 `shouldBe` Just "newname"
+
+    it "closes slot 0 in the shared TabRegistry and returns the dispatcher reply" $ do
+      withSystemTempDirectory "pureclaw-webtab-close" $ \tmpDir -> do
+        let sid = "20240101-000000-002"
+        writeTestSession tmpDir sid False
+        (env, tabReg) <- mkWebTabSeamEnv tmpDir
+        _ <- registryAppend tabReg (BoundSession (SessionId "s-doomed")) "doomed"
+        -- Sanity: the seeded tab is present before the command.
+        seeded <- readTabs tabReg
+        length (toList seeded) `shouldBe` 1
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/tab close 0" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> ("closed" `T.isInfixOf` txt) `shouldBe` True
+          _ -> expectationFailure "expected a string 'response' field"
+        -- The slot is gone from the SHARED registry.
+        slot0 <- registryLookupSlot tabReg
+                   (fromMaybe (error "mkTabIndex 0") (mkTabIndex 0))
+        slot0 `shouldBe` Nothing
+        remaining <- readTabs tabReg
+        length (toList remaining) `shouldBe` 0
+
+  -- -----------------------------------------------------------------------
   -- WU6: id-primary routing with name fallback + PID-corroboration refusal
   -- -----------------------------------------------------------------------
   describe "POST /api/sessions/{sid}/send (id-primary routing — WU6)" $ do
@@ -3584,6 +3645,44 @@ mkTestFrontendEnvWithTabsAndDir _tabs dir = do
 -- Replaces the old @_fe_listTabs@-wired variant.
 mkTestFrontendEnvWithRegistryTabs :: IO FrontendEnv
 mkTestFrontendEnvWithRegistryTabs = mkTestFrontendEnv
+
+-- | Build a 'FrontendEnv' whose '_fe_agentEnv' has its '_env_runTabCommand'
+-- wired to the PRODUCTION seam ('mkRunTabCommandSeam') over a 'TabDispatchDeps'
+-- built on that SAME agent env — mirroring how "PureClaw.CLI.Commands" wires
+-- the web @/tab@ path. The returned 'TabRegistry' is the single shared registry
+-- that both the deps ('_td_tabs') and the agent env ('_env_tabRegistry') point
+-- at, so a test can seed it before the request and assert on it afterwards.
+--
+-- The base test 'AgentEnv' (which has its own private tab subsystem) is
+-- overridden so its tab fields point at a freshly-allocated registry/cursors/
+-- exec; the deps + seam are then built over that overridden env. The web
+-- placeholder conversation key matches production: @(CkWeb, "web")@.
+mkWebTabSeamEnv :: FilePath -> IO (FrontendEnv, TabRegistry)
+mkWebTabSeamEnv dir = do
+  base       <- mkTestFrontendEnvWithTabsAndDir [] dir
+  tabReg     <- newTabRegistry
+  cursorsRef <- newIORef emptyCursors
+  exec       <- newExec
+  store      <- newIORef Map.empty
+  agentBase  <- mkTestAgentEnv
+  -- Share ONE tab subsystem between the deps and the seam's agent env.
+  let agentShared = agentBase
+        { _env_tabRegistry = tabReg
+        , _env_cursors     = cursorsRef
+        , _env_exec        = exec
+        }
+      execDeps = Wiring.mkExecDeps agentShared store
+      deps     = Wiring.mkTabDispatchDeps agentShared execDeps store
+      webKey   = (CkWeb, ConversationId "web")
+      agentEnv = agentShared
+        { _env_runTabCommand = mkRunTabCommandSeam deps webKey }
+      env = base
+        { _fe_tabRegistry = tabReg
+        , _fe_cursors     = cursorsRef
+        , _fe_exec        = exec
+        , _fe_agentEnv    = agentEnv
+        }
+  pure (env, tabReg)
 
 -- | Insert a harness registry entry AND the corresponding 'BoundHarness'
 -- slot into '_fe_tabRegistry', so the entry appears in GET /api/tabs (WU6).

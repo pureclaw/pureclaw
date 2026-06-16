@@ -32,6 +32,8 @@ module PureClaw.Routing.TabDispatch
   , handleInbound
     -- * Parsed-command entry point
   , runTabCommand
+    -- * Production wiring seam
+  , mkRunTabCommandSeam
   ) where
 
 import Data.Char qualified as Char
@@ -43,6 +45,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 import PureClaw.Agent.SlashCommands qualified as Slash
+import PureClaw.Handles.Channel (ChannelHandle (..), OutgoingMessage (..))
 import PureClaw.Handles.Tab
   ( NameError
   , TabError
@@ -216,6 +219,26 @@ runTabCommand deps conv cmd =
     -- followed by the remaining argument words.
     kindWords = maybe [] (\k -> [tabKindArgText k])
     argWords  = maybe [] T.words
+
+-- | Build the '_env_runTabCommand' seam closure: route a parsed @\/tab@ command
+-- through 'runTabCommand' over the shared dispatch deps, sending the dispatcher
+-- reply to the caller-supplied channel (so the web capture channel receives it),
+-- and substituting the web placeholder conversation key when none is supplied.
+--
+-- This is the named, testable extraction of the inline lambda that
+-- "PureClaw.CLI.Commands" assigns to '_env_runTabCommand'. The behaviour is
+-- identical: the '_td_emit' field is overridden so the dispatcher's reply goes
+-- to @chan@ (the per-request capture channel) instead of the conversation's
+-- live sink, and a missing 'ConversationKey' falls back to @placeholderKey@.
+mkRunTabCommandSeam
+  :: TabDispatchDeps
+  -> ConversationKey
+     -- ^ placeholder key used when the caller passes 'Nothing' (the web path)
+  -> (ChannelHandle -> Maybe ConversationKey -> TabSlashCommand -> IO ())
+mkRunTabCommandSeam deps placeholderKey chan mConv =
+  runTabCommand
+    (deps { _td_emit = \_ t -> _ch_send chan (OutgoingMessage t) })
+    (Maybe.fromMaybe placeholderKey mConv)
 
 -- | Render a 'TabKindArg' back to the lowercase keyword 'cmdTabNew' recognises
 -- (the inverse of 'PureClaw.Agent.SlashCommands.parseTabKindArg').
