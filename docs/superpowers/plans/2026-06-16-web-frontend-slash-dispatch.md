@@ -914,7 +914,14 @@ Run: `nix develop . --command bash -c "cabal clean && cabal build"` then `nix de
 
 - [ ] **Step 2: Coverage gate**
 
-Run coverage per `.coverage-thresholds.json` (the project's enforcement command — `grep -n "coverage" .githooks/pre-push` for the exact invocation). New pure modules (`SlashDispatch`, capture channel) should be ~100%; ensure no new uncovered branch. `Frontend.API` glue falls under its existing waiver, but the new decision logic must be exercised by Task 7's tests.
+`.coverage-thresholds.json` is the source of truth (CLAUDE.md). The enforcement command is **`nix develop . --command cabal test --enable-coverage`**, and the thresholds are **95** for each of lines / branches / functions / statements (NOT 100 — the JSON overrides CLAUDE.md's prose; `blockPRCreation` and `blockTaskCompletion` are both true). The coverage command is NOT in `.githooks/pre-push`; read it from the JSON's `enforcement.command`.
+
+Module-by-module expectations:
+- New modules `PureClaw.Agent.SlashDispatch` and the capture-channel additions in `PureClaw.Handles.Channel` are NOT waived — they must each meet the 95% global threshold. They are pure/IORef-based and the Task 1-3 unit tests exercise every branch (each `parseInput` variant, the `InteractiveUnsupported` catch, the `renderParseError` arms), so ~100% is achievable. Do not let any new logic hide under a waiver.
+- `PureClaw.Frontend.API` is ALREADY a staged waiver (`stagedWaivers.modules`, ~77% expr — pre-existing WAI IO debt). The `handleSend` glue lands there under that waiver, but the new decision logic (slash short-circuit, `kind` field) MUST be exercised by Task 7's integration tests rather than relying on the waiver.
+- `PureClaw.Frontend.Server` is not waived; the Task 4 tests cover `isLoopbackHost` / `corsAllowedOrigin` / the default. If `mkFrontendSettings`/`runFrontend` IO glue dips the module below 95%, either add a focused test or — only if genuinely live-IO-bound — follow the documented `stagedWaiverProtocol` (record `stagedBy`/`reason`/`minimalChecks`); do not silently drop below threshold.
+
+Run: `nix develop . --command cabal test --enable-coverage` and confirm each touched, non-waived module meets 95%.
 
 - [ ] **Step 3: Knowledge capture (per CLAUDE.md)**
 
