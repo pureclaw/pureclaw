@@ -1,0 +1,71 @@
+# Unify the tab name and the session name
+
+**Status:** Design — driven by user-stated principles 2026-06-16
+**Branch:** feat/web-frontend-slash-dispatch (follows the tui-requires-gateway change)
+
+## Governing principles (from the user — these guide every decision)
+
+1. **There is no difference between a tab name and a session name.** The label in the frontend's **Recent Sessions** list and the label in the **Active Tabs** list are the *same thing*. Opening a recent session as a tab keeps its name; closing a tab (it moves from Active Tabs back to Recent Sessions) keeps its name. The name follows the *session*, not the tab slot.
+2. **Default the name to the start of the session's first user message** when the user hasn't set a custom name.
+3. **The user can set a custom name for anything in Active Tabs** (important for organizing in-flight work).
+4. **No rename is needed in Recent Sessions, and definitely not in Archived.** Renaming is an Active-Tabs-only affordance.
+
+## The core consequence
+
+The displayed name is **a session property**, computed identically wherever a session appears (Active Tab, Recent Session, TUI `/tabs`). The tab-registry field `_tab_name` is **no longer the name source** — a tab is just a view of a session, and the name comes from the session. This is what makes principle 1 hold by construction, and it sidesteps the per-process tab-registry split-brain for *names* (the session title is already shared on disk and re-broadcast).
+
+## Current model (verified)
+
+- There is **no `_sm_name`**; the session title is computed: `sessionDisplayTitle = _sm_description` (user override, in `session.json`, set via `PUT /api/sessions/{id}/description`) `?? _sm_autoSummary` (unwired, always `Nothing`) `?? firstMessageSnippet` (computed live backend-side from the first transcript line, `API.hs:1308`) `?? agent ?? id` (`frontend/src/types.ts:41`).
+- `_tab_name :: Text` (`Tabs/Types.hs:101`) is a *separate* field defaulting to the literal `"session"` for provider tabs (or the tmux window key for harness tabs), stored per-process in `tabs.json`. It is the current source of `_ts_name` / `tab.name` in the sidebar (`ActiveTabs.tsx:122`) and the TUI `/tabs` listing (`TabDispatch.tabRow`).
+- `computeListsSnapshot` re-reads session metas fresh from disk on every broadcast; `PUT /description` already calls `broadcastLists`. The backend tab projection (`tabSnapshotsFromRegistry`, `TabsView.hs`) deliberately takes **no** session meta (a documented security boundary) but **does** emit each tab's `sessionId` (`_ts_sessionId`).
+- Both tab kinds are session-backed: `BoundSession sid` directly; `BoundHarness hid` is an `SkHarness` session reachable via the harness registry's `_he_sessionId`.
+
+## Design
+
+### 1. Name source: the session title (principles 1 & 2)
+
+Everywhere a tab/session label is displayed, it resolves to `sessionDisplayTitle` for that session:
+`_sm_description` (custom override) → `firstMessageSnippet` (default, start of first user message) → existing fallbacks. `_tab_name` is retired as the display-name source.
+
+- **Web — Active Tabs sidebar:** `ActiveTabs` already receives each tab's `sessionId` and the app already has the session list (with titles). Resolve the label by **joining tab → session client-side** (`sessionDisplayTitle(sessionFor(tab.sessionId))`). This keeps the backend's meta-free tab projection intact (no security-boundary change) and guarantees the Active Tab and Recent Session labels are identical (same function, same data). For a harness tab, resolve its session id via the snapshot's `sessionId` (the backend already exposes it; if a harness snapshot lacks it, add the harness→session id to the snapshot — ids only, not meta).
+- **Web — Recent Sessions / Archived:** already render `sessionDisplayTitle`. Unchanged — and now provably identical to the Active Tab label.
+- **TUI `/tabs`:** `tabRow` resolves each session tab's title from session meta (the TUI has the session store) instead of `_tab_name`. Harness tabs likewise resolve their session title.
+
+### 2. Custom override (principle 3): rename from Active Tabs → session description
+
+A custom name is `_sm_description`, written via the existing `PUT /api/sessions/{id}/description` (the single canonical writer; the web pencil already uses it).
+
+- **Web:** the rename affordance lives in **Active Tabs**. The existing chat-header pencil edits the focused active tab's session title; to satisfy "anything in Active Tabs," add an inline rename to each Active Tab sidebar item (double-click / pencil), which sets that session's description via the same endpoint. (Final affordance shape is a UI detail for the plan; the data path is fixed: it sets `_sm_description`.)
+- **TUI:** `/tab rename <slot> <name>` resolves the slot to its `SessionId` (locally), then sets that session's description **by calling the gateway's `PUT /api/sessions/{id}/description`** (the TUI now requires a running gateway, so it can always reach it). The gateway persists to shared `session.json` and broadcasts to the browser.
+
+### 3. Default (principle 2)
+
+Falls out automatically: a session with no `_sm_description` shows `firstMessageSnippet` (start of the first user message). New tabs stop showing the literal `"session"`. No new mechanism needed — it's already the session default.
+
+### 4. Scope of rename (principle 4)
+
+Rename is **Active-Tabs-only**. Recent Sessions and Archived get **no** rename affordance (the chat-header pencil is on a focused active tab, which is fine). No change to those lists beyond them continuing to show `sessionDisplayTitle`.
+
+### 5. Cross-process sync
+
+A rename in either surface sets `_sm_description` on the shared `session.json` via the gateway's `PUT /description`, which broadcasts the refreshed lists snapshot (read fresh from disk) to all browser clients. The TUI reads the title from the shared session on its next `/tabs`. So: TUI rename → reflected in the web live; web rename → reflected in the TUI on next listing. Both read one shared source.
+
+## Explicitly out of scope
+
+- The tab **registry** split-brain — *which* sessions are open as tabs, their **slots / order / membership** — remains per-process. This change unifies only the **name**. (A separate effort if the user wants full registry sharing / the gateway-as-single-source-of-truth thin-client.)
+- Physically deleting the `_tab_name` field from `tabs.json`/`Tab`: optional follow-up. This design stops *using* it for the display name; whether to remove the field (and any harness-label fallback) is an implementation decision for the plan, weighed against blast radius. Harness tabs may retain a label fallback for the (rare) case where their session title is unavailable.
+
+## Affected surfaces (from investigation)
+
+- Read/display: `frontend/src/components/ActiveTabs.tsx` (join to session title), `src/PureClaw/Routing/TabDispatch.hs` `tabRow` (TUI `/tabs`), `src/PureClaw/Routing/Relay.hs:141`, death message. (`TabsView.hs` may stay meta-free; the join is client-side — confirm harness snapshots expose `sessionId`.)
+- Write: `/tab rename` (`TabDispatch.doRename`) → re-target to the session description via the gateway `PUT /description`; web Active-Tabs rename affordance → same endpoint. The web pencil is unchanged.
+- The `firstMessageSnippet` default already exists (`API.hs:1308`); no change.
+
+## Testing (high level)
+
+- Active-Tab label == Recent-Session label for the same session (web): set a description, assert both lists show it; clear it, assert both show the first-message snippet.
+- Open a recent session as a tab → label unchanged; close a tab → label unchanged in Recent Sessions.
+- `/tab rename` in a TUI process updates the session description (via the gateway endpoint) and the web sidebar reflects it after a broadcast; web rename reflects in the TUI `/tabs`.
+- Default name = start of first user message when no override; override sticks.
+- No rename affordance reachable for Recent Sessions / Archived.
