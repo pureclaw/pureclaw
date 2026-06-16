@@ -875,6 +875,7 @@ runChat consentChannel opts = do
               , _fe_listProviders = listConfiguredProviders
               , _fe_registry     = fullRegistry
               , _fe_maxToolIterations = 90
+              , _fe_agentEnv     = env
               }
         -- Fill the envRef so the tab completer can access the live env.
         writeIORef envRef (Just env)

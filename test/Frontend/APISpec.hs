@@ -81,6 +81,7 @@ import PureClaw.Tools.Registry
   , registerTool
   )
 import Test.Fake.Provider (FakeProvider, newFakeProvider, peekRecorded, queueResponse, queueResponses)
+import Support.AgentEnv (mkTestAgentEnv)
 import PureClaw.Handles.Tab (unTabIndex)
 import PureClaw.Tabs (newTabRegistry, readTabs, registryAppend)
 import PureClaw.Tabs.Exec (newExec)
@@ -3388,6 +3389,7 @@ mkTestFrontendEnvWith maxTabs = do
   tabReg      <- newTabRegistry
   cursorsRef  <- newIORef emptyCursors
   exec        <- newExec
+  agentEnv    <- mkTestAgentEnv
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
@@ -3415,6 +3417,7 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_streamGuard  = Nothing
     , _fe_registry    = emptyRegistry
     , _fe_maxToolIterations = 90
+    , _fe_agentEnv     = agentEnv
     }
 
 -- | Build a FrontendEnv with a real sessions directory.

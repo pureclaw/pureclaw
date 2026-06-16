@@ -82,6 +82,7 @@ import PureClaw.Agent.AgentDef
   , loadAgent
   , unAgentName
   )
+import PureClaw.Agent.Env (AgentEnv (..))
 import PureClaw.Agent.Context
 import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, isValidSessionId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
@@ -253,6 +254,11 @@ data FrontendEnv = FrontendEnv
     -- before giving up. Defends against a model that keeps tool-calling
     -- without ever returning final text. Reaching the cap returns a
     -- placeholder response; it does not throw.
+  , _fe_agentEnv :: AgentEnv
+    -- ^ Shared base env; '_env_channel'/'_env_session' are overridden per
+    -- request by the slash-dispatch caller (Task 7). Leave LAZY (no bang):
+    -- in CLI.Commands 'env' and 'frontendEnv' are bound in the same recursive
+    -- 'let', so this back-edge ties the knot without forcing at construction.
   , _fe_tabRegistry :: TabRegistry
     -- ^ The live first-class tab registry (WU6). 'tabsFromRegistry' reads
     -- this alongside '_fe_harnessRegistry' to project the canonical

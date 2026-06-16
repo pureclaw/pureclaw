@@ -47,6 +47,7 @@ import PureClaw.Handles.Log (mkNoOpLogHandle)
 import PureClaw.Security.Adoption (ConsentChannel (..))
 import PureClaw.Session.Types (SessionMeta (..))
 import PureClaw.Tabs (newTabRegistry)
+import Support.AgentEnv (mkTestAgentEnv)
 import PureClaw.Tabs.Exec (newExec)
 import PureClaw.Tabs.Types (emptyCursors)
 import PureClaw.Tools.Registry (emptyRegistry)
@@ -129,6 +130,7 @@ mkFrontendEnvForD18 broker sessionsDir = do
   tabReg       <- newTabRegistry
   cursorsRef   <- newIORef emptyCursors
   exec         <- newExec
+  agentEnv     <- mkTestAgentEnv
   pure FrontendEnv
     { _fe_harnesses    = harnessesRef
     , _fe_harnessRegistry = harnessReg
@@ -156,6 +158,7 @@ mkFrontendEnvForD18 broker sessionsDir = do
     , _fe_listProviders = pure []
     , _fe_registry    = emptyRegistry
     , _fe_maxToolIterations = 90
+    , _fe_agentEnv     = agentEnv
     }
 
 -- | Run a WAI 'Application' with a one-shot request body.

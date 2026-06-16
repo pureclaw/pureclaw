@@ -144,6 +144,8 @@ import qualified Tabs.RuntimesSpec
 import qualified Routing.TabDispatchSpec
 -- Tabs-as-View (GitHub #79) 8d.c.3
 import qualified Tabs.WiringSpec
+-- Shared test AgentEnv builder
+import qualified Support.AgentEnvSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -303,6 +305,8 @@ main = hspec $ do
   describe "Routing.TabDispatch" Routing.TabDispatchSpec.spec
   -- Tabs-as-View (GitHub #79) 8d.c.3
   describe "Tabs.Wiring"          Tabs.WiringSpec.spec
+  -- Shared test AgentEnv builder
+  describe "Support.AgentEnv"     Support.AgentEnvSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)

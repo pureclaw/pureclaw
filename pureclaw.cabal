@@ -419,6 +419,9 @@ test-suite pureclaw-test
     -- WU0 (tabbed-chat) test seams T1–T4
     Test.Fake.Provider
     Test.Fake.ChannelHandle
+    -- Shared test AgentEnv builder
+    Support.AgentEnv
+    Support.AgentEnvSpec
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw
