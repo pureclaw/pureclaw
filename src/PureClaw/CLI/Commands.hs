@@ -774,6 +774,10 @@ runChat consentChannel opts = do
                     (Left . harnessErrText)
                     (\(_sid, hid, _meta, key) -> Right (BoundHarness hid, key))
                     r
+              -- Task B: the dispatcher-reachable @\/tab@ command seam.
+              -- Defaulted to the unwired stub here; the real closure over the
+              -- shared @runTabCommand@ is wired in Task C.
+              , _env_runTabCommand    = noRunTabCommand
               }
         -- Start the frontend server and the activity probe loop under
         -- structured 'Async.withAsync' scopes so both are automatically

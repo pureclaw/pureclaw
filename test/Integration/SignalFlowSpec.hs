@@ -97,6 +97,7 @@ mkTestEnv p ch = do
     , _env_tabOutQ     = _ts_tabOutQ ts
     , _env_onTabsChanged = pure ()
     , _env_startHarness  = noStartHarness
+    , _env_runTabCommand = noRunTabCommand
     }
 
 spec :: Spec

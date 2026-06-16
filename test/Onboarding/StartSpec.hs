@@ -343,5 +343,6 @@ mkOnboardingEnv ch = do
     , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
     , _env_onTabsChanged = pure ()
     , _env_startHarness  = noStartHarness
+    , _env_runTabCommand = noRunTabCommand
     }
 
