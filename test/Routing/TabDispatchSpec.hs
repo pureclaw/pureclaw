@@ -673,6 +673,15 @@ renameSpec = describe "/rename" $ do
     map _tab_name (toList tl) `shouldBe` ["alpha", "joke"]
     lastEmit f `shouldReturn` "renamed /1 joke"
 
+  it "/tabs rename K NAME aliases /tab rename (real rename, not a listing)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    _ <- appendHarness f (harn "1") "beta"
+    handleInbound (f_deps f) convA "/tabs rename 1 joke"
+    tl <- readTabs (f_reg f)
+    map _tab_name (toList tl) `shouldBe` ["alpha", "joke"]
+    lastEmit f `shouldReturn` "renamed /1 joke"
+
 -- ---------------------------------------------------------------------------
 -- /relay
 -- ---------------------------------------------------------------------------

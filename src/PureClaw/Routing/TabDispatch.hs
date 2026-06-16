@@ -230,7 +230,8 @@ handleNonWizard ctx raw =
     ("/new"    : _)    -> cmdNew    ctx
     ("/nt"     : _)    -> cmdNt     ctx
     ("/close"  : args) -> cmdClose  ctx args
-    ("/tabs"   : _)    -> cmdTabs   ctx
+    ("/tabs" : sub@(_:_)) -> handleNonWizard ctx (T.unwords ("/tab" : sub))  -- /tabs <sub> == /tab <sub>
+    ["/tabs"]          -> cmdTabs   ctx   -- bare /tabs lists
     ("/rename" : args) -> cmdRename ctx args
     ("/relay"  : args) -> cmdRelay  ctx args
     ("/tab" : "new" : rest)    -> cmdTabNew ctx rest

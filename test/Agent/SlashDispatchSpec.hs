@@ -6,7 +6,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 import PureClaw.Agent.Env (AgentEnv (..))
-import PureClaw.Agent.SlashCommands (SlashCommand (..))
+import PureClaw.Agent.SlashCommands (SlashCommand (..), TabSlashCommand (..))
 import PureClaw.Agent.SlashDispatch
 import PureClaw.Handles.Channel (mkCaptureChannelHandle)
 import PureClaw.Routing.Config (defaultRoutingConfig)
@@ -30,6 +30,10 @@ classifyInputSpec = describe "classifyInput" $ do
 
   it "classifies a known command" $
     classifyInput rc "/help" `shouldBe` ClassCommand CmdHelp
+
+  it "classifies /tabs <sub> as the aliased /tab <sub> command" $
+    classifyInput rc "/tabs rename 0 hi"
+      `shouldBe` ClassCommand (CmdTab (TabRenameCmd 0 "hi"))
 
   it "short-circuits bare /N (Switch) with a message, not a command" $
     case classifyInput rc "/0" of
