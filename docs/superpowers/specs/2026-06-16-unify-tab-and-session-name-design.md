@@ -23,12 +23,27 @@ The displayed name is **a session property**, computed identically wherever a se
 
 ## Design
 
+### 0. Shared session-title derivation (required for principle 1 to hold on ALL surfaces)
+
+Design-review found the title is computed **differently** today: the web uses `description → autoSummary → firstMessageSnippet → …` (snippet derived live backend-side, `API.hs:1308`), but the **TUI** uses `Wiring.sessionLabel = _sm_description ?? unSessionId` (`Wiring.hs:629`) — **no snippet**. So as-is, the TUI default would be a raw session id while the web shows the first-message snippet — violating principle 1.
+
+**Fix:** extract the canonical title derivation into ONE shared helper that both the Frontend and the TUI call:
+
+```haskell
+-- new leaf module, e.g. PureClaw.Session.Title
+sessionTitle :: FilePath -> SessionMeta -> IO Text   -- baseDir, meta -> the displayed title
+-- = _sm_description ?? _sm_autoSummary ?? firstMessageSnippet(baseDir, meta) ?? agent ?? id-prefix
+```
+
+`firstMessageSnippet` (currently private in `Frontend.API`) moves into this shared module; `Frontend.API` and the TUI both call `sessionTitle`. This guarantees identical defaults everywhere (and keeps the `sessionDisplayTitle` cascade in `frontend/src/types.ts` as the single client-side mirror). The TUI's `sessionLabel`/`tabRow` use `sessionTitle`.
+
 ### 1. Name source: the session title (principles 1 & 2)
 
 Everywhere a tab/session label is displayed, it resolves to `sessionDisplayTitle` for that session:
 `_sm_description` (custom override) → `firstMessageSnippet` (default, start of first user message) → existing fallbacks. `_tab_name` is retired as the display-name source.
 
-- **Web — Active Tabs sidebar:** `ActiveTabs` already receives each tab's `sessionId` and the app already has the session list (with titles). Resolve the label by **joining tab → session client-side** (`sessionDisplayTitle(sessionFor(tab.sessionId))`). This keeps the backend's meta-free tab projection intact (no security-boundary change) and guarantees the Active Tab and Recent Session labels are identical (same function, same data). For a harness tab, resolve its session id via the snapshot's `sessionId` (the backend already exposes it; if a harness snapshot lacks it, add the harness→session id to the snapshot — ids only, not meta).
+- **Web — three `tab.name` consumers, centralized join:** design-review found `tab.name` is read in **three** places, not one: `ActiveTabs.tsx:122` (tab row), `HarnessControls.tsx:82` (harness header), and `deriveAgent` in `App.tsx:1212` (chat-header/TopBar title). All switch to the session title. To avoid per-site drift, **compute the label once in `App`** (it already holds `sessions`/`archivedSessions` and already joins by `session_id` in `deriveAgent`/`HarnessControls`) via a shared `sessionFor(sessionId)` resolver, and thread it (or the resolved label) into `ActiveTabs` (which does NOT currently receive `sessions` — add the prop via `Sidebar`). The resolver checks BOTH `sessions` and `archivedSessions` (a tab can stay open after its session is archived). This keeps the backend tab projection meta-free (the join uses only the session list the client already has + the tab's `sessionId`) — the documented security boundary is preserved.
+- **Harness tabs / unresolved join:** the harness snapshot exposes `_ts_sessionId` but it is `Maybe` (`_he_sessionId :: Maybe Text`, `Registry.hs:144`) — it can be `Nothing` (no backing session yet / vanished). When `sessionFor` yields nothing (harness without a session id, or a tab whose session isn't in either list yet), the row falls back to a defined label — the harness flavour / window label (kept available on the snapshot) — so a row **never renders blank**. An empty session (zero messages) resolves via `sessionDisplayTitle`'s existing id-prefix fallback, not the literal `"session"`.
 - **Web — Recent Sessions / Archived:** already render `sessionDisplayTitle`. Unchanged — and now provably identical to the Active Tab label.
 - **TUI `/tabs`:** `tabRow` resolves each session tab's title from session meta (the TUI has the session store) instead of `_tab_name`. Harness tabs likewise resolve their session title.
 
@@ -37,7 +52,12 @@ Everywhere a tab/session label is displayed, it resolves to `sessionDisplayTitle
 A custom name is `_sm_description`, written via the existing `PUT /api/sessions/{id}/description` (the single canonical writer; the web pencil already uses it).
 
 - **Web:** the rename affordance is the existing **chat-header pencil** (it edits the focused active tab's session title via `PUT /description`). **Decision:** the pencil is currently revealed only on hover (`ChatArea.tsx` / the `editable-title-pencil` CSS) — make it **always visible** to improve discoverability. No per-tab inline rename is added; the focused active tab's pencil is sufficient.
-- **TUI:** `/tab rename <slot> <name>` resolves the slot to its `SessionId` (locally), then sets that session's description **by calling the gateway's `PUT /api/sessions/{id}/description`** (the TUI now requires a running gateway, so it can always reach it). The gateway persists to shared `session.json` and broadcasts to the browser.
+- **TUI — via an injectable seam (not an inline HTTP call):** `TabDispatch` runs purely through `TabDispatchDeps` and has no HTTP/gateway access; routing rename inline would break that testable-deps pattern (design-review blocker). Add a seam:
+  ```haskell
+  , _td_setSessionDescription :: SessionId -> Maybe Text -> IO (Either Text ())
+  ```
+  `/tab rename <slot> <name>` (`doRename`) resolves the slot → `SessionId` locally (via `registryLookupSlot` + `_tab_ref`), runs `Parse.sanitizeTabName` TUI-side, then calls the seam; a `Left err` surfaces a user-facing message (gateway down / 4xx / no session). The production seam is wired in `CLI/Commands.hs` (where the HTTP `Manager` + gateway URL already live for `probeGatewayUp`) to `PUT /api/sessions/{id}/description`; tests inject a fake. The gateway persists to shared `session.json` and broadcasts to the browser. (For TUI `/tabs` to SHOW titles, add a companion read — either a `_td_sessionTitle :: SessionId -> IO Text` seam wired to the shared `sessionTitle` helper, or reuse the existing `_td_recentSessions` pairs — pinned in the plan; either way it uses §0's shared derivation, not a duplicate.)
+- **Description length cap (security):** `handleSetDescription` (`API.hs:1247`) must clamp the description to a sane max (the snippet path is already bounded at 120 chars; the user override is not, and it now displays in more places). The title renders as a React-escaped text child everywhere (no `dangerouslySetInnerHTML`).
 
 ### 3. Default (principle 2)
 
@@ -63,7 +83,9 @@ A rename in either surface sets `_sm_description` on the shared `session.json` v
 - Update all construction/mutation sites that set it (`registryAppend`/`appendTab`/`rebindSlot`/`bindNewTab`/`cmdTabNew`) to no longer take/store a name.
 - `/tab rename` (`doRename`) no longer relabels the registry — it re-targets the session description (see §2).
 - Remove `_ts_name` from the tab snapshot (`TabsView.hs`) since its only source was `_tab_name`; the frontend derives the label from the session (the snapshot already carries `sessionId`). This is a wire-contract change — update the frontend `TabInfo`/`mapTabInfo` accordingly.
-- **Harness tabs:** their name becomes their `SkHarness` session's title. The first-message snippet may be unhelpful for a harness, so define a sensible fallback in the session-title resolution (e.g. the harness flavour / window label) when the session title is empty — to be pinned in the plan.
+- **Harness tabs:** their name becomes their `SkHarness` session's title via the same shared `sessionTitle` helper (so parity holds for harness rows too). When the session title is empty/unavailable, fall back to the harness flavour / window label (today `_he_label`, surfaced on the snapshot at `API.hs:531`). The fallback is computed by the same path on both surfaces.
+
+**Blast radius (verified by design-review — for the plan to enumerate):** `_tab_name` is constructed at two real sites (`appendTab` `Types.hs:161`; `rebindSlot` `Types.hs:241`) and read at `Persist.hs:194/262`, `Relay.hs:141`, `TabsView.hs:151/167/183`, `TabDispatch.hs:461/675`. `-Wincomplete-record-updates` flags the two updates; `appendTab`/`rebindSlot` lose their `Text` name param (update callers `registryAppend`, `TabDispatch.hs:387`, `bindNewTab`). `_ts_name` removal also touches the harness arm `API.hs:531` and the encoder `TabsView.hs:85`. Tests to rewrite: `Tabs/TypesSpec.hs:199/296/317`, `Routing/TabDispatchSpec.hs` (656/665/678/687/1033/1091), `Frontend/{APISpec,TabsViewSpec}.hs` name assertions, frontend `Sidebar/ActiveTabs/HarnessControls/App` tests that construct `name:`, and `mapTabInfo`/`TabInfo` (`useApi.ts`). Add a `Tabs/PersistSpec.hs` fixture with a legacy `"name"` key to prove `parseTab` ignores it.
 
 ## Affected surfaces (from investigation)
 
