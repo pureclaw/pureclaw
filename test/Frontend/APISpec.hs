@@ -1926,6 +1926,74 @@ spec = do
                              , Just (Aeson.String t) <- [lookupKey v "id"] ]
         recentIds `shouldSatisfy` elem sid
 
+    -- Task 7 (item 3): a description set via PUT /api/sessions/{sid}/description
+    -- is REFLECTED in the broadcast 'lists' snapshot's session list. The tab
+    -- label join is client-side, so the cross-surface parity rests on the
+    -- backend exposing the session's canonical description in the very payload
+    -- the frontend renders for Recent Sessions; this is the server half of the
+    -- "tab reads identically to its Recent Sessions row" guarantee.
+    it "a PUT description is reflected in the lists snapshot's recentSessions for that sid" $
+      withSystemTempDirectory "pureclaw-task7-desc-snap" $ \tmpDir -> do
+        let sid = "test-20240101-120000-task7"
+        writeTestSession tmpDir sid False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Set the canonical description through the production endpoint.
+        (st, _) <- putJSON env ["api", "sessions", sid, "description"]
+          (Aeson.encode (object ["description" .= ("Renamed Title" :: Text)]))
+        st `shouldBe` HTTP.status200
+        snap <- computeListsSnapshot env
+        let lookupArr key v = case v of
+              Aeson.Object km -> case KM.lookup (AesonKey.fromText key) km of
+                Just (Aeson.Array arr) -> toList' arr
+                _                      -> []
+              _ -> []
+        -- The recentSessions payload for this sid carries the new description.
+        let descsForSid =
+              [ d
+              | v <- lookupArr "recentSessions" snap
+              , lookupKey v "id" == Just (Aeson.String sid)
+              , Just d <- [lookupKey v "description"]
+              ]
+        descsForSid `shouldBe` [Aeson.String "Renamed Title"]
+
+  -- -----------------------------------------------------------------------
+  -- Task 7 (item 3): the web-seam /tab rename round-trip is reflected in BOTH
+  -- session.json (proven by "Task D" above) AND, end to end, the GET /api/tabs
+  -- snapshot carries the matching session_id for the renamed slot. The tab
+  -- label is a CLIENT-SIDE join over (tab.session_id -> session.description), so
+  -- the backend's job is to expose the session_id on the tab snapshot and the
+  -- description on the session — these two facts together let the client render
+  -- a tab label identical to the Recent Sessions row.
+  -- -----------------------------------------------------------------------
+
+  describe "web /tab rename round-trip (Task 7 — tab snapshot carries the session_id)" $
+    it "after /tab rename, session.json holds the description AND GET /api/tabs reports the matching session_id at slot 0" $
+      withSystemTempDirectory "pureclaw-task7-tab-sid" $ \tmpDir -> do
+        let sid = "20240101-000000-777"
+        writeTestSession tmpDir sid False
+        (env, tabReg) <- mkWebTabSeamEnv tmpDir
+        _ <- registryAppend tabReg (BoundSession (SessionId sid))
+        -- Drive the rename through the production HTTP send seam.
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/tab rename 0 RoundTripName" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        -- (a) session.json now carries the canonical description.
+        Right onDisk <- Aeson.eitherDecodeFileStrict'
+          (tmpDir </> T.unpack sid </> "session.json")
+            :: IO (Either String SessionMeta)
+        _sm_description onDisk `shouldBe` Just "RoundTripName"
+        -- (b) The tab snapshot carries the matching session_id so the client can
+        -- join the renamed description onto the tab's label.
+        (stT, tabsBody) <- getJSON env ["api", "tabs"]
+        stT `shouldBe` HTTP.status200
+        case Aeson.decode tabsBody of
+          Just (Aeson.Array arr) -> do
+            let sids = [ s | v <- toList' arr
+                           , Just (Aeson.String s) <- [lookupKey v "session_id"] ]
+            sids `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected GET /api/tabs to return a JSON array"
+
   -- -----------------------------------------------------------------------
   -- #67 follow-up: SessionInfo exposes channel name + channel user id
   -- (so the transcript header can show channel:userId instead of the model)

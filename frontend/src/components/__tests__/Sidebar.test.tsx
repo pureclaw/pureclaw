@@ -230,3 +230,59 @@ describe('Sidebar lifecycle transitions', () => {
     expect(screen.getByText('h0')).toBeInTheDocument()
   })
 })
+
+describe('Task 7: rename is ONLY on the focused chat header, never on Recent/Archived rows', () => {
+  const defaultProps = {
+    tabs: [] as TabInfo[],
+    sessions: [] as SessionInfo[],
+    archivedSessions: [] as SessionInfo[],
+    selectedId: null as string | null,
+    onSelectTab: vi.fn(),
+    onSelectSession: vi.fn(),
+    onNewTab: vi.fn(),
+    onArchiveSession: vi.fn(),
+    onUnarchiveSession: vi.fn(),
+    onCloseTab: vi.fn(),
+    onArchiveTab: vi.fn(),
+    onDismissTab: vi.fn(),
+    onAcknowledgeTab: vi.fn(),
+    onReleaseTab: vi.fn(),
+  }
+
+  // The unify-name design puts the editable-title pencil (the rename
+  // affordance, wired to `onSetDescription`) ONLY on the focused chat header
+  // in ChatArea — an Active Tab. Recent Sessions and Archived rows render the
+  // session title as plain, non-editable text via `SessionRow`. The Sidebar
+  // component takes no `onSetDescription` prop at all, so there is structurally
+  // no path for a rename control to reach those rows. These tests pin that.
+  it('renders NO editable-title pencil on a Recent Sessions row', () => {
+    const { container } = render(
+      <Sidebar
+        {...defaultProps}
+        sessions={makeSessions({ id: 'rec-1', description: 'a recent session' })}
+      />,
+    )
+    // The recent row is present...
+    expect(screen.getByText('a recent session')).toBeInTheDocument()
+    // ...but it carries no editable-title affordance (no pencil button, no
+    // "set a session title" control).
+    expect(container.querySelector('.editable-title')).toBeNull()
+    expect(container.querySelector('.editable-title-pencil')).toBeNull()
+    expect(screen.queryByTitle(/set a session title/i)).not.toBeInTheDocument()
+  })
+
+  it('renders NO editable-title pencil on an Archived row (even when expanded)', () => {
+    const { container } = render(
+      <Sidebar
+        {...defaultProps}
+        archivedSessions={makeSessions({ id: 'arch-1', description: 'an archived session' })}
+      />,
+    )
+    // Expand the archived accordion so its rows render.
+    fireEvent.click(screen.getByText(/Archived/))
+    expect(screen.getByText('an archived session')).toBeInTheDocument()
+    expect(container.querySelector('.editable-title')).toBeNull()
+    expect(container.querySelector('.editable-title-pencil')).toBeNull()
+    expect(screen.queryByTitle(/set a session title/i)).not.toBeInTheDocument()
+  })
+})
