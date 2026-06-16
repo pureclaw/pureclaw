@@ -156,6 +156,7 @@ data ChatOptions = ChatOptions
   , _co_channel       :: Maybe String
   , _co_memory        :: Maybe MemoryBackend
   , _co_logLevel      :: Maybe LogLevel
+  , _co_bind          :: Maybe String
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
   , _co_noVault       :: Bool
@@ -213,6 +214,14 @@ chatOptionsParser = ChatOptions
      <> metavar "LEVEL"
      <> help "Minimum log severity: debug, info, warn, error (default: info)"
       ))
+  <*> optional (strOption
+      ( long "bind"
+     <> metavar "HOST"
+     <> help "Interface for the web frontend to bind (default 127.0.0.1). \
+             \Setting a non-loopback host (e.g. 0.0.0.0) exposes the FULL \
+             \slash-command surface, including local code execution via \
+             \/mcp connect, to anything that can reach that address — use \
+             \only on trusted networks." ))
   <*> optional (strOption
       ( long "soul"
      <> help "Path to SOUL.md identity file (default: ./SOUL.md if it exists)"
@@ -931,8 +940,12 @@ runChat consentChannel opts = do
         (loadedTabs, loadedCursors) <- loadTabs bootPersistDeps
         overwriteTabs (_ts_tabRegistry tabSub) loadedTabs
         writeIORef (_ts_cursors tabSub) loadedCursors
+        let feCfg = defaultFrontendConfig
+                      { _fsc_bindHost =
+                          fromMaybe (_fsc_bindHost defaultFrontendConfig) (_co_bind opts)
+                      }
         Async.withAsync
-          (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
+          (runFrontend feCfg (Just frontendEnv) logger) $ \_serverAsync ->
           Async.withAsync
             (Reconcile.runReconcileLoopWith
                Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)

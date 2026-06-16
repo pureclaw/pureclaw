@@ -246,6 +246,17 @@ spec = do
               legacyContents <- listDirectory legacyDir
               legacyContents `shouldBe` []
 
+  describe "--bind CLI flag" $ do
+
+    it "documents the --bind flag with a trust warning" $ do
+      bin <- findPureclaw
+      -- optparse-applicative prints --help to stdout and exits successfully.
+      (exitCode, out, err) <-
+        runPureclawWithArgs bin ["gateway", "run", "--help"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "--bind"
+      out `shouldContain` "trusted networks"
+
   describe "--agent CLI flag" $ do
 
     let setupFixtureAgent tmp name body = do
