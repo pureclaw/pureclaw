@@ -168,6 +168,9 @@ spec = do
     it "treats a LAN address as non-loopback" $
       isLoopbackHost "192.168.1.5" `shouldBe` False
 
+    it "matches a hostname case-insensitively" $
+      isLoopbackHost "Localhost" `shouldBe` True
+
   describe "corsAllowedOrigin" $ do
     it "echoes an allowed origin (default localhost)" $
       corsAllowedOrigin defaultFrontendConfig (Just "http://localhost:8080")

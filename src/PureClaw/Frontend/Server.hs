@@ -21,6 +21,7 @@ module PureClaw.Frontend.Server
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.Char qualified as Char
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -86,7 +87,7 @@ mkFrontendSettings cfg =
 -- frontend reachable only from the local machine. Anything else exposes the
 -- server (and its slash-command surface) to the network.
 isLoopbackHost :: String -> Bool
-isLoopbackHost h = h `elem` ["127.0.0.1", "localhost", "::1", "[::1]"]
+isLoopbackHost h = map Char.toLower h `elem` ["127.0.0.1", "localhost", "::1", "[::1]"]
 
 -- | The bound-host origin, i.e. @http:\/\/\<bindHost\>:\<port\>@.
 boundHostOrigin :: FrontendConfig -> Text
