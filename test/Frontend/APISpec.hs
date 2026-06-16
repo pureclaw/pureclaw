@@ -38,6 +38,7 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   , _streamBroker_subscribe
   )
+import PureClaw.Session.Handle (setDescription)
 import PureClaw.Handles.Harness
   ( HarnessError (..)
   , HarnessHandle (..)
@@ -2580,8 +2581,9 @@ spec = do
         let sid = "20240101-000000-001"
         writeTestSession tmpDir sid False
         (env, tabReg) <- mkWebTabSeamEnv tmpDir
-        -- Seed a tab at slot 0 (named "orig") in the SHARED registry.
-        _ <- registryAppend tabReg (BoundSession (SessionId "s-orig")) "orig"
+        -- Seed a tab at slot 0 (named "orig") in the SHARED registry, bound to
+        -- the on-disk session so the rename's description write is observable.
+        _ <- registryAppend tabReg (BoundSession (SessionId sid)) "orig"
         (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("/tab rename 0 newname" :: Text)]))
         st `shouldBe` HTTP.status200
@@ -2590,10 +2592,16 @@ spec = do
         case lookupKey' respBody "response" of
           Just (Aeson.String txt) -> ("renamed" `T.isInfixOf` txt) `shouldBe` True
           _ -> expectationFailure "expected a string 'response' field"
-        -- (b) The SHARED registry now shows slot 0 named "newname".
+        -- (b) Rename now sets the SESSION's canonical description (cross-process),
+        -- not the per-process tab label: the tab name is unchanged, and
+        -- session.json now carries the new description.
         slot0 <- registryLookupSlot tabReg
                    (fromMaybe (error "mkTabIndex 0") (mkTabIndex 0))
-        fmap _tab_name slot0 `shouldBe` Just "newname"
+        fmap _tab_name slot0 `shouldBe` Just "orig"
+        Right onDisk <- Aeson.eitherDecodeFileStrict'
+          (tmpDir </> T.unpack sid </> "session.json")
+            :: IO (Either String SessionMeta)
+        _sm_description onDisk `shouldBe` Just "newname"
 
     it "closes slot 0 in the shared TabRegistry and returns the dispatcher reply" $ do
       withSystemTempDirectory "pureclaw-webtab-close" $ \tmpDir -> do
@@ -3672,7 +3680,13 @@ mkWebTabSeamEnv dir = do
         , _env_exec        = exec
         }
       execDeps = Wiring.mkExecDeps agentShared store
+      -- The session-description seam, wired to the real on-disk writer rooted at
+      -- @dir@ (mirroring the production 'ServeFrontend' closure), so a web @/tab
+      -- rename@ updates the bound session's canonical description and a test can
+      -- assert on @session.json@.
       deps     = Wiring.mkTabDispatchDeps agentShared execDeps store
+                   (\sid mDesc -> either (Left . T.pack . show) Right
+                                    <$> setDescription dir sid mDesc)
       webKey   = (CkWeb, ConversationId "web")
       agentEnv = agentShared
         { _env_runTabCommand = mkRunTabCommandSeam deps webKey }

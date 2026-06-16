@@ -351,7 +351,7 @@ mkTabbedEnvWith sessionsDir scripted mProvider mModel = do
 runLoopBounded :: TabbedHarness -> IO Bool
 runLoopBounded th = do
   store <- newIORef Map.empty
-  done <- timeout (5 * 1000000) (runTabbedLoop (_th_env th) store)
+  done <- timeout (5 * 1000000) (runTabbedLoop (_th_env th) store (\_ _ -> pure (Right ())))
   cancelAll (_th_runners th)
   pure (isJust done)
 
@@ -619,7 +619,7 @@ spec = do
         -- BEFORE tearing the runners down (cancelAll would otherwise kill the
         -- worker mid-turn). The runner-tracking fork keeps the worker alive.
         store <- newIORef Map.empty
-        completed <- timeout (5 * 1000000) (runTabbedLoop env store)
+        completed <- timeout (5 * 1000000) (runTabbedLoop env store (\_ _ -> pure (Right ())))
         completed `shouldSatisfy` isJust
         firedInTime <- timeout (5 * 1000000) (takeMVar fired)
         cancelAll (_th_runners th)
@@ -648,7 +648,7 @@ spec = do
         fired <- newEmptyMVar
         writeIORef (_env_onFirstStreamDone env) (Just (putMVar fired ()))
         store <- newIORef Map.empty
-        _ <- timeout (5 * 1000000) (runTabbedLoop env store)
+        _ <- timeout (5 * 1000000) (runTabbedLoop env store (\_ _ -> pure (Right ())))
         -- Wait until the worker has run its turn and parked on its input queue
         -- (the exact state in which the orphaned-queue cancel hang manifests).
         _ <- timeout (5 * 1000000) (takeMVar fired)

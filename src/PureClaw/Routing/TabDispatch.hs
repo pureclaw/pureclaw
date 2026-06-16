@@ -152,6 +152,13 @@ data TabDispatchDeps = TabDispatchDeps
     -- tab's @('TabRef', label)@ (or a user-facing error). Used by the harness
     -- arm of 'cmdTabNew' (@\/tab new harness@). Wired from
     -- 'PureClaw.Agent.Env._env_startHarness' in "PureClaw.Tabs.Wiring".
+  , _td_setSessionDescription :: !(SessionId -> Maybe Text -> IO (Either Text ()))
+    -- ^ Set (or clear, with 'Nothing') a session's canonical description — the
+    -- cross-process name. Injected so @\/rename@ on a @BoundSession@ tab updates
+    -- the session entity (which syncs to every surface) rather than relabelling
+    -- a per-process tab field. Wired in "PureClaw.CLI.Commands" per 'ServerMode'
+    -- ('ServeFrontend' writes @session.json@ directly + rebroadcasts; the TUI
+    -- 'RequireGateway' path PUTs to the running gateway's description endpoint).
   }
 
 -- ---------------------------------------------------------------------------
@@ -489,25 +496,27 @@ cmdRename ctx args = case args of
       Just slot -> doRename ctx slot (T.unwords args)
       Nothing   -> emit ctx renameNoTargetMsg
 
--- | Sanitize @name@ and rewrite the tab at @slot@'s label in place.
+-- | Sanitize @name@ and set the bound entity's canonical name.
+--
+-- For a @BoundSession@ slot this sets the /session's/ description through the
+-- injected '_td_setSessionDescription' seam (the canonical, cross-process name)
+-- rather than relabelling the per-process tab field — so a rename syncs to every
+-- surface. For a @BoundHarness@ slot, rename is out of scope (the harness has no
+-- equivalent canonical name here): emit a clear note and do nothing.
 doRename :: Ctx -> TabIndex -> Text -> IO ()
-doRename ctx slot name =
-  case Parse.sanitizeTabName name of
-    Left e      -> emit ctx (renameBadNameMsg e)
-    Right clean -> do
-      mTab <- registryLookupSlot (_td_tabs (_ctx_deps ctx)) slot
-      case mTab of
-        Nothing  -> emit ctx renameNoTargetMsg
-        Just tab -> do
-          -- Rebinding a slot to the ref it already holds always succeeds
-          -- (relabel in place); the impossible 'Left' is folded into 'error'.
-          tl <- readTabs (_td_tabs (_ctx_deps ctx))
-          let tl' = either (impossible "doRename: in-place rebind rejected")
-                           id
-                           (rebindSlot slot (_tab_ref tab) clean tl)
-          writeTabs ctx tl'
-          notifyChanged ctx
-          emit ctx ("renamed /" <> slotChar slot <> " " <> clean)
+doRename ctx slot name = do
+  mTab <- registryLookupSlot (_td_tabs (_ctx_deps ctx)) slot
+  case mTab of
+    Nothing  -> emit ctx renameNoTargetMsg
+    Just tab -> case _tab_ref tab of
+      BoundHarness _   -> emit ctx renameHarnessMsg
+      BoundSession sid -> case Parse.sanitizeTabName name of
+        Left e      -> emit ctx (renameBadNameMsg e)
+        Right clean -> do
+          res <- _td_setSessionDescription (_ctx_deps ctx) sid (Just clean)
+          case res of
+            Right () -> emit ctx ("renamed /" <> slotChar slot <> " " <> clean)
+            Left err -> emit ctx err
 
 -- ---------------------------------------------------------------------------
 -- /relay <mode>
@@ -883,6 +892,11 @@ renameNoTargetMsg = "no tab to rename — /tabs to list"
 -- | @\/rename@ whose name failed sanitization.
 renameBadNameMsg :: NameError -> Text
 renameBadNameMsg e = "invalid tab name (" <> tshow e <> ")"
+
+-- | @\/rename@ targeting a harness tab — out of scope (rename sets a session's
+-- canonical description; a harness has no equivalent canonical name here).
+renameHarnessMsg :: Text
+renameHarnessMsg = "rename applies to session tabs only"
 
 -- | @\/relay@ with an unrecognised mode word.
 relayBadModeMsg :: Text

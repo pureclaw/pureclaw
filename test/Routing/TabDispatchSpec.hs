@@ -95,6 +95,8 @@ data Fakes = Fakes
     -- ^ Incremented once per call to '_td_onTabsChanged'.
   , f_spawned     :: IORef [HarnessSpec]
     -- ^ Records each 'HarnessSpec' passed to '_td_spawnHarness'.
+  , f_descCalls   :: IORef [(SessionId, Maybe Text)]
+    -- ^ Records each @(sid, mDesc)@ passed to '_td_setSessionDescription'.
   }
 
 -- | How the injected @newDefaultSession@ behaves.
@@ -143,6 +145,7 @@ mkFakesEx defB sendB spawnB harnesses sessions liveFn = do
   wizard      <- newIORef Map.empty
   tabsChanged <- newIORef (0 :: Int)
   spawned     <- newIORef []
+  descCallsRef <- newIORef []
   let deps = TabDispatchDeps
         { _td_tabs           = reg
         , _td_cursors        = cursors
@@ -170,6 +173,9 @@ mkFakesEx defB sendB spawnB harnesses sessions liveFn = do
             pure $ case spawnB of
               SpawnsRef r label -> Right (r, label)
               SpawnErr msg      -> Left msg
+        , _td_setSessionDescription = \sid mDesc -> do
+            modifyIORef' descCallsRef (++ [(sid, mDesc)])
+            pure (Right ())
         }
   pure Fakes
     { f_deps        = deps
@@ -183,6 +189,7 @@ mkFakesEx defB sendB spawnB harnesses sessions liveFn = do
     , f_wizard      = wizard
     , f_tabsChanged = tabsChanged
     , f_spawned     = spawned
+    , f_descCalls   = descCallsRef
     }
 
 -- | A simple default-mint 'Fakes' (no wizard candidates, all harnesses live).
@@ -208,6 +215,10 @@ simpleFakesWithSendErr err =
 
 emitted :: Fakes -> IO [Text]
 emitted f = map snd <$> readIORef (f_emits f)
+
+-- | Every @(sid, mDesc)@ recorded by the '_td_setSessionDescription' spy.
+descCalls :: Fakes -> IO [(SessionId, Maybe Text)]
+descCalls f = readIORef (f_descCalls f)
 
 lastEmit :: Fakes -> IO Text
 lastEmit f = do
@@ -648,44 +659,64 @@ tabsSpec = describe "/tabs" $ do
 
 renameSpec :: Spec
 renameSpec = describe "/rename" $ do
-  it "relabels a tab by slot, sanitizing the name" $ do
+  it "sets the bound session's description by slot, sanitizing the name" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     _ <- appendSession f "s0" "old"
     handleInbound (f_deps f) convA "/rename 0 new-name"
+    -- The session description is updated via the injected seam (the canonical,
+    -- cross-process name); the per-process tab label is NOT relabelled.
+    descCalls f `shouldReturn` [(SessionId "s0", Just "new-name")]
     tl <- readTabs (f_reg f)
-    map _tab_name (toList tl) `shouldBe` ["new-name"]
+    map _tab_name (toList tl) `shouldBe` ["old"]
     lastEmit f `shouldReturn` "renamed /0 new-name"
 
-  it "renames the active tab when no slot is given" $ do
+  it "renames the active session tab when no slot is given" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     _ <- appendSession f "s0" "old"
     handleInbound (f_deps f) convA "/0"
     handleInbound (f_deps f) convA "/rename shiny"
-    tl <- readTabs (f_reg f)
-    map _tab_name (toList tl) `shouldBe` ["shiny"]
+    descCalls f `shouldReturn` [(SessionId "s0", Just "shiny")]
 
   it "with no active tab and no slot, emits a no-target note" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     handleInbound (f_deps f) convA "/rename whatever"
     lastEmit f `shouldReturn` "no tab to rename — /tabs to list"
+    descCalls f `shouldReturn` []
 
-  it "/tab rename K NAME relabels the tab (not the attach wizard)" $ do
+  it "rejects a name that fails sanitization; the seam is NOT called" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "old"
+    -- An ANSI-escape name is rejected by 'sanitizeTabName'.
+    handleInbound (f_deps f) convA "/rename 0 \ESC[31mx"
+    descCalls f `shouldReturn` []
+    es <- emitted f
+    last es `shouldSatisfy` ("invalid tab name" `T.isPrefixOf`)
+
+  it "/tab rename K NAME sets the session description (not the attach wizard)" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     _ <- appendSession f "s0" "alpha"
-    _ <- appendHarness f (harn "1") "beta"
+    _ <- appendSession f "s1" "beta"
     handleInbound (f_deps f) convA "/tab rename 1 joke"
-    tl <- readTabs (f_reg f)
-    map _tab_name (toList tl) `shouldBe` ["alpha", "joke"]
+    descCalls f `shouldReturn` [(SessionId "s1", Just "joke")]
     lastEmit f `shouldReturn` "renamed /1 joke"
 
   it "/tabs rename K NAME aliases /tab rename (real rename, not a listing)" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     _ <- appendSession f "s0" "alpha"
-    _ <- appendHarness f (harn "1") "beta"
+    _ <- appendSession f "s1" "beta"
     handleInbound (f_deps f) convA "/tabs rename 1 joke"
-    tl <- readTabs (f_reg f)
-    map _tab_name (toList tl) `shouldBe` ["alpha", "joke"]
+    descCalls f `shouldReturn` [(SessionId "s1", Just "joke")]
     lastEmit f `shouldReturn` "renamed /1 joke"
+
+  it "rename of a harness tab is out of scope (clear message, seam not called)" $ do
+    f <- simpleFakes (MintsRef (sess "x"))
+    _ <- appendSession f "s0" "alpha"
+    _ <- appendHarness f (harn "1") "beta"
+    handleInbound (f_deps f) convA "/rename 1 joke"
+    descCalls f `shouldReturn` []
+    tl <- readTabs (f_reg f)
+    map _tab_name (toList tl) `shouldBe` ["alpha", "beta"]
+    lastEmit f `shouldReturn` "rename applies to session tabs only"
 
 -- ---------------------------------------------------------------------------
 -- /relay
@@ -1082,13 +1113,12 @@ onTabsChangedSpec = describe "_td_onTabsChanged" $ do
 
 runTabCommandSpec :: Spec
 runTabCommandSpec = describe "runTabCommand" $ do
-  it "TabRenameCmd renames a slot (same observable as /tab rename)" $ do
+  it "TabRenameCmd sets the session description (same observable as /tab rename)" $ do
     f <- simpleFakes (MintsRef (sess "x"))
     _ <- appendSession f "s0" "alpha"
-    _ <- appendHarness f (harn "1") "beta"
+    _ <- appendSession f "s1" "beta"
     runTabCommand (f_deps f) convA (TabRenameCmd 1 "joke")
-    tl <- readTabs (f_reg f)
-    map _tab_name (toList tl) `shouldBe` ["alpha", "joke"]
+    descCalls f `shouldReturn` [(SessionId "s1", Just "joke")]
     lastEmit f `shouldReturn` "renamed /1 joke"
 
   it "TabCloseCmd N ForceNo removes the slot (same as /close N)" $ do

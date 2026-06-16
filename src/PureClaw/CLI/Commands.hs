@@ -31,8 +31,11 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (getCurrentTime)
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as LBS
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
+import Network.HTTP.Types.Status qualified as HTTPStatus
 import Options.Applicative
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 
@@ -58,10 +61,12 @@ import PureClaw.Routing.Types qualified as Routing
 import PureClaw.Session.Handle
   ( ResumeError (..)
   , SessionHandle (..)
+  , SetDescriptionError (..)
   , markBootstrapConsumed
   , mkSessionHandle
   , resolveResumedTarget
   , resumeSession
+  , setDescription
   )
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Frontend.API
@@ -743,7 +748,33 @@ runChat consentChannel serverMode opts = do
             -- close over @env@ lazily, exactly like '_env_onTabsChanged' /
             -- '_env_startHarness' forward-reference 'frontendEnv').
             tabExecDeps     = mkExecDeps env tabStore
-            tabDispatchDeps = mkTabDispatchDeps env tabExecDeps tabStore
+            -- Task 3 (#79): the session-description seam @\/rename@ routes
+            -- through. It sets the SESSION's canonical description (the
+            -- cross-process name) per 'serverMode', and is threaded as a PARAM
+            -- into both 'mkTabDispatchDeps' (the web @\/tab@ seam) and
+            -- 'runTabbedLoop' (the chat path) so the same write+notify policy
+            -- backs every surface. It forward-references 'frontendEnv' lazily
+            -- through this recursive @let@ group (a thunked closure, never forced
+            -- at construction — mirrors '_env_onTabsChanged' / '_env_startHarness'
+            -- above). 'ServeFrontend' (gateway) writes @session.json@ directly
+            -- and rebroadcasts the sidebar lists; 'RequireGateway' (TUI) PUTs to
+            -- the running gateway's description endpoint so the gateway stays the
+            -- single source of truth (it owns the registry + WS broadcast).
+            setSessionDescription sid mDesc = case serverMode of
+              ServeFrontend -> do
+                r <- setDescription sessionsDir sid mDesc
+                case r of
+                  Right ()                          -> do
+                    broadcastLists frontendEnv
+                    pure (Right ())
+                  Left SetDescriptionSessionMissing ->
+                    pure (Left "session not found")
+                  Left (SetDescriptionParseFailed e) ->
+                    pure (Left ("could not update session: " <> e))
+              RequireGateway ->
+                putDescriptionViaGateway manager sid mDesc
+            tabDispatchDeps =
+              mkTabDispatchDeps env tabExecDeps tabStore setSessionDescription
             -- The 'ConversationKey' the web path runs @\/tab@ against when the
             -- caller supplies none (the web chat box has no 'ConversationKey').
             webConvKey      = (CkWeb, ConversationId "web")
@@ -1005,7 +1036,7 @@ runChat consentChannel serverMode opts = do
           ServeFrontend ->
             Async.withAsync
               (runFrontend feCfg (Just frontendEnv) logger) $ \_serverAsync ->
-              withReconcileLoop (runTabbedLoop env tabStore)
+              withReconcileLoop (runTabbedLoop env tabStore setSessionDescription)
           -- TUI mode (step 1 of gateway-as-single-source-of-truth): do NOT
           -- start an embedded frontend. Require a gateway to be reachable;
           -- if none is, print a clear error and exit non-zero before entering
@@ -1013,7 +1044,7 @@ runChat consentChannel serverMode opts = do
           RequireGateway -> do
             up <- probeGatewayUp manager feCfg
             if up
-              then withReconcileLoop (runTabbedLoop env tabStore)
+              then withReconcileLoop (runTabbedLoop env tabStore setSessionDescription)
               else do
                 _lh_logError logger $
                   "No PureClaw gateway is running at http://127.0.0.1:"
@@ -1173,6 +1204,36 @@ probeGatewayUp mgr cfg = do
   req <- HTTP.parseRequest url
   r <- try (HTTP.httpNoBody req mgr) :: IO (Either HTTP.HttpException (HTTP.Response ()))
   pure (either (const False) (const True) r)
+
+-- | Set (or clear) a session's description by PUTting to the running gateway's
+-- @PUT \/api\/sessions\/\<sid\>\/description@ endpoint (the same handler the web
+-- frontend uses). Used by the TUI ('RequireGateway') @\/rename@ path: the
+-- gateway owns the registry + WS broadcast, so the TUI must mutate the session
+-- through it rather than writing @session.json@ behind its back (gateway as
+-- single source of truth). The body is @{"description": \<string|null\>}@. A
+-- non-2xx status or a transport exception surfaces as a user-facing 'Left'.
+putDescriptionViaGateway
+  :: HTTP.Manager -> SessionId -> Maybe T.Text -> IO (Either T.Text ())
+putDescriptionViaGateway mgr sid mDesc = do
+  let url = "http://127.0.0.1:" <> show (_fsc_port defaultFrontendConfig)
+              <> "/api/sessions/" <> T.unpack (unSessionId sid) <> "/description"
+      body = Aeson.encode (Aeson.object ["description" Aeson..= mDesc])
+  initReq <- HTTP.parseRequest url
+  let req = initReq
+        { HTTP.method         = "PUT"
+        , HTTP.requestHeaders = [("Content-Type", "application/json")]
+        , HTTP.requestBody    = HTTP.RequestBodyLBS body
+        }
+  r <- try (HTTP.httpLbs req mgr)
+         :: IO (Either HTTP.HttpException (HTTP.Response LBS.ByteString))
+  pure $ case r of
+    Left _     -> Left "could not reach the gateway to rename this session"
+    Right resp ->
+      let code = HTTPStatus.statusCode (HTTP.responseStatus resp)
+      in if code >= 200 && code < 300
+           then Right ()
+           else Left ("gateway rejected the rename (HTTP "
+                        <> T.pack (show code) <> ")")
 
 -- | Resolve the LLM provider from the provider type.
 -- Checks CLI flag first, then the vault for the API key.

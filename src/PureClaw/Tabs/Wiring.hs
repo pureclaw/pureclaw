@@ -140,8 +140,15 @@ type SessionStore = IORef (Map Core.SessionId Session.SessionHandle)
 -- | The Tabs-as-View production loop (replaces 'runAgentLoopWith' at the 8c.2
 -- flip). Forks the relay-writer thread, registers the CLI sink, then reads the
 -- channel and dispatches each inbound message per conversation.
-runTabbedLoop :: AgentEnv -> SessionStore -> IO ()
-runTabbedLoop env store = do
+runTabbedLoop
+  :: AgentEnv
+  -> SessionStore
+  -> (Core.SessionId -> Maybe Text -> IO (Either Text ()))
+     -- ^ The session-description seam (built per 'ServerMode' in
+     -- "PureClaw.CLI.Commands"); threaded into the dispatcher deps so @\/rename@
+     -- on a session tab sets the session's canonical, cross-process name.
+  -> IO ()
+runTabbedLoop env store setSessionDescription = do
   _lh_logInfo logger "Tabbed agent loop started"
   let execDeps   = mkExecDeps env store
       relayDeps  = RelayWriterDeps
@@ -155,7 +162,7 @@ runTabbedLoop env store = do
     (ref, ev) <- atomically (readTBQueue (_env_tabOutQ env))
     processOutput relayDeps (_env_relayWriter env) ref ev
   -- The dispatcher deps are built once; they close over the live env + store.
-  let dispatchDeps = mkTabDispatchDeps env execDeps store
+  let dispatchDeps = mkTabDispatchDeps env execDeps store setSessionDescription
   -- Read the first inbound message to learn the CLI conversation key, register
   -- its sink, then loop. (b) + (c).
   loop dispatchDeps
@@ -509,8 +516,16 @@ openSessionFromDisk env sid = do
 -- '_td_newDefaultSession' mints a fresh default-provider session and caches its
 -- handle in @store@; the wizard candidate lists come from the harness registry
 -- and the sessions directory; '_td_fallthrough' handles non-tab slash commands.
-mkTabDispatchDeps :: AgentEnv -> ExecDeps -> SessionStore -> Dispatch.TabDispatchDeps
-mkTabDispatchDeps env execDeps store = TabDispatchDeps
+mkTabDispatchDeps
+  :: AgentEnv
+  -> ExecDeps
+  -> SessionStore
+  -> (Core.SessionId -> Maybe Text -> IO (Either Text ()))
+     -- ^ The session-description seam threaded from the caller (built per
+     -- 'ServerMode' in "PureClaw.CLI.Commands"). Used by @\/rename@ on a
+     -- @BoundSession@ tab to set the session's canonical, cross-process name.
+  -> Dispatch.TabDispatchDeps
+mkTabDispatchDeps env execDeps store setSessionDescription = TabDispatchDeps
   { _td_tabs              = _env_tabRegistry env
   , _td_cursors           = _env_cursors env
   , _td_wizard            = _env_wizard env
@@ -527,6 +542,7 @@ mkTabDispatchDeps env execDeps store = TabDispatchDeps
   , _td_fallthrough       = fallthrough env store
   , _td_onTabsChanged     = _env_onTabsChanged env
   , _td_spawnHarness      = _env_startHarness env
+  , _td_setSessionDescription = setSessionDescription
   }
 
 -- | Emit a dispatcher banner\/reply to a conversation's registered sink. The

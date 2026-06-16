@@ -665,9 +665,23 @@ data SetDescriptionError
 -- transcript-derived snippet.
 setDescription :: FilePath -> SessionId -> Maybe Text -> IO (Either SetDescriptionError ())
 setDescription baseDir sid mDesc =
-  let normalized = mDesc >>= \t -> let s = T.strip t in if T.null s then Nothing else Just s
+  -- Cap at 120 chars (matching 'PureClaw.Session.Title.snippetCharBudget', the
+  -- snippet display budget). Applied here so EVERY writer — the web API handler,
+  -- the gateway 'ServeFrontend' /rename seam, the direct CLI path — gets the
+  -- same clamp uniformly.
+  let normalized = mDesc >>= \t ->
+        let s = T.take descriptionCharCap (T.strip t)
+        in if T.null s then Nothing else Just s
   in  updateSessionMeta baseDir sid (\m -> m { _sm_description = normalized })
         SetDescriptionSessionMissing SetDescriptionParseFailed
+
+-- | Maximum stored length of a session description, in characters. Matches
+-- 'PureClaw.Session.Title.snippetCharBudget' (120) — the budget the display
+-- layer truncates snippets to — so a stored description never exceeds what the
+-- sidebar can show. Hardcoded here (rather than importing the constant) to keep
+-- "PureClaw.Session.Handle" free of a "PureClaw.Session.Title" dependency.
+descriptionCharCap :: Int
+descriptionCharCap = 120
 
 -- | Best-effort bump of @_sm_lastActive@ to the current time, operating
 -- directly on the on-disk @session.json@ under @\<baseDir\>/\<sid\>/@ — no
