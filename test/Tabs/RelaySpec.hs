@@ -22,6 +22,14 @@
 --      compaction that moves the tab is reflected in the ping text.
 --   8. BannerLine source — a 'BannerLine' event never pings and never forwards
 --      to a background conversation (returns the set unchanged).
+--
+-- Focused __speaker prefix__ (pureclaw): when more than one tab exists, a
+-- focused burst-start does NOT get a standalone @\/N@ banner anymore — instead
+-- a @\/N \<model\>: @ prefix is MERGED into the burst content: prepended to a
+-- 'FullMsg', or injected as the first 'ChunkOf' right after 'StreamStart' so a
+-- streamed reply renders the speaker inline (and a non-streaming channel buffers
+-- it into the one flushed message). The model is omitted when unknown (a harness
+-- tab). A single-tab session is never prefixed.
 module Tabs.RelaySpec (spec) where
 
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
@@ -100,11 +108,19 @@ withRelay k m cs = cs { _cs_relay = Map.insert k m (_cs_relay cs) }
 ping :: Text -> Int -> ChannelEvent
 ping _name slot = BannerLine ("/" <> T.pack (show slot) <> " has new output")
 
--- | The focused speaker-label event the engine is contracted to produce when
--- more than one tab exists (a tab-identity label, WITHOUT the activity-ping
--- "has new output" suffix). Slot-only, matching the engine.
-focusLabel :: Text -> Int -> ChannelEvent
-focusLabel _name slot = BannerLine ("/" <> T.pack (show slot))
+-- | The source tab's model fixture, passed to 'relayEvent' and rendered into
+-- the focused speaker prefix (e.g. @\/0 opus: @).
+srcModel :: Maybe Text
+srcModel = Just "opus"
+
+-- | The speaker prefix the engine MERGES into a focused burst-start when more
+-- than one tab exists: @\/N \<model\>: @ (the model is omitted when 'Nothing',
+-- e.g. a harness tab). Replicated here to keep the streaming-injection
+-- assertions readable; the format itself is also pinned by literal-string
+-- assertions below.
+speakerPrefix :: Maybe Text -> Int -> Text
+speakerPrefix model slot =
+  "/" <> T.pack (show slot) <> maybe "" (" " <>) model <> ": "
 
 -- | Unsafe 'TabIndex' for tests (the int is always in range here).
 idx :: Int -> TabIndex
@@ -120,7 +136,7 @@ spec :: Spec
 spec = do
   -- DoD 1 — FocusedOnly: focused gets every event verbatim; background nothing.
   describe "FocusedOnly" $ do
-    it "delivers every event of a stream verbatim to a focused conversation, and nothing to a background FocusedOnly conversation" $ do
+    it "delivers every event of a stream to a focused conversation (prefix injected at StreamStart), and nothing to a background FocusedOnly conversation" $ do
       let src = refN 0
           other = refN 1
           tl = append1 other "beta" (append1 src "alpha" emptyTabs)
@@ -134,14 +150,14 @@ spec = do
             , StreamEnd sid
             ]
       (sink, deps) <- newSink
-      let drive acc = relayEvent deps cs FocusedOnly tl acc src
+      let drive acc = relayEvent deps cs FocusedOnly tl srcModel acc src
       _ <- foldEvents drive events
       out <- readIORef sink
-      -- The focused conversation c0 saw all four events verbatim (preceded by
-      -- a speaker label, since 2 tabs exist); c1 saw none.
+      -- The focused conversation c0 saw all four events, with the speaker prefix
+      -- injected as the first chunk (since 2 tabs exist); c1 saw none.
       out `shouldBe`
-        [ (keyN 0, focusLabel "alpha" 0)
-        , (keyN 0, StreamStart sid anyIdx)
+        [ (keyN 0, StreamStart sid anyIdx)
+        , (keyN 0, ChunkOf sid (speakerPrefix srcModel 0))
         , (keyN 0, ChunkOf sid "a")
         , (keyN 0, ChunkOf sid "b")
         , (keyN 0, StreamEnd sid)
@@ -150,9 +166,9 @@ spec = do
   -- gb7 — focused output is labelled ONLY when more than one tab exists.
   describe "focused multi-tab labelling (pureclaw-gb7)" $ do
     -- Test A: 2+ tabs, focused on src, a provider streaming burst → the
-    -- speaker label is delivered exactly once (at StreamStart), before the
-    -- forwarded events.
-    it "labels a focused provider burst once at StreamStart when 2+ tabs exist" $ do
+    -- speaker prefix is injected exactly once (the first chunk after
+    -- StreamStart), before the forwarded chunks.
+    it "injects the speaker prefix once at StreamStart when 2+ tabs exist" $ do
       let src = refN 0
           other = refN 1
           tl = append1 other "beta" (append1 src "alpha" emptyTabs)
@@ -165,20 +181,20 @@ spec = do
             , StreamEnd sid
             ]
       (sink, deps) <- newSink
-      let drive acc = relayEvent deps cs FocusedOnly tl acc src
+      let drive acc = relayEvent deps cs FocusedOnly tl srcModel acc src
       _ <- foldEvents drive events
       out <- readIORef sink
       out `shouldBe`
-        [ (keyN 0, focusLabel "alpha" 0)
-        , (keyN 0, StreamStart sid anyIdx)
+        [ (keyN 0, StreamStart sid anyIdx)
+        , (keyN 0, ChunkOf sid "/0 opus: ")
         , (keyN 0, ChunkOf sid "a")
         , (keyN 0, ChunkOf sid "b")
         , (keyN 0, StreamEnd sid)
         ]
 
-    -- Test B: only ONE tab, focused on src, a provider burst → NO label
+    -- Test B: only ONE tab, focused on src, a provider burst → NO prefix
     -- (single-tab CLI stays clean).
-    it "does NOT label focused output when only one tab exists" $ do
+    it "does NOT prefix focused output when only one tab exists" $ do
       let src = refN 0
           tl = append1 src "alpha" emptyTabs
           sid = sidN 5
@@ -189,7 +205,7 @@ spec = do
             , StreamEnd sid
             ]
       (sink, deps) <- newSink
-      let drive acc = relayEvent deps cs FocusedOnly tl acc src
+      let drive acc = relayEvent deps cs FocusedOnly tl srcModel acc src
       _ <- foldEvents drive events
       out <- readIORef sink
       out `shouldBe`
@@ -198,43 +214,53 @@ spec = do
         , (keyN 0, StreamEnd sid)
         ]
 
-    -- Test C: 2+ tabs, focused on src, a harness FullMsg → the label precedes
-    -- the FullMsg.
-    it "labels a focused FullMsg when 2+ tabs exist" $ do
+    -- Test C: 2+ tabs, focused on src, a harness FullMsg → the prefix is
+    -- prepended to the FullMsg text (one message, slot + model + separator).
+    it "prefixes a focused FullMsg with '/N model: ' when 2+ tabs exist" $ do
       let src = refN 0
           other = refN 1
           tl = append1 other "beta" (append1 src "alpha" emptyTabs)
           cs = withCursors [(keyN 0, src)]
       (sink, deps) <- newSink
-      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (FullMsg anyIdx "cap")
+      _ <- relayEvent deps cs FocusedOnly tl srcModel Set.empty src (FullMsg anyIdx "cap")
       out <- readIORef sink
-      out `shouldBe`
-        [ (keyN 0, focusLabel "alpha" 0)
-        , (keyN 0, FullMsg anyIdx "cap")
-        ]
+      -- Literal pin of the on-wire prefix format: "/<slot> <model>: <text>".
+      out `shouldBe` [(keyN 0, FullMsg anyIdx "/0 opus: cap")]
 
-    -- A focused 'BannerLine' is forwarded verbatim and carries NO speaker label
-    -- even with 2+ tabs (only burst-start StreamStart/FullMsg label).
-    it "does NOT label a focused BannerLine even with 2+ tabs" $ do
+    -- A focused FullMsg with an UNKNOWN model (e.g. a harness tab) → the prefix
+    -- is slot-only ("/N: "), with no model token.
+    it "prefixes a focused FullMsg with a slot-only '/N: ' when the model is unknown" $ do
       let src = refN 0
           other = refN 1
           tl = append1 other "beta" (append1 src "alpha" emptyTabs)
           cs = withCursors [(keyN 0, src)]
       (sink, deps) <- newSink
-      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (BannerLine "raw")
+      _ <- relayEvent deps cs FocusedOnly tl Nothing Set.empty src (FullMsg anyIdx "h")
+      out <- readIORef sink
+      out `shouldBe` [(keyN 0, FullMsg anyIdx "/0: h")]
+
+    -- A focused 'BannerLine' is forwarded verbatim and carries NO speaker prefix
+    -- even with 2+ tabs (only burst-start StreamStart/FullMsg are prefixed).
+    it "does NOT prefix a focused BannerLine even with 2+ tabs" $ do
+      let src = refN 0
+          other = refN 1
+          tl = append1 other "beta" (append1 src "alpha" emptyTabs)
+          cs = withCursors [(keyN 0, src)]
+      (sink, deps) <- newSink
+      _ <- relayEvent deps cs FocusedOnly tl srcModel Set.empty src (BannerLine "raw")
       out <- readIORef sink
       out `shouldBe` [(keyN 0, BannerLine "raw")]
 
-    -- A focused source tab absent from the list yields no label (focusedLabel
-    -- is Nothing) even with 2+ tabs in the list; the event still forwards.
-    it "does NOT label when the focused source ref is absent from the list" $ do
+    -- A focused source tab absent from the list yields no prefix (no slot) even
+    -- with 2+ tabs in the list; the event still forwards verbatim.
+    it "does NOT prefix when the focused source ref is absent from the list" $ do
       let src = refN 0
           a = refN 1
           b = refN 2
           tl = append1 b "gamma" (append1 a "beta" emptyTabs) -- src not present
           cs = withCursors [(keyN 0, src)]
       (sink, deps) <- newSink
-      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (FullMsg anyIdx "x")
+      _ <- relayEvent deps cs FocusedOnly tl srcModel Set.empty src (FullMsg anyIdx "x")
       out <- readIORef sink
       out `shouldBe` [(keyN 0, FullMsg anyIdx "x")]
 
@@ -252,7 +278,7 @@ spec = do
             , StreamEnd sid
             ]
       (sink, deps) <- newSink
-      let drive acc = relayEvent deps cs Firehose tl acc src
+      let drive acc = relayEvent deps cs Firehose tl Nothing acc src
       _ <- foldEvents drive events
       out <- readIORef sink
       out `shouldBe`
@@ -263,7 +289,7 @@ spec = do
 
   -- DoD 3 — ActivityDigest streaming burst.
   describe "ActivityDigest streaming burst" $ do
-    it "pings a background conversation exactly once across a full stream, and forwards every event to a focused one" $ do
+    it "pings a background conversation exactly once across a full stream, and forwards every event (prefixed) to a focused one" $ do
       let src = refN 0
           other = refN 1
           tl = append1 other "beta" (append1 src "alpha" emptyTabs)
@@ -278,14 +304,14 @@ spec = do
             , StreamEnd sid
             ]
       (sink, deps) <- newSink
-      let drive acc = relayEvent deps cs ActivityDigest tl acc src
+      let drive acc = relayEvent deps cs ActivityDigest tl srcModel acc src
       final <- foldEvents drive events
       out <- readIORef sink
-      -- c1 gets exactly one ping; c0 gets all five events verbatim.
+      -- c1 gets exactly one ping; c0 gets all five events, prefix injected.
       filter ((== keyN 1) . fst) out `shouldBe` [(keyN 1, ping "alpha" 0)]
       filter ((== keyN 0) . fst) out `shouldBe`
-        [ (keyN 0, focusLabel "alpha" 0)
-        , (keyN 0, StreamStart sid anyIdx)
+        [ (keyN 0, StreamStart sid anyIdx)
+        , (keyN 0, ChunkOf sid (speakerPrefix srcModel 0))
         , (keyN 0, ChunkOf sid "1")
         , (keyN 0, ChunkOf sid "2")
         , (keyN 0, ChunkOf sid "3")
@@ -303,23 +329,22 @@ spec = do
           fg = withCursors [(keyN 0, src)]      -- focused on src
       (sink, deps) <- newSink
       -- First FullMsg (background): one ping.
-      s1 <- relayEvent deps bg ActivityDigest tl Set.empty src (FullMsg anyIdx "m1")
+      s1 <- relayEvent deps bg ActivityDigest tl srcModel Set.empty src (FullMsg anyIdx "m1")
       s1 `shouldBe` Set.fromList [(keyN 0, BurstFull)]
       -- Second FullMsg (still background, threading s1): no re-ping.
-      s2 <- relayEvent deps bg ActivityDigest tl s1 src (FullMsg anyIdx "m2")
+      s2 <- relayEvent deps bg ActivityDigest tl srcModel s1 src (FullMsg anyIdx "m2")
       s2 `shouldBe` Set.fromList [(keyN 0, BurstFull)]
-      -- Refocus onto src and deliver: clears membership, forwards verbatim.
-      s3 <- relayEvent deps fg ActivityDigest tl s2 src (FullMsg anyIdx "m3")
+      -- Refocus onto src and deliver: clears membership, forwards (prefixed).
+      s3 <- relayEvent deps fg ActivityDigest tl srcModel s2 src (FullMsg anyIdx "m3")
       s3 `shouldBe` Set.empty
       -- New FullMsg while background again: pings again.
-      s4 <- relayEvent deps bg ActivityDigest tl s3 src (FullMsg anyIdx "m4")
+      s4 <- relayEvent deps bg ActivityDigest tl srcModel s3 src (FullMsg anyIdx "m4")
       s4 `shouldBe` Set.fromList [(keyN 0, BurstFull)]
       out <- readIORef sink
       out `shouldBe`
-        [ (keyN 0, ping "alpha" 0)        -- m1 ping
-        , (keyN 0, focusLabel "alpha" 0)  -- m3 speaker label (2 tabs, focused)
-        , (keyN 0, FullMsg anyIdx "m3")   -- m3 forwarded (focused)
-        , (keyN 0, ping "alpha" 0)        -- m4 ping
+        [ (keyN 0, ping "alpha" 0)                          -- m1 ping
+        , (keyN 0, FullMsg anyIdx "/0 opus: m3")            -- m3 focused, prefixed
+        , (keyN 0, ping "alpha" 0)                          -- m4 ping
         ]
 
   -- DoD 5 — Refocus clears ALL of a conversation's burst entries.
@@ -335,8 +360,9 @@ spec = do
             , (keyN 1, BurstFull)
             ]
       (sink, deps) <- newSink
-      final <- relayEvent deps cs ActivityDigest tl seeded src (FullMsg anyIdx "go")
+      final <- relayEvent deps cs ActivityDigest tl srcModel seeded src (FullMsg anyIdx "go")
       out <- readIORef sink
+      -- Single tab → no prefix.
       out `shouldBe` [(keyN 0, FullMsg anyIdx "go")]
       -- All keyN 0 entries gone; the unrelated keyN 1 entry survives.
       final `shouldBe` Set.fromList [(keyN 1, BurstFull)]
@@ -356,13 +382,12 @@ spec = do
              $ base
           ev = FullMsg anyIdx "msg"
       (sink, deps) <- newSink
-      final <- relayEvent deps cs FocusedOnly tl Set.empty src ev
+      final <- relayEvent deps cs FocusedOnly tl srcModel Set.empty src ev
       out <- readIORef sink
       out `shouldBe`
-        [ (keyN 1, ev)                 -- Firehose
-        , (keyN 2, ping "alpha" 0)     -- ActivityDigest background ping
-        , (keyN 3, focusLabel "alpha" 0) -- speaker label (2 tabs, focused)
-        , (keyN 3, ev)                 -- FocusedOnly on src
+        [ (keyN 1, ev)                              -- Firehose verbatim (background)
+        , (keyN 2, ping "alpha" 0)                  -- ActivityDigest background ping
+        , (keyN 3, FullMsg anyIdx "/0 opus: msg")   -- FocusedOnly on src, prefixed
         ]
       final `shouldBe` Set.fromList [(keyN 2, BurstFull)]
 
@@ -379,7 +404,7 @@ spec = do
           tl1 = removeSlot (idx 0) tl0
           cs = withCursors [(keyN 0, other)]
       (sink, deps) <- newSink
-      _ <- relayEvent deps cs ActivityDigest tl1 Set.empty src (FullMsg anyIdx "out")
+      _ <- relayEvent deps cs ActivityDigest tl1 Nothing Set.empty src (FullMsg anyIdx "out")
       out <- readIORef sink
       out `shouldBe` [(keyN 0, ping "src" 0)]
 
@@ -396,7 +421,7 @@ spec = do
              $ withCursors [(keyN 0, other), (keyN 1, other)]
           seeded = Set.fromList [(keyN 1, BurstFull)]
       (sink, deps) <- newSink
-      final <- relayEvent deps cs ActivityDigest tl seeded src (BannerLine "ignored")
+      final <- relayEvent deps cs ActivityDigest tl Nothing seeded src (BannerLine "ignored")
       out <- readIORef sink
       out `shouldBe` []
       final `shouldBe` seeded
@@ -409,7 +434,7 @@ spec = do
           tl = append1 src "alpha" emptyTabs
           cs = withCursors [(keyN 0, src)]
       (sink, deps) <- newSink
-      final <- relayEvent deps cs ActivityDigest tl Set.empty src (BannerLine "hi")
+      final <- relayEvent deps cs ActivityDigest tl srcModel Set.empty src (BannerLine "hi")
       out <- readIORef sink
       out `shouldBe` [(keyN 0, BannerLine "hi")]
       final `shouldBe` Set.empty
@@ -420,7 +445,7 @@ spec = do
       let src = refN 0
           tl = append1 src "alpha" emptyTabs
       (sink, deps) <- newSink
-      final <- relayEvent deps emptyCursors FocusedOnly tl Set.empty src (FullMsg anyIdx "x")
+      final <- relayEvent deps emptyCursors FocusedOnly tl Nothing Set.empty src (FullMsg anyIdx "x")
       out <- readIORef sink
       out `shouldBe` []
       final `shouldBe` Set.empty
@@ -432,7 +457,7 @@ spec = do
           tl = append1 src "alpha" emptyTabs
           cs = withCursors [(keyN 2, src), (keyN 0, src), (keyN 1, src)]
       (sink, deps) <- newSink
-      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (FullMsg anyIdx "x")
+      _ <- relayEvent deps cs FocusedOnly tl srcModel Set.empty src (FullMsg anyIdx "x")
       out <- readIORef sink
       map fst out `shouldBe` [keyN 0, keyN 1, keyN 2]
 
@@ -443,7 +468,7 @@ spec = do
           tl = append1 src "alpha" emptyTabs
           cs = withRelay (keyN 5) Firehose emptyCursors
       (sink, deps) <- newSink
-      _ <- relayEvent deps cs FocusedOnly tl Set.empty src (FullMsg anyIdx "f")
+      _ <- relayEvent deps cs FocusedOnly tl Nothing Set.empty src (FullMsg anyIdx "f")
       out <- readIORef sink
       out `shouldBe` [(keyN 5, FullMsg anyIdx "f")]
 
@@ -456,7 +481,7 @@ spec = do
           tl = setStatus src Dead tl0
           cs = withCursors [(keyN 0, other)]
       (sink, deps) <- newSink
-      _ <- relayEvent deps cs ActivityDigest tl Set.empty src (FullMsg anyIdx "x")
+      _ <- relayEvent deps cs ActivityDigest tl Nothing Set.empty src (FullMsg anyIdx "x")
       out <- readIORef sink
       out `shouldBe` [(keyN 0, ping "alpha" 0)]
 
@@ -469,7 +494,7 @@ spec = do
           tl = append1 other "beta" emptyTabs -- src not in the list
           cs = withCursors [(keyN 0, other)]
       (sink, deps) <- newSink
-      final <- relayEvent deps cs ActivityDigest tl Set.empty src (FullMsg anyIdx "x")
+      final <- relayEvent deps cs ActivityDigest tl Nothing Set.empty src (FullMsg anyIdx "x")
       out <- readIORef sink
       out `shouldBe` []
       final `shouldBe` Set.empty

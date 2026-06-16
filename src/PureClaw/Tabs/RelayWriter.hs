@@ -115,6 +115,11 @@ data RelayWriterDeps = RelayWriterDeps
     -- ^ Snapshot the current 'TabList' (tab registry).
   , _rw_default :: !RelayMode
     -- ^ The global default 'RelayMode' for conversations with no override.
+  , _rw_modelOf :: !(TabRef -> IO (Maybe Text))
+    -- ^ Resolve a tab's model name for the focused speaker prefix
+    --   (@\/N \<model\>: @). 'Nothing' when unknown (e.g. a harness tab), so the
+    --   prefix renders slot-only. Read fresh per output event for the source
+    --   ref only (the only tab whose prefix is rendered).
   }
 
 -- | The mutable state carried across 'processOutput' calls.
@@ -151,13 +156,14 @@ newRelayWriter =
 -- persists across calls.
 processOutput :: RelayWriterDeps -> RelayWriter -> TabRef -> ChannelEvent -> IO ()
 processOutput deps rw src event = do
-  cursors <- _rw_cursors deps
-  tabs    <- _rw_tabs deps
-  pinged  <- readIORef (_rw_pinged rw)
+  cursors  <- _rw_cursors deps
+  tabs     <- _rw_tabs deps
+  srcModel <- _rw_modelOf deps src
+  pinged   <- readIORef (_rw_pinged rw)
   let sink = RelayDeps $ \convKey ev ->
         lookupSink (_rw_sinks deps) convKey
           >>= maybe (pure ()) (\ch -> emitToConversation (_rw_buffer rw) convKey ch ev)
-  pinged' <- relayEvent sink cursors (_rw_default deps) tabs pinged src event
+  pinged' <- relayEvent sink cursors (_rw_default deps) tabs srcModel pinged src event
   writeIORef (_rw_pinged rw) pinged'
 
 -- | Deliver one per-conversation 'ChannelEvent' to its sink, honoring the
@@ -172,6 +178,13 @@ processOutput deps rw src event = do
 --     'StreamId')@ and flush it as ONE '_ch_send' on 'StreamEnd' (dropping an
 --     empty stream). 'StreamStart' just primes an empty buffer entry;
 --     'FullMsg'\/'BannerLine' send a full message directly.
+--
+-- Note: in a multi-tab session the relay injects the focused speaker prefix
+-- (@\/N \<model\>: @) as the first 'ChunkOf' after 'StreamStart' (see
+-- "PureClaw.Tabs.Relay"), so a stream that carries NO content chunks still
+-- buffers the prefix and flushes a content-free @\/N \<model\>: @ message
+-- rather than being dropped. This only affects the degenerate text-less stream;
+-- a single-tab session injects no prefix and still drops an empty stream.
 emitToConversation
   :: IORef (Map (ConversationKey, StreamId) Text)
   -> ConversationKey

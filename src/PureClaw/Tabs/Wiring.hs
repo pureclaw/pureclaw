@@ -156,6 +156,7 @@ runTabbedLoop env store setSessionDescription = do
         , _rw_cursors = readIORef (_env_cursors env)
         , _rw_tabs    = Tabs.readTabs (_env_tabRegistry env)
         , _rw_default = defaultRelayMode
+        , _rw_modelOf = modelOf store
         }
   -- (a) Fork the relay-writer thread draining the ref-tagged tab-output queue.
   _ <- _env_fork env $ forever $ do
@@ -243,6 +244,24 @@ activeBoundSession env store convKey = do
 -- 'FocusedOnly' matches the design default (only the focused tab is relayed).
 defaultRelayMode :: RelayMode
 defaultRelayMode = FocusedOnly
+
+-- | Resolve a tab's model name for the relay's focused speaker prefix
+-- (@\/N \<model\>: @). A @BoundSession@ resolves its pooled 'Session.SessionHandle'
+-- from @store@ (the running tab's session is always cached there) and reads its
+-- current @_sm_model@; an empty model string and a @BoundHarness@ (no model)
+-- both yield 'Nothing', so the prefix renders slot-only (@\/N: @). This reads
+-- only the in-memory store + meta 'IORef' — no disk I/O on the relay path.
+modelOf :: SessionStore -> TabRef -> IO (Maybe Text)
+modelOf store = \case
+  BoundSession sid -> do
+    m <- readIORef store
+    case Map.lookup sid m of
+      Nothing -> pure Nothing
+      Just sh -> do
+        meta <- readIORef (Session._sh_meta sh)
+        let model = SessionTypes._sm_model meta
+        pure (if T.null model then Nothing else Just model)
+  BoundHarness _ -> pure Nothing
 
 -- ---------------------------------------------------------------------------
 -- Exec wiring — the real _ex_startRuntime closure

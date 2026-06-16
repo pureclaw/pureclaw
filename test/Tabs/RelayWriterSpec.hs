@@ -99,6 +99,22 @@ append1 ref _name tl = case appendTab ref tl of
 oneTab :: TabRef -> TabList
 oneTab ref = append1 ref "alpha" emptyTabs
 
+-- | A two-tab list (slot 0 = @a@, slot 1 = @b@), so the focused speaker prefix
+-- (only emitted when more than one tab exists) is exercised.
+twoTabs :: TabRef -> TabRef -> TabList
+twoTabs a b = append1 b "beta" (append1 a "alpha" emptyTabs)
+
+-- | The default model resolver for tests that do not exercise the speaker
+-- prefix: every ref resolves to no model. Single-tab fixtures never render a
+-- prefix, so the resolved value is irrelevant there.
+noModel :: TabRef -> IO (Maybe Text)
+noModel _ = pure Nothing
+
+-- | A model resolver that reports every source ref as @opus@, so the focused
+-- speaker prefix renders as @\/0 opus: @ in the multi-tab tests.
+opusModel :: TabRef -> IO (Maybe Text)
+opusModel _ = pure (Just "opus")
+
 -- | One recorded call against a fake 'ChannelHandle'.
 data Call
   = Sent OutgoingMessage
@@ -191,7 +207,7 @@ spec = do
       registerSink reg (keyN 0) ch
       let cs   = setCursor (keyN 0) (refN 0) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0)) streamBurst
       readIORef calls `shouldReturn`
@@ -210,7 +226,7 @@ spec = do
       registerSink reg (keyN 0) ch
       let cs   = setCursor (keyN 0) (refN 0) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0))
         [ StreamStart (sidN 1) anyIdx
@@ -227,7 +243,7 @@ spec = do
       -- keyN 1 is NOT focused on the source ref; default ActivityDigest.
       let cs   = setCursor (keyN 1) (refN 9) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) ActivityDigest
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) ActivityDigest noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0)) streamBurst
       recorded <- readIORef calls
@@ -240,7 +256,7 @@ spec = do
       registerSink reg (keyN 1) ch
       let cs   = setCursor (keyN 1) (refN 9) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0)) streamBurst
       readIORef calls `shouldReturn` []
@@ -251,7 +267,7 @@ spec = do
       registerSink reg (keyN 1) ch
       let cs   = setCursor (keyN 1) (refN 9) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) Firehose
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) Firehose noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0)) streamBurst
       readIORef calls `shouldReturn`
@@ -268,7 +284,7 @@ spec = do
       let cs   = setCursor (keyN 0) (refN 0)
                    (setCursor (keyN 1) (refN 0) emptyCursors)
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0)) streamBurst
       readIORef calls `shouldReturn`
@@ -284,7 +300,7 @@ spec = do
       let tabs = oneTab (refN 0)
           -- Phase A: keyN 1 background (focused elsewhere), ActivityDigest.
           csBg = setCursor (keyN 1) (refN 9) emptyCursors
-          depsBg = RelayWriterDeps reg (pure csBg) (pure tabs) ActivityDigest
+          depsBg = RelayWriterDeps reg (pure csBg) (pure tabs) ActivityDigest noModel
       w <- newRelayWriter
       -- First burst (sid 1): exactly one ping.
       mapM_ (processOutput depsBg w (refN 0)) streamBurst
@@ -298,7 +314,7 @@ spec = do
       -- Refocus keyN 1 onto the source ref and deliver one event: clears its
       -- burst membership (and forwards the event verbatim).
       let csFocus = setCursor (keyN 1) (refN 0) emptyCursors
-          depsFocus = RelayWriterDeps reg (pure csFocus) (pure tabs) ActivityDigest
+          depsFocus = RelayWriterDeps reg (pure csFocus) (pure tabs) ActivityDigest noModel
       processOutput depsFocus w (refN 0) (FullMsg anyIdx "focused")
       -- Back to background with a NEW burst (sid 1 again) -> pings again,
       -- because refocus cleared the (key, _) membership.
@@ -322,7 +338,7 @@ spec = do
       registerSink reg (keyN 0) ch
       let cs   = setCursor (keyN 0) (refN 0) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0))
         [ StreamStart (sidN 1) anyIdx
@@ -336,7 +352,7 @@ spec = do
       registerSink reg (keyN 0) ch
       let cs   = setCursor (keyN 0) (refN 0) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       processOutput deps w (refN 0) (FullMsg anyIdx "whole")
       readIORef calls `shouldReturn` [Sent (OutgoingMessage "whole")]
@@ -347,10 +363,61 @@ spec = do
       registerSink reg (keyN 0) ch
       let cs   = setCursor (keyN 0) (refN 0) emptyCursors
           tabs = oneTab (refN 0)
-          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       processOutput deps w (refN 0) (BannerLine "notice")
       readIORef calls `shouldReturn` [Sent (OutgoingMessage "notice")]
+
+  describe "multi-tab focused speaker prefix (pureclaw)" $ do
+    it "injects a '/N model: ' prefix inline into a focused STREAM on a streaming channel" $ do
+      -- Two tabs exist, so a focused reply is prefixed with its speaker. On a
+      -- streaming channel the prefix arrives as the first ChunkOf (ChunkText),
+      -- before the real chunks, so it renders inline ahead of the reply.
+      reg <- newSinkRegistry
+      (calls, ch) <- newRecordingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = twoTabs (refN 0) (refN 1)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly opusModel
+      w <- newRelayWriter
+      mapM_ (processOutput deps w (refN 0)) streamBurst
+      readIORef calls `shouldReturn`
+        [ SentChunk (ChunkText "/0 opus: ")
+        , SentChunk (ChunkText "he")
+        , SentChunk (ChunkText "llo")
+        , SentChunk ChunkDone
+        ]
+
+    it "merges the '/N model: ' prefix into the ONE buffered message on a NON-STREAMING channel" $ do
+      -- On a non-streaming channel (Signal) the relay buffers the focused
+      -- stream and flushes it as one _ch_send. The injected prefix chunk is
+      -- buffered ahead of the content, so the single message carries the
+      -- speaker prefix — one bubble, not a separate '/0' bubble.
+      reg <- newSinkRegistry
+      (calls, ch) <- newNonStreamingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = twoTabs (refN 0) (refN 1)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly opusModel
+      w <- newRelayWriter
+      mapM_ (processOutput deps w (refN 0))
+        [ StreamStart (sidN 1) anyIdx
+        , ChunkOf (sidN 1) "Hel"
+        , ChunkOf (sidN 1) "lo"
+        , StreamEnd (sidN 1)
+        ]
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "/0 opus: Hello")]
+
+    it "prepends the '/N model: ' prefix to a focused FullMsg on a non-streaming channel" $ do
+      reg <- newSinkRegistry
+      (calls, ch) <- newNonStreamingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = twoTabs (refN 0) (refN 1)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly opusModel
+      w <- newRelayWriter
+      processOutput deps w (refN 0) (FullMsg anyIdx "whole")
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "/0 opus: whole")]
 
 -- | Whether a 'lookupSink' result is empty, without needing 'Eq' on
 -- 'ChannelHandle'.
