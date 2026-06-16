@@ -45,6 +45,8 @@ module PureClaw.Tabs.Wiring
     -- * Session resolution (exposed for tests \/ reuse)
   , SessionStore
   , resolveSession
+    -- * Wizard menus (exposed for tests \/ reuse)
+  , recentSessions
   ) where
 
 import Control.Concurrent.STM (atomically, readTBQueue, writeTBQueue)
@@ -84,6 +86,7 @@ import PureClaw.Routing.TabDispatch (TabDispatchDeps (..))
 import PureClaw.Routing.TabDispatch qualified as Dispatch
 import PureClaw.Routing.Types qualified as RT
 import PureClaw.Session.Handle qualified as Session
+import PureClaw.Session.Title qualified as Title
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Tabs qualified as Tabs
 import PureClaw.Tabs.Exec (ExecDeps (..), Runtime, ensure, release, sendTo)
@@ -617,18 +620,16 @@ recentHarnesses env = do
        , isLive (Registry._he_liveness e)
        ]
 
--- | Recent sessions (id + label) for the @\/tab@ wizard menu.
+-- | Recent sessions (id + title) for the @\/tab@ wizard menu. Titles are
+-- computed by the shared 'Title.sessionTitle' so the TUI wizard and the web
+-- frontend display a session's name identically — including the
+-- first-message snippet fallback for sessions with no custom description
+-- (web parity).
 recentSessions :: AgentEnv -> IO [(Core.SessionId, Text)]
 recentSessions env = do
   dir   <- sessionsDirOf env
   metas <- Session.listSessions dir Nothing 50
-  pure [ (SessionTypes._sm_id m, sessionLabel m) | m <- metas ]
-
--- | A terse session label for the wizard menu.
-sessionLabel :: SessionTypes.SessionMeta -> Text
-sessionLabel m =
-  fromMaybe (Core.unSessionId (SessionTypes._sm_id m))
-            (SessionTypes._sm_description m)
+  mapM (\m -> (,) (SessionTypes._sm_id m) <$> Title.sessionTitle dir m) metas
 
 -- | Liveness probe used by the wizard when a harness pick is resolved.
 liveHarness :: AgentEnv -> Registry.HarnessId -> IO Bool

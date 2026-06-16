@@ -63,6 +63,7 @@ import PureClaw.Tabs.RelayWriter (lookupSink)
 import PureClaw.Tabs.Wiring
   ( effectiveRegistry
   , execOneTool
+  , recentSessions
   , resolveSession
   , runTabbedLoop
   )
@@ -73,6 +74,7 @@ import PureClaw.Tools.Registry
   , registerTool
   , registryDefinitions
   )
+import PureClaw.Transcript.Types qualified as TT
 
 -- ---------------------------------------------------------------------------
 -- A provider that is never expected to be called in these loop-level tests.
@@ -877,3 +879,57 @@ spec = do
               , TRPText t <- parts
               ]
         texts `shouldContain` ["Unknown tool: nope"]
+
+  describe "recentSessions — wizard menu titles match the web (sessionTitle parity)" $ do
+    it "uses the first-message snippet (not the raw id) for a session with no description" $
+      withSystemTempDirectory "pc-wiring-titles" $ \tmp -> do
+        -- A real on-disk session under @tmp@ (the dir recentSessions enumerates)
+        -- with NO description and NO autoSummary, plus a transcript whose first
+        -- Request payload carries a recognisable first message. The shared
+        -- sessionTitle must therefore fall through to the first-message snippet,
+        -- NOT the raw session id. Before the flip recentSessions used a label
+        -- helper with no snippet support and returned the raw id (RED).
+        now <- getCurrentTime
+        let snippetText = "task: refactor the parser"
+            descLessTime = addUTCTime (negate 3600) now
+            descLessSid  = SessionTypes.newSessionId Nothing descLessTime
+            descLessMeta = SessionTypes.SessionMeta
+              { SessionTypes._sm_id    = descLessSid
+              , SessionTypes._sm_agent = Nothing
+              , SessionTypes._sm_kind  = SessionTypes.SkProvider
+                  (SessionTypes.ProviderSpec
+                    (SessionTypes.inferProviderId "mock") (ModelId "mock") Nothing)
+              , SessionTypes._sm_model             = "mock"
+              , SessionTypes._sm_channel           = "cli"
+              , SessionTypes._sm_createdAt         = descLessTime
+              , SessionTypes._sm_lastActive        = descLessTime
+              , SessionTypes._sm_bootstrapConsumed = False
+              , SessionTypes._sm_archived          = False
+              , SessionTypes._sm_description       = Nothing
+              , SessionTypes._sm_autoSummary       = Nothing
+              , SessionTypes._sm_source            = Nothing
+              }
+        sessSh <- mkSessionHandle Nothing mkNoOpLogHandle tmp descLessMeta
+        -- A Request entry whose plain-text payload is the first message. The
+        -- shared snippet extractor uses a plain (non-"messages") payload directly.
+        let entry = TT.TranscriptEntry
+              { TT._te_id            = "id-1"
+              , TT._te_timestamp     = descLessTime
+              , TT._te_harness       = Nothing
+              , TT._te_model         = Just "mock"
+              , TT._te_direction     = TT.Request
+              , TT._te_payload       = snippetText
+              , TT._te_durationMs    = Nothing
+              , TT._te_correlationId = "corr-1"
+              , TT._te_metadata      = Map.empty
+              }
+        TIO.writeFile (_sh_dir sessSh FP.</> "transcript.jsonl")
+          (TT.encodeEntryRaw entry <> "\n")
+
+        -- Build a tabbed env whose foreground session is ALSO under @tmp@, so
+        -- recentSessions enumerates @tmp@ (sessionsDirOf = parent of fg dir).
+        th <- mkTabbedEnv tmp []
+        recents <- recentSessions (_th_env th)
+        case lookup descLessSid recents of
+          Nothing    -> expectationFailure "expected the description-less session in recentSessions"
+          Just title -> title `shouldContain'` snippetText
