@@ -106,6 +106,7 @@ import qualified Transcript.CombinatorSpec
 import qualified Transcript.ProviderSpec
 import qualified Session.TypesSpec
 import qualified Session.HandleSpec
+import qualified Session.TitleSpec
 
 -- WU2 (Session.Kind leaf module)
 import qualified Session.KindSpec
@@ -273,6 +274,7 @@ main = hspec $ do
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
   describe "Session.Types" Session.TypesSpec.spec
   describe "Session.Handle" Session.HandleSpec.spec
+  describe "Session.Title" Session.TitleSpec.spec
   -- WU2 (Session.Kind leaf module)
   describe "Session.Kind"         Session.KindSpec.spec
   -- WU1 (frontend server settings + CORS)

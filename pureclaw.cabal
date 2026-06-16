@@ -147,6 +147,7 @@ library
     -- Session
     PureClaw.Session.Handle
     PureClaw.Session.Kind
+    PureClaw.Session.Title
     PureClaw.Session.Types
     -- Providers
     PureClaw.Providers.Class
@@ -351,6 +352,7 @@ test-suite pureclaw-test
     Transcript.ProviderSpec
     Session.TypesSpec
     Session.HandleSpec
+    Session.TitleSpec
     Handles.TranscriptSpec
     Handles.HarnessSpec
     -- Frontend (live transcript streaming — WU1)

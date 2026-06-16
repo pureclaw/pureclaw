@@ -48,12 +48,8 @@ import Control.Monad (filterM, unless, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?), (.!=))
 import Data.Aeson.Types qualified as AesonTypes
-import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
-import Data.Vector qualified as V
-import System.IO (IOMode (..), withFile)
-import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
 import Data.List qualified as List
 import Data.Map.Strict (Map)
@@ -133,6 +129,7 @@ import PureClaw.Session.Handle
   , tryLoad
   )
 import PureClaw.Session.Types
+import PureClaw.Session.Title (firstMessageSnippet)
 import PureClaw.Handles.Transcript
 import PureClaw.Tools.Registry (ToolRegistry, executeTool, registryDefinitions)
 import PureClaw.Transcript.Provider
@@ -1296,61 +1293,6 @@ toSessionInfo m snippet = SessionInfo
   , _si_channel             = channelKindToText . _ms_channel <$> _sm_source m
   , _si_channelUserId       = _sm_source m >>= fmap unUserId . _ms_userId
   }
-
--- | Cheap fallback for display: read just the first line of the
--- session's @transcript.jsonl@, decode it as a 'TranscriptEntry', and
--- extract a short snippet of the first user message. Returns 'Nothing'
--- when there's no transcript, the first entry isn't a request, or any
--- decoding step fails. The returned string is at most
--- 'snippetCharBudget' chars with newlines normalised to spaces.
---
--- Cost is one bounded read per call (we don't load the whole transcript).
-firstMessageSnippet :: FilePath -> SessionMeta -> IO (Maybe Text)
-firstMessageSnippet baseDir meta = do
-  let path = baseDir </> T.unpack (unSessionId (_sm_id meta)) </> "transcript.jsonl"
-  result <- try @IOException $ withFile path ReadMode BSC.hGetLine
-  case result of
-    Left _    -> pure Nothing
-    Right line -> case Aeson.eitherDecodeStrict' line :: Either String TranscriptEntry of
-      Left _ -> pure Nothing
-      Right entry
-        | _te_direction entry /= Request -> pure Nothing
-        | otherwise -> pure (snippetFromPayload (_te_payload entry))
-
-snippetCharBudget :: Int
-snippetCharBudget = 120
-
--- | Extract a display snippet from a request payload. Two shapes:
--- (1) JSON object with a "messages" array (provider request) — pull
---     text out of the first message; (2) plain text (harness send) —
---     use the payload directly. Trimmed, newline-normalised, and
---     truncated to 'snippetCharBudget' characters.
-snippetFromPayload :: Text -> Maybe Text
-snippetFromPayload raw = trimAndTruncate <$>
-  case Aeson.decodeStrict (TE.encodeUtf8 raw) of
-    Just (Aeson.Object o)
-      | Just (Aeson.Array msgs) <- KM.lookup "messages" o
-      , not (V.null msgs)
-      -> messageText (V.unsafeHead msgs)
-    _ -> Just raw
-  where
-    -- Anthropic-style message content: either a plain string or an
-    -- array of {type:"text", text:"..."} blocks. We just want a
-    -- human-readable lead.
-    messageText :: Aeson.Value -> Maybe Text
-    messageText (Aeson.Object m) = case KM.lookup "content" m of
-      Just (Aeson.String s) -> Just s
-      Just (Aeson.Array bs) -> Just (T.intercalate " " [t | Aeson.Object b <- V.toList bs
-                                                          , Just (Aeson.String t) <- [KM.lookup "text" b]])
-      _                     -> Nothing
-    messageText _ = Nothing
-
-    trimAndTruncate :: Text -> Text
-    trimAndTruncate t =
-      let normalized = T.unwords (T.words t)  -- collapse whitespace incl. newlines
-      in  if T.length normalized > snippetCharBudget
-            then T.take (snippetCharBudget - 1) normalized <> "\x2026"
-            else normalized
 
 -- | JSON-serializable transcript entry for the frontend.
 data TranscriptEntryInfo = TranscriptEntryInfo
