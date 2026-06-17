@@ -403,9 +403,19 @@ renameWindowNamedArgs sessionName windowName newLabel =
 
 -- | @new-window@ argv creating a named window in a session, optionally honoring
 -- a working directory (@-c@). The command string is run in the new window.
+--
+-- The target is the SESSION form @\<session\>:@ (trailing colon), NOT the bare
+-- session name. @new-window@'s @-t@ is an /insertion-window/ target: a bare
+-- name is resolved by tmux as a window-name match in the CURRENT session first,
+-- so if the user has a window named e.g. @pureclaw@ in their attached session,
+-- @-t pureclaw@ lands on that window's index and tmux fails with
+-- @create window failed: index 0 in use@ — the harness window is never created.
+-- The trailing colon pins the target to the session named @\<session\>@, so
+-- tmux allocates the next free window index there regardless of any same-named
+-- windows elsewhere on the server.
 newWindowNamedArgs :: Text -> Text -> Maybe FilePath -> String -> [String]
 newWindowNamedArgs sessionName windowName mWorkDir cmd =
-  ["new-window", "-t", T.unpack sessionName, "-n", T.unpack windowName]
+  ["new-window", "-t", T.unpack sessionName <> ":", "-n", T.unpack windowName]
     <> dirArgs
     <> [cmd]
   where
@@ -506,22 +516,36 @@ renameWindowNamed sessionName windowName newLabel = do
   _ <- runTmuxSilent (renameWindowNamedArgs sessionName windowName newLabel)
   pure ()
 
--- | Add a harness window addressed by name. If the session was just created
--- and still has its fresh default window 0, reuse it (send the command); else
--- create a new named window. Honors an optional working directory.
+-- | Add a harness window addressed by name, given whether the tmux session was
+-- just created by us ('TmuxSessionCreated') or already existed
+-- ('TmuxSessionExisted').
+--
+-- A freshly created session still holds only its default window 0 (a bare
+-- shell), so we REUSE it: rename it to @windowName@, @cd@ if asked, then run
+-- the command. This keeps the FIRST harness in window 0 instead of stranding an
+-- idle shell there and opening the harness in window 1. An existing session
+-- already has windows, so we append a new named window.
+--
+-- The status comes from 'startTmuxSessionStatus' and is authoritative. An
+-- earlier version inferred freshness from window 0's NAME (@name == index@),
+-- but that never holds under tmux @automatic-rename@ — a new session's window 0
+-- is named after its shell (e.g. @zsh@), not @0@ — so the reuse branch was dead
+-- and every harness, including the first, landed in a new window.
 --
 -- Targets and names the window by 'Text' rather than by index.
-addHarnessWindowNamed :: Text -> Text -> FilePath -> [Text] -> Maybe FilePath -> IO (Either HarnessError ())
-addHarnessWindowNamed sessionName windowName binary args mWorkDir = do
+addHarnessWindowNamed :: TmuxSessionStatus -> Text -> Text -> FilePath -> [Text] -> Maybe FilePath -> IO (Either HarnessError ())
+addHarnessWindowNamed sessionStatus sessionName windowName binary args mWorkDir = do
   tmuxCheck <- requireTmux
   case tmuxCheck of
     Left err -> pure (Left err)
     Right () -> do
       let stealthCmd = stealthShellCommand binary args
-      fresh <- isFreshDefaultWindow sessionName
-      if fresh
-        then do
-          -- Reuse the session's fresh default window 0: name it, then run.
+      case sessionStatus of
+        TmuxSessionCreated -> do
+          -- Reuse the freshly created session's default window 0: name it, then
+          -- run. 'renameWindowNamed' targets @session:0@, which resolves to
+          -- window INDEX 0 (no window is named "0"), so it works regardless of
+          -- the shell-derived default name.
           renameWindowNamed sessionName "0" windowName
           case mWorkDir of
             Just dir ->
@@ -533,22 +557,18 @@ addHarnessWindowNamed sessionName windowName binary args mWorkDir = do
           -- Enter to execute it.
           sendLineNamed sessionName windowName (BC.pack stealthCmd)
           pure (Right ())
-        else do
-          (exitCode, _stderr) <- runTmux (newWindowNamedArgs sessionName windowName mWorkDir stealthCmd)
+        TmuxSessionExisted -> do
+          (exitCode, stderr) <- runTmux (newWindowNamedArgs sessionName windowName mWorkDir stealthCmd)
           case exitCode of
             ExitSuccess   -> pure (Right ())
-            ExitFailure _ -> pure (Right ())
-
--- | A session has a \"fresh\" default window when it holds exactly one window
--- still named with tmux's default (a bare numeric index, e.g. @0@). Used to
--- decide whether 'addHarnessWindowNamed' should reuse window 0 or create a new
--- one (spike §11).
-isFreshDefaultWindow :: Text -> IO Bool
-isFreshDefaultWindow sessionName = do
-  windows <- listSessionWindows sessionName
-  pure $ case windows of
-    [(idx, name)] -> name == T.pack (show idx)
-    _             -> False
+            -- Surface the failure rather than swallowing it as success: a
+            -- dropped @new-window@ error previously left the caller believing
+            -- the harness launched (registering a phantom entry the reconciler
+            -- later evicts) while no window or command ever ran. Fail loud so
+            -- the create path reports the real tmux error (everything-visible).
+            ExitFailure c -> pure (Left (HarnessTmuxNotAvailable
+              ("tmux new-window failed (exit " <> T.pack (show c) <> "): "
+                <> TE.decodeUtf8Lenient stderr)))
 
 -- ---------------------------------------------------------------------------
 -- Identity markers + server sweep

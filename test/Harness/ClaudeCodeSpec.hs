@@ -19,7 +19,7 @@ import PureClaw.Handles.Harness
 import PureClaw.Handles.Transcript
 import PureClaw.Harness.ClaudeCode
 import PureClaw.Harness.Registry qualified as Reg
-import PureClaw.Harness.Tmux (TmuxWindowRow (..), validateTmuxIdent)
+import PureClaw.Harness.Tmux (TmuxSessionStatus (..), TmuxWindowRow (..), validateTmuxIdent)
 import PureClaw.Security.Adoption
 import PureClaw.Security.Command
 import PureClaw.Security.Policy
@@ -47,8 +47,8 @@ okDeps = ClaudeCodeDeps
   { _ccd_newId        = pure fixedId
   , _ccd_findClaude   = pure (Just "/usr/bin/claude")
   , _ccd_checkTmux    = pure (Right ())
-  , _ccd_addWindow    = \_ _ _ _ _ -> pure (Right ())
-  , _ccd_startSession = \_ -> pure (Right ())
+  , _ccd_addWindow    = \_ _ _ _ _ _ -> pure (Right ())
+  , _ccd_startSession = \_ -> pure (Right TmuxSessionCreated)
   , _ccd_setMarker    = \_ _ _ -> pure ()
   , _ccd_renameWindow = \_ _ _ -> pure ()
   , _ccd_setRemain    = \_ _ -> pure ()
@@ -127,7 +127,7 @@ spec = do
       result <- mkClaudeCodeHarnessWith
         okDeps
           { _ccd_findClaude = pure (Just "/custom/path/to/claude")
-          , _ccd_addWindow = \_ _ binary _ _ -> do
+          , _ccd_addWindow = \_ _ _ binary _ _ -> do
               writeIORef usedPathRef (Just binary)
               pure (Right ())
           }
@@ -424,7 +424,7 @@ spec = do
           uuid  = "fedcfedc-1234-4abc-8abc-fedcfedcfedc"
           extra = claudeCodeExtraArgs True (Just uuid)
       result <- mkClaudeCodeHarnessWith
-        okDeps { _ccd_addWindow = \_ _ _ args _ -> do
+        okDeps { _ccd_addWindow = \_ _ _ _ args _ -> do
                    writeIORef argvRef args
                    pure (Right ()) }
         policy mkNoOpTranscriptHandle "pureclaw" "claude-code-0" 0 Nothing
