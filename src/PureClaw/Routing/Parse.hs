@@ -339,6 +339,11 @@ parseTabFamily t
   | "/tab " `T.isPrefixOf` lower =
       let rest = T.strip (T.drop (T.length "/tab ") t)
       in parseTabAction rest
+  -- /tabs <sub> is an alias for /tab <sub> (the bare "/tabs" arm above
+  -- already handles the list case, so this only matches with a sub).
+  | "/tabs " `T.isPrefixOf` lower =
+      let rest = T.strip (T.drop (T.length "/tabs ") t)
+      in parseTabAction rest
   | otherwise = Nothing
   where
     lower = T.toLower t

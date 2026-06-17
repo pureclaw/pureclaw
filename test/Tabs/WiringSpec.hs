@@ -13,6 +13,7 @@ import Data.IORef
   , writeIORef
   )
 import Data.Map.Strict qualified as Map
+import Data.Either (isLeft, isRight)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text, isInfixOf)
 import Data.Text.IO qualified as TIO
@@ -58,11 +59,29 @@ import PureClaw.Session.Handle
   , noOpOnFirstStreamDoneRef
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Tabs (readTabs, resolveCursorSlot, toList)
+import PureClaw.Tabs
+  ( TabList
+  , TabRef (..)
+  , TabStatus (..)
+  , appendTab
+  , emptyTabs
+  , readTabs
+  , resolveCursorSlot
+  , setStatus
+  , toList
+  )
+import PureClaw.Tabs.Exec
+  ( ExecDeps (..)
+  , Runtime (..)
+  , newExec
+  , sendTo
+  )
 import PureClaw.Tabs.RelayWriter (lookupSink)
 import PureClaw.Tabs.Wiring
   ( effectiveRegistry
+  , ensureRestoredRuntimes
   , execOneTool
+  , recentSessions
   , resolveSession
   , runTabbedLoop
   )
@@ -73,6 +92,7 @@ import PureClaw.Tools.Registry
   , registerTool
   , registryDefinitions
   )
+import PureClaw.Transcript.Types qualified as TT
 
 -- ---------------------------------------------------------------------------
 -- A provider that is never expected to be called in these loop-level tests.
@@ -326,6 +346,7 @@ mkTabbedEnvChan sessionsDir (channel, clog) = do
         , _env_tabOutQ           = _ts_tabOutQ ts
         , _env_onTabsChanged     = _ts_onTabsChanged ts
         , _env_startHarness      = noStartHarness
+        , _env_runTabCommand     = noRunTabCommand
         }
   pure (TabbedHarness env clog runnersTracker)
 
@@ -347,7 +368,8 @@ mkTabbedEnvWith sessionsDir scripted mProvider mModel = do
 -- thread. Returns whether the loop completed (i.e. did NOT time out).
 runLoopBounded :: TabbedHarness -> IO Bool
 runLoopBounded th = do
-  done <- timeout (5 * 1000000) (runTabbedLoop (_th_env th))
+  store <- newIORef Map.empty
+  done <- timeout (5 * 1000000) (runTabbedLoop (_th_env th) store (\_ _ -> pure (Right ())))
   cancelAll (_th_runners th)
   pure (isJust done)
 
@@ -360,6 +382,11 @@ readSource env = do
 -- | The conversation key for a CLI conversation id (channel + conversation).
 cliKey :: Text -> (ChannelKind, ConversationId)
 cliKey conv = (CkCli, ConversationId conv)
+
+-- | Append a ref to a 'TabList', keeping the list unchanged on the
+-- structurally-impossible rejection (only fresh, unique refs are appended here).
+appendOrKeep :: TabRef -> TabList -> TabList
+appendOrKeep ref tl = either (const tl) snd (appendTab ref tl)
 
 -- | Whether a CLI conversation's cursor currently resolves to a live tab in the
 -- env's registry. Proves that conversation's plain-text iteration auto-started
@@ -614,7 +641,8 @@ spec = do
         -- returns), then wait for the worker's StreamDone to fire the hook
         -- BEFORE tearing the runners down (cancelAll would otherwise kill the
         -- worker mid-turn). The runner-tracking fork keeps the worker alive.
-        completed <- timeout (5 * 1000000) (runTabbedLoop env)
+        store <- newIORef Map.empty
+        completed <- timeout (5 * 1000000) (runTabbedLoop env store (\_ _ -> pure (Right ())))
         completed `shouldSatisfy` isJust
         firedInTime <- timeout (5 * 1000000) (takeMVar fired)
         cancelAll (_th_runners th)
@@ -642,7 +670,8 @@ spec = do
         let env = _th_env th
         fired <- newEmptyMVar
         writeIORef (_env_onFirstStreamDone env) (Just (putMVar fired ()))
-        _ <- timeout (5 * 1000000) (runTabbedLoop env)
+        store <- newIORef Map.empty
+        _ <- timeout (5 * 1000000) (runTabbedLoop env store (\_ _ -> pure (Right ())))
         -- Wait until the worker has run its turn and parked on its input queue
         -- (the exact state in which the orphaned-queue cancel hang manifests).
         _ <- timeout (5 * 1000000) (takeMVar fired)
@@ -711,6 +740,39 @@ spec = do
             status `shouldContain'` "Total input tokens:  0"
             status `shouldContain'` "Total output tokens: 0"
           [] -> expectationFailure "expected a /status block in the sent log"
+
+  describe "ensureRestoredRuntimes — boot-time runtime restore (reconnect after restart)" $ do
+    it "ensures a runtime for each restored Live tab so delivery succeeds, and skips Dead tombstones" $ do
+      -- Reproduce the post-restart symptom at the Exec seam. On a gateway
+      -- restart, 'overwriteTabs' rebinds the persisted tabs into the registry
+      -- but their runtimes were never 'ensure'd, so 'sendTo' to a restored ref
+      -- returns Left TabNotFound — surfaced to the user as
+      -- "couldn't deliver your message — tab: not found". The boot restore must
+      -- 'ensure' each Live restored ref (reconnect) while leaving Dead
+      -- tombstones runtime-less.
+      startsRef <- newIORef (0 :: Int)
+      let deps = ExecDeps
+            { _ex_startRuntime = \_ref -> do
+                modifyIORef' startsRef (+ 1)
+                pure Runtime
+                  { _rt_send = \_ -> pure (Right ())
+                  , _rt_stop = pure ()
+                  }
+            }
+          liveRef = BoundSession (SessionId "restored-live")
+          deadRef = BoundSession (SessionId "restored-dead")
+          tl = setStatus deadRef Dead
+                 (appendOrKeep deadRef (appendOrKeep liveRef emptyTabs))
+      ex <- newExec
+      ensureRestoredRuntimes deps ex tl
+      -- The Live tab reconnected: delivery now succeeds (no TabNotFound).
+      rLive <- sendTo ex liveRef "after restart"
+      rLive `shouldSatisfy` isRight
+      -- The Dead tombstone was skipped: it has no runtime.
+      rDead <- sendTo ex deadRef "to a tombstone"
+      rDead `shouldSatisfy` isLeft
+      -- Exactly one runtime was started — the Live tab only.
+      readIORef startsRef `shouldReturn` 1
 
   describe "resolveSession — wizard-reopen fallback loads real session (pureclaw-apv)" $ do
     it "loads the REAL on-disk session.json (model + description), not a fabricated one" $
@@ -873,3 +935,57 @@ spec = do
               , TRPText t <- parts
               ]
         texts `shouldContain` ["Unknown tool: nope"]
+
+  describe "recentSessions — wizard menu titles match the web (sessionTitle parity)" $ do
+    it "uses the first-message snippet (not the raw id) for a session with no description" $
+      withSystemTempDirectory "pc-wiring-titles" $ \tmp -> do
+        -- A real on-disk session under @tmp@ (the dir recentSessions enumerates)
+        -- with NO description and NO autoSummary, plus a transcript whose first
+        -- Request payload carries a recognisable first message. The shared
+        -- sessionTitle must therefore fall through to the first-message snippet,
+        -- NOT the raw session id. Before the flip recentSessions used a label
+        -- helper with no snippet support and returned the raw id (RED).
+        now <- getCurrentTime
+        let snippetText = "task: refactor the parser"
+            descLessTime = addUTCTime (negate 3600) now
+            descLessSid  = SessionTypes.newSessionId Nothing descLessTime
+            descLessMeta = SessionTypes.SessionMeta
+              { SessionTypes._sm_id    = descLessSid
+              , SessionTypes._sm_agent = Nothing
+              , SessionTypes._sm_kind  = SessionTypes.SkProvider
+                  (SessionTypes.ProviderSpec
+                    (SessionTypes.inferProviderId "mock") (ModelId "mock") Nothing)
+              , SessionTypes._sm_model             = "mock"
+              , SessionTypes._sm_channel           = "cli"
+              , SessionTypes._sm_createdAt         = descLessTime
+              , SessionTypes._sm_lastActive        = descLessTime
+              , SessionTypes._sm_bootstrapConsumed = False
+              , SessionTypes._sm_archived          = False
+              , SessionTypes._sm_description       = Nothing
+              , SessionTypes._sm_autoSummary       = Nothing
+              , SessionTypes._sm_source            = Nothing
+              }
+        sessSh <- mkSessionHandle Nothing mkNoOpLogHandle tmp descLessMeta
+        -- A Request entry whose plain-text payload is the first message. The
+        -- shared snippet extractor uses a plain (non-"messages") payload directly.
+        let entry = TT.TranscriptEntry
+              { TT._te_id            = "id-1"
+              , TT._te_timestamp     = descLessTime
+              , TT._te_harness       = Nothing
+              , TT._te_model         = Just "mock"
+              , TT._te_direction     = TT.Request
+              , TT._te_payload       = snippetText
+              , TT._te_durationMs    = Nothing
+              , TT._te_correlationId = "corr-1"
+              , TT._te_metadata      = Map.empty
+              }
+        TIO.writeFile (_sh_dir sessSh FP.</> "transcript.jsonl")
+          (TT.encodeEntryRaw entry <> "\n")
+
+        -- Build a tabbed env whose foreground session is ALSO under @tmp@, so
+        -- recentSessions enumerates @tmp@ (sessionsDirOf = parent of fg dir).
+        th <- mkTabbedEnv tmp []
+        recents <- recentSessions (_th_env th)
+        case lookup descLessSid recents of
+          Nothing    -> expectationFailure "expected the description-less session in recentSessions"
+          Just title -> title `shouldContain'` snippetText

@@ -56,6 +56,7 @@ data FileConfig = FileConfig
   , _fc_agentTruncateLimit :: Maybe Int -- ^ Per-file truncation limit (chars) for composed prompts; default 8000
   , _fc_sessionPrefix  :: Maybe Text  -- ^ Default session prefix when @--prefix@ and @--agent@ are both omitted
   , _fc_defaultTarget  :: Maybe Text  -- ^ Default target for new sessions (@"provider"@ or a harness name)
+  , _fc_bindHost       :: Maybe Text  -- ^ Web frontend bind interface (default 127.0.0.1); overridden by @--bind@
   } deriving stock (Show, Eq)
 
 -- | Signal channel configuration from the @[signal]@ TOML table.
@@ -71,7 +72,7 @@ emptyFileConfig =
   FileConfig Nothing Nothing Nothing Nothing Nothing Nothing
              Nothing Nothing Nothing Nothing Nothing Nothing Nothing
              Nothing Nothing Nothing Nothing Nothing
-             Nothing Nothing Nothing Nothing
+             Nothing Nothing Nothing Nothing Nothing
 
 emptyFileSignalConfig :: FileSignalConfig
 emptyFileSignalConfig = FileSignalConfig Nothing Nothing Nothing Nothing
@@ -110,6 +111,7 @@ fileConfigCodec = FileConfig
   <*> Toml.dioptional (Toml.int  "agent_truncate_limit")      .= _fc_agentTruncateLimit
   <*> Toml.dioptional (Toml.text "session_prefix")            .= _fc_sessionPrefix
   <*> Toml.dioptional (Toml.text "default_target")            .= _fc_defaultTarget
+  <*> Toml.dioptional (Toml.text "bind_host")                 .= _fc_bindHost
 
 fileSignalConfigCodec :: TomlCodec FileSignalConfig
 fileSignalConfigCodec = FileSignalConfig

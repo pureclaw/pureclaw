@@ -497,6 +497,17 @@ spec = do
       result <- setDescription base (parseSessionId "nope-2") (Just "x")
       result `shouldBe` Left SetDescriptionSessionMissing
 
+    it "caps an over-long description at 120 characters" $ withTmp $ \base -> do
+      let meta = mkMeta "desc-cap" t0
+      sh <- mkSessionHandle Nothing mkNoOpLogHandle base meta
+      _th_close (_sh_transcript sh)
+      _ <- setDescription base (parseSessionId "desc-cap") (Just (T.replicate 500 "a"))
+      Right onDisk <- Aeson.eitherDecodeFileStrict' (base </> "desc-cap" </> "session.json")
+        :: IO (Either String SessionMeta)
+      case _sm_description onDisk of
+        Just d  -> T.length d `shouldBe` 120
+        Nothing -> expectationFailure "expected a capped description, got Nothing"
+
   describe "touchSessionLastActive" $ do
     it "advances _sm_lastActive past _sm_createdAt, leaving other fields intact" $ withTmp $ \base -> do
       let meta = mkMeta "touch-1" t0

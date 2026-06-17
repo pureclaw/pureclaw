@@ -52,6 +52,10 @@ module PureClaw.Tabs.Types
   , conversationsOn
   , pruneDangling
   , relayModeFor
+    -- * @\/tab@ command ADTs (parsed form; shared by the dispatcher seam)
+  , TabKindArg (..)
+  , ForceMode (..)
+  , TabSlashCommand (..)
   ) where
 
 import Data.List.NonEmpty (NonEmpty)
@@ -94,9 +98,6 @@ data Tab = Tab
     --   never set directly by callers — derived by 'appendTab'\/'removeSlot'.
   , _tab_ref    :: !TabRef
     -- ^ The bound ground-truth entity (unique across the list, I2).
-  , _tab_name   :: !Text
-    -- ^ Friendly label. (Sanitisation is the caller's responsibility — this
-    --   module stores the text verbatim.)
   , _tab_status :: !TabStatus
     -- ^ Liveness of the binding.
   }
@@ -134,15 +135,18 @@ emptyTabs = TabList []
 toList :: TabList -> [Tab]
 toList (TabList ts) = ts
 
--- | Append a new tab binding @ref@ with label @name@ at the next free slot.
+-- | Append a new tab binding @ref@ at the next free slot.
 --
 -- * If @ref@ is already bound, returns @'Left' ('AlreadyBound' i)@ where @i@
 --   is its current slot (I2 — no duplicate refs).
 -- * If all 36 slots are taken, returns @'Left' 'SlotsFull'@.
 -- * Otherwise the new tab lands at slot @length@ (preserving I1) with status
 --   'Live', and the new slot index is returned alongside the updated list.
-appendTab :: TabRef -> Text -> TabList -> Either TabsError (TabIndex, TabList)
-appendTab ref name tl@(TabList ts) =
+--
+-- Tabs no longer carry a friendly label of their own — a tab's display title
+-- derives from its bound session (or a harness label fallback) at render time.
+appendTab :: TabRef -> TabList -> Either TabsError (TabIndex, TabList)
+appendTab ref tl@(TabList ts) =
   case lookupRef ref tl of
     Just i  -> Left (AlreadyBound i)
     Nothing ->
@@ -154,7 +158,7 @@ appendTab ref name tl@(TabList ts) =
              -- (with a provisional slot 'reindex' overwrites) and 'reindex' to
              -- stamp contiguous slots @0..n@ (I1). The new tab is last, so its
              -- slot is the last stamped index, read back via 'NE.last'.
-             let placed = NE.fromList (reindex (ts ++ [Tab firstSlot ref name Live]))
+             let placed = NE.fromList (reindex (ts ++ [Tab firstSlot ref Live]))
              in Right (_tab_slot (NE.last placed), TabList (NE.toList placed))
 
 -- | The infinite stream of valid slots @0, 1, 2, …@ as a 'NonEmpty'. Built
@@ -207,10 +211,10 @@ setStatus ref status (TabList ts) =
         then t { _tab_status = status }
         else t
 
--- | Rebind the tab at @slot@ to a new @ref@ and @name@, /in place/ — the
--- slot, and the slots of every other tab, are unchanged (I1 preserved). The
--- rebound tab's status is reset to 'Live'. This backs @\/new@'s "reset the
--- active tab to a fresh session" semantics (design §6.1).
+-- | Rebind the tab at @slot@ to a new @ref@, /in place/ — the slot, and the
+-- slots of every other tab, are unchanged (I1 preserved). The rebound tab's
+-- status is reset to 'Live'. This backs @\/new@'s "reset the active tab to a
+-- fresh session" semantics (design §6.1).
 --
 -- The new @ref@ is dedup-checked against I2:
 --
@@ -223,8 +227,8 @@ setStatus ref status (TabList ts) =
 -- If no tab occupies @slot@, this is a no-op returning the list unchanged
 -- (@'Right'@) — callers that already verified an active tab never hit this,
 -- but it keeps the function total.
-rebindSlot :: TabIndex -> TabRef -> Text -> TabList -> Either TabsError TabList
-rebindSlot slot ref name tl@(TabList ts) =
+rebindSlot :: TabIndex -> TabRef -> TabList -> Either TabsError TabList
+rebindSlot slot ref tl@(TabList ts) =
   case lookupSlot slot tl of
     Nothing -> Right tl
     Just _  ->
@@ -234,7 +238,7 @@ rebindSlot slot ref name tl@(TabList ts) =
   where
     upd t =
       if unTabIndex (_tab_slot t) == unTabIndex slot
-        then t { _tab_ref = ref, _tab_name = name, _tab_status = Live }
+        then t { _tab_ref = ref, _tab_status = Live }
         else t
 
 -- ---------------------------------------------------------------------------
@@ -317,3 +321,76 @@ pruneDangling tl cs =
 -- set, otherwise the supplied global default.
 relayModeFor :: ConversationKey -> RelayMode -> CursorState -> RelayMode
 relayModeFor k def cs = Map.findWithDefault def k (_cs_relay cs)
+
+-- ---------------------------------------------------------------------------
+-- @/tab@ command ADTs (parsed form)
+-- ---------------------------------------------------------------------------
+
+-- | A redacted enumeration of @TabKind@ as it appears in the @/tab new@
+-- command. Local to this module to avoid an import cycle through
+-- 'PureClaw.Handles.Tab' (which imports this module for 'SlashCommand'
+-- in its 'TabUnsupportedCommand' constructor). WU2 introduces this type
+-- alongside the @/tab@ command family; downstream WUs that need a
+-- 'PureClaw.Handles.Tab.TabKind' translate via a trivial total
+-- conversion at the handler layer (WU9).
+data TabKindArg
+  = TkaAi
+  | TkaProvider
+  | TkaHarness
+  | TkaShell
+  | TkaSsh
+  | TkaTmux
+  deriving stock (Show, Eq, Ord, Bounded, Enum)
+
+-- | Whether @/tab close N@ was passed the @--force@ flag.
+--
+-- For @KindAi@ tabs, @ForceYes@ skips the session archive on close
+-- (transcript deleted from disk). For non-AI tabs the close path is
+-- already destructive so the flag is a no-op semantically — the
+-- distinction is preserved here so 'executeSlashCommand' (WU9) can
+-- still echo what the user asked for.
+data ForceMode
+  = ForceNo
+  | ForceYes
+  deriving stock (Show, Eq, Ord, Bounded, Enum)
+
+-- | The @/tab@ command family (introduced by WU2 of Tabbed Chat #51).
+--
+-- Tab indices are stored as plain 'Int' rather than as
+-- 'PureClaw.Handles.Tab.TabIndex' to avoid an import cycle. The parser
+-- ('PureClaw.Routing.Parse.parseInput') validates the index against
+-- @_rc_maxTabs@ via @mkTabIndex@ before constructing these values, so
+-- callers may treat the contained 'Int' as well-formed for the
+-- configured cap; downstream handlers (WU9) are still expected to
+-- re-wrap via @mkTabIndex@ when crossing into 'TabIndex'-typed APIs.
+--
+-- @TabResumeCmd@ carries the validated 'SessionId' produced by
+-- @mkSessionId@ (WU2 smart constructor).
+--
+-- /tmux-style packing update:/ @TabNewCmd@ no longer carries an
+-- explicit target index — new tabs are always allocated at the lowest
+-- free slot. The constructor's payload is therefore just the optional
+-- kind keyword and the optional argument-text remainder.
+data TabSlashCommand
+  = TabNewCmd !(Maybe TabKindArg) !(Maybe Text)
+    -- ^ @\/tab new [\<kind\> [\<arg-text\>]]@. Index is allocated at
+    --   the lowest free slot by the handler (tmux-style packing). The
+    --   second field is the remainder of the line after the kind,
+    --   captured as a single 'Text' for the handler to split further.
+  | TabListCmd
+    -- ^ @\/tab list@ (and the @\/tabs@ alias).
+  | TabCloseCmd !Int !ForceMode
+    -- ^ @\/tab close \<N\> [--force]@. Remaining tabs are renumbered
+    --   down by one starting at @N+1@ so the registry is always packed
+    --   in the lowest slots (tmux @renumber-windows on@ model).
+  | TabFocusCmd !Int
+    -- ^ @\/tab focus \<N\>@ (functional alias of @\/N@).
+  | TabResumeCmd !SessionId
+    -- ^ @\/tab resume \<session-id\>@. Validation lives in
+    --   @mkSessionId@; rejection surfaces as
+    --   @ParseErrorInvalidSessionId@.
+  | TabRenameCmd !Int !Text
+    -- ^ @\/tab rename \<N\> \<name\>@. Parser captures the requested
+    --   name verbatim; @sanitizeTabName@ runs at handler time per
+    --   S10 so the user sees the rejection reason when applicable.
+  deriving stock (Show, Eq)

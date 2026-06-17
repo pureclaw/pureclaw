@@ -44,6 +44,13 @@ spec = do
         cfg <- loadFileConfig path
         _fc_model cfg `shouldBe` Just "claude-opus-4-20250514"
 
+    it "parses bind_host" $
+      withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
+        let path = dir </> "config.toml"
+        TIO.writeFile path "bind_host = \"localhost\"\n"
+        cfg <- loadFileConfig path
+        _fc_bindHost cfg `shouldBe` Just "localhost"
+
     it "parses provider" $
       withSystemTempDirectory "pureclaw-config-test" $ \dir -> do
         let path = dir </> "config.toml"

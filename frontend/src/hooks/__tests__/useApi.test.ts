@@ -7,7 +7,7 @@ describe('mapTabInfo', () => {
     const wire = {
       index: 4,
       kind: 'session:harness',
-      name: 'claude-code-abc',
+      label: 'claude-code-abc',
       status: 'exited',
       session_id: 'sess-9',
       ext_modified: true,
@@ -18,7 +18,7 @@ describe('mapTabInfo', () => {
     expect(mapTabInfo(wire)).toEqual({
       index: 4,
       kind: 'session:harness',
-      name: 'claude-code-abc',
+      label: 'claude-code-abc',
       status: 'exited',
       session_id: 'sess-9',
       extModified: true,
@@ -28,18 +28,39 @@ describe('mapTabInfo', () => {
     })
   })
 
+  it('maps a null label (session-backed tab, no harness fallback)', () => {
+    const wire = {
+      index: 1,
+      kind: 'session:provider',
+      label: null,
+      status: 'idle',
+      session_id: 'sess-1',
+    }
+    expect(mapTabInfo(wire)).toEqual({
+      index: 1,
+      kind: 'session:provider',
+      label: null,
+      status: 'idle',
+      session_id: 'sess-1',
+      extModified: false,
+      stale: false,
+      origin: undefined,
+      attachCommand: null,
+    })
+  })
+
   it('tolerates a Phase-1 wire object missing the new fields (back-compat)', () => {
     const wire = {
       index: 0,
       kind: 'shell:bash',
-      name: 'bash',
+      label: 'bash',
       status: 'idle',
       session_id: null,
     }
     expect(mapTabInfo(wire)).toEqual({
       index: 0,
       kind: 'shell:bash',
-      name: 'bash',
+      label: 'bash',
       status: 'idle',
       session_id: null,
       extModified: false,
@@ -365,5 +386,72 @@ describe('useSendMessage model body (U5)', () => {
     const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
     const body = JSON.parse((call[1] as RequestInit).body as string)
     expect(body).toEqual({ message: 'hello' })
+  })
+})
+
+describe('useSendMessage send result body', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => { globalThis.fetch = originalFetch })
+
+  it('resolves to the parsed {response, kind:"slash"} body on a 200', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ response: '/help output here', kind: 'slash' }),
+    })
+    const onComplete = vi.fn()
+    const { result } = renderHook(() => useSendMessage('sess-1', onComplete))
+    let resolved: unknown
+    await act(async () => {
+      resolved = await result.current.send('/help')
+    })
+    expect(resolved).toEqual({ response: '/help output here', kind: 'slash' })
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolves to the parsed {response, kind:"assistant"} body on a 200', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ response: 'hi there', kind: 'assistant' }),
+    })
+    const { result } = renderHook(() => useSendMessage('sess-1', vi.fn()))
+    let resolved: unknown
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toEqual({ response: 'hi there', kind: 'assistant' })
+  })
+
+  it('resolves to null on a non-ok response', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      json: () => Promise.resolve({ error: 'boom' }),
+    })
+    const { result } = renderHook(() => useSendMessage('sess-1', vi.fn()))
+    let resolved: unknown = 'unset'
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toBeNull()
+  })
+
+  it('resolves to null when the fetch throws', async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('net'))
+    const { result } = renderHook(() => useSendMessage('sess-1', vi.fn()))
+    let resolved: unknown = 'unset'
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toBeNull()
+  })
+
+  it('resolves to null when there is no session id', async () => {
+    globalThis.fetch = vi.fn()
+    const { result } = renderHook(() => useSendMessage(null, vi.fn()))
+    let resolved: unknown = 'unset'
+    await act(async () => {
+      resolved = await result.current.send('hello')
+    })
+    expect(resolved).toBeNull()
+    expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 })

@@ -48,12 +48,8 @@ import Control.Monad (filterM, unless, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?), (.!=))
 import Data.Aeson.Types qualified as AesonTypes
-import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
-import Data.Vector qualified as V
-import System.IO (IOMode (..), withFile)
-import Data.ByteString.Char8 qualified as BSC
 import Data.IORef
 import Data.List qualified as List
 import Data.Map.Strict (Map)
@@ -82,7 +78,10 @@ import PureClaw.Agent.AgentDef
   , loadAgent
   , unAgentName
   )
+import PureClaw.Agent.Env (AgentEnv (..))
 import PureClaw.Agent.Context
+import PureClaw.Agent.SlashDispatch (SlashResult (..), runSlashInput)
+import PureClaw.Handles.Channel (mkCaptureChannelHandle)
 import PureClaw.Core.Types (MessageSource (..), ModelId (..), SessionId (..), ToolCallId, UserId (..), channelKindToText, isValidSessionId, unModelId, unSessionId)
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
@@ -130,6 +129,7 @@ import PureClaw.Session.Handle
   , tryLoad
   )
 import PureClaw.Session.Types
+import PureClaw.Session.Title (firstMessageSnippet)
 import PureClaw.Handles.Transcript
 import PureClaw.Tools.Registry (ToolRegistry, executeTool, registryDefinitions)
 import PureClaw.Transcript.Provider
@@ -253,6 +253,11 @@ data FrontendEnv = FrontendEnv
     -- before giving up. Defends against a model that keeps tool-calling
     -- without ever returning final text. Reaching the cap returns a
     -- placeholder response; it does not throw.
+  , _fe_agentEnv :: AgentEnv
+    -- ^ Shared base env; '_env_channel'/'_env_session' are overridden per
+    -- request by the slash-dispatch caller (Task 7). Leave LAZY (no bang):
+    -- in CLI.Commands 'env' and 'frontendEnv' are bound in the same recursive
+    -- 'let', so this back-edge ties the knot without forcing at construction.
   , _fe_tabRegistry :: TabRegistry
     -- ^ The live first-class tab registry (WU6). 'tabsFromRegistry' reads
     -- this alongside '_fe_harnessRegistry' to project the canonical
@@ -520,7 +525,7 @@ harnessEntriesToTabs entries =
     toTab idx e = TabSnapshot
       { _ts_index         = idx
       , _ts_kind          = "harness"
-      , _ts_name          = Registry._he_label e
+      , _ts_label         = Just (Registry._he_label e)
       , _ts_status        = livenessToTabStatus (Registry._he_liveness e)
       , _ts_sessionId     = Registry._he_sessionId e
       , _ts_extModified   = Registry._he_extModified e
@@ -1190,11 +1195,23 @@ computeListsSnapshot env = do
         archivedMetas
   archivedSnippets <- traverse (firstMessageSnippet baseDir) archivedChosen
   let archivedInfos = zipWith toSessionInfo archivedChosen archivedSnippets
+  -- Active-tab-backed sessions are deduped OUT of recentSessions above, and
+  -- the tab snapshot is meta-free, so the frontend has no SessionInfo to join
+  -- a tab's session_id against (breaking the chat-header edit pencil and the
+  -- rename-derived title for open tabs). Carry their full SessionInfo in a
+  -- dedicated "tabSessions" array — built the same way recentSessions is —
+  -- so the frontend can resolve them WITHOUT putting meta on the tab snapshot.
+  -- Non-harness only (harness-tab sessions stay listed under recentSessions);
+  -- archived sessions bound to a non-harness tab are still surfaced here.
+  let tabChosen = filter (\m -> unSessionId (_sm_id m) `elem` activeTabSids) allMetas
+  tabSnippets <- traverse (firstMessageSnippet baseDir) tabChosen
+  let tabSessionInfos = zipWith toSessionInfo tabChosen tabSnippets
   pure $ object
     [ "type"              .= ("lists" :: Text)
     , "tabs"              .= tabs
     , "recentSessions"    .= recentInfos
     , "archivedSessions"  .= archivedInfos
+    , "tabSessions"       .= tabSessionInfos
     ]
 
 -- | Compute and broadcast a lists snapshot to all WS subscribers.
@@ -1288,61 +1305,6 @@ toSessionInfo m snippet = SessionInfo
   , _si_channel             = channelKindToText . _ms_channel <$> _sm_source m
   , _si_channelUserId       = _sm_source m >>= fmap unUserId . _ms_userId
   }
-
--- | Cheap fallback for display: read just the first line of the
--- session's @transcript.jsonl@, decode it as a 'TranscriptEntry', and
--- extract a short snippet of the first user message. Returns 'Nothing'
--- when there's no transcript, the first entry isn't a request, or any
--- decoding step fails. The returned string is at most
--- 'snippetCharBudget' chars with newlines normalised to spaces.
---
--- Cost is one bounded read per call (we don't load the whole transcript).
-firstMessageSnippet :: FilePath -> SessionMeta -> IO (Maybe Text)
-firstMessageSnippet baseDir meta = do
-  let path = baseDir </> T.unpack (unSessionId (_sm_id meta)) </> "transcript.jsonl"
-  result <- try @IOException $ withFile path ReadMode BSC.hGetLine
-  case result of
-    Left _    -> pure Nothing
-    Right line -> case Aeson.eitherDecodeStrict' line :: Either String TranscriptEntry of
-      Left _ -> pure Nothing
-      Right entry
-        | _te_direction entry /= Request -> pure Nothing
-        | otherwise -> pure (snippetFromPayload (_te_payload entry))
-
-snippetCharBudget :: Int
-snippetCharBudget = 120
-
--- | Extract a display snippet from a request payload. Two shapes:
--- (1) JSON object with a "messages" array (provider request) — pull
---     text out of the first message; (2) plain text (harness send) —
---     use the payload directly. Trimmed, newline-normalised, and
---     truncated to 'snippetCharBudget' characters.
-snippetFromPayload :: Text -> Maybe Text
-snippetFromPayload raw = trimAndTruncate <$>
-  case Aeson.decodeStrict (TE.encodeUtf8 raw) of
-    Just (Aeson.Object o)
-      | Just (Aeson.Array msgs) <- KM.lookup "messages" o
-      , not (V.null msgs)
-      -> messageText (V.unsafeHead msgs)
-    _ -> Just raw
-  where
-    -- Anthropic-style message content: either a plain string or an
-    -- array of {type:"text", text:"..."} blocks. We just want a
-    -- human-readable lead.
-    messageText :: Aeson.Value -> Maybe Text
-    messageText (Aeson.Object m) = case KM.lookup "content" m of
-      Just (Aeson.String s) -> Just s
-      Just (Aeson.Array bs) -> Just (T.intercalate " " [t | Aeson.Object b <- V.toList bs
-                                                          , Just (Aeson.String t) <- [KM.lookup "text" b]])
-      _                     -> Nothing
-    messageText _ = Nothing
-
-    trimAndTruncate :: Text -> Text
-    trimAndTruncate t =
-      let normalized = T.unwords (T.words t)  -- collapse whitespace incl. newlines
-      in  if T.length normalized > snippetCharBudget
-            then T.take (snippetCharBudget - 1) normalized <> "\x2026"
-            else normalized
 
 -- | JSON-serializable transcript entry for the frontend.
 data TranscriptEntryInfo = TranscriptEntryInfo
@@ -1645,13 +1607,12 @@ createTab env tabKind mSeed respond =
         Just seed -> mapM_ (_th_record (_sh_transcript sh)) (_bseed_prefix seed)
         Nothing -> pure ()
       -- Bind the session into the first-class TabRegistry (WU7). The returned
-      -- slot is the tab's display index in the response. A label of the agent
-      -- name (else the session id) drives the sidebar title. The cap was
-      -- pre-checked in 'handleNewTab'; 'registryAppend' re-checks defensively
-      -- and a 'SlotsFull' (a lost race against a concurrent create) maps to the
-      -- same cap 409.
-      let tabName = maybe (unSessionId sid) unAgentName metaAgent
-      appended <- registryAppend (_fe_tabRegistry env) (BoundSession sid) tabName
+      -- slot is the tab's display index in the response. Tabs carry no label of
+      -- their own — the sidebar title derives from the bound session. The cap
+      -- was pre-checked in 'handleNewTab'; 'registryAppend' re-checks
+      -- defensively and a 'SlotsFull' (a lost race against a concurrent create)
+      -- maps to the same cap 409.
+      appended <- registryAppend (_fe_tabRegistry env) (BoundSession sid)
       case appended of
         Left SlotsFull ->
           respond $ jsonResponse status409
@@ -1717,14 +1678,15 @@ createHarnessTab env tabKind spec sk respond = do
   spawned <- spawnHarnessSession env spec sk
   case spawned of
     Left err -> respond $ harnessErrorResponse err
-    Right (sid, hid, updatedMeta, key) -> do
+    Right (sid, hid, updatedMeta, _key) -> do
       -- Bind the harness into the first-class TabRegistry (WU7) — only a
       -- successful spawn consumes a tab slot. The returned slot is the tab's
-      -- display index in the response; the label is the spawn's window key.
+      -- display index in the response. Tabs carry no label of their own — the
+      -- harness label fallback comes from the registry entry at render time.
       -- 'SlotsFull' here (a lost race against a concurrent create after the
       -- pre-check in 'handleNewTab') maps to the cap 409; the harness window is
       -- already up, but the tab cannot be surfaced, so report the cap.
-      appended <- registryAppend (_fe_tabRegistry env) (BoundHarness hid) key
+      appended <- registryAppend (_fe_tabRegistry env) (BoundHarness hid)
       case appended of
         Left SlotsFull ->
           respond $ jsonResponse status409
@@ -1966,37 +1928,71 @@ handleSend env sid req respond = do
             Left _ ->
               respond $ jsonResponse status400 (object ["error" .= ("Invalid JSON: expected {\"message\": \"...\"}" :: Text)])
             Right (SendRequest userText reqModel) -> do
-              -- Branch on the session's kind BEFORE the provider/model guard:
-              -- an AI-Harness session must route to its live tmux harness even
-              -- on an instance with no LLM provider configured. A failure to
-              -- load the meta (missing/malformed) falls through to the
-              -- provider path, preserving prior behaviour.
+              -- Load the session meta ONCE up front: it is needed both by the
+              -- slash short-circuit (to build a request-scoped session) and by
+              -- the harness/provider pass-through below. The transcript-exists
+              -- 404 check above already proves the session exists, so 'mMeta'
+              -- is 'Just' on every reachable path here.
               mMeta <- tryLoad (_fe_sessionsDir env) (T.unpack sid)
-              let mKind = _sm_kind <$> mMeta
-              case mKind >>= harnessKeyFromKind of
-                Just key -> do
-                  -- The dual-written tmux window name is the legacy name-fallback
-                  -- key; an id-shaped @key@ resolves via the registry first and
-                  -- falls back to this name (WU6).
-                  let fallbackName = mKind >>= harnessWindowFromKind
-                  sendToHarness env sid key fallbackName userText transcriptPath respond
-                Nothing -> do
-                  mProvider <- readIORef (_fe_provider env)
-                  mModel <- readIORef (_fe_model env)
-                  case (mProvider, mModel) of
-                    (Nothing, _) ->
-                      respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
-                    (_, Nothing) ->
-                      respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
-                    (Just provider, Just model) -> do
-                      result <- try @SomeException $
-                        doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
-                      case result of
-                        Left e -> do
-                          _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
-                          respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
-                        Right respText ->
-                          respond $ jsonResponse status200 (object ["response" .= respText])
+              -- Slash short-circuit (Task 7): classify the input against the
+              -- shared dispatcher BEFORE any harness/provider work. A
+              -- recognized command runs against a fresh capture channel + a
+              -- request-scoped session handle and never reaches inference; its
+              -- output is returned verbatim and NEVER persisted/inferred.
+              let base = _fe_agentEnv env
+                  -- Forced ONLY by 'runSlashInput' for a recognized command, so
+                  -- passthrough chat / short-circuit messages pay no scoping
+                  -- cost. The 'maybe' fallback is a total defensive guard for a
+                  -- session whose meta vanished between the 404 check and here.
+                  mkScoped = do
+                    (chan, readOut) <- mkCaptureChannelHandle
+                    meta <- maybe (ioError (userError "session meta vanished")) pure mMeta
+                    sh   <- mkSessionHandle (_fe_broker env) (_fe_logger env)
+                              (_fe_sessionsDir env) meta
+                    sref <- newIORef sh
+                    pure (base { _env_channel = chan, _env_session = sref }, readOut)
+              slashOutcome <- try @SomeException (runSlashInput base mkScoped userText)
+              case slashOutcome of
+                Left e -> do
+                  _lh_logError (_fe_logger env) $ "Slash dispatch error: " <> T.pack (show e)
+                  respond $ jsonResponse status500 (object ["error" .= ("Command failed" :: Text)])
+                Right (SlashHandled out) ->
+                  respond $ jsonResponse status200
+                    (object ["response" .= out, "kind" .= ("slash" :: Text)])
+                Right (SlashPassThrough _) -> do
+                  -- Non-slash input: the existing harness/provider path,
+                  -- behaviour-identical, now tagged "kind" = "assistant".
+                  --
+                  -- Branch on the session's kind BEFORE the provider/model guard:
+                  -- an AI-Harness session must route to its live tmux harness even
+                  -- on an instance with no LLM provider configured. A failure to
+                  -- load the meta (missing/malformed) falls through to the
+                  -- provider path, preserving prior behaviour.
+                  let mKind = _sm_kind <$> mMeta
+                  case mKind >>= harnessKeyFromKind of
+                    Just key -> do
+                      -- The dual-written tmux window name is the legacy name-fallback
+                      -- key; an id-shaped @key@ resolves via the registry first and
+                      -- falls back to this name (WU6).
+                      let fallbackName = mKind >>= harnessWindowFromKind
+                      sendToHarness env sid key fallbackName userText transcriptPath respond
+                    Nothing -> do
+                      mProvider <- readIORef (_fe_provider env)
+                      mModel <- readIORef (_fe_model env)
+                      case (mProvider, mModel) of
+                        (Nothing, _) ->
+                          respond $ jsonResponse status503 (object ["error" .= ("No provider configured" :: Text)])
+                        (_, Nothing) ->
+                          respond $ jsonResponse status503 (object ["error" .= ("No model configured" :: Text)])
+                        (Just provider, Just model) -> do
+                          result <- try @SomeException $
+                            doCompletion env (SessionId sid) provider reqModel model userText transcriptPath
+                          case result of
+                            Left e -> do
+                              _lh_logError (_fe_logger env) $ "Send error: " <> T.pack (show e)
+                              respond $ jsonResponse status500 (object ["error" .= ("Completion failed" :: Text)])
+                            Right respText ->
+                              respond $ jsonResponse status200 (object ["response" .= respText, "kind" .= ("assistant" :: Text)])
 
 -- | Route a user message to a live tmux harness handle (WU3, defect #2).
 -- This is the harness analogue of 'doCompletion': it is the SOLE recorder
@@ -2152,7 +2148,7 @@ routeViaHandle env sid hh userText transcriptPath postSend respond = do
       -- minor latency — but is exception-proof at the source, so it cannot fail
       -- the send the user is about to receive.
       postSend
-      respond $ jsonResponse status200 (object ["response" .= resp])
+      respond $ jsonResponse status200 (object ["response" .= resp, "kind" .= ("assistant" :: Text)])
 
 -- | Lazy migration (D6.5): if a corroborated registry entry's label matches
 -- @windowName@, persist its 'Registry.HarnessId' onto the session's

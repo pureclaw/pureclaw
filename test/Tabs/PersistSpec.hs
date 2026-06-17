@@ -82,11 +82,12 @@ harnessRef :: Int -> TabRef
 harnessRef = BoundHarness . hid
 
 -- | Build a 'TabList' from a list of (ref, name) appends, erroring on any
--- rejection (fixtures are always valid).
+-- rejection (fixtures are always valid). Tabs no longer carry a label of their
+-- own; the name is retained in the fixture tuples for readability and ignored.
 buildTabs :: [(TabRef, Text)] -> TabList
 buildTabs = List.foldl' step emptyTabs
   where
-    step tl (ref, name) = case appendTab ref name tl of
+    step tl (ref, _name) = case appendTab ref tl of
       Right (_, tl') -> tl'
       Left err       -> error ("buildTabs: " <> show err)
 
@@ -347,6 +348,27 @@ spec = do
         (tabs', cursors') <- loadTabs (allLiveDeps dir)
         map _tab_ref (toList tabs') `shouldBe` [harnessRef 1]
         Map.keys (_cs_cursors cursors') `shouldBe` [ckey CkCli "cli"]
+
+  describe "legacy name back-compat" $ do
+    -- A tabs.json written by an older pureclaw carries a per-tab "name" key.
+    -- After the _tab_name removal, parseTab must IGNORE that legacy key (the
+    -- file still loads), and a subsequent re-encode must DROP it (the new wire
+    -- shape no longer carries "name").
+    it "loads a legacy tabs.json containing a per-tab name key, then re-encodes without it" $
+      withSystemTempDirectory "pureclaw-tabs" $ \dir -> do
+        writeFile (dir </> "tabs.json")
+          "{\"tabs\":[\
+          \{\"ref\":{\"tag\":\"session\",\"sessionId\":\"legacy\"},\"name\":\"Legacy Name\",\"status\":\"live\"}\
+          \],\"cursors\":[],\"relay\":[]}"
+        -- Legacy file loads despite the now-unused "name" key.
+        (tabs', cursors') <- loadTabs (allLiveDeps dir)
+        map _tab_ref (toList tabs') `shouldBe` [sid "legacy"]
+        -- Re-encode the loaded registry: the "name" key is gone.
+        saveTabs dir tabs' cursors'
+        raw <- BL.readFile (dir </> "tabs.json")
+        let lowered = T.toLower (TE.decodeUtf8 (BL.toStrict raw))
+        ("\"name\"" `T.isInfixOf` lowered) `shouldBe` False
+        ("legacy name" `T.isInfixOf` lowered) `shouldBe` False
 
   describe "no-secrets" $
     it "serialized JSON contains only documented fields" $

@@ -13,6 +13,7 @@ export function RunningHarnesses({
   tabs,
   selectedId,
   sessionActivity,
+  tabLabel,
   onSelectTab,
   onCloseTab,
   onArchiveTab,
@@ -23,6 +24,10 @@ export function RunningHarnesses({
   tabs: TabInfo[]
   selectedId: string | null
   sessionActivity?: Record<string, SessionActivityState>
+  /** Resolve a tab to its display label (session title, harness fallback,
+   *  else ellipsis). Centralized by the parent so all tab-label consumers
+   *  agree. */
+  tabLabel: (tab: TabInfo) => string
   onSelectTab: (index: number) => void
   onCloseTab: (index: number) => void
   onArchiveTab: (index: number) => void
@@ -62,6 +67,7 @@ export function RunningHarnesses({
           <TabRow
             key={tab.index}
             tab={tab}
+            label={tabLabel(tab)}
             selected={selectedId === `tab:${tab.index}`}
             onSelect={() => onSelectTab(tab.index)}
             onClose={() => onCloseTab(tab.index)}

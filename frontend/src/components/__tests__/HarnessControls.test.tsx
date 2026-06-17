@@ -7,7 +7,10 @@ function harnessTab(overrides: Partial<TabInfo> = {}): TabInfo {
   return {
     index: 0,
     kind: 'harness',
-    name: 'claude-code-0',
+    // Harness fallback label (the tmux window name). The DISPLAY label derives
+    // from the backing session when one resolves; this only shows when no
+    // session is available (session=null).
+    label: 'claude-code-0',
     status: 'running',
     session_id: 'sess-h',
     ...overrides,
@@ -32,10 +35,29 @@ function session(overrides: Partial<SessionInfo> = {}): SessionInfo {
 }
 
 describe('HarnessControls', () => {
-  it('HC.1: shows the harness name and its status', () => {
-    render(<HarnessControls tab={harnessTab()} session={session()} onDestroy={vi.fn()} />)
+  it('HC.1: shows the harness fallback label (no session resolved) and its status', () => {
+    // With no backing session resolved, the header falls back to the harness
+    // `label` (never blank).
+    render(<HarnessControls tab={harnessTab()} session={null} onDestroy={vi.fn()} />)
     expect(screen.getByText('claude-code-0')).toBeInTheDocument()
     expect(screen.getByText(/Running/i)).toBeInTheDocument()
+  })
+
+  it('HC.1b: shows the backing session title as the header when a session resolves', () => {
+    // When the session is loaded, the header reads identically to the session's
+    // Recent Sessions row (its description / summary / snippet), NOT the harness
+    // fallback name.
+    render(
+      <HarnessControls
+        tab={harnessTab()}
+        session={session({ description: 'my harness session' })}
+        onDestroy={vi.fn()}
+      />,
+    )
+    // The header shows the session title...
+    expect(screen.getAllByText('my harness session').length).toBeGreaterThanOrEqual(1)
+    // ...and the harness fallback label is NOT shown.
+    expect(screen.queryByText('claude-code-0')).not.toBeInTheDocument()
   })
 
   it('HC.2: lists the associated session', () => {
@@ -46,7 +68,9 @@ describe('HarnessControls', () => {
         onDestroy={vi.fn()}
       />,
     )
-    expect(screen.getByText('my harness session')).toBeInTheDocument()
+    // The session title now appears both as the header label and in the
+    // Associated session link, so it renders more than once.
+    expect(screen.getAllByText('my harness session').length).toBeGreaterThanOrEqual(1)
   })
 
   it('HC.3: indicates when no session is associated yet', () => {

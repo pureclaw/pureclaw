@@ -17,7 +17,7 @@
 -- "PureClaw.Session.Kind".
 --
 -- Security (§2): the file stores __no secrets__ — no tokens, API keys,
--- passwords, or absolute filesystem paths. Only tab refs (opaque ids), names,
+-- passwords, or absolute filesystem paths. Only tab refs (opaque ids),
 -- statuses, channel kinds, conversation ids, cursors, and relay modes.
 --
 -- IO seams are injected through 'PersistDeps' so boot reconcile is testable
@@ -187,11 +187,11 @@ readPersisted path = do
 
 -- | A tab's persisted content, slot excluded — the slot is always re-derived
 -- (I1) by 'rebuildTabs', never trusted from disk.
-type TabSpec = (TabRef, Text, TabStatus)
+type TabSpec = (TabRef, TabStatus)
 
 -- | Project a 'Tab' onto its persisted content (dropping the slot).
 tabSpec :: Tab -> TabSpec
-tabSpec t = (_tab_ref t, _tab_name t, _tab_status t)
+tabSpec t = (_tab_ref t, _tab_status t)
 
 -- | Drop harness-backed tabs whose ground truth is gone. Provider tabs are
 -- always retained; the surviving tabs are re-appended in order so the result
@@ -214,7 +214,7 @@ reconcileTabs deps tabs = do
 rebuildTabs :: [TabSpec] -> TabList
 rebuildTabs = foldl step emptyTabs
   where
-    step tl (ref, name, status) = case appendTab ref name tl of
+    step tl (ref, status) = case appendTab ref tl of
       Right (_, tl') -> setStatus ref status tl'
       Left _         -> tl
 
@@ -259,18 +259,21 @@ encodeTab :: Tab -> Aeson.Value
 encodeTab t =
   Aeson.object
     [ "ref"    .= encodeRef (_tab_ref t)
-    , "name"   .= _tab_name t
     , "status" .= statusToText (_tab_status t)
     ]
 
 -- | Parse a tab row into a slot-less 'TabSpec'; the slot is re-derived on load
 -- (I1) by 'rebuildTabs', never read from disk.
+--
+-- Back-compat: a legacy @tabs.json@ may carry a per-tab @"name"@ key (tabs no
+-- longer have their own label — the title derives from the bound session). The
+-- key is ignored on load; Aeson tolerates the extra field, so older files keep
+-- loading and re-encode without it.
 parseTab :: Aeson.Value -> Aeson.Parser TabSpec
 parseTab = Aeson.withObject "Tab" $ \o -> do
   ref    <- o .: "ref" >>= parseRef
-  name   <- o .: "name"
   status <- o .: "status" >>= statusFromText
-  pure (ref, name, status)
+  pure (ref, status)
 
 -- TabRef --------------------------------------------------------------------
 

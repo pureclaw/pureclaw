@@ -1,20 +1,22 @@
----
-status: in-progress
-issue: 79
-spec: docs/superpowers/specs/2026-06-08-tabs-as-view-refactor-design.md
-plan: docs/superpowers/plans/2026-06-08-tabs-as-view-refactor.md
-design_review_gate: PASSED (2026-06-08)
-plan_review_gate: PASSED (2026-06-08, feasibility round 5)
-branch: feat/tabs-as-view-refactor
-execution_method: metaswarm-orchestrated (chosen 2026-06-08)
----
+# Active Plan
+<!-- approved: 2026-06-16 (design-review 5/5; plan-review 3/3) -->
+<!-- user-approved: true (execution: subagent-driven) -->
+<!-- status: in-progress -->
 
-# Approved: Tabs-as-View Refactor (GitHub #79)
+## Canonical plan
+docs/superpowers/plans/2026-06-16-unify-tab-and-session-name.md
+Spec: docs/superpowers/specs/2026-06-16-unify-tab-and-session-name-design.md
+Branch: feat/web-frontend-slash-dispatch
 
-Full plan: docs/superpowers/plans/2026-06-08-tabs-as-view-refactor.md (11 work units).
-Spec: docs/superpowers/specs/2026-06-08-tabs-as-view-refactor-design.md.
+## Goal
+Make the displayed name a single SESSION property (override -> first-message default),
+identical in Active Tabs and Recent Sessions and across TUI/web; remove _tab_name.
 
-Strategy: WU1-7 additive new modules; WU8 incremental migrate-first/delete-last
-cutover with -Werror locally relaxed (gitignored cabal.project.local -Wwarn);
-WU9 harness death; WU10 config+WARN+docs; WU11 restore -Werror + integration + gate.
-Trust model: single trusted operator. /new resets active tab; /nt new tab.
+## Tasks
+- [ ] Task 1: Shared PureClaw.Session.Title (sessionTitle + moved firstMessageSnippet)
+- [ ] Task 2: TUI parity (recentSessions -> sessionTitle)
+- [ ] Task 3: _td_setSessionDescription seam (threaded param, not AgentEnv field) + /tab rename re-target + ServerMode closure + description cap (120)
+- [ ] Task 4: Remove _tab_name + _ts_name; add _ts_label; tab labels from session; tabs.json back-compat
+- [ ] Task 5: Frontend join across 3 consumers (ActiveTabs/HarnessControls/deriveAgent) + never-blank fallback
+- [ ] Task 6: Always-visible rename pencil (CSS)
+- [ ] Task 7: Cross-surface parity tests + coverage + verification

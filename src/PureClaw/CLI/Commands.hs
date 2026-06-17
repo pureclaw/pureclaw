@@ -3,8 +3,11 @@ module PureClaw.CLI.Commands
     runCLI
     -- * Command types (exported for testing)
   , Command (..)
+  , ServerMode (..)
   , ChatOptions (..)
   , chatOptionsParser
+    -- * Gateway liveness probe (exported for testing)
+  , probeGatewayUp
     -- * Enums (exported for testing)
   , ProviderType (..)
   , MemoryBackend (..)
@@ -28,8 +31,11 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (getCurrentTime)
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as LBS
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS qualified as HTTP
+import Network.HTTP.Types.Status qualified as HTTPStatus
 import Options.Applicative
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 
@@ -47,17 +53,26 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Tabs (overwriteTabs, readTabs)
 import PureClaw.Tabs.Persist (PersistDeps (..), loadTabs, saveTabs)
-import PureClaw.Tabs.Wiring (runTabbedLoop)
+import PureClaw.Tabs.Wiring
+  ( SessionStore
+  , ensureRestoredRuntimes
+  , mkExecDeps
+  , mkTabDispatchDeps
+  , runTabbedLoop
+  )
+import PureClaw.Routing.TabDispatch (mkRunTabCommandSeam)
 import PureClaw.Agent.SlashCommands
 import PureClaw.Routing.Config qualified as Routing
 import PureClaw.Routing.Types qualified as Routing
 import PureClaw.Session.Handle
   ( ResumeError (..)
   , SessionHandle (..)
+  , SetDescriptionError (..)
   , markBootstrapConsumed
   , mkSessionHandle
   , resolveResumedTarget
   , resumeSession
+  , setDescription
   )
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Frontend.API
@@ -156,6 +171,7 @@ data ChatOptions = ChatOptions
   , _co_channel       :: Maybe String
   , _co_memory        :: Maybe MemoryBackend
   , _co_logLevel      :: Maybe LogLevel
+  , _co_bind          :: Maybe String
   , _co_soul          :: Maybe String
   , _co_config        :: Maybe FilePath
   , _co_noVault       :: Bool
@@ -213,6 +229,14 @@ chatOptionsParser = ChatOptions
      <> metavar "LEVEL"
      <> help "Minimum log severity: debug, info, warn, error (default: info)"
       ))
+  <*> optional (strOption
+      ( long "bind"
+     <> metavar "HOST"
+     <> help "Interface for the web frontend to bind (default 127.0.0.1). \
+             \Setting a non-loopback host (e.g. 0.0.0.0) exposes the FULL \
+             \slash-command surface, including local code execution via \
+             \/mcp connect, to anything that can reach that address — use \
+             \only on trusted networks." ))
   <*> optional (strOption
       ( long "soul"
      <> help "Path to SOUL.md identity file (default: ./SOUL.md if it exists)"
@@ -292,6 +316,18 @@ data Command
   | CmdImport ImportOptions (Maybe FilePath)  -- ^ Import an OpenClaw state directory
   deriving stock (Show, Eq)
 
+-- | Whether a chat session should serve the frontend\/web server itself, or
+-- require an already-running gateway to be reachable.
+--
+-- This is step 1 of making the gateway the single source of truth: @pureclaw
+-- gateway run@ ('ServeFrontend') still starts the embedded frontend server,
+-- while @pureclaw tui@ ('RequireGateway') no longer starts its own server and
+-- instead probes for a running gateway, erroring out if none is reachable.
+data ServerMode
+  = ServeFrontend    -- ^ Start the embedded frontend server (gateway mode).
+  | RequireGateway   -- ^ Do not serve a frontend; require an external gateway.
+  deriving stock (Show, Eq)
+
 -- | Full CLI parser with subcommands.
 cliParserInfo :: ParserInfo Command
 cliParserInfo = info (commandParser <**> helper)
@@ -345,8 +381,8 @@ runCLI = do
     -- unattended mode with no human picking a window ('CmdImport', and any
     -- future cron\/daemon\/background mode) maps to 'ConsentHeadless' so
     -- adoption fails closed.
-    CmdTui opts     -> runChat ConsentInteractive opts { _co_channel = Just "cli" }
-    CmdGateway opts -> runChat ConsentWeb opts
+    CmdTui opts     -> runChat ConsentInteractive RequireGateway opts { _co_channel = Just "cli" }
+    CmdGateway opts -> runChat ConsentWeb ServeFrontend opts
     CmdImport opts mPos -> runImport opts mPos
 
 -- | Import an OpenClaw state directory.
@@ -426,8 +462,8 @@ runImport opts mPositional = do
 -- gateway\/headless modes pass 'ConsentHeadless'. It is stored on the
 -- 'FrontendEnv' as '_fe_consentChannel' so the @POST \/api\/adopt@ endpoint can
 -- fail closed for non-interactive runs (design §8 B2 / SEC-1).
-runChat :: ConsentChannel -> ChatOptions -> IO ()
-runChat consentChannel opts = do
+runChat :: ConsentChannel -> ServerMode -> ChatOptions -> IO ()
+runChat consentChannel serverMode opts = do
   logger <- mkStderrLogHandleAt (fromMaybe LlInfo (_co_logLevel opts))
 
   -- --session and --prefix are mutually exclusive. We enforce this
@@ -691,6 +727,13 @@ runChat consentChannel opts = do
         onFirstStreamDoneRef <- newIORef
           =<< resolveBootstrapCallback logger mAgentDef sessionHandle
         mcpRef <- newIORef Map.empty
+        -- Task C2 (web /tab dispatch): the ONE shared session-handle pool the
+        -- tabbed loop ('runTabbedLoop') and the web @\/tab@ seam both bind
+        -- through. Created here (rather than privately inside 'runTabbedLoop')
+        -- so @/tab new@\/@/tab resume@ typed into the web chat box mutate the
+        -- SAME pool the loop drives — without it the two paths would
+        -- split-brain the session pool.
+        tabStore <- newIORef Map.empty :: IO SessionStore
         -- WU3 (Tabbed Chat #51) — load routing config from disk.
         routingCfg0    <- Routing.loadRoutingConfig pureclawDir
         let routingCfg = routingCfg0
@@ -706,6 +749,41 @@ runChat consentChannel opts = do
         -- env.registry includes the delegate tool. Haskell's laziness
         -- makes this safe — the tool closure only forces env when invoked.
         let fullRegistry = uncurry registerTool (delegateTaskTool env) registry
+            -- Task C2: the deps for the web @\/tab@ seam, built over the SAME
+            -- shared @tabStore@ the tabbed loop uses (mkExecDeps/mkTabDispatchDeps
+            -- close over @env@ lazily, exactly like '_env_onTabsChanged' /
+            -- '_env_startHarness' forward-reference 'frontendEnv').
+            tabExecDeps     = mkExecDeps env tabStore
+            -- Task 3 (#79): the session-description seam @\/rename@ routes
+            -- through. It sets the SESSION's canonical description (the
+            -- cross-process name) per 'serverMode', and is threaded as a PARAM
+            -- into both 'mkTabDispatchDeps' (the web @\/tab@ seam) and
+            -- 'runTabbedLoop' (the chat path) so the same write+notify policy
+            -- backs every surface. It forward-references 'frontendEnv' lazily
+            -- through this recursive @let@ group (a thunked closure, never forced
+            -- at construction — mirrors '_env_onTabsChanged' / '_env_startHarness'
+            -- above). 'ServeFrontend' (gateway) writes @session.json@ directly
+            -- and rebroadcasts the sidebar lists; 'RequireGateway' (TUI) PUTs to
+            -- the running gateway's description endpoint so the gateway stays the
+            -- single source of truth (it owns the registry + WS broadcast).
+            setSessionDescription sid mDesc = case serverMode of
+              ServeFrontend -> do
+                r <- setDescription sessionsDir sid mDesc
+                case r of
+                  Right ()                          -> do
+                    broadcastLists frontendEnv
+                    pure (Right ())
+                  Left SetDescriptionSessionMissing ->
+                    pure (Left "session not found")
+                  Left (SetDescriptionParseFailed e) ->
+                    pure (Left ("could not update session: " <> e))
+              RequireGateway ->
+                putDescriptionViaGateway manager sid mDesc
+            tabDispatchDeps =
+              mkTabDispatchDeps env tabExecDeps tabStore setSessionDescription
+            -- The 'ConversationKey' the web path runs @\/tab@ against when the
+            -- caller supplies none (the web chat box has no 'ConversationKey').
+            webConvKey      = (CkWeb, ConversationId "web")
             env = AgentEnv
               { _env_provider     = providerRef
               , _env_model        = modelRef
@@ -765,6 +843,17 @@ runChat consentChannel opts = do
                     (Left . harnessErrText)
                     (\(_sid, hid, _meta, key) -> Right (BoundHarness hid, key))
                     r
+              -- Task C2: the dispatcher-reachable @\/tab@ command seam, wired to
+              -- the shared @runTabCommand@ over @tabDispatchDeps@. The web path
+              -- captures dispatcher output via the scoped /capture/ channel
+              -- @chan@ (its '_env_channel'), NOT '_env_sinks' — so @_td_emit@ is
+              -- overridden to send the reply text to @chan@ rather than the
+              -- conversation's sink. @Nothing@ (no caller 'ConversationKey')
+              -- falls back to @webConvKey@. The seam is built by the named,
+              -- unit-tested 'mkRunTabCommandSeam' helper (Task D) so the
+              -- override + fallback logic lives in one place and is exercised
+              -- end to end by the test suite.
+              , _env_runTabCommand    = mkRunTabCommandSeam tabDispatchDeps webConvKey
               }
         -- Start the frontend server and the activity probe loop under
         -- structured 'Async.withAsync' scopes so both are automatically
@@ -875,6 +964,7 @@ runChat consentChannel opts = do
               , _fe_listProviders = listConfiguredProviders
               , _fe_registry     = fullRegistry
               , _fe_maxToolIterations = 90
+              , _fe_agentEnv     = env
               }
         -- Fill the envRef so the tab completer can access the live env.
         writeIORef envRef (Just env)
@@ -930,17 +1020,51 @@ runChat consentChannel opts = do
         (loadedTabs, loadedCursors) <- loadTabs bootPersistDeps
         overwriteTabs (_ts_tabRegistry tabSub) loadedTabs
         writeIORef (_ts_cursors tabSub) loadedCursors
-        Async.withAsync
-          (runFrontend defaultFrontendConfig (Just frontendEnv) logger) $ \_serverAsync ->
-          Async.withAsync
-            (Reconcile.runReconcileLoopWith
-               Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
-            $ \_probeAsync ->
+        -- 'overwriteTabs' rebinds the restored tabs but does NOT start their
+        -- runtimes — the bind-time 'ensure' that live tab creation performs is
+        -- skipped on restore. Without this, the first message routed to a
+        -- restored tab fails with TabNotFound ("tab: not found") instead of
+        -- resuming the session. Re-establish the invariant: ensure each restored
+        -- Live tab's runtime once (a BoundSession reconnects with its transcript
+        -- reseeded; a live BoundHarness re-attaches; Dead tombstones are skipped).
+        ensureRestoredRuntimes tabExecDeps (_ts_exec tabSub) loadedTabs
+            -- Bind host precedence: --bind flag, else config-file bind_host,
+            -- else the loopback default.
+        let feCfg = defaultFrontendConfig
+                      { _fsc_bindHost =
+                          fromMaybe (_fsc_bindHost defaultFrontendConfig)
+                            (_co_bind opts <|> fmap T.unpack (_fc_bindHost fileCfg))
+                      }
             -- Tabs-as-View (GitHub #79) — the production entry is the tabbed
             -- loop. It seeds each provider runtime's context from the session
             -- transcript directly (via 'loadRecentMessages'), so a
             -- foreground-wide message replay at boot is not needed here.
-            runTabbedLoop env
+        let withReconcileLoop body =
+              Async.withAsync
+                (Reconcile.runReconcileLoopWith
+                   Reconcile.defaultTickMicros reconcileDeps harnessReg broker logger)
+                (const body)
+        case serverMode of
+          -- Gateway mode: start the embedded frontend server alongside the
+          -- reconcile loop and the tabbed loop, exactly as before.
+          ServeFrontend ->
+            Async.withAsync
+              (runFrontend feCfg (Just frontendEnv) logger) $ \_serverAsync ->
+              withReconcileLoop (runTabbedLoop env tabStore setSessionDescription)
+          -- TUI mode (step 1 of gateway-as-single-source-of-truth): do NOT
+          -- start an embedded frontend. Require a gateway to be reachable;
+          -- if none is, print a clear error and exit non-zero before entering
+          -- the interactive loop.
+          RequireGateway -> do
+            up <- probeGatewayUp manager feCfg
+            if up
+              then withReconcileLoop (runTabbedLoop env tabStore setSessionDescription)
+              else do
+                _lh_logError logger $
+                  "No PureClaw gateway is running at http://127.0.0.1:"
+                    <> T.pack (show (_fsc_port feCfg))
+                    <> ". Start one with `pureclaw gateway run` before launching the TUI."
+                exitFailure
 
   case effectiveChannel of
     "signal" -> do
@@ -1079,6 +1203,51 @@ buildPolicy Nothing cmds =
     , _sp_autonomy              = Full
     , _sp_allowedRemoteCommands = AllowList Set.empty
     }
+
+-- | True iff a gateway frontend is reachable at the configured loopback
+-- address. Used by @pureclaw tui@ to require a running gateway before
+-- entering the interactive loop (step 1 of gateway-as-single-source-of-truth).
+--
+-- The frontend serves @GET \/api\/tabs@ once it is up, so a successful HTTP
+-- response (any status) means a gateway is listening. We probe 127.0.0.1 — a
+-- gateway bound to either 0.0.0.0 or 127.0.0.1 accepts loopback — on the
+-- configured port.
+probeGatewayUp :: HTTP.Manager -> FrontendConfig -> IO Bool
+probeGatewayUp mgr cfg = do
+  let url = "http://127.0.0.1:" <> show (_fsc_port cfg) <> "/api/tabs"
+  req <- HTTP.parseRequest url
+  r <- try (HTTP.httpNoBody req mgr) :: IO (Either HTTP.HttpException (HTTP.Response ()))
+  pure (either (const False) (const True) r)
+
+-- | Set (or clear) a session's description by PUTting to the running gateway's
+-- @PUT \/api\/sessions\/\<sid\>\/description@ endpoint (the same handler the web
+-- frontend uses). Used by the TUI ('RequireGateway') @\/rename@ path: the
+-- gateway owns the registry + WS broadcast, so the TUI must mutate the session
+-- through it rather than writing @session.json@ behind its back (gateway as
+-- single source of truth). The body is @{"description": \<string|null\>}@. A
+-- non-2xx status or a transport exception surfaces as a user-facing 'Left'.
+putDescriptionViaGateway
+  :: HTTP.Manager -> SessionId -> Maybe T.Text -> IO (Either T.Text ())
+putDescriptionViaGateway mgr sid mDesc = do
+  let url = "http://127.0.0.1:" <> show (_fsc_port defaultFrontendConfig)
+              <> "/api/sessions/" <> T.unpack (unSessionId sid) <> "/description"
+      body = Aeson.encode (Aeson.object ["description" Aeson..= mDesc])
+  initReq <- HTTP.parseRequest url
+  let req = initReq
+        { HTTP.method         = "PUT"
+        , HTTP.requestHeaders = [("Content-Type", "application/json")]
+        , HTTP.requestBody    = HTTP.RequestBodyLBS body
+        }
+  r <- try (HTTP.httpLbs req mgr)
+         :: IO (Either HTTP.HttpException (HTTP.Response LBS.ByteString))
+  pure $ case r of
+    Left _     -> Left "could not reach the gateway to rename this session"
+    Right resp ->
+      let code = HTTPStatus.statusCode (HTTP.responseStatus resp)
+      in if code >= 200 && code < 300
+           then Right ()
+           else Left ("gateway rejected the rename (HTTP "
+                        <> T.pack (show code) <> ")")
 
 -- | Resolve the LLM provider from the provider type.
 -- Checks CLI flag first, then the vault for the API key.
