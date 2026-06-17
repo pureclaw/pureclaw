@@ -53,7 +53,13 @@ import PureClaw.Agent.Env
 import PureClaw.Agent.Identity
 import PureClaw.Tabs (overwriteTabs, readTabs)
 import PureClaw.Tabs.Persist (PersistDeps (..), loadTabs, saveTabs)
-import PureClaw.Tabs.Wiring (SessionStore, mkExecDeps, mkTabDispatchDeps, runTabbedLoop)
+import PureClaw.Tabs.Wiring
+  ( SessionStore
+  , ensureRestoredRuntimes
+  , mkExecDeps
+  , mkTabDispatchDeps
+  , runTabbedLoop
+  )
 import PureClaw.Routing.TabDispatch (mkRunTabCommandSeam)
 import PureClaw.Agent.SlashCommands
 import PureClaw.Routing.Config qualified as Routing
@@ -1014,6 +1020,14 @@ runChat consentChannel serverMode opts = do
         (loadedTabs, loadedCursors) <- loadTabs bootPersistDeps
         overwriteTabs (_ts_tabRegistry tabSub) loadedTabs
         writeIORef (_ts_cursors tabSub) loadedCursors
+        -- 'overwriteTabs' rebinds the restored tabs but does NOT start their
+        -- runtimes — the bind-time 'ensure' that live tab creation performs is
+        -- skipped on restore. Without this, the first message routed to a
+        -- restored tab fails with TabNotFound ("tab: not found") instead of
+        -- resuming the session. Re-establish the invariant: ensure each restored
+        -- Live tab's runtime once (a BoundSession reconnects with its transcript
+        -- reseeded; a live BoundHarness re-attaches; Dead tombstones are skipped).
+        ensureRestoredRuntimes tabExecDeps (_ts_exec tabSub) loadedTabs
             -- Bind host precedence: --bind flag, else config-file bind_host,
             -- else the loopback default.
         let feCfg = defaultFrontendConfig

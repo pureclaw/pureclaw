@@ -109,7 +109,9 @@ import PureClaw.Tabs.Types
   , Tab (..)
   , TabList
   , TabRef (..)
+  , TabStatus (..)
   , resolveCursorSlot
+  , toList
   )
 import PureClaw.MCP (mcpRegistry)
 import PureClaw.Tools.Registry
@@ -304,7 +306,8 @@ mkExecDeps env store = ExecDeps { _ex_startRuntime = startRuntime }
 -- pruned at load ('PureClaw.Tabs.Persist.reconcileTabs'), so its conversation
 -- falls through to a fresh default session instead.
 ensureRestoredRuntimes :: ExecDeps -> Exec -> TabList -> IO ()
-ensureRestoredRuntimes _deps _ex _tl = pure ()
+ensureRestoredRuntimes deps ex =
+  mapM_ (ensure deps ex . _tab_ref) . filter ((/= Dead) . _tab_status) . toList
 
 -- | Enqueue a ref-tagged output event onto the tab-output queue (the relay
 -- writer's source).
