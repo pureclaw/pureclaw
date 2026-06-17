@@ -251,14 +251,16 @@ export function useNewTabSpec(): NewTabSpec {
       if (!attachSession.trim()) return 'Pick or enter a session to attach to'
       return null
     }
-    // Backend sub-field validation applies to both kinds — the LLM's
-    // tool calls (provider) and the harness binary's environment
-    // (harness) both run against the chosen TerminalBackend.
-    if (backendTag === 'ssh' && !backendConfig.host?.trim()) {
-      return 'Host is required for SSH backend'
-    }
-    if (backendTag === 'container' && !backendConfig.target?.trim()) {
-      return 'Target is required for container backend'
+    // Backend sub-field validation only applies to provider sessions —
+    // their LLM tool calls run against the chosen TerminalBackend. Harnesses
+    // always run in tmux (no backend choice), so they never hit these checks.
+    if (kind === 'provider') {
+      if (backendTag === 'ssh' && !backendConfig.host?.trim()) {
+        return 'Host is required for SSH backend'
+      }
+      if (backendTag === 'container' && !backendConfig.target?.trim()) {
+        return 'Target is required for container backend'
+      }
     }
     return null
   })()
@@ -278,12 +280,14 @@ export function useNewTabSpec(): NewTabSpec {
       if (agent.trim()) sessionKind.agent = agent.trim()
       return { kind: { tag: 'session', session_kind: sessionKind } }
     }
-    // kind === 'harness'
+    // kind === 'harness'. Harnesses always run in a tmux session — the
+    // composer offers no backend choice, so the payload is hard-wired to
+    // tmux (the session name, if any, comes from backendConfig.session).
     const effectiveFlavour = flavour === 'custom' ? customBinary.trim() : flavour
     const sessionKind: Record<string, unknown> = {
       tag: 'harness',
       flavour: effectiveFlavour,
-      backend: buildBackendPayload(backendTag, backendConfig),
+      backend: buildBackendPayload('tmux', backendConfig),
       args: parseArgs(extraArgs),
     }
     // Field name must be `cwd` — the backend's FromJSON HarnessSpec
