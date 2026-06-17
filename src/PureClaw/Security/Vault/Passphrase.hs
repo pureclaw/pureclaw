@@ -1,5 +1,9 @@
 module PureClaw.Security.Vault.Passphrase
   ( mkPassphraseVaultEncryptor
+  , mkPassphraseVaultEncryptorWith
+  , ageWorkFactor
+  , WorkFactor
+  , mkWorkFactor
   ) where
 
 import Control.Concurrent.STM
@@ -17,7 +21,10 @@ import Data.Text qualified as T
 
 import PureClaw.Security.Vault.Age (VaultEncryptor (..), VaultError (..))
 
--- | scrypt work factor (N = 2^22), matching the age CLI default.
+-- | scrypt work factor for production vaults (N = 2^22): a deliberately high,
+-- fixed cost for brute-force resistance. The work factor only affects KDF
+-- cost, not correctness, so tests inject a small factor via
+-- 'mkPassphraseVaultEncryptorWith' to stay fast.
 ageWorkFactor :: WorkFactor
 ageWorkFactor = fromJust (mkWorkFactor 22)
 
@@ -29,8 +36,18 @@ toAgePass bs = Passphrase (convert bs)
 -- The resulting ciphertext is a standard age binary file, compatible with
 -- @age -d --passphrase@.
 -- The IO action is called at most once to obtain the passphrase, then cached.
+--
+-- Uses the production 'ageWorkFactor'. For a configurable work factor (e.g.
+-- a cheap one in tests), use 'mkPassphraseVaultEncryptorWith'.
 mkPassphraseVaultEncryptor :: IO ByteString -> IO VaultEncryptor
-mkPassphraseVaultEncryptor getPass = do
+mkPassphraseVaultEncryptor = mkPassphraseVaultEncryptorWith ageWorkFactor
+
+-- | Like 'mkPassphraseVaultEncryptor', but with an explicit scrypt work factor.
+-- Production callers should use 'mkPassphraseVaultEncryptor' (which supplies
+-- 'ageWorkFactor'); a low work factor makes the scrypt KDF cheap and is
+-- intended for tests, where the high production cost would dominate CI time.
+mkPassphraseVaultEncryptorWith :: WorkFactor -> IO ByteString -> IO VaultEncryptor
+mkPassphraseVaultEncryptorWith workFactor getPass = do
   cache <- newTVarIO Nothing
   let getOrPrompt = do
         c <- readTVarIO cache
@@ -50,7 +67,7 @@ mkPassphraseVaultEncryptor getPass = do
             let recipient = ScryptRecipient
                   { srPassphrase  = toAgePass passphrase
                   , srSalt        = salt
-                  , srWorkFactor  = ageWorkFactor
+                  , srWorkFactor  = workFactor
                   }
             result <- runExceptT (encrypt (RecipientsScrypt recipient) plaintext)
             case result of
@@ -60,7 +77,7 @@ mkPassphraseVaultEncryptor getPass = do
         passphrase <- getOrPrompt
         let identity   = ScryptIdentity
               { siPassphrase    = toAgePass passphrase
-              , siMaxWorkFactor = ageWorkFactor
+              , siMaxWorkFactor = workFactor
               }
             identities = IdentityScrypt identity :| []
         case decrypt identities ciphertext of
