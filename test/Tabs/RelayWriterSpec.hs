@@ -99,14 +99,14 @@ append1 ref _name tl = case appendTab ref tl of
 oneTab :: TabRef -> TabList
 oneTab ref = append1 ref "alpha" emptyTabs
 
--- | A two-tab list (slot 0 = @a@, slot 1 = @b@), so the focused speaker prefix
--- (only emitted when more than one tab exists) is exercised.
+-- | A two-tab list (slot 0 = @a@, slot 1 = @b@), used by the tests that pin the
+-- multi-tab speaker prefix with a known model (@\/0 opus: @).
 twoTabs :: TabRef -> TabRef -> TabList
 twoTabs a b = append1 b "beta" (append1 a "alpha" emptyTabs)
 
--- | The default model resolver for tests that do not exercise the speaker
--- prefix: every ref resolves to no model. Single-tab fixtures never render a
--- prefix, so the resolved value is irrelevant there.
+-- | The default model resolver: every ref resolves to no model, so a focused
+-- burst renders the slot-only prefix (@\/N: @). Focused output is always
+-- labelled, single-tab fixtures included.
 noModel :: TabRef -> IO (Maybe Text)
 noModel _ = pure Nothing
 
@@ -210,8 +210,11 @@ spec = do
           deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0)) streamBurst
+      -- Focused output is always labelled (slot-only here, model unknown), so
+      -- the speaker prefix arrives as the first ChunkText after StreamStart.
       readIORef calls `shouldReturn`
-        [ SentChunk (ChunkText "he")
+        [ SentChunk (ChunkText "/0: ")
+        , SentChunk (ChunkText "he")
         , SentChunk (ChunkText "llo")
         , SentChunk ChunkDone
         ]
@@ -234,7 +237,9 @@ spec = do
         , ChunkOf (sidN 1) "lo"
         , StreamEnd (sidN 1)
         ]
-      readIORef calls `shouldReturn` [Sent (OutgoingMessage "Hello")]
+      -- The injected speaker prefix is buffered ahead of the content, so the one
+      -- flushed message carries it (slot-only here, model unknown).
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "/0: Hello")]
 
     it "ActivityDigest background pings exactly once over a burst (DoD 2)" $ do
       reg <- newSinkRegistry
@@ -288,7 +293,8 @@ spec = do
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0)) streamBurst
       readIORef calls `shouldReturn`
-        [ SentChunk (ChunkText "he")
+        [ SentChunk (ChunkText "/0: ")
+        , SentChunk (ChunkText "he")
         , SentChunk (ChunkText "llo")
         , SentChunk ChunkDone
         ]
@@ -324,20 +330,38 @@ spec = do
       -- two pings.
       final `shouldBe`
         [ Sent (OutgoingMessage "/0 has new output")
-        , Sent (OutgoingMessage "focused")
+        , Sent (OutgoingMessage "/0: focused")
         , Sent (OutgoingMessage "/0 has new output")
         ]
 
   describe "processOutput on a NON-STREAMING channel (emitToConversation arms)" $ do
-    it "drops an empty stream (StreamStart->StreamEnd, no chunks): no _ch_send" $ do
+    it "flushes the content-free speaker prefix for an empty focused stream" $ do
       -- A focused stream that carries NO ChunkOf between StreamStart and
-      -- StreamEnd flushes an empty buffer. On a non-streaming channel the
-      -- StreamEnd arm must NOT emit a _ch_send (the empty-buffer drop arm).
+      -- StreamEnd still buffers the injected speaker prefix (focused output is
+      -- always labelled), so the StreamEnd arm flushes a content-free '/N: '
+      -- message rather than dropping the stream.
       reg <- newSinkRegistry
       (calls, ch) <- newNonStreamingHandle
       registerSink reg (keyN 0) ch
       let cs   = setCursor (keyN 0) (refN 0) emptyCursors
           tabs = oneTab (refN 0)
+          deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
+      w <- newRelayWriter
+      mapM_ (processOutput deps w (refN 0))
+        [ StreamStart (sidN 1) anyIdx
+        , StreamEnd (sidN 1)
+        ]
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "/0: ")]
+
+    it "drops an empty focused stream when no prefix is injected (source absent from list)" $ do
+      -- When the focused source ref is absent from the tab list it has no slot,
+      -- so no speaker prefix is injected. An empty stream then buffers nothing,
+      -- and the StreamEnd arm drops it (no _ch_send) — the empty-buffer drop arm.
+      reg <- newSinkRegistry
+      (calls, ch) <- newNonStreamingHandle
+      registerSink reg (keyN 0) ch
+      let cs   = setCursor (keyN 0) (refN 0) emptyCursors
+          tabs = oneTab (refN 1) -- src refN 0 is NOT in the list → no slot, no prefix
           deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       mapM_ (processOutput deps w (refN 0))
@@ -355,7 +379,7 @@ spec = do
           deps = RelayWriterDeps reg (pure cs) (pure tabs) FocusedOnly noModel
       w <- newRelayWriter
       processOutput deps w (refN 0) (FullMsg anyIdx "whole")
-      readIORef calls `shouldReturn` [Sent (OutgoingMessage "whole")]
+      readIORef calls `shouldReturn` [Sent (OutgoingMessage "/0: whole")]
 
     it "forwards a focused BannerLine as one _ch_send" $ do
       reg <- newSinkRegistry

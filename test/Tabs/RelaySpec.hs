@@ -23,13 +23,13 @@
 --   8. BannerLine source — a 'BannerLine' event never pings and never forwards
 --      to a background conversation (returns the set unchanged).
 --
--- Focused __speaker prefix__ (pureclaw): when more than one tab exists, a
--- focused burst-start does NOT get a standalone @\/N@ banner anymore — instead
--- a @\/N \<model\>: @ prefix is MERGED into the burst content: prepended to a
+-- Focused __speaker prefix__ (pureclaw): every focused burst-start gets a
+-- @\/N \<model\>: @ prefix MERGED into the burst content: prepended to a
 -- 'FullMsg', or injected as the first 'ChunkOf' right after 'StreamStart' so a
 -- streamed reply renders the speaker inline (and a non-streaming channel buffers
 -- it into the one flushed message). The model is omitted when unknown (a harness
--- tab). A single-tab session is never prefixed.
+-- tab). Single-tab sessions are labelled too (the always-label decision, which
+-- reverses the gb7 single-tab exemption).
 module Tabs.RelaySpec (spec) where
 
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
@@ -163,8 +163,9 @@ spec = do
         , (keyN 0, StreamEnd sid)
         ]
 
-  -- gb7 — focused output is labelled ONLY when more than one tab exists.
-  describe "focused multi-tab labelling (pureclaw-gb7)" $ do
+  -- Focused output is ALWAYS labelled with the speaker prefix, single tab
+  -- included (the always-label decision, reversing the gb7 single-tab exemption).
+  describe "focused speaker labelling" $ do
     -- Test A: 2+ tabs, focused on src, a provider streaming burst → the
     -- speaker prefix is injected exactly once (the first chunk after
     -- StreamStart), before the forwarded chunks.
@@ -192,9 +193,10 @@ spec = do
         , (keyN 0, StreamEnd sid)
         ]
 
-    -- Test B: only ONE tab, focused on src, a provider burst → NO prefix
-    -- (single-tab CLI stays clean).
-    it "does NOT prefix focused output when only one tab exists" $ do
+    -- Test B: only ONE tab, focused on src, a provider burst → the speaker
+    -- prefix is STILL injected (always-label decision; reverses gb7). The user
+    -- wants every focused reply identified by speaker, single-tab included.
+    it "injects the speaker prefix even when only one tab exists" $ do
       let src = refN 0
           tl = append1 src "alpha" emptyTabs
           sid = sidN 5
@@ -210,6 +212,7 @@ spec = do
       out <- readIORef sink
       out `shouldBe`
         [ (keyN 0, StreamStart sid anyIdx)
+        , (keyN 0, ChunkOf sid (speakerPrefix srcModel 0))
         , (keyN 0, ChunkOf sid "a")
         , (keyN 0, StreamEnd sid)
         ]
@@ -362,8 +365,8 @@ spec = do
       (sink, deps) <- newSink
       final <- relayEvent deps cs ActivityDigest tl srcModel seeded src (FullMsg anyIdx "go")
       out <- readIORef sink
-      -- Single tab → no prefix.
-      out `shouldBe` [(keyN 0, FullMsg anyIdx "go")]
+      -- Focused delivery is always labelled, single tab included.
+      out `shouldBe` [(keyN 0, FullMsg anyIdx (speakerPrefix srcModel 0 <> "go"))]
       -- All keyN 0 entries gone; the unrelated keyN 1 entry survives.
       final `shouldBe` Set.fromList [(keyN 1, BurstFull)]
 

@@ -179,12 +179,13 @@ processOutput deps rw src event = do
 --     empty stream). 'StreamStart' just primes an empty buffer entry;
 --     'FullMsg'\/'BannerLine' send a full message directly.
 --
--- Note: in a multi-tab session the relay injects the focused speaker prefix
--- (@\/N \<model\>: @) as the first 'ChunkOf' after 'StreamStart' (see
+-- Note: the relay injects the focused speaker prefix (@\/N \<model\>: @) as the
+-- first 'ChunkOf' after 'StreamStart' for every focused burst (see
 -- "PureClaw.Tabs.Relay"), so a stream that carries NO content chunks still
 -- buffers the prefix and flushes a content-free @\/N \<model\>: @ message
--- rather than being dropped. This only affects the degenerate text-less stream;
--- a single-tab session injects no prefix and still drops an empty stream.
+-- rather than being dropped. This only affects the degenerate text-less stream.
+-- A focused source with no slot (absent from the tab list) injects no prefix, so
+-- its empty stream still drops.
 emitToConversation
   :: IORef (Map (ConversationKey, StreamId) Text)
   -> ConversationKey
