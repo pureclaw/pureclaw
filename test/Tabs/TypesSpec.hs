@@ -79,7 +79,7 @@ buildList k = go 0 emptyTabs
   where
     go i tl
       | i >= k = tl
-      | otherwise = case appendTab (refN i) ("tab" <> T.pack (show i)) tl of
+      | otherwise = case appendTab (refN i) tl of
           Right (_, tl') -> go (i + 1) tl'
           Left _         -> tl
 
@@ -102,7 +102,7 @@ instance Arbitrary Op where
 -- | Apply one op to a 'TabList'.
 applyOp :: Op -> TabList -> TabList
 applyOp (OpAppend n) tl =
-  case appendTab (refN n) ("t" <> T.pack (show n)) tl of
+  case appendTab (refN n) tl of
     Right (_, tl') -> tl'
     Left _         -> tl
 applyOp (OpRemove n) tl =
@@ -131,13 +131,13 @@ spec = do
   describe "I2 uniqueness / dedup (DoD 2)" $ do
     it "appending an already-bound ref returns Left (AlreadyBound i)" $ do
       let tl = buildList 3
-      appendTab (refN 1) "again" tl `shouldBe` Left (AlreadyBound (idx 1))
+      appendTab (refN 1) tl `shouldBe` Left (AlreadyBound (idx 1))
 
     it "AlreadyBound reports the ref's CURRENT slot after compaction" $ do
       -- Build [0,1,2]; remove slot 0 -> old ref 1 now at slot 0, ref 2 at 1.
       let tl  = buildList 3
           tl' = removeSlot (idx 0) tl
-      appendTab (refN 1) "x" tl' `shouldBe` Left (AlreadyBound (idx 0))
+      appendTab (refN 1) tl' `shouldBe` Left (AlreadyBound (idx 0))
 
     it "never produces two tabs with the same ref" $
       property $ \ops ->
@@ -149,11 +149,11 @@ spec = do
     it "appending a 37th distinct ref returns Left SlotsFull" $ do
       let tl36 = buildList 36
       length (toList tl36) `shouldBe` 36
-      appendTab (refN 36) "overflow" tl36 `shouldBe` Left SlotsFull
+      appendTab (refN 36) tl36 `shouldBe` Left SlotsFull
 
     it "the 36th distinct ref still succeeds (boundary)" $ do
       let tl35 = buildList 35
-      case appendTab (refN 35) "last" tl35 of
+      case appendTab (refN 35) tl35 of
         Right (i, tl') -> do
           unTabIndex i `shouldBe` 35
           length (toList tl') `shouldBe` 36
@@ -190,13 +190,14 @@ spec = do
       show Dead `shouldBe` "Dead"
       show SlotsFull `shouldBe` "SlotsFull"
       show (AlreadyBound (idx 3)) `shouldSatisfy` (\s -> "AlreadyBound" `List.isInfixOf` s)
-      -- Tab Show mentions the name field; TabList Show wraps the tabs
+      -- Tab Show wraps the ref + status; TabList Show wraps the tabs
       let tl = buildList 1
       case toList tl of
         (t : _) -> do
           show t `shouldSatisfy` (\s -> "Tab" `List.isInfixOf` s)
-          -- exercise the _tab_name accessor with a real assertion
-          _tab_name t `shouldBe` "tab0"
+          -- exercise the _tab_ref accessor with a real assertion (tabs no
+          -- longer carry a _tab_name field)
+          _tab_ref t `shouldBe` refN 0
         []      -> expectationFailure "buildList 1 should have one tab"
       show tl `shouldSatisfy` (\s -> "TabList" `List.isInfixOf` s)
 
@@ -227,21 +228,21 @@ spec = do
       reg <- newTabRegistry
       tl0 <- readTabs reg
       toList tl0 `shouldBe` []
-      r1 <- registryAppend reg (refN 0) "a"
+      r1 <- registryAppend reg (refN 0)
       r1 `shouldBe` Right (idx 0)
-      r2 <- registryAppend reg (refN 1) "b"
+      r2 <- registryAppend reg (refN 1)
       r2 `shouldBe` Right (idx 1)
       tl <- readTabs reg
       map (unTabIndex . _tab_slot) (toList tl) `shouldBe` [0, 1]
       map _tab_ref (toList tl) `shouldBe` [refN 0, refN 1]
       -- dedup is enforced through the handle too
-      registryAppend reg (refN 0) "dup" `shouldReturn` Left (AlreadyBound (idx 0))
+      registryAppend reg (refN 0) `shouldReturn` Left (AlreadyBound (idx 0))
 
     it "registryRemove drops the tab at a slot and compacts (via readTabs)" $ do
       reg <- newTabRegistry
-      _ <- registryAppend reg (refN 0) "a"
-      _ <- registryAppend reg (refN 1) "b"
-      _ <- registryAppend reg (refN 2) "c"
+      _ <- registryAppend reg (refN 0)
+      _ <- registryAppend reg (refN 1)
+      _ <- registryAppend reg (refN 2)
       registryRemove reg (idx 1)            -- remove the middle tab
       tl <- readTabs reg
       -- slots stay contiguous, old ref 2 shifted down to slot 1
@@ -250,15 +251,15 @@ spec = do
 
     it "registryRemove of an absent slot is a no-op" $ do
       reg <- newTabRegistry
-      _ <- registryAppend reg (refN 0) "a"
+      _ <- registryAppend reg (refN 0)
       registryRemove reg (idx 5)            -- nothing at slot 5
       tl <- readTabs reg
       map _tab_ref (toList tl) `shouldBe` [refN 0]
 
     it "registryLookupSlot finds a present slot and misses an absent one" $ do
       reg <- newTabRegistry
-      _ <- registryAppend reg (refN 0) "a"
-      _ <- registryAppend reg (refN 1) "b"
+      _ <- registryAppend reg (refN 0)
+      _ <- registryAppend reg (refN 1)
       hit  <- registryLookupSlot reg (idx 1)
       fmap _tab_ref hit `shouldBe` Just (refN 1)
       miss <- registryLookupSlot reg (idx 9)
@@ -266,8 +267,8 @@ spec = do
 
     it "registryLookupRef finds a present ref's slot and misses an absent one" $ do
       reg <- newTabRegistry
-      _ <- registryAppend reg (refN 0) "a"
-      _ <- registryAppend reg (refN 1) "b"
+      _ <- registryAppend reg (refN 0)
+      _ <- registryAppend reg (refN 1)
       hit  <- registryLookupRef reg (refN 1)
       hit `shouldBe` Just (idx 1)
       miss <- registryLookupRef reg (refN 9)
@@ -275,50 +276,48 @@ spec = do
 
     it "registrySetStatus flips a present ref to Dead and no-ops an absent ref" $ do
       reg <- newTabRegistry
-      _ <- registryAppend reg (refN 0) "a"
-      _ <- registryAppend reg (refN 1) "b"
+      _ <- registryAppend reg (refN 0)
+      _ <- registryAppend reg (refN 1)
       registrySetStatus reg (refN 0) Dead   -- present: flips
       registrySetStatus reg (refN 9) Dead   -- absent: no-op
       tl <- readTabs reg
       map _tab_status (toList tl) `shouldBe` [Dead, Live]
 
   describe "rebindSlot (8b.4 /new support)" $ do
-    it "rebinds the ref + name at a slot in place, preserving the slot" $ do
+    it "rebinds the ref at a slot in place, preserving the slot" $ do
       let tl  = buildList 3
           new = refN 99
-      case rebindSlot (idx 1) new "renamed" tl of
+      case rebindSlot (idx 1) new tl of
         Left e   -> expectationFailure ("unexpected Left: " <> show e)
         Right tl' -> do
           -- slots stay contiguous and unchanged
           map (unTabIndex . _tab_slot) (toList tl') `shouldBe` [0, 1, 2]
-          -- slot 1 now holds the new ref + name; neighbours untouched
+          -- slot 1 now holds the new ref; neighbours untouched
           fmap _tab_ref  (lookupSlot (idx 1) tl') `shouldBe` Just new
-          fmap _tab_name (lookupSlot (idx 1) tl') `shouldBe` Just "renamed"
           fmap _tab_ref  (lookupSlot (idx 0) tl') `shouldBe` Just (refN 0)
           fmap _tab_ref  (lookupSlot (idx 2) tl') `shouldBe` Just (refN 2)
 
     it "resets the rebound tab's status to Live" $ do
       let tl  = setStatus (refN 1) Dead (buildList 2)
-      case rebindSlot (idx 1) (refN 88) "fresh" tl of
+      case rebindSlot (idx 1) (refN 88) tl of
         Left e    -> expectationFailure ("unexpected Left: " <> show e)
         Right tl' -> fmap _tab_status (lookupSlot (idx 1) tl') `shouldBe` Just Live
 
     it "rejects rebinding to a ref already bound at a different slot" $ do
       let tl = buildList 3
       -- slot 1 -> ref already at slot 2
-      rebindSlot (idx 1) (refN 2) "dup" tl `shouldBe` Left (AlreadyBound (idx 2))
+      rebindSlot (idx 1) (refN 2) tl `shouldBe` Left (AlreadyBound (idx 2))
 
-    it "allows rebinding a slot to the ref it already holds (rename in place)" $ do
+    it "allows rebinding a slot to the ref it already holds (in place)" $ do
       let tl = buildList 2
-      case rebindSlot (idx 0) (refN 0) "relabel" tl of
+      case rebindSlot (idx 0) (refN 0) tl of
         Left e    -> expectationFailure ("unexpected Left: " <> show e)
-        Right tl' -> do
+        Right tl' ->
           fmap _tab_ref  (lookupSlot (idx 0) tl') `shouldBe` Just (refN 0)
-          fmap _tab_name (lookupSlot (idx 0) tl') `shouldBe` Just "relabel"
 
     it "is a no-op Right when the slot is absent" $ do
       let tl = buildList 1
-      case rebindSlot (idx 5) (refN 77) "ghost" tl of
+      case rebindSlot (idx 5) (refN 77) tl of
         Left e    -> expectationFailure ("unexpected Left: " <> show e)
         Right tl' -> toList tl' `shouldBe` toList tl
 

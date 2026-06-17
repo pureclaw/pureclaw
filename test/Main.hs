@@ -65,6 +65,7 @@ import qualified Agent.MemorySpec
 import qualified Agent.CompactionSpec
 import qualified Agent.ContextTrackerSpec
 import qualified Agent.SlashCommandsSpec
+import qualified Agent.SlashDispatchSpec
 import qualified Providers.OpenAISpec
 import qualified Providers.OllamaSpec
 import qualified Providers.OpenRouterSpec
@@ -105,6 +106,7 @@ import qualified Transcript.CombinatorSpec
 import qualified Transcript.ProviderSpec
 import qualified Session.TypesSpec
 import qualified Session.HandleSpec
+import qualified Session.TitleSpec
 
 -- WU2 (Session.Kind leaf module)
 import qualified Session.KindSpec
@@ -143,6 +145,8 @@ import qualified Tabs.RuntimesSpec
 import qualified Routing.TabDispatchSpec
 -- Tabs-as-View (GitHub #79) 8d.c.3
 import qualified Tabs.WiringSpec
+-- Shared test AgentEnv builder
+import qualified Support.AgentEnvSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -229,6 +233,7 @@ main = hspec $ do
   describe "Agent.Compaction" Agent.CompactionSpec.spec
   describe "Agent.ContextTracker" Agent.ContextTrackerSpec.spec
   describe "Agent.SlashCommands" Agent.SlashCommandsSpec.spec
+  describe "Agent.SlashDispatch" Agent.SlashDispatchSpec.spec
   describe "Providers.OpenAI" Providers.OpenAISpec.spec
   describe "Providers.Ollama" Providers.OllamaSpec.spec
   describe "Providers.OpenRouter" Providers.OpenRouterSpec.spec
@@ -269,6 +274,7 @@ main = hspec $ do
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
   describe "Session.Types" Session.TypesSpec.spec
   describe "Session.Handle" Session.HandleSpec.spec
+  describe "Session.Title" Session.TitleSpec.spec
   -- WU2 (Session.Kind leaf module)
   describe "Session.Kind"         Session.KindSpec.spec
   -- WU1 (frontend server settings + CORS)
@@ -301,6 +307,8 @@ main = hspec $ do
   describe "Routing.TabDispatch" Routing.TabDispatchSpec.spec
   -- Tabs-as-View (GitHub #79) 8d.c.3
   describe "Tabs.Wiring"          Tabs.WiringSpec.spec
+  -- Shared test AgentEnv builder
+  describe "Support.AgentEnv"     Support.AgentEnvSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)

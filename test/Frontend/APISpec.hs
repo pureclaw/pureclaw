@@ -38,6 +38,7 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   , _streamBroker_subscribe
   )
+import PureClaw.Session.Handle (setDescription)
 import PureClaw.Handles.Harness
   ( HarnessError (..)
   , HarnessHandle (..)
@@ -81,10 +82,14 @@ import PureClaw.Tools.Registry
   , registerTool
   )
 import Test.Fake.Provider (FakeProvider, newFakeProvider, peekRecorded, queueResponse, queueResponses)
-import PureClaw.Handles.Tab (unTabIndex)
-import PureClaw.Tabs (newTabRegistry, readTabs, registryAppend)
+import Support.AgentEnv (mkTestAgentEnv)
+import PureClaw.Agent.Env (AgentEnv (..))
+import PureClaw.Handles.Tab (mkTabIndex, unTabIndex)
+import PureClaw.Tabs (TabRegistry, newTabRegistry, readTabs, registryAppend, registryLookupSlot)
 import PureClaw.Tabs.Exec (newExec)
 import PureClaw.Tabs.Types (Tab (..), TabRef (..), emptyCursors, toList)
+import PureClaw.Tabs.Wiring qualified as Wiring
+import PureClaw.Routing.TabDispatch (mkRunTabCommandSeam)
 
 spec :: Spec
 spec = do
@@ -772,7 +777,7 @@ spec = do
           hid2 = mustParseHid "22222222-2222-4222-8222-222222222222"
           sid  = SessionId "session-001"
       -- Slot 0: provider session
-      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid) "claude-opus"
+      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid)
       -- Slots 1 & 2: harness tabs (also insert into harness registry)
       seedHarnessTab env
         (baseEntry hid1 "thinking-win" Nothing)
@@ -795,7 +800,10 @@ spec = do
           let t0 = head items
           lookupKey t0 "index"      `shouldBe` Just (Aeson.Number 0)
           lookupKey t0 "kind"       `shouldBe` Just (Aeson.String "provider")
-          lookupKey t0 "name"       `shouldBe` Just (Aeson.String "claude-opus")
+          -- Tabs no longer carry a per-tab "name"; provider tabs emit a null
+          -- "label" (the title derives from the session via session_id).
+          lookupKey t0 "name"       `shouldBe` Nothing
+          lookupKey t0 "label"      `shouldBe` Just Aeson.Null
           lookupKey t0 "status"     `shouldBe` Just (Aeson.String "idle")
           lookupKey t0 "session_id" `shouldBe` Just (Aeson.String "session-001")
           -- slot 1: harness "running"
@@ -966,7 +974,7 @@ spec = do
                     , Registry._he_shellPid   = Just 4242  -- corroborated
                     })
                 -- WU6: also bind the tab in the TabRegistry so GET /api/tabs sees it.
-                _ <- registryAppend (_fe_tabRegistry env0) (BoundHarness hid) w
+                _ <- registryAppend (_fe_tabRegistry env0) (BoundHarness hid)
                 _ <- pure (tok :: AdoptedHarness)
                 pure (Right (hid, mkNoOpHarnessHandle))
             }
@@ -1026,7 +1034,7 @@ spec = do
       case harnessEntriesToTabs [e] of
         [t] -> do
           _ts_kind t      `shouldBe` "harness"
-          _ts_name t      `shouldBe` "claude-code"
+          _ts_label t     `shouldBe` Just "claude-code"
           _ts_status t    `shouldBe` "running"
           _ts_sessionId t `shouldBe` Just "session-xyz"
           _ts_index t     `shouldBe` 0
@@ -1063,8 +1071,8 @@ spec = do
       let tabs = harnessEntriesToTabs es
       map _ts_index tabs `shouldBe` [0, 1, 2]
       -- The first two are the "alpha" entries, id "1111..." before "3333...".
-      map (\t -> (_ts_index t, _ts_name t)) tabs
-        `shouldBe` [(0, "alpha"), (1, "alpha"), (2, "bravo")]
+      map (\t -> (_ts_index t, _ts_label t)) tabs
+        `shouldBe` [(0, Just "alpha"), (1, Just "alpha"), (2, Just "bravo")]
 
   describe "GET /api/tabs (registry-wired — WU8 D8.1/D8.2)" $ do
     it "is empty when the registry has no harnesses" $ do
@@ -1088,8 +1096,8 @@ spec = do
           let items = toList' arr
           length items `shouldBe` 1
           let t0 = head items
-          lookupKey t0 "kind" `shouldBe` Just (Aeson.String "harness")
-          lookupKey t0 "name" `shouldBe` Just (Aeson.String "claude-code")
+          lookupKey t0 "kind"  `shouldBe` Just (Aeson.String "harness")
+          lookupKey t0 "label" `shouldBe` Just (Aeson.String "claude-code")
         _ -> expectationFailure "Expected JSON array with one harness tab"
 
     it "reflects each entry's liveness as the documented status string" $ do
@@ -1112,7 +1120,7 @@ spec = do
           let pairs =
                 [ (n, s)
                 | v <- toList' arr
-                , Just (Aeson.String n) <- [lookupKey v "name"]
+                , Just (Aeson.String n) <- [lookupKey v "label"]
                 , Just (Aeson.String s) <- [lookupKey v "status"]
                 ]
           lookup "a-idle"     pairs `shouldBe` Just "idle"
@@ -1147,7 +1155,7 @@ spec = do
             `shouldBe` Just (Aeson.String "tmux attach -t pureclaw:claude-code-0")
         _ -> expectationFailure "Expected JSON array with one harness tab"
 
-    it "keeps the existing keys unchanged for back-compat (P2-WU1 D1.3)" $ do
+    it "keeps the existing keys (name replaced by label) for a harness tab" $ do
       env <- mkTestFrontendEnvWithRegistryTabs
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
       seedHarnessTab env
@@ -1161,11 +1169,12 @@ spec = do
       case Aeson.decode respBody of
         Just (Aeson.Array arr) -> do
           let t0 = head (toList' arr)
-          -- The original Phase-1 keys must remain present and unchanged so
-          -- existing consumers keep working (extend-only JSON).
+          -- The per-tab "name" key is GONE; a harness tab carries its label as
+          -- the "label" fallback. The other keys are unchanged.
           lookupKey t0 "index"      `shouldBe` Just (Aeson.Number 0)
           lookupKey t0 "kind"       `shouldBe` Just (Aeson.String "harness")
-          lookupKey t0 "name"       `shouldBe` Just (Aeson.String "claude-code")
+          lookupKey t0 "name"       `shouldBe` Nothing
+          lookupKey t0 "label"      `shouldBe` Just (Aeson.String "claude-code")
           lookupKey t0 "status"     `shouldBe` Just (Aeson.String "idle")
           lookupKey t0 "session_id" `shouldBe` Just (Aeson.String "session-abc")
         _ -> expectationFailure "Expected JSON array with one harness tab"
@@ -1706,14 +1715,14 @@ spec = do
         (baseEntry hidA "alpha" Nothing) { Registry._he_label = "alpha" }
       seedHarnessTab env
         (baseEntry hidB "bravo" Nothing) { Registry._he_label = "bravo" }
-      -- Discover which name /api/tabs shows at index 1 BEFORE dismissing.
+      -- Discover which label /api/tabs shows at index 1 BEFORE dismissing.
       (_, tabsBody) <- getJSON env ["api", "tabs"]
       let nameAt n = case Aeson.decode tabsBody of
             Just (Aeson.Array arr) ->
               listToMaybe' [ nm | v <- toList' arr
                                 , Just (Aeson.Number i) <- [lookupKey v "index"]
                                 , round i == (n :: Int)
-                                , Just (Aeson.String nm) <- [lookupKey v "name"] ]
+                                , Just (Aeson.String nm) <- [lookupKey v "label"] ]
             _ -> Nothing
       nameAt 1 `shouldBe` Just "bravo"  -- "alpha" at slot 0, "bravo" at slot 1
       -- Dismiss index 1; exactly the "bravo" row (hidB) must be removed
@@ -1799,7 +1808,6 @@ spec = do
         _ <- registryAppend
                (_fe_tabRegistry env)
                (BoundSession (SessionId sid1))
-               "tab0"
         (st, respBody) <- getJSON env ["api", "sessions", "recent"]
         st `shouldBe` HTTP.status200
         case Aeson.decode respBody of
@@ -1876,7 +1884,6 @@ spec = do
         _ <- registryAppend
                (_fe_tabRegistry env)
                (BoundSession (SessionId sid))
-               "wu6-session-tab"
         snap <- computeListsSnapshot env
         let lookupArr key v = case v of
               Aeson.Object km -> case KM.lookup (AesonKey.fromText key) km of
@@ -1918,6 +1925,111 @@ spec = do
         let recentIds = [ t | v <- lookupArr "recentSessions" snap
                              , Just (Aeson.String t) <- [lookupKey v "id"] ]
         recentIds `shouldSatisfy` elem sid
+
+    -- Task 7 (item 3): a description set via PUT /api/sessions/{sid}/description
+    -- is REFLECTED in the broadcast 'lists' snapshot's session list. The tab
+    -- label join is client-side, so the cross-surface parity rests on the
+    -- backend exposing the session's canonical description in the very payload
+    -- the frontend renders for Recent Sessions; this is the server half of the
+    -- "tab reads identically to its Recent Sessions row" guarantee.
+    it "a PUT description is reflected in the lists snapshot's recentSessions for that sid" $
+      withSystemTempDirectory "pureclaw-task7-desc-snap" $ \tmpDir -> do
+        let sid = "test-20240101-120000-task7"
+        writeTestSession tmpDir sid False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Set the canonical description through the production endpoint.
+        (st, _) <- putJSON env ["api", "sessions", sid, "description"]
+          (Aeson.encode (object ["description" .= ("Renamed Title" :: Text)]))
+        st `shouldBe` HTTP.status200
+        snap <- computeListsSnapshot env
+        let lookupArr key v = case v of
+              Aeson.Object km -> case KM.lookup (AesonKey.fromText key) km of
+                Just (Aeson.Array arr) -> toList' arr
+                _                      -> []
+              _ -> []
+        -- The recentSessions payload for this sid carries the new description.
+        let descsForSid =
+              [ d
+              | v <- lookupArr "recentSessions" snap
+              , lookupKey v "id" == Just (Aeson.String sid)
+              , Just d <- [lookupKey v "description"]
+              ]
+        descsForSid `shouldBe` [Aeson.String "Renamed Title"]
+
+    -- After the "unify tab name = session name" refactor, an ACTIVE TAB's
+    -- backing SessionInfo is deduped out of recentSessions AND the tab snapshot
+    -- is meta-free, so the frontend can join NOWHERE to resolve the tab's
+    -- session (chat-header pencil + renamed title vanish). The fix carries the
+    -- full SessionInfo for active-tab-backed sessions in a NEW "tabSessions"
+    -- array, while preserving the recentSessions dedup.
+    it "an active-tab session's SessionInfo appears in tabSessions (not recentSessions), carrying its description" $
+      withSystemTempDirectory "pureclaw-tabsessions" $ \tmpDir -> do
+        let sid = "test-20240101-120000-tabsess"
+        writeTestSession tmpDir sid False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- Give the session a canonical description through the production endpoint.
+        (st, _) <- putJSON env ["api", "sessions", sid, "description"]
+          (Aeson.encode (object ["description" .= ("Renamed" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- Bind it as a non-harness (BoundSession) active tab.
+        _ <- registryAppend (_fe_tabRegistry env) (BoundSession (SessionId sid))
+        snap <- computeListsSnapshot env
+        let lookupArr key v = case v of
+              Aeson.Object km -> case KM.lookup (AesonKey.fromText key) km of
+                Just (Aeson.Array arr) -> toList' arr
+                _                      -> []
+              _ -> []
+        -- (a) The session's SessionInfo IS present in tabSessions, with its
+        --     id AND its description.
+        let tabDescsForSid =
+              [ d
+              | v <- lookupArr "tabSessions" snap
+              , lookupKey v "id" == Just (Aeson.String sid)
+              , Just d <- [lookupKey v "description"]
+              ]
+        tabDescsForSid `shouldBe` [Aeson.String "Renamed"]
+        -- (b) The dedup is preserved: the sid is NOT in recentSessions.
+        let recentIds = [ t | v <- lookupArr "recentSessions" snap
+                             , Just (Aeson.String t) <- [lookupKey v "id"] ]
+        recentIds `shouldSatisfy` notElem sid
+
+  -- -----------------------------------------------------------------------
+  -- Task 7 (item 3): the web-seam /tab rename round-trip is reflected in BOTH
+  -- session.json (proven by "Task D" above) AND, end to end, the GET /api/tabs
+  -- snapshot carries the matching session_id for the renamed slot. The tab
+  -- label is a CLIENT-SIDE join over (tab.session_id -> session.description), so
+  -- the backend's job is to expose the session_id on the tab snapshot and the
+  -- description on the session — these two facts together let the client render
+  -- a tab label identical to the Recent Sessions row.
+  -- -----------------------------------------------------------------------
+
+  describe "web /tab rename round-trip (Task 7 — tab snapshot carries the session_id)" $
+    it "after /tab rename, session.json holds the description AND GET /api/tabs reports the matching session_id at slot 0" $
+      withSystemTempDirectory "pureclaw-task7-tab-sid" $ \tmpDir -> do
+        let sid = "20240101-000000-777"
+        writeTestSession tmpDir sid False
+        (env, tabReg) <- mkWebTabSeamEnv tmpDir
+        _ <- registryAppend tabReg (BoundSession (SessionId sid))
+        -- Drive the rename through the production HTTP send seam.
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/tab rename 0 RoundTripName" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        -- (a) session.json now carries the canonical description.
+        Right onDisk <- Aeson.eitherDecodeFileStrict'
+          (tmpDir </> T.unpack sid </> "session.json")
+            :: IO (Either String SessionMeta)
+        _sm_description onDisk `shouldBe` Just "RoundTripName"
+        -- (b) The tab snapshot carries the matching session_id so the client can
+        -- join the renamed description onto the tab's label.
+        (stT, tabsBody) <- getJSON env ["api", "tabs"]
+        stT `shouldBe` HTTP.status200
+        case Aeson.decode tabsBody of
+          Just (Aeson.Array arr) -> do
+            let sids = [ s | v <- toList' arr
+                           , Just (Aeson.String s) <- [lookupKey v "session_id"] ]
+            sids `shouldSatisfy` elem sid
+          _ -> expectationFailure "Expected GET /api/tabs to return a JSON array"
 
   -- -----------------------------------------------------------------------
   -- #67 follow-up: SessionInfo exposes channel name + channel user id
@@ -2405,6 +2517,221 @@ spec = do
         -- The send was attempted (bytes reached the handle) before the throw.
         sent <- readIORef sentRef
         sent `shouldBe` ["will throw"]
+
+  -- -----------------------------------------------------------------------
+  -- Task 7: slash-command short-circuit in handleSend
+  -- -----------------------------------------------------------------------
+  describe "POST /api/sessions/{sid}/send (slash short-circuit — Task 7)" $ do
+    -- 1. /help is handled by the shared slash dispatch: kind "slash", a
+    --    non-empty response, the provider is NEVER called, and no Request/
+    --    Response transcript entries are appended.
+    it "handles /help without calling the provider or touching the transcript" $ do
+      withSystemTempDirectory "pureclaw-slash-help" $ \tmpDir -> do
+        let sid = "sess-slash-help"
+        writeTestSession tmpDir sid False
+        linesBefore <- transcriptLineCount tmpDir sid
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "should-not-be-used"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/help" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> T.null txt `shouldBe` False
+          _ -> expectationFailure "expected a string 'response' field"
+        -- The provider was never invoked.
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+        -- No transcript entries were appended.
+        linesAfter <- transcriptLineCount tmpDir sid
+        linesAfter `shouldBe` linesBefore
+
+    -- 2. /status short-circuits even when no provider/model is configured on
+    --    the shared base env — the dispatch precedes the provider guard, so
+    --    there is no 503.
+    it "handles /status without a 503 even when no provider is configured" $ do
+      withSystemTempDirectory "pureclaw-slash-status" $ \tmpDir -> do
+        let sid = "sess-slash-status"
+        writeTestSession tmpDir sid False
+        -- _fe_provider / _fe_model AND the shared _fe_agentEnv default to
+        -- Nothing in the test env, so a 503 would mean the guard ran first.
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/status" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+
+    -- 3. A plain message reaches the provider and is tagged kind "assistant".
+    it "routes a plain message to the provider and tags it kind assistant" $ do
+      withSystemTempDirectory "pureclaw-slash-plain" $ \tmpDir -> do
+        let sid = "sess-slash-plain"
+        writeTestSession tmpDir sid False
+        fakeProv <- newFakeProvider
+        queueResponse fakeProv CompletionResponse
+          { _crsp_content = [TextBlock "canned answer"]
+          , _crsp_model   = ModelId "claude-sonnet-4-20250514"
+          , _crsp_usage   = Nothing
+          }
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "claude-sonnet-4-20250514"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hello" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "assistant")
+        lookupKey' respBody "response" `shouldBe` Just (Aeson.String "canned answer")
+        recorded <- peekRecorded fakeProv
+        length recorded `shouldBe` 1
+
+    -- 4. A harness session + /help: the slash dispatch short-circuits BEFORE
+    --    the harness branch, so the response is the slash help text and NO
+    --    keystrokes are relayed to the harness handle.
+    it "handles /help on a harness session without relaying keystrokes" $ do
+      withSystemTempDirectory "pureclaw-slash-harness" $ \tmpDir -> do
+        let sid = "sess-slash-harness"
+            key = "claude-code-0"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef []
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        modifyIORef' (_fe_harnesses env0)
+          (Map.insert key (mkFakeHarnessHandle sentRef "harness echo"))
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/help" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        -- It is the slash help text, NOT the harness echo.
+        lookupKey' respBody "response"
+          `shouldNotBe` Just (Aeson.String "harness echo")
+        -- No keystrokes reached the harness handle.
+        sent <- readIORef sentRef
+        sent `shouldBe` []
+
+    -- 5. Unknown / unrecognised slash forms short-circuit with kind "slash"
+    --    and never call the provider.
+    it "short-circuits /0 and /foo with kind slash and no provider call" $ do
+      withSystemTempDirectory "pureclaw-slash-unknown" $ \tmpDir -> do
+        let sid = "sess-slash-unknown"
+        writeTestSession tmpDir sid False
+        fakeProv <- newFakeProvider
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        provRef  <- newIORef (Just (MkProvider fakeProv))
+        modelRef <- newIORef (Just (ModelId "should-not-be-used"))
+        let env = env0 { _fe_provider = provRef, _fe_model = modelRef }
+        let postSlash raw = postJSON env ["api", "sessions", sid, "send"]
+              (Aeson.encode (object ["message" .= (raw :: Text)]))
+        (st0, body0) <- postSlash "/0"
+        st0 `shouldBe` HTTP.status200
+        lookupKey' body0 "kind" `shouldBe` Just (Aeson.String "slash")
+        (stF, bodyF) <- postSlash "/foo"
+        stF `shouldBe` HTTP.status200
+        lookupKey' bodyF "kind" `shouldBe` Just (Aeson.String "slash")
+        recorded <- peekRecorded fakeProv
+        recorded `shouldBe` []
+
+    -- 6. /vault setup is a recognised command that needs interactive input;
+    --    against the capture channel it surfaces the deferral message
+    --    containing both "interactive" and the tracking "/issues/" URL.
+    it "defers /vault setup with an interactive-unsupported message" $ do
+      withSystemTempDirectory "pureclaw-slash-vault" $ \tmpDir -> do
+        let sid = "sess-slash-vault"
+        writeTestSession tmpDir sid False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/vault setup" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> do
+            ("interactive" `T.isInfixOf` txt) `shouldBe` True
+            ("/issues/" `T.isInfixOf` txt) `shouldBe` True
+          _ -> expectationFailure "expected a string 'response' field"
+
+    -- 7. Two distinct sessions each get their own freshly-scoped session ref
+    --    per request: /status to each responds independently with kind "slash".
+    it "scopes the session per request across two distinct sids" $ do
+      withSystemTempDirectory "pureclaw-slash-iso" $ \tmpDir -> do
+        let sidA = "sess-slash-a"
+            sidB = "sess-slash-b"
+        writeTestSession tmpDir sidA False
+        writeTestSession tmpDir sidB False
+        env <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        (stA, bodyA) <- postJSON env ["api", "sessions", sidA, "send"]
+          (Aeson.encode (object ["message" .= ("/status" :: Text)]))
+        stA `shouldBe` HTTP.status200
+        lookupKey' bodyA "kind" `shouldBe` Just (Aeson.String "slash")
+        (stB, bodyB) <- postJSON env ["api", "sessions", sidB, "send"]
+          (Aeson.encode (object ["message" .= ("/status" :: Text)]))
+        stB `shouldBe` HTTP.status200
+        lookupKey' bodyB "kind" `shouldBe` Just (Aeson.String "slash")
+
+  -- -----------------------------------------------------------------------
+  -- Task D: a web @/tab@ command, sent over the HTTP send endpoint, mutates
+  -- the SHARED 'TabRegistry' end to end. This closes the gap left by the
+  -- earlier tasks: those proved the dispatcher seam was wired into
+  -- 'executeSlashCommand', but no test exercised the PRODUCTION-equivalent
+  -- wiring ('mkRunTabCommandSeam' over deps whose '_td_tabs' is the registry
+  -- the frontend exposes) all the way from the HTTP body to a registry
+  -- mutation + the captured dispatcher reply.
+  --
+  -- The shared default test env wires '_env_runTabCommand = noRunTabCommand'
+  -- (a no-op), so each test here builds a bespoke env whose '_fe_agentEnv'
+  -- shares ONE 'TabRegistry'/cursors/exec with the 'FrontendEnv' and whose
+  -- '_env_runTabCommand' is the real 'mkRunTabCommandSeam' over deps built on
+  -- that same env (exactly how "PureClaw.CLI.Commands" wires production).
+  describe "POST /api/sessions/{sid}/send (web /tab mutates the shared registry — Task D)" $ do
+    it "renames slot 0 in the shared TabRegistry and returns the dispatcher reply" $ do
+      withSystemTempDirectory "pureclaw-webtab-rename" $ \tmpDir -> do
+        let sid = "20240101-000000-001"
+        writeTestSession tmpDir sid False
+        (env, tabReg) <- mkWebTabSeamEnv tmpDir
+        -- Seed a tab at slot 0 in the SHARED registry, bound to the on-disk
+        -- session so the rename's description write is observable.
+        _ <- registryAppend tabReg (BoundSession (SessionId sid))
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/tab rename 0 newname" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- (a) The slash short-circuit fired and surfaced the dispatcher reply.
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> ("renamed" `T.isInfixOf` txt) `shouldBe` True
+          _ -> expectationFailure "expected a string 'response' field"
+        -- (b) Rename now sets the SESSION's canonical description (cross-process).
+        -- Tabs carry no label of their own, so the tab is untouched (its binding
+        -- is unchanged) and session.json now carries the new description.
+        slot0 <- registryLookupSlot tabReg
+                   (fromMaybe (error "mkTabIndex 0") (mkTabIndex 0))
+        fmap _tab_ref slot0 `shouldBe` Just (BoundSession (SessionId sid))
+        Right onDisk <- Aeson.eitherDecodeFileStrict'
+          (tmpDir </> T.unpack sid </> "session.json")
+            :: IO (Either String SessionMeta)
+        _sm_description onDisk `shouldBe` Just "newname"
+
+    it "closes slot 0 in the shared TabRegistry and returns the dispatcher reply" $ do
+      withSystemTempDirectory "pureclaw-webtab-close" $ \tmpDir -> do
+        let sid = "20240101-000000-002"
+        writeTestSession tmpDir sid False
+        (env, tabReg) <- mkWebTabSeamEnv tmpDir
+        _ <- registryAppend tabReg (BoundSession (SessionId "s-doomed"))
+        -- Sanity: the seeded tab is present before the command.
+        seeded <- readTabs tabReg
+        length (toList seeded) `shouldBe` 1
+        (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("/tab close 0" :: Text)]))
+        st `shouldBe` HTTP.status200
+        lookupKey' respBody "kind" `shouldBe` Just (Aeson.String "slash")
+        case lookupKey' respBody "response" of
+          Just (Aeson.String txt) -> ("closed" `T.isInfixOf` txt) `shouldBe` True
+          _ -> expectationFailure "expected a string 'response' field"
+        -- The slot is gone from the SHARED registry.
+        slot0 <- registryLookupSlot tabReg
+                   (fromMaybe (error "mkTabIndex 0") (mkTabIndex 0))
+        slot0 `shouldBe` Nothing
+        remaining <- readTabs tabReg
+        length (toList remaining) `shouldBe` 0
 
   -- -----------------------------------------------------------------------
   -- WU6: id-primary routing with name fallback + PID-corroboration refusal
@@ -3073,7 +3400,7 @@ spec = do
     it "closes a BoundSession tab at the slot and removes it (WU7)" $ do
       env <- mkTestFrontendEnv
       let sid = SessionId "test-20240101-120000-c01"
-      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid) "tab0"
+      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid)
       (st, respBody) <- postJSON env ["api", "tabs", "0", "close"] ""
       st `shouldBe` HTTP.status200
       case Aeson.decode respBody of
@@ -3138,7 +3465,7 @@ spec = do
     it "close resolves the registry slot and removes the tab (any kind)" $ do
       env <- mkTestFrontendEnv
       let sid = SessionId "test-20240101-120000-777"
-      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid) "claude-opus"
+      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid)
       -- Slot 0 now holds the BoundSession tab.
       (st, _) <- postJSON env ["api", "tabs", "0", "close"] ""
       st `shouldBe` HTTP.status200
@@ -3148,7 +3475,7 @@ spec = do
     it "dismiss on a BoundSession (non-harness) tab returns 4xx 'not a harness tab'" $ do
       env <- mkTestFrontendEnv
       let sid = SessionId "test-20240101-120000-888"
-      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid) "claude-opus"
+      _ <- registryAppend (_fe_tabRegistry env) (BoundSession sid)
       (st, respBody) <- postJSON env ["api", "tabs", "0", "dismiss"] "{}"
       HTTP.statusCode st `shouldSatisfy` (\c -> c >= 400 && c < 500)
       lookupKey' respBody "error" `shouldBe` Just (Aeson.String "not a harness tab")
@@ -3157,7 +3484,7 @@ spec = do
       env <- mkTestFrontendEnvWith 1   -- maxTabs = 1
       -- Fill the single slot.
       _ <- registryAppend (_fe_tabRegistry env)
-             (BoundSession (SessionId "test-20240101-120000-aaa")) "tab0"
+             (BoundSession (SessionId "test-20240101-120000-aaa"))
       lenBefore <- length . toList <$> readTabs (_fe_tabRegistry env)
       (st, respBody) <- postJSON env ["api", "tabs", "new"] providerNewTabBody
       HTTP.statusCode st `shouldSatisfy` (\c -> c >= 400 && c < 500)
@@ -3388,6 +3715,7 @@ mkTestFrontendEnvWith maxTabs = do
   tabReg      <- newTabRegistry
   cursorsRef  <- newIORef emptyCursors
   exec        <- newExec
+  agentEnv    <- mkTestAgentEnv
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
@@ -3415,6 +3743,7 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_streamGuard  = Nothing
     , _fe_registry    = emptyRegistry
     , _fe_maxToolIterations = 90
+    , _fe_agentEnv     = agentEnv
     }
 
 -- | Build a FrontendEnv with a real sessions directory.
@@ -3432,6 +3761,50 @@ mkTestFrontendEnvWithTabsAndDir _tabs dir = do
 mkTestFrontendEnvWithRegistryTabs :: IO FrontendEnv
 mkTestFrontendEnvWithRegistryTabs = mkTestFrontendEnv
 
+-- | Build a 'FrontendEnv' whose '_fe_agentEnv' has its '_env_runTabCommand'
+-- wired to the PRODUCTION seam ('mkRunTabCommandSeam') over a 'TabDispatchDeps'
+-- built on that SAME agent env — mirroring how "PureClaw.CLI.Commands" wires
+-- the web @/tab@ path. The returned 'TabRegistry' is the single shared registry
+-- that both the deps ('_td_tabs') and the agent env ('_env_tabRegistry') point
+-- at, so a test can seed it before the request and assert on it afterwards.
+--
+-- The base test 'AgentEnv' (which has its own private tab subsystem) is
+-- overridden so its tab fields point at a freshly-allocated registry/cursors/
+-- exec; the deps + seam are then built over that overridden env. The web
+-- placeholder conversation key matches production: @(CkWeb, "web")@.
+mkWebTabSeamEnv :: FilePath -> IO (FrontendEnv, TabRegistry)
+mkWebTabSeamEnv dir = do
+  base       <- mkTestFrontendEnvWithTabsAndDir [] dir
+  tabReg     <- newTabRegistry
+  cursorsRef <- newIORef emptyCursors
+  exec       <- newExec
+  store      <- newIORef Map.empty
+  agentBase  <- mkTestAgentEnv
+  -- Share ONE tab subsystem between the deps and the seam's agent env.
+  let agentShared = agentBase
+        { _env_tabRegistry = tabReg
+        , _env_cursors     = cursorsRef
+        , _env_exec        = exec
+        }
+      execDeps = Wiring.mkExecDeps agentShared store
+      -- The session-description seam, wired to the real on-disk writer rooted at
+      -- @dir@ (mirroring the production 'ServeFrontend' closure), so a web @/tab
+      -- rename@ updates the bound session's canonical description and a test can
+      -- assert on @session.json@.
+      deps     = Wiring.mkTabDispatchDeps agentShared execDeps store
+                   (\sid mDesc -> either (Left . T.pack . show) Right
+                                    <$> setDescription dir sid mDesc)
+      webKey   = (CkWeb, ConversationId "web")
+      agentEnv = agentShared
+        { _env_runTabCommand = mkRunTabCommandSeam deps webKey }
+      env = base
+        { _fe_tabRegistry = tabReg
+        , _fe_cursors     = cursorsRef
+        , _fe_exec        = exec
+        , _fe_agentEnv    = agentEnv
+        }
+  pure (env, tabReg)
+
 -- | Insert a harness registry entry AND the corresponding 'BoundHarness'
 -- slot into '_fe_tabRegistry', so the entry appears in GET /api/tabs (WU6).
 -- Ignores slot-full / already-bound errors — tests should not overflow the
@@ -3442,7 +3815,6 @@ seedHarnessTab env e = do
   _ <- registryAppend
          (_fe_tabRegistry env)
          (BoundHarness (Registry._he_id e))
-         (Registry._he_label e)
   pure ()
 
 -- | Bind a 'BoundHarness' tab for @hid@ into '_fe_tabRegistry' at the next
@@ -3453,7 +3825,7 @@ seedHarnessTab env e = do
 -- bound errors are ignored — the action tests never overflow the cap.
 tabBindHarness :: FrontendEnv -> Registry.HarnessId -> IO ()
 tabBindHarness env hid = do
-  _ <- registryAppend (_fe_tabRegistry env) (BoundHarness hid) "harness-tab"
+  _ <- registryAppend (_fe_tabRegistry env) (BoundHarness hid)
   pure ()
 
 -- | Write a minimal session.json + transcript.jsonl to disk so that
@@ -3852,6 +4224,16 @@ readSessionTranscript baseDir sid = do
     raw <- LBS.readFile p
     let ls = filter (not . LBS.null) (LBS.split 0x0a raw)
     pure (foldr (\x acc -> maybe acc (: acc) (Aeson.decode' x)) [] ls)
+
+-- | Count the non-empty lines in a session's @transcript.jsonl@. Used by the
+-- slash short-circuit tests to assert a handled command appended nothing.
+transcriptLineCount :: FilePath -> Text -> IO Int
+transcriptLineCount baseDir sid = do
+  let p = baseDir </> T.unpack sid </> "transcript.jsonl"
+  ok <- doesFileExist p
+  if not ok then pure 0 else do
+    raw <- LBS.readFile p
+    pure (length (filter (not . LBS.null) (LBS.split 0x0a raw)))
 
 -- | List the entries under a sessions base dir, ignoring a missing base
 -- dir. Used to assert a failed harness spawn left no session directory

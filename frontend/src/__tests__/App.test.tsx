@@ -13,6 +13,7 @@ interface HookState {
   tabs: TabInfo[]
   recentSessions: SessionInfo[]
   archivedSessions: SessionInfo[]
+  tabSessions: SessionInfo[]
   agents: AgentInfo[]
   // Transcript entries keyed by the session id useTranscript is asked for.
   transcripts: Record<string, TranscriptEntry[]>
@@ -22,6 +23,7 @@ const state: HookState = {
   tabs: [],
   recentSessions: [],
   archivedSessions: [],
+  tabSessions: [],
   agents: [],
   transcripts: {},
 }
@@ -62,6 +64,7 @@ vi.mock('../hooks/useListsStream', () => ({
     tabs: state.tabs,
     recentSessions: state.recentSessions,
     archivedSessions: state.archivedSessions,
+    tabSessions: state.tabSessions,
   }),
 }))
 
@@ -216,6 +219,7 @@ beforeEach(() => {
   state.tabs = []
   state.recentSessions = []
   state.archivedSessions = []
+  state.tabSessions = []
   state.agents = []
   state.transcripts = {}
   focusSpy.mockReset()
@@ -625,7 +629,7 @@ describe('App tab actions wiring (D4.7)', () => {
     return {
       index,
       kind: 'session:harness',
-      name: `exited-${index}`,
+      label: `exited-${index}`,
       status: 'exited',
       session_id: `sess-${index}`,
     }
@@ -646,7 +650,7 @@ describe('App tab actions wiring (D4.7)', () => {
     state.tabs = [{
       index: 3,
       kind: 'session:harness',
-      name: 'edited-3',
+      label: 'edited-3',
       status: 'idle',
       session_id: 'sess-3',
       extModified: true,
@@ -664,7 +668,10 @@ describe('App harness controls view (RH/HC)', () => {
     return {
       index,
       kind: 'harness',
-      name: `claude-code-${index}`,
+      // Harness fallback label. With no backing session in the recents list the
+      // row renders this; when a session resolves the row shows the session
+      // title instead.
+      label: `claude-code-${index}`,
       status: 'running',
       session_id: `sess-${index}`,
       origin: 'spawned',
@@ -675,12 +682,16 @@ describe('App harness controls view (RH/HC)', () => {
   it('selecting a running harness shows the controls view (Destroy), not a transcript', async () => {
     mockFetchOk('x')
     state.tabs = [runningHarness(0)]
-    state.recentSessions = [harnessSession('sess-0')]
+    // The harness's backing session: its title now drives the harness row's
+    // label (identical to its Recent Sessions row), so the row reads "harness
+    // chat" rather than the fallback "claude-code-0".
+    state.recentSessions = [{ ...harnessSession('sess-0'), description: 'harness chat' }]
     state.transcripts['sess-0'] = [userEntry('e1', 'harness transcript text')]
     const utils = render(<App />)
 
-    // Click the harness row in the Running Harnesses section.
-    fireEvent.click(utils.getByText('claude-code-0'))
+    // The harness row (and its Recent Sessions twin) both read "harness chat";
+    // click the first to open the controls view.
+    fireEvent.click(utils.getAllByText('harness chat')[0]!)
 
     await waitFor(() => {
       expect(utils.getByRole('button', { name: /destroy harness/i })).toBeInTheDocument()
@@ -840,5 +851,92 @@ describe('App slot-exhaustion (WU9)', () => {
 
     // The composer is still shown (user can act after closing a tab).
     expect(utils.queryByLabelText('Tab kind')).toBeTruthy()
+  })
+})
+
+describe('App slash-command response (Task 8)', () => {
+  it('a kind:"slash" /send response renders a transient bubble AND clears the optimistic thinking spinner', async () => {
+    mockFetchOk('x')
+    // The main composer's send goes through the mocked useSendMessage hook.
+    // A slash command resolves to a transient `{response, kind:"slash"}` body
+    // that adds NO transcript entry — so the only thing that can clear the
+    // optimistic pending spinner is handleSendResult.
+    sendSpy.mockResolvedValue({ response: 'help text', kind: 'slash' })
+
+    // Render focused on a provider session so the bottom input drives App's
+    // handleSend (the existing-session path), not the new-tab composer.
+    state.recentSessions = [providerSession('s-1')]
+    state.transcripts['s-1'] = [userEntry('e1', 'prior message')]
+    window.history.replaceState(null, '', '/session/s-1')
+    const utils = render(<App />)
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/help' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+    })
+
+    // The slash command was dispatched through the send hook.
+    expect(sendSpy).toHaveBeenCalledWith('/help', expect.anything())
+
+    // (a) A transient slash bubble appears with the command output.
+    const bubble = await utils.findByTestId('slash-bubble')
+    expect(bubble).toHaveTextContent('help text')
+    expect(bubble).toHaveTextContent(/command output\s*—\s*not saved/i)
+
+    // (b) The optimistic pending/thinking spinner is NOT left stranded — a
+    // slash response yields no transcript entry, so handleSendResult must
+    // clear it explicitly. The pending-thinking block (id="msg-pending-thinking")
+    // and its typing-dot spinner must be gone.
+    await waitFor(() => {
+      expect(document.getElementById('msg-pending-thinking')).toBeNull()
+    })
+    expect(document.querySelector('.typing-dot')).toBeNull()
+  })
+})
+
+describe('Active-tab session resolution (chat-header pencil + renamed title)', () => {
+  // Regression: selecting an OPEN tab must surface the chat-header edit pencil
+  // and the rename-derived title. The tab's backing session is deduped OUT of
+  // recentSessions/archivedSessions by the backend and the tab snapshot is
+  // meta-free, so the session arrives ONLY via the `tabSessions` list. If App
+  // doesn't consult it, `selectedSession` is null → no pencil, stale title.
+  function providerTab(index: number, sessionId: string): TabInfo {
+    return {
+      index,
+      kind: 'session:provider',
+      label: null,
+      status: 'idle',
+      session_id: sessionId,
+    }
+  }
+
+  it('shows the edit pencil + renamed title for a selected active tab whose session is only in tabSessions', async () => {
+    mockFetchOk('x')
+    state.tabs = [providerTab(0, 'open-sid')]
+    // Session present ONLY in tabSessions — NOT recents/archived — with a
+    // user-set description (the rename) that should drive the header title.
+    state.tabSessions = [{ ...providerSession('open-sid'), description: 'Renamed Via Tab' }]
+    window.history.replaceState(null, '', '/tab/0')
+    const utils = render(<App />)
+    // The editable-title button (and its pencil glyph) render only when the
+    // selected session resolves — proving App found it in tabSessions.
+    await waitFor(() => {
+      expect(utils.container.querySelector('.editable-title-pencil')).not.toBeNull()
+    })
+    // ...and the title text is the renamed description, not a stale fallback.
+    expect(utils.container.querySelector('.editable-title')).toHaveTextContent('Renamed Via Tab')
+  })
+
+  it('does NOT show the pencil when the active tab session is absent everywhere (control)', async () => {
+    mockFetchOk('x')
+    state.tabs = [providerTab(0, 'open-sid')]
+    state.tabSessions = [] // session resolves nowhere
+    window.history.replaceState(null, '', '/tab/0')
+    const utils = render(<App />)
+    await waitFor(() => {
+      expect(utils.container).toBeTruthy()
+    })
+    expect(utils.container.querySelector('.editable-title-pencil')).toBeNull()
   })
 })

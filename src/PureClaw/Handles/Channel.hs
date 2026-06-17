@@ -10,10 +10,16 @@ module PureClaw.Handles.Channel
     -- * Implementations
   , mkNoOpChannelHandle
   , noopConversationId
+  , mkCaptureChannelHandle
+  , InteractiveUnsupported (..)
+  , renderPublicError
   ) where
 
+import Control.Exception (Exception, throwIO)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import Data.Text qualified as T
 
 import PureClaw.Core.Errors
 import PureClaw.Core.Types
@@ -93,3 +99,41 @@ mkNoOpChannelHandle = ChannelHandle
 -- conversation.
 noopConversationId :: ConversationId
 noopConversationId = ConversationId "noop"
+
+-- | Thrown when a slash command tries to read interactive input through a
+-- capture channel (which has no interactive transport). Carries the prompt
+-- label so the caller can report which command needs the CLI.
+newtype InteractiveUnsupported = InteractiveUnsupported Text
+  deriving stock (Show, Eq)
+
+instance Exception InteractiveUnsupported
+
+-- | Render a 'PublicError' to channel-safe display text (for buffering).
+renderPublicError :: PublicError -> Text
+renderPublicError (TemporaryError t) = t
+renderPublicError RateLimitError     = "Rate limit reached."
+renderPublicError NotAllowedError    = "Not authorized."
+
+-- | A channel handle that buffers all output instead of writing to a
+-- transport, and refuses interactive input. Returns the handle plus a reader
+-- that yields the accumulated output (messages joined by newline).
+mkCaptureChannelHandle :: IO (ChannelHandle, IO Text)
+mkCaptureChannelHandle = do
+  buf <- newIORef []  -- reversed list of emitted fragments
+  let append t = modifyIORef' buf (t :)
+      handle = ChannelHandle
+        -- '_ch_receive'/'_ch_readSecret' take no label, so they throw with a
+        -- parenthesized sentinel identifying the method (not a user-facing prompt).
+        { _ch_receive      = throwIO (InteractiveUnsupported "(receive)")
+        , _ch_send         = \(OutgoingMessage t) -> append t
+        , _ch_sendError    = append . renderPublicError
+        , _ch_sendChunk    = \case
+            ChunkText t -> append t
+            ChunkDone   -> pure ()
+        , _ch_streaming    = False
+        , _ch_readSecret   = throwIO (InteractiveUnsupported "(secret)")
+        , _ch_prompt       = throwIO . InteractiveUnsupported
+        , _ch_promptSecret = throwIO . InteractiveUnsupported
+        }
+      reader = T.intercalate "\n" . reverse <$> readIORef buf
+  pure (handle, reader)

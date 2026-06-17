@@ -3,11 +3,15 @@ import { describe, it, expect, vi } from 'vitest'
 import { Sidebar } from '../Sidebar'
 import type { SessionInfo, TabInfo } from '../../types'
 
-function makeTabs(...overrides: Partial<TabInfo>[]): TabInfo[] {
+/** Tabs no longer carry a `name`; the display label derives from the backing
+ *  session (else the harness `label` fallback). The old `name` overrides are
+ *  mapped onto `label` so these tests, which mostly pass no matching session,
+ *  still render the expected row text via the fallback. */
+function makeTabs(...overrides: (Partial<TabInfo> & { name?: string })[]): TabInfo[] {
   return overrides.map((o, i) => ({
     index: o.index ?? i,
     kind: o.kind ?? 'session:provider',
-    name: o.name ?? `tab-${i}`,
+    label: o.label ?? o.name ?? `tab-${i}`,
     status: o.status ?? 'idle',
     session_id: o.session_id ?? `sess-${i}`,
   }))
@@ -188,11 +192,14 @@ describe('Sidebar lifecycle transitions', () => {
         )}
       />,
     )
-    // The harness's session is listed under Recent Sessions (clickable row).
-    expect(screen.getByText('harness session')).toBeInTheDocument()
-    // The harness controls row is still present under Running Harnesses.
+    // The harness controls row is still present under Running Harnesses, and
+    // its label now derives from the backing session's title (identical to its
+    // Recent Sessions row) — NOT the harness fallback name.
     const section = screen.getByTestId('running-harnesses-section')
-    expect(within(section).getByText('claude-code-0')).toBeInTheDocument()
+    expect(within(section).getByText('harness session')).toBeInTheDocument()
+    // The same session is also listed under Recent Sessions (clickable row), so
+    // 'harness session' appears twice across the sidebar.
+    expect(screen.getAllByText('harness session').length).toBeGreaterThanOrEqual(2)
     // Unrelated provider sessions are unaffected.
     expect(screen.getByText('plain session')).toBeInTheDocument()
   })
@@ -221,5 +228,61 @@ describe('Sidebar lifecycle transitions', () => {
     )
     expect(screen.getByText('h1')).toBeInTheDocument()
     expect(screen.getByText('h0')).toBeInTheDocument()
+  })
+})
+
+describe('Task 7: rename is ONLY on the focused chat header, never on Recent/Archived rows', () => {
+  const defaultProps = {
+    tabs: [] as TabInfo[],
+    sessions: [] as SessionInfo[],
+    archivedSessions: [] as SessionInfo[],
+    selectedId: null as string | null,
+    onSelectTab: vi.fn(),
+    onSelectSession: vi.fn(),
+    onNewTab: vi.fn(),
+    onArchiveSession: vi.fn(),
+    onUnarchiveSession: vi.fn(),
+    onCloseTab: vi.fn(),
+    onArchiveTab: vi.fn(),
+    onDismissTab: vi.fn(),
+    onAcknowledgeTab: vi.fn(),
+    onReleaseTab: vi.fn(),
+  }
+
+  // The unify-name design puts the editable-title pencil (the rename
+  // affordance, wired to `onSetDescription`) ONLY on the focused chat header
+  // in ChatArea — an Active Tab. Recent Sessions and Archived rows render the
+  // session title as plain, non-editable text via `SessionRow`. The Sidebar
+  // component takes no `onSetDescription` prop at all, so there is structurally
+  // no path for a rename control to reach those rows. These tests pin that.
+  it('renders NO editable-title pencil on a Recent Sessions row', () => {
+    const { container } = render(
+      <Sidebar
+        {...defaultProps}
+        sessions={makeSessions({ id: 'rec-1', description: 'a recent session' })}
+      />,
+    )
+    // The recent row is present...
+    expect(screen.getByText('a recent session')).toBeInTheDocument()
+    // ...but it carries no editable-title affordance (no pencil button, no
+    // "set a session title" control).
+    expect(container.querySelector('.editable-title')).toBeNull()
+    expect(container.querySelector('.editable-title-pencil')).toBeNull()
+    expect(screen.queryByTitle(/set a session title/i)).not.toBeInTheDocument()
+  })
+
+  it('renders NO editable-title pencil on an Archived row (even when expanded)', () => {
+    const { container } = render(
+      <Sidebar
+        {...defaultProps}
+        archivedSessions={makeSessions({ id: 'arch-1', description: 'an archived session' })}
+      />,
+    )
+    // Expand the archived accordion so its rows render.
+    fireEvent.click(screen.getByText(/Archived/))
+    expect(screen.getByText('an archived session')).toBeInTheDocument()
+    expect(container.querySelector('.editable-title')).toBeNull()
+    expect(container.querySelector('.editable-title-pencil')).toBeNull()
+    expect(screen.queryByTitle(/set a session title/i)).not.toBeInTheDocument()
   })
 })

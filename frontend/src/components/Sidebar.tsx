@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { SessionInfo, TabInfo } from '../types'
-import { sessionDisplayTitle, sessionSubtitle } from '../types'
+import { findSession, sessionDisplayTitle, sessionSubtitle, tabDisplayLabel } from '../types'
 import type { SessionActivityState } from '../types/stream'
 import { ActiveTabs } from './ActiveTabs'
 import { RunningHarnesses } from './RunningHarnesses'
@@ -200,6 +200,7 @@ export function Sidebar({
   tabs,
   sessions,
   archivedSessions,
+  tabSessions = [],
   selectedId,
   sessionActivity,
   onSelectTab,
@@ -216,6 +217,10 @@ export function Sidebar({
   tabs: TabInfo[]
   sessions: SessionInfo[]
   archivedSessions: SessionInfo[]
+  /** SessionInfo for sessions backing an OPEN tab (deduped out of `sessions`).
+   *  Optional/defaulted so presentational tests can omit it; the live App always
+   *  supplies it so active-tab labels resolve. */
+  tabSessions?: SessionInfo[]
   selectedId: string | null
   sessionActivity?: Record<string, SessionActivityState>
   onSelectTab: (index: number) => void
@@ -233,6 +238,13 @@ export function Sidebar({
   // "Running Harnesses" section; everything else stays under "Active Tabs".
   const harnessTabs = tabs.filter((t) => t.kind === 'harness')
   const otherTabs = tabs.filter((t) => t.kind !== 'harness')
+
+  // A tab's display label = its backing session's title (so it reads
+  // identically to its Recent Sessions row), falling back to the harness
+  // `label` then an ellipsis — never blank. Computed once here so both
+  // ActiveTabs and RunningHarnesses share the SAME join.
+  const tabLabel = (tab: TabInfo): string =>
+    tabDisplayLabel(tab, findSession(tab.session_id, sessions, archivedSessions, tabSessions))
 
   // A running harness appears under "Running Harnesses" (its status/Destroy
   // controls) AND, intentionally, its backing session is also listed under
@@ -252,6 +264,7 @@ export function Sidebar({
           tabs={otherTabs}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
+          tabLabel={tabLabel}
           onSelectTab={onSelectTab}
           onNewTab={onNewTab}
           onCloseTab={onCloseTab}
@@ -265,6 +278,7 @@ export function Sidebar({
           tabs={harnessTabs}
           selectedId={selectedId}
           sessionActivity={sessionActivity}
+          tabLabel={tabLabel}
           onSelectTab={onSelectTab}
           onCloseTab={onCloseTab}
           onArchiveTab={onArchiveTab}

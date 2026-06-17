@@ -72,20 +72,22 @@ describe('useListsStream', () => {
     const { result } = renderHook(() => useListsStream(client))
     const recent = [mkSession('r1')]
     const archived = [mkSession('a1')]
+    const tabBacked = [mkSession('t1')]
     act(() => {
       emit({
         tabs: [
-          { index: 0, kind: 'shell:bash', name: 'bash', status: 'idle', session_id: null },
+          { index: 0, kind: 'shell:bash', label: 'bash', status: 'idle', session_id: null },
         ],
         recentSessions: recent,
         archivedSessions: archived,
+        tabSessions: tabBacked,
       })
     })
     expect(result.current.tabs).toEqual([
       {
         index: 0,
         kind: 'shell:bash',
-        name: 'bash',
+        label: 'bash',
         status: 'idle',
         session_id: null,
         extModified: false,
@@ -96,6 +98,7 @@ describe('useListsStream', () => {
     ])
     expect(result.current.recentSessions).toEqual(recent)
     expect(result.current.archivedSessions).toEqual(archived)
+    expect(result.current.tabSessions).toEqual(tabBacked)
   })
 
   it('unsubscribes from the client on unmount', () => {

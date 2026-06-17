@@ -67,6 +67,34 @@ export function sessionSubtitle(s: { agent?: string | null; channel?: string | n
   return parts.join(' · ')
 }
 
+/** Resolve the display label for a tab. The label is the backing SESSION's
+ *  title (so a tab reads identically to its Recent Sessions row); only when no
+ *  session resolves do we fall back to the harness `label`, and as an absolute
+ *  last resort an ellipsis — NEVER blank. Centralized so every tab-label
+ *  consumer (sidebar rows, harness header, chat-header title) agrees. */
+export function tabDisplayLabel(tab: TabInfo, session: SessionInfo | null | undefined): string {
+  if (session) return sessionDisplayTitle(session)
+  return tab.label ?? '…'
+}
+
+/** Find the session backing a tab id across the live (recents), archived, and
+ *  active-tab lists. `tabSessions` carries the SessionInfo for sessions that
+ *  back an open tab — those are deduped OUT of recents/archived by the backend
+ *  and the tab snapshot is meta-free, so without consulting it an OPEN tab's
+ *  session would resolve nowhere (no chat-header pencil, stale title). Returns
+ *  undefined when the id is null/unknown. */
+export function findSession(
+  id: string | null | undefined,
+  sessions: SessionInfo[],
+  archivedSessions: SessionInfo[],
+  tabSessions: SessionInfo[] = [],
+): SessionInfo | undefined {
+  if (!id) return undefined
+  return sessions.find((s) => s.id === id)
+    ?? archivedSessions.find((s) => s.id === id)
+    ?? tabSessions.find((s) => s.id === id)
+}
+
 /** Liveness of a tab/harness. `exited` (harness process died, window still
  *  present) and `orphaned` (no live window for this id) replace the old
  *  collapsed `crashed` value — the backend now reports them distinctly. */
@@ -78,7 +106,13 @@ export type TabOrigin = 'spawned' | 'discovered' | 'adopted'
 export interface TabInfo {
   index: number
   kind: string
-  name: string
+  /** Harness-only fallback label (the tmux window/session name), or null for
+   *  session-backed tabs. The tab's DISPLAY label is NOT this field — it is
+   *  derived from the backing session's title (see `tabDisplayLabel`), so a
+   *  session-backed tab reads identically to its Recent Sessions row. This
+   *  `label` is only the last-resort fallback for harness tabs whose session
+   *  has not (yet) resolved. */
+  label: string | null
   status: TabStatus
   session_id: string | null
   /** The harness window's name/session changed out-of-band since PureClaw
@@ -166,4 +200,9 @@ export interface Message {
   isGenerating?: boolean
   meta?: string            // e.g. model name, token usage
   rawJson?: string         // full transcript-entry payload (pretty-printed when JSON)
+  /** Marks a TRANSIENT slash-command output bubble (kind:"slash" send
+   *  response). These rows are NOT persisted — they never enter the
+   *  transcript and vanish on reload. Rendered in a muted "command output"
+   *  style with a "command output — not saved" label. */
+  slashBubble?: boolean
 }

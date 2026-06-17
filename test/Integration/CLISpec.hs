@@ -45,6 +45,14 @@ findPureclaw = do
 runPureclaw :: FilePath -> String -> Int -> IO (ExitCode, String, String)
 runPureclaw bin = runPureclawWithArgs bin ["--no-vault"]
 
+-- | Run the pureclaw binary in @gateway run@ mode. The gateway serves its own
+-- embedded frontend and runs the interactive loop, so this is the path that
+-- exercises the agent loop end-to-end. (Plain @pureclaw tui@ now REQUIRES an
+-- already-running gateway and exits non-zero if none is reachable, so loop
+-- tests use the gateway path instead.)
+runGateway :: FilePath -> String -> Int -> IO (ExitCode, String, String)
+runGateway bin = runPureclawWithArgs bin ["gateway", "run", "--no-vault"]
+
 -- | Run the pureclaw binary with custom arguments.
 runPureclawWithArgs :: FilePath -> [String] -> String -> Int -> IO (ExitCode, String, String)
 runPureclawWithArgs bin args stdinContent timeoutUs =
@@ -114,7 +122,7 @@ spec = do
       -- Send /help then EOF (Ctrl-D). If the binary enters the loop,
       -- it will process /help and print help text. If it dies on startup
       -- (the current bug), we'll get an error exit code and no help output.
-      (exitCode, out, err) <- runPureclaw bin "/help\n" 5000000  -- 5s timeout
+      (exitCode, out, err) <- runGateway bin "/help\n" 5000000  -- 5s timeout
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "Slash commands:"
 
@@ -122,7 +130,7 @@ spec = do
       bin <- findPureclaw
       -- Just send EOF immediately. The binary should start up, print
       -- its banner, then exit cleanly on EOF — not die with an error.
-      (exitCode, out, err) <- runPureclaw bin "" 5000000
+      (exitCode, out, err) <- runGateway bin "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "PureClaw"
 
@@ -141,26 +149,26 @@ spec = do
       -- (restoring the implicit "just works" session). With no credentials the
       -- default-session mint fails for lack of a provider, so the dispatcher
       -- surfaces the actionable setup guidance rather than crashing.
-      (exitCode, out, err) <- runPureclaw bin "Hello world\n" 5000000
+      (exitCode, out, err) <- runGateway bin "Hello world\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       -- Should guide the user to configure a provider.
       out `shouldContain` "No provider configured"
 
     it "shows a warning when --autonomy full is set" $ do
       bin <- findPureclaw
-      (exitCode, _out, err) <- runPureclawWithArgs bin ["--autonomy", "full", "--no-vault"] "" 5000000
+      (exitCode, _out, err) <- runPureclawWithArgs bin ["gateway", "run", "--autonomy", "full", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       err `shouldContain` "unrestricted"
 
     it "shows allowed commands as allow-all when --autonomy full with no --allow" $ do
       bin <- findPureclaw
-      (exitCode, _out, err) <- runPureclawWithArgs bin ["--autonomy", "full", "--no-vault"] "" 5000000
+      (exitCode, _out, err) <- runPureclawWithArgs bin ["gateway", "run", "--autonomy", "full", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       err `shouldContain` "allow all"
 
     it "accepts --log-level debug and starts up cleanly" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclawWithArgs bin ["--log-level", "debug", "--no-vault"] "" 5000000
+      (exitCode, out, err) <- runPureclawWithArgs bin ["gateway", "run", "--log-level", "debug", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "PureClaw"
 
@@ -220,7 +228,7 @@ spec = do
                    , ("TERM", "dumb")
                    , ("LANG", "C.UTF-8")
                    ]
-               $ proc bin ["--no-vault"]
+               $ proc bin ["gateway", "run", "--no-vault"]
         result <- race' (threadDelay 5000000) (readProcess pc)
         case result of
           Left ()              -> expectationFailure "pureclaw timed out"
@@ -246,6 +254,17 @@ spec = do
               legacyContents <- listDirectory legacyDir
               legacyContents `shouldBe` []
 
+  describe "--bind CLI flag" $ do
+
+    it "documents the --bind flag with a trust warning" $ do
+      bin <- findPureclaw
+      -- optparse-applicative prints --help to stdout and exits successfully.
+      (exitCode, out, err) <-
+        runPureclawWithArgs bin ["gateway", "run", "--help"] "" 5000000
+      annotate err exitCode `shouldBe` annotate err ExitSuccess
+      out `shouldContain` "--bind"
+      out `shouldContain` "trusted networks"
+
   describe "--agent CLI flag" $ do
 
     let setupFixtureAgent tmp name body = do
@@ -256,7 +275,7 @@ spec = do
     it "loads a named agent from ~/.pureclaw/agents/<name>/ and logs the name" $ do
       bin <- findPureclaw
       (exitCode, _out, err) <- runPureclawWithSetup
-        bin ["--agent", "zoe", "--no-vault"] "" 5000000
+        bin ["gateway", "run", "--agent", "zoe", "--no-vault"] "" 5000000
         (\tmp -> setupFixtureAgent tmp "zoe" "You are Zoe, a helpful agent.")
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       -- Agent loaded from --agent flag; config has no default set
@@ -279,7 +298,7 @@ spec = do
     it "loads default_agent from config.toml when --agent is omitted" $ do
       bin <- findPureclaw
       (exitCode, _out, err) <- runPureclawWithSetup
-        bin ["--no-vault"] "" 5000000
+        bin ["gateway", "run", "--no-vault"] "" 5000000
         (\tmp -> do
            setupFixtureAgent tmp "zoe" "hi"
            let cfgDir = tmp </> ".pureclaw"
@@ -291,7 +310,7 @@ spec = do
     it "--agent flag overrides default_agent in config" $ do
       bin <- findPureclaw
       (exitCode, _out, err) <- runPureclawWithSetup
-        bin ["--agent", "bob", "--no-vault"] "" 5000000
+        bin ["gateway", "run", "--agent", "bob", "--no-vault"] "" 5000000
         (\tmp -> do
            setupFixtureAgent tmp "zoe" "hi"
            setupFixtureAgent tmp "bob" "hi"
@@ -303,7 +322,7 @@ spec = do
 
     it "backward-compat: no agent, no SOUL.md → no system prompt, no crash" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclaw bin "" 5000000
+      (exitCode, out, err) <- runGateway bin "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "PureClaw"
       err `shouldContain` "Default agent: (none)"
@@ -311,7 +330,7 @@ spec = do
     it "backward-compat: --system is honored when no agent is selected" $ do
       bin <- findPureclaw
       (exitCode, _out, err) <- runPureclawWithArgs
-        bin ["--system", "custom-prompt", "--no-vault"] "" 5000000
+        bin ["gateway", "run", "--system", "custom-prompt", "--no-vault"] "" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       err `shouldContain` "Default agent: (none)"
 
@@ -329,7 +348,7 @@ spec = do
                    , ("TERM", "dumb")
                    , ("LANG", "C.UTF-8")
                    ]
-               $ proc bin ["--no-vault", "--prefix", "myrun"]
+               $ proc bin ["gateway", "run", "--no-vault", "--prefix", "myrun"]
         result <- race' (threadDelay 5000000) (readProcess pc)
         case result of
           Left () -> expectationFailure "pureclaw timed out"
@@ -343,7 +362,7 @@ spec = do
     it "defaults --prefix to the agent name when --agent is set and --prefix is omitted" $ do
       bin <- findPureclaw
       (exitCode, _out, err) <- runPureclawWithSetup
-        bin ["--agent", "zoe", "--no-vault"] "" 5000000
+        bin ["gateway", "run", "--agent", "zoe", "--no-vault"] "" 5000000
         (\tmp -> do
            let agentDir = tmp </> ".pureclaw" </> "agents" </> "zoe"
            createDirectoryIfMissing True agentDir
@@ -385,7 +404,7 @@ spec = do
                 Left () -> fail "pureclaw timed out"
                 Right (ec, _o, e) ->
                   pure (ec, T.unpack (TE.decodeUtf8 (LBS.toStrict e)))
-        (ec1, _err1) <- runArgs ["--no-vault", "--prefix", "seed"]
+        (ec1, _err1) <- runArgs ["gateway", "run", "--no-vault", "--prefix", "seed"]
         ec1 `shouldBe` ExitSuccess
         let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
         dirs <- listDirectory sessionsDir
@@ -394,7 +413,7 @@ spec = do
                           _     -> Nothing
         resumeId <- maybe (fail "no seed session directory found") pure mResumeId
         -- Second run: resume it by exact ID.
-        (ec2, err2) <- runArgs ["--no-vault", "--session", resumeId]
+        (ec2, err2) <- runArgs ["gateway", "run", "--no-vault", "--session", resumeId]
         ec2 `shouldBe` ExitSuccess
         -- The resumed session dir must still exist and still have its
         -- transcript file (independence / migration check).
@@ -464,7 +483,7 @@ spec = do
         -- session resumed cleanly and its on-disk transcript is in use.
         -- (The per-tab Messages-count assertion is re-established in the 8d
         -- end-to-end CLISpec rewrite.)
-        let args = ["--no-vault", "--session", "replay-fixture-1"]
+        let args = ["gateway", "run", "--no-vault", "--session", "replay-fixture-1"]
             pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "/status\n")))
                $ setStdout byteStringOutput
                $ setStderr byteStringOutput
@@ -513,7 +532,7 @@ spec = do
         createDirectoryIfMissing True sessionsDir
         sh <- mkSessionHandle Nothing mkNoOpLogHandle sessionsDir meta
         _th_close (_sh_transcript sh)
-        let args = ["--no-vault", "--session", "dead-harness-fixture-1"]
+        let args = ["gateway", "run", "--no-vault", "--session", "dead-harness-fixture-1"]
             pc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 "")))
                $ setStdout byteStringOutput
                $ setStderr byteStringOutput
@@ -562,9 +581,9 @@ spec = do
               case r of
                 Left () -> fail "pureclaw timed out"
                 Right (ec, _, _) -> pure ec
-        ec1 <- runArgs ["--no-vault", "--prefix", "one"]
+        ec1 <- runArgs ["gateway", "run", "--no-vault", "--prefix", "one"]
         ec1 `shouldBe` ExitSuccess
-        ec2 <- runArgs ["--no-vault", "--prefix", "two"]
+        ec2 <- runArgs ["gateway", "run", "--no-vault", "--prefix", "two"]
         ec2 `shouldBe` ExitSuccess
         let sessionsDir = tmpDir </> ".pureclaw" </> "sessions"
         dirs <- listDirectory sessionsDir
@@ -596,7 +615,7 @@ spec = do
     -- /new with no provider → provider setup guidance (Wiring.hs:563)
     it "/new with no provider configured shows provider setup guidance" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclaw bin "/new\n" 5000000
+      (exitCode, out, err) <- runGateway bin "/new\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "No provider configured"
       out `shouldContain` "/provider <PROVIDER>"
@@ -604,7 +623,7 @@ spec = do
     -- /5 with 0 tabs → out-of-range §14 copy (TabDispatch.hs:628-630)
     it "/5 with no tabs shows the out-of-range §14 message" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclaw bin "/5\n" 5000000
+      (exitCode, out, err) <- runGateway bin "/5\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "/5: out of range"
       out `shouldContain` "you have 0 tabs"
@@ -613,7 +632,7 @@ spec = do
     -- /tabs with 0 tabs → just the relay-mode line (TabDispatch.hs:347-352)
     it "/tabs with no tabs renders the relay-mode line without crashing" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclaw bin "/tabs\n" 5000000
+      (exitCode, out, err) <- runGateway bin "/tabs\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       -- With zero tabs the only output is the trailing relay line.
       out `shouldContain` "Relay mode: focused"
@@ -621,7 +640,7 @@ spec = do
     -- /relay with no arg → current relay mode (TabDispatch.hs:657-658)
     it "/relay with no argument shows the current relay mode" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclaw bin "/relay\n" 5000000
+      (exitCode, out, err) <- runGateway bin "/relay\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "relay mode:"
       out `shouldContain` "focused | activity | all"
@@ -630,14 +649,14 @@ spec = do
     -- describe too so the tabbed surface §14 block is self-contained)
     it "/help shows the slash-command reference" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclaw bin "/help\n" 5000000
+      (exitCode, out, err) <- runGateway bin "/help\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "Slash commands:"
 
     -- Unknown slash → parse-error §14 copy (TabDispatch.hs:662)
     it "an unknown slash command shows the parse-error §14 copy" $ do
       bin <- findPureclaw
-      (exitCode, out, err) <- runPureclaw bin "/zzz\n" 5000000
+      (exitCode, out, err) <- runGateway bin "/zzz\n" 5000000
       annotate err exitCode `shouldBe` annotate err ExitSuccess
       out `shouldContain` "could not parse that"
       out `shouldContain` "/help for commands"

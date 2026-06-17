@@ -7,6 +7,8 @@ module PureClaw.Agent.Env
   , defaultEnvFork
     -- * Default helpers (WU-B — /tab new harness)
   , noStartHarness
+    -- * Default helpers (Task B — /tab dispatcher seam)
+  , noRunTabCommand
     -- * Tab subsystem bundle (Tabs-as-View 8c.2)
   , TabSubsystem (..)
   , newTabSubsystem
@@ -51,6 +53,7 @@ import PureClaw.Tabs.Types
   ( ConversationKey
   , CursorState
   , TabRef
+  , TabSlashCommand
   , emptyCursors
   )
 import PureClaw.Tabs.Wizard (WizardState)
@@ -191,6 +194,22 @@ data AgentEnv = AgentEnv
     -- and the real closure is wired in "PureClaw.CLI.Commands" (WU-B) over
     -- 'PureClaw.Frontend.API.spawnHarnessSession'. Kept here so @Routing\/Tabs@
     -- need not depend on @Frontend@.
+  , _env_runTabCommand :: !(ChannelHandle -> Maybe ConversationKey -> TabSlashCommand -> IO ())
+    -- ^ Dispatcher-reachable seam that executes a parsed @\/tab@ command
+    -- (rename\/close\/list\/new\/focus\/resume) against the shared tab
+    -- subsystem. The first argument is the caller's reply 'ChannelHandle':
+    -- the web path captures dispatcher output via a scoped /capture/ channel
+    -- (NOT '_env_sinks'), so the real wiring overrides @_td_emit@ to send to
+    -- THIS channel rather than the conversation's sink. @Just k@ supplies the
+    -- current conversation for the conversation-relative bits (focus cursor,
+    -- "(focused)" marker, relay, wizard); @Nothing@ (the web path, which has
+    -- no 'ConversationKey') falls back to the wired web 'ConversationKey'.
+    -- Mirrors '_env_startHarness': the
+    -- default ('noRunTabCommand') is the unwired stub; the real closure is
+    -- wired in "PureClaw.Tabs.Wiring"\/"PureClaw.CLI.Commands" (Task C) over
+    -- the shared @runTabCommand@. Kept here so @Agent.SlashCommands@ (which
+    -- defines @executeSlashCommand@) can invoke tab logic without importing
+    -- @Routing.TabDispatch@.
   }
 
 -- | Read the active session's transcript handle.
@@ -226,6 +245,12 @@ defaultEnvFork body = do
 -- non-CLI construction site default to this.
 noStartHarness :: HarnessSpec -> IO (Either Text (TabRef, Text))
 noStartHarness _ = pure (Left "harness spawn not wired")
+
+-- | Default '_env_runTabCommand': the unwired stub (no-op). Tests and any
+-- non-CLI construction site default to this; the real closure is wired in
+-- "PureClaw.Tabs.Wiring"\/"PureClaw.CLI.Commands".
+noRunTabCommand :: ChannelHandle -> Maybe ConversationKey -> TabSlashCommand -> IO ()
+noRunTabCommand _ _ _ = pure ()
 
 -- ---------------------------------------------------------------------------
 -- Tab subsystem bundle (Tabs-as-View 8c.2)

@@ -97,6 +97,7 @@ mkTestEnv p ch = do
     , _env_tabOutQ     = _ts_tabOutQ ts
     , _env_onTabsChanged = pure ()
     , _env_startHarness  = noStartHarness
+    , _env_runTabCommand = noRunTabCommand
     }
 
 spec :: Spec
@@ -111,7 +112,8 @@ spec = do
       let env = baseEnv { _env_systemPrompt = Just "You are a test agent." }
 
       -- Run the tabbed loop in a separate thread.
-      agentThread <- async $ runTabbedLoop env
+      store <- newIORef Map.empty
+      agentThread <- async $ runTabbedLoop env store (\_ _ -> pure (Right ()))
 
       -- On the tabbed path a plain DM only reaches the provider once the
       -- conversation has an active tab, so mint one with /nt first and wait for
@@ -149,7 +151,8 @@ spec = do
       let handle = mkRecordingHandle sc sentRef
 
       env2 <- mkTestEnv (EchoProvider "Re: ") handle
-      agentThread <- async $ runTabbedLoop env2
+      store <- newIORef Map.empty
+      agentThread <- async $ runTabbedLoop env2 store (\_ _ -> pure (Right ()))
 
       -- Establish an active tab first (then wait for its banner).
       atomically $ writeTQueue (_sch_inbox sc) (mkNtEnvelope "+111")
@@ -181,7 +184,8 @@ spec = do
       let handle = mkRecordingHandle sc sentRef
 
       env3 <- mkTestEnv (EchoProvider "Echo: ") handle
-      agentThread <- async $ runTabbedLoop env3
+      store <- newIORef Map.empty
+      agentThread <- async $ runTabbedLoop env3 store (\_ _ -> pure (Right ()))
 
       -- /status is a non-tab slash command dispatched by fallthrough ->
       -- executeSlashCommand regardless of active tabs, so no /nt prelude needed.
@@ -212,7 +216,8 @@ spec = do
       baseEnv4 <- mkTestEnv ToolCallThenTextProvider handle
       let env = baseEnv4 { _env_registry = registry }
 
-      agentThread <- async $ runTabbedLoop env
+      store <- newIORef Map.empty
+      agentThread <- async $ runTabbedLoop env store (\_ _ -> pure (Right ()))
 
       -- Establish an active tab so the DM reaches the provider, wait for banner.
       atomically $ writeTQueue (_sch_inbox sc) (mkNtEnvelope "+111")
@@ -266,7 +271,8 @@ spec = do
         baseEnv <- mkTestEnv (EchoProvider "Echo: ") handle
         writeIORef (_env_session baseEnv) sh
 
-        agentThread <- async $ runTabbedLoop baseEnv
+        store <- newIORef Map.empty
+        agentThread <- async $ runTabbedLoop baseEnv store (\_ _ -> pure (Right ()))
 
         -- 1) /nt mints a default-provider tab+session for this conversation and
         --    focuses the cursor on it. The new path needs an active tab before a

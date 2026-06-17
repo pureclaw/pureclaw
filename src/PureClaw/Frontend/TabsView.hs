@@ -50,8 +50,10 @@ data TabSnapshot = TabSnapshot
   { _ts_index     :: !Int
   , _ts_kind      :: !Text
     -- ^ @\"provider\"@, @\"harness\"@, or @\"raw_shell\"@.
-  , _ts_name      :: !Text
-    -- ^ Human-readable tab name.
+  , _ts_label     :: !(Maybe Text)
+    -- ^ Harness label fallback so a harness tab (whose session id can be
+    -- 'Nothing') never renders blank. 'Nothing' for session-backed tabs —
+    -- their display title derives from the session (via '_ts_sessionId').
   , _ts_status    :: !Text
     -- ^ Liveness word: @\"running\"@, @\"idle\"@, @\"exited\"@, or
     -- @\"orphaned\"@ (Phase 2 split Exited\/Orphaned; see
@@ -73,16 +75,16 @@ data TabSnapshot = TabSnapshot
   }
   deriving stock (Show, Eq)
 
--- | Serialize a 'TabSnapshot'. EXTEND-ONLY: the original Phase-1 keys
--- (@index@\/@kind@\/@name@\/@status@\/@session_id@) are emitted unchanged;
--- the Phase-2 health fields are ADDED as new snake_case keys
--- (@ext_modified@\/@stale@\/@origin@\/@attach_command@). Old consumers that
--- ignore unknown keys keep working.
+-- | Serialize a 'TabSnapshot'. The per-tab @name@ key is GONE — a tab's
+-- display title now derives from its bound session (frontend resolves it from
+-- @session_id@). Harness tabs keep a @label@ fallback so they never render
+-- blank. The Phase-2 health fields (@ext_modified@\/@stale@\/@origin@\/
+-- @attach_command@) remain. Consumers that ignore unknown keys keep working.
 instance ToJSON TabSnapshot where
   toJSON ts = object
     [ "index"          .= _ts_index ts
     , "kind"           .= _ts_kind ts
-    , "name"           .= _ts_name ts
+    , "label"          .= _ts_label ts
     , "status"         .= _ts_status ts
     , "session_id"     .= _ts_sessionId ts
     , "ext_modified"   .= _ts_extModified ts
@@ -148,7 +150,7 @@ tabSnapshotsFromRegistry tl harnOf = map project (toList tl)
         TabSnapshot
           { _ts_index         = unTabIndex (_tab_slot tab)
           , _ts_kind          = "provider"
-          , _ts_name          = _tab_name tab
+          , _ts_label         = Nothing
           , _ts_status        = case _tab_status tab of
                                   Live -> "idle"
                                   Dead -> "exited"
@@ -164,7 +166,7 @@ tabSnapshotsFromRegistry tl harnOf = map project (toList tl)
             TabSnapshot
               { _ts_index         = unTabIndex (_tab_slot tab)
               , _ts_kind          = "harness"
-              , _ts_name          = _tab_name tab
+              , _ts_label         = Just (Registry._he_label e)
               , _ts_status        = livenessToTabStatus (Registry._he_liveness e)
               , _ts_sessionId     = Registry._he_sessionId e
               , _ts_extModified   = Registry._he_extModified e
@@ -180,7 +182,7 @@ tabSnapshotsFromRegistry tl harnOf = map project (toList tl)
             TabSnapshot
               { _ts_index         = unTabIndex (_tab_slot tab)
               , _ts_kind          = "harness"
-              , _ts_name          = _tab_name tab
+              , _ts_label         = Nothing
               , _ts_status        = "exited"
               , _ts_sessionId     = Nothing
               , _ts_extModified   = False

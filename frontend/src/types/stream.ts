@@ -84,6 +84,10 @@ export interface ListsEvent {
   tabs: TabInfoWire[]
   recentSessions: SessionInfo[]
   archivedSessions: SessionInfo[]
+  // Sessions backing an open tab. Deduped out of `recentSessions` above (a tab's
+  // session is not also a Recent Sessions row); carried here so the frontend can
+  // still join a tab to its session for the label/edit-pencil.
+  tabSessions: SessionInfo[]
 }
 
 export type ServerEvent =
@@ -116,6 +120,8 @@ export interface ListsSnapshot {
   tabs: TabInfoWire[]
   recentSessions: SessionInfo[]
   archivedSessions: SessionInfo[]
+  // Sessions backing an open tab — see `ListsEvent.tabSessions`.
+  tabSessions: SessionInfo[]
 }
 
 export interface StreamClient {

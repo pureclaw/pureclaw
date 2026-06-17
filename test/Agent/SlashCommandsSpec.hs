@@ -35,6 +35,7 @@ import PureClaw.Security.Policy
 import PureClaw.Security.Vault
 import PureClaw.Security.Vault.Age
 import PureClaw.Security.Vault.Plugin
+import PureClaw.Tabs.Types (ConversationKey)
 import PureClaw.Tools.Registry
 import PureClaw.Transcript.Types
 
@@ -364,6 +365,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
 
     it "/new clears messages but keeps system prompt" $ do
@@ -378,6 +380,27 @@ spec = do
       case sent of
         Just t  -> T.unpack t `shouldContain` "cleared"
         Nothing -> expectationFailure "Expected message"
+
+    -- Task C2 (web /tab dispatch): a CmdTab reaching executeSlashCommand (the
+    -- web chat path) must be forwarded to the '_env_runTabCommand' seam — with
+    -- this env's '_env_channel' as the reply channel and 'Nothing' for the
+    -- conversation (the production wiring falls back to its web ConversationKey).
+    -- Here we install a SPY seam and assert it was reached with the parsed
+    -- command and channel-ignored conversation argument.
+    it "/tab forwards CmdTab to the _env_runTabCommand seam (web path)" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      spyRef  <- newIORef (Nothing :: Maybe (Maybe ConversationKey, TabSlashCommand))
+      env0 <- mkEnv sentRef
+      let env = env0
+            { _env_runTabCommand = \_chan mConv c ->
+                writeIORef spyRef (Just (mConv, c))
+            }
+          renameCmd = TabRenameCmd 0 "x"
+          ctx = emptyContext Nothing
+      ctx' <- executeSlashCommand env (CmdTab renameCmd) ctx
+      ctx' `shouldBe` ctx  -- /tab forwarding does not mutate the context
+      recorded <- readIORef spyRef
+      recorded `shouldBe` Just (Nothing, renameCmd)
 
     it "/new preserves usage counters" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
@@ -530,6 +553,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -584,6 +608,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider ProviderList) ctx
@@ -634,6 +659,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "badname")) ctx
@@ -684,6 +710,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -746,6 +773,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdProvider (ProviderConfigure "ollama")) ctx
@@ -799,6 +827,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget Nothing) ctx
@@ -848,6 +877,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "llama3")) ctx
@@ -908,6 +938,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTarget (Just "claude-code")) ctx
@@ -970,6 +1001,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "claude-code-0" "list TODOs") ctx
@@ -1023,6 +1055,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "nonexistent" "hello") ctx
@@ -1076,6 +1109,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdMsg "cc-0" "test") ctx
@@ -1124,6 +1158,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
 
     it "/vault list with no vault → helpful message" $ do
@@ -1187,6 +1222,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1246,6 +1282,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1298,6 +1335,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
 
     it "/vault setup presents menu with passphrase option" $ withTempHome $ do
@@ -1341,6 +1379,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1395,6 +1434,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1455,6 +1495,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1517,6 +1558,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1568,6 +1610,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault VaultSetup) ctx
@@ -1685,6 +1728,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "todelete")) ctx
@@ -1739,6 +1783,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultDelete "keep")) ctx
@@ -1794,6 +1839,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdVault (VaultAdd "mykey")) ctx
@@ -1885,6 +1931,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1944,6 +1991,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -1996,6 +2044,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env CmdHelp ctx
@@ -2043,6 +2092,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = addMessage (textMessage User "hello") (emptyContext Nothing)
       ctx' <- executeSlashCommand env (CmdBg "x") ctx
@@ -2171,6 +2221,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2223,6 +2274,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -2287,6 +2339,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2342,6 +2395,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2419,6 +2473,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptSearch "ollama")) ctx
@@ -2473,6 +2528,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptUnknown "badcmd")) ctx
@@ -2524,6 +2580,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript TranscriptPath) ctx
@@ -2573,6 +2630,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env CmdHelp ctx
@@ -2637,6 +2695,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
           ctx = emptyContext Nothing
       _ <- executeSlashCommand env (CmdTranscript (TranscriptRecent Nothing)) ctx
@@ -2718,6 +2777,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
 
     it "/agent list lists discovered agent names" $ withTempHome $ do
@@ -2786,6 +2846,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
 
     it "/agent info <name> shows files and frontmatter" $ withTempHome $ do
@@ -2952,6 +3013,7 @@ spec = do
             , _env_tabOutQ = error "8c.2 stub: _env_tabOutQ not exercised in this test"
             , _env_onTabsChanged = pure ()
             , _env_startHarness  = noStartHarness
+            , _env_runTabCommand = noRunTabCommand
             }
 
     it "/session new writes session.json on disk and returns a confirmation" $ withTempHome $ do

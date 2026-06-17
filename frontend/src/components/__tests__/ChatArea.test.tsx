@@ -979,3 +979,45 @@ describe('transcriptToMessages thinking extraction (WU8)', () => {
     expect(blocks.every((b) => b.thinkingText === undefined)).toBe(true)
   })
 })
+
+describe('ChatArea slash-command output bubble', () => {
+  function slashMessage(id: string, text: string): Message {
+    return {
+      id,
+      agentName: 'Command output',
+      agentStatus: 'idle',
+      timestamp: '12:00',
+      blocks: [{ id: id + '-text', text }],
+      slashBubble: true,
+    }
+  }
+
+  it('renders a slashBubble message as a muted command-output bubble with a not-saved label', () => {
+    const { getByTestId, getByText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[slashMessage('slash-1', '/help output text')]}
+      />,
+    )
+    const bubble = getByTestId('slash-bubble')
+    expect(bubble).toBeTruthy()
+    // The response text is shown verbatim.
+    expect(getByText('/help output text')).toBeTruthy()
+    // The "not saved" label distinguishes it from a persisted transcript turn.
+    expect(bubble.textContent).toContain('not saved')
+  })
+
+  it('a slashBubble message carries no branch or JSON affordance', () => {
+    const { queryByLabelText } = render(
+      <ChatArea
+        selectedAgent={makeAgent()}
+        messages={[slashMessage('slash-1', 'cmd out')]}
+        onBranch={() => {}}
+      />,
+    )
+    // Even with onBranch supplied, a transient command bubble offers no
+    // branch button (it has no entryId) and no raw-JSON button (no rawJson).
+    expect(queryByLabelText('branch session from here')).toBeNull()
+    expect(queryByLabelText('View raw JSON (message)')).toBeNull()
+  })
+})

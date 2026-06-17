@@ -1,13 +1,19 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { ActiveTabs } from '../ActiveTabs'
-import type { TabInfo } from '../../types'
+import type { SessionInfo, TabInfo } from '../../types'
+import { findSession, tabDisplayLabel } from '../../types'
 
-function makeTabs(...overrides: Partial<TabInfo>[]): TabInfo[] {
+/** Tabs no longer carry a `name` — the display label is derived from the
+ *  backing session (see `tabDisplayLabel`). The old `name` overrides are
+ *  mapped onto the harness-fallback `label` so the bulk of the existing
+ *  ActiveTabs assertions (which only care about the rendered row text)
+ *  keep working without a `sessions` join. */
+function makeTabs(...overrides: (Partial<TabInfo> & { name?: string })[]): TabInfo[] {
   return overrides.map((o, i) => ({
     index: o.index ?? i,
     kind: o.kind ?? 'session:provider',
-    name: o.name ?? `tab-${i}`,
+    label: o.label ?? o.name ?? `tab-${i}`,
     status: o.status ?? 'idle',
     session_id: 'session_id' in o ? (o.session_id ?? null) : `sess-${i}`,
     ...('extModified' in o ? { extModified: o.extModified } : {}),
@@ -17,10 +23,15 @@ function makeTabs(...overrides: Partial<TabInfo>[]): TabInfo[] {
   }))
 }
 
+/** Default label resolver for tests that don't exercise the session join:
+ *  fall back to the tab's harness `label`. */
+const fallbackLabel = (tab: TabInfo): string => tabDisplayLabel(tab, null)
+
 /** All callback props ActiveTabs requires, with no-op defaults so each
  *  test only overrides the one(s) it asserts on. */
 function noopProps() {
   return {
+    tabLabel: fallbackLabel,
     onSelectTab: () => {},
     onNewTab: () => {},
     onCloseTab: () => {},
@@ -41,6 +52,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -60,6 +72,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={[]}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -78,6 +91,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={[]}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={onNewTab}
         onCloseTab={() => {}}
@@ -99,6 +113,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -120,6 +135,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -220,6 +236,7 @@ describe('ActiveTabs', () => {
         tabs={tabs}
         selectedId={null}
         {...noopProps()}
+        tabLabel={fallbackLabel}
         onSelectTab={onSelectTab}
         onDismiss={onDismiss}
       />,
@@ -265,6 +282,7 @@ describe('ActiveTabs', () => {
         tabs={tabs}
         selectedId={null}
         {...noopProps()}
+        tabLabel={fallbackLabel}
         onSelectTab={onSelectTab}
         onAcknowledge={onAcknowledge}
       />,
@@ -366,6 +384,7 @@ describe('ActiveTabs', () => {
         tabs={tabs}
         selectedId={null}
         {...noopProps()}
+        tabLabel={fallbackLabel}
         onSelectTab={onSelectTab}
         onRelease={onRelease}
       />,
@@ -384,6 +403,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -403,6 +423,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -425,6 +446,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={onSelectTab}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -447,6 +469,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId="tab:1"
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -471,6 +494,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -492,6 +516,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -514,6 +539,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -537,6 +563,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={onCloseTab}
@@ -559,6 +586,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={onSelectTab}
         onNewTab={() => {}}
         onCloseTab={onCloseTab}
@@ -582,6 +610,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -602,6 +631,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -623,6 +653,7 @@ describe('ActiveTabs', () => {
       <ActiveTabs
         tabs={tabs}
         selectedId={null}
+        tabLabel={fallbackLabel}
         onSelectTab={() => {}}
         onNewTab={() => {}}
         onCloseTab={() => {}}
@@ -642,7 +673,7 @@ describe('ActiveTabs session-kind tab render (WU9)', () => {
   const providerIdleTab: TabInfo = {
     index: 0,
     kind: 'session:provider',
-    name: 'chat 0',
+    label: 'chat 0',
     status: 'idle',
     session_id: 's1',
     // No origin, no extModified, no stale — a clean idle provider tab.
@@ -675,5 +706,63 @@ describe('ActiveTabs session-kind tab render (WU9)', () => {
     expect(screen.queryByRole('button', { name: /release tab/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /restart tab/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /acknowledge tab/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('ActiveTabs label derives from the backing session', () => {
+  function makeSessions(...overrides: Partial<SessionInfo>[]): SessionInfo[] {
+    return overrides.map((o, i) => ({
+      id: o.id ?? `session-${i}`,
+      agent: o.agent ?? null,
+      runtime: o.runtime ?? 'session:provider',
+      model: o.model ?? '',
+      lastActive: o.lastActive ?? new Date().toISOString(),
+      createdAt: o.createdAt ?? new Date().toISOString(),
+      description: o.description ?? null,
+      autoSummary: o.autoSummary ?? null,
+      firstMessageSnippet: o.firstMessageSnippet ?? null,
+      channel: o.channel ?? null,
+      channelUserId: o.channelUserId ?? null,
+    }))
+  }
+
+  /** The real label resolver: join the tab to a session, then take the
+   *  session's display title (matching how App.tsx threads `tabLabel`). */
+  function labelVia(sessions: SessionInfo[]) {
+    return (tab: TabInfo): string =>
+      tabDisplayLabel(tab, findSession(tab.session_id, sessions, []))
+  }
+
+  it('shows the session description for a session-backed tab', () => {
+    const sessions = makeSessions({ id: 's1', description: 'Custom' })
+    const tabs: TabInfo[] = [
+      { index: 0, kind: 'session:provider', label: null, status: 'idle', session_id: 's1' },
+    ]
+    render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} tabLabel={labelVia(sessions)} />,
+    )
+    expect(screen.getByText('Custom')).toBeInTheDocument()
+  })
+
+  it('falls back to the first-message snippet via sessionDisplayTitle', () => {
+    const sessions = makeSessions({ id: 's1', description: null, firstMessageSnippet: 'do the thing' })
+    const tabs: TabInfo[] = [
+      { index: 0, kind: 'session:provider', label: null, status: 'idle', session_id: 's1' },
+    ]
+    render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} tabLabel={labelVia(sessions)} />,
+    )
+    expect(screen.getByText('do the thing')).toBeInTheDocument()
+  })
+
+  it('uses the harness `label` fallback for an unsession-backed (null session_id) tab — NEVER blank', () => {
+    const tabs: TabInfo[] = [
+      { index: 0, kind: 'harness', label: 'claude-code', status: 'running', session_id: null },
+    ]
+    // No session can resolve (session_id is null), so the harness label shows.
+    render(
+      <ActiveTabs tabs={tabs} selectedId={null} {...noopProps()} tabLabel={labelVia([])} />,
+    )
+    expect(screen.getByText('claude-code')).toBeInTheDocument()
   })
 })

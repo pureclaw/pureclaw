@@ -51,6 +51,7 @@ function Pill({
 
 export function TabRow({
   tab,
+  label,
   selected,
   onSelect,
   onClose,
@@ -61,6 +62,10 @@ export function TabRow({
   activity,
 }: {
   tab: TabInfo
+  /** Resolved display label for this tab (session title, harness fallback,
+   *  else ellipsis — never blank). Computed by the parent so every consumer
+   *  agrees on the same session-join. */
+  label: string
   selected: boolean
   onSelect: () => void
   onClose: () => void
@@ -119,7 +124,7 @@ export function TabRow({
           className="text-sm font-medium"
           style={{ color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)' }}
         >
-          {tab.name}
+          {label}
         </span>
         {isRawShell && <Pill>raw</Pill>}
         {tab.origin && <Pill>{tab.origin}</Pill>}
@@ -267,6 +272,7 @@ export function ActiveTabs({
   tabs,
   selectedId,
   sessionActivity,
+  tabLabel,
   onSelectTab,
   onNewTab,
   onCloseTab,
@@ -278,6 +284,10 @@ export function ActiveTabs({
   tabs: TabInfo[]
   selectedId: string | null
   sessionActivity?: Record<string, SessionActivityState>
+  /** Resolve a tab to its display label (session title, harness fallback,
+   *  else ellipsis). Centralized by the parent so all tab-label consumers
+   *  agree. */
+  tabLabel: (tab: TabInfo) => string
   onSelectTab: (index: number) => void
   onNewTab: () => void
   onCloseTab: (index: number) => void
@@ -312,6 +322,7 @@ export function ActiveTabs({
         <TabRow
           key={tab.index}
           tab={tab}
+          label={tabLabel(tab)}
           selected={selectedId === `tab:${tab.index}`}
           onSelect={() => onSelectTab(tab.index)}
           onClose={() => onCloseTab(tab.index)}

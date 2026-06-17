@@ -720,6 +720,50 @@ function ChatMessage({
   const ref = useRef<HTMLDivElement>(null)
   const targeted = useFragmentAnchor(anchorId, ref)
   const [jsonOpen, setJsonOpen] = useState(false)
+
+  // Transient slash-command output bubble. Rendered in a muted, distinct
+  // "command output" style with a "not saved" label so the user can tell it
+  // apart from persisted transcript turns. These rows never enter the
+  // transcript and vanish on reload; they carry no branch/JSON affordances.
+  if (message.slashBubble) {
+    return (
+      <div
+        ref={ref}
+        id={anchorId}
+        data-testid="slash-bubble"
+        className="message-group flex flex-col gap-1 addressable-block rounded-md px-3 py-2"
+        style={{
+          background: 'var(--bg-sunken)',
+          border: '1px solid var(--border)',
+          color: 'var(--text-muted)',
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>
+            {message.agentName}
+          </span>
+          <span className="text-xs" style={{ color: 'var(--text-faint)', fontStyle: 'italic' }}>
+            command output &mdash; not saved
+          </span>
+          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+            {message.timestamp}
+          </span>
+        </div>
+        <div className="text-sm" style={{ lineHeight: 'var(--leading-relaxed)' }}>
+          {message.blocks.map((block, i) => (
+            <pre
+              key={block.id ?? i}
+              className="whitespace-pre-wrap break-words"
+              style={{ fontFamily: 'inherit', margin: 0, color: 'var(--text-muted)' }}
+            >
+              {block.text}
+            </pre>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       ref={ref}

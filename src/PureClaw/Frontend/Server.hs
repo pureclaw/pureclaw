@@ -6,8 +6,12 @@ module PureClaw.Frontend.Server
   , defaultFrontendConfig
     -- * Warp settings
   , mkFrontendSettings
+    -- * Host binding
+  , isLoopbackHost
+  , nonLoopbackWarning
     -- * Middleware
   , corsMiddleware
+  , corsAllowedOrigin
     -- * Re-export environment
   , FrontendEnv (..)
   , StartedHarness (..)
@@ -17,10 +21,12 @@ module PureClaw.Frontend.Server
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
+import Data.Char qualified as Char
+import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Network.HTTP.Types qualified as HTTP
 import Network.Socket (SockAddr)
 import Network.Wai
@@ -31,12 +37,18 @@ import System.Directory (doesFileExist)
 import System.FilePath ((</>), takeExtension)
 
 import PureClaw.Frontend.API
-import PureClaw.Frontend.Stream (streamApp)
+import PureClaw.Frontend.Stream (normalizeOrigin, streamApp)
 import PureClaw.Handles.Log
 
 -- | Frontend server configuration.
 data FrontendConfig = FrontendConfig
   { _fsc_port          :: Int
+  , _fsc_bindHost      :: String
+    -- ^ Interface the server binds to. Defaults to @"127.0.0.1"@
+    -- (loopback only). Binding a non-loopback host (e.g. @"0.0.0.0"@)
+    -- exposes the full slash-command surface — including local code
+    -- execution via @\/mcp connect@ — to anything that can reach the
+    -- address, so 'runFrontend' emits a loud WARN in that case.
   , _fsc_staticDir     :: FilePath
   , _fc_allowedOrigins :: [Text]
     -- ^ Exact-match allowlist of @Origin@ headers permitted to upgrade to
@@ -47,11 +59,13 @@ data FrontendConfig = FrontendConfig
   }
   deriving stock (Show, Eq)
 
--- | Default: port 8080, serving from @frontend\/dist@, accepting WS
--- upgrades from @http://localhost:8080@ and @http://127.0.0.1:8080@.
+-- | Default: port 8080, bound to loopback (@127.0.0.1@), serving from
+-- @frontend\/dist@, accepting WS upgrades from @http://localhost:8080@
+-- and @http://127.0.0.1:8080@.
 defaultFrontendConfig :: FrontendConfig
 defaultFrontendConfig = FrontendConfig
   { _fsc_port          = 8080
+  , _fsc_bindHost      = "127.0.0.1"
   , _fsc_staticDir     = "frontend/dist"
   , _fc_allowedOrigins = [ "http://localhost:8080"
                          , "http://127.0.0.1:8080"
@@ -66,12 +80,69 @@ defaultFrontendConfig = FrontendConfig
 mkFrontendSettings :: FrontendConfig -> Warp.Settings
 mkFrontendSettings cfg =
   Warp.setPort (_fsc_port cfg)
+    $ Warp.setHost (fromString (_fsc_bindHost cfg))
     $ Warp.setTimeout 30
       Warp.defaultSettings
 
--- | CORS middleware that restricts the @Access-Control-Allow-Origin@
--- header to @http:\/\/localhost:\<port\>@ and handles OPTIONS preflight
--- requests with a 200 response.
+-- | Is the given host string a loopback interface? Loopback binds keep the
+-- frontend reachable only from the local machine. Anything else exposes the
+-- server (and its slash-command surface) to the network.
+isLoopbackHost :: String -> Bool
+isLoopbackHost h = map Char.toLower h `elem` ["127.0.0.1", "localhost", "::1", "[::1]"]
+
+-- | The non-loopback exposure warning for a config's bind host, if one is
+-- warranted. 'Nothing' for a loopback bind (no warning); 'Just' a loud
+-- message for any other host, naming the @\/mcp connect@ RCE risk. The
+-- decision lives here (pure, tested) so 'runFrontend' only does the IO log.
+nonLoopbackWarning :: FrontendConfig -> Maybe Text
+nonLoopbackWarning cfg
+  | isLoopbackHost (_fsc_bindHost cfg) = Nothing
+  | otherwise = Just $
+      "Frontend bound to non-loopback host " <> T.pack (_fsc_bindHost cfg)
+        <> " — the FULL slash-command surface (including local code execution "
+        <> "via /mcp connect) is reachable by anything that can reach this "
+        <> "address. Use only on trusted networks."
+
+-- | The bound-host origin, i.e. @http:\/\/\<bindHost\>:\<port\>@.
+boundHostOrigin :: FrontendConfig -> Text
+boundHostOrigin cfg =
+  "http://" <> T.pack (_fsc_bindHost cfg) <> ":" <> T.pack (show (_fsc_port cfg))
+
+-- | The set of origins permitted for @Access-Control-Allow-Origin@: the
+-- configured allowlist ('_fc_allowedOrigins') plus the bound-host origin
+-- (so a non-loopback bind's own origin is always allowed). Compared after
+-- 'normalizeOrigin' so casing\/trailing-slash differences don't reject a
+-- legitimate origin.
+corsAllowedOrigins :: FrontendConfig -> [Text]
+corsAllowedOrigins cfg = boundHostOrigin cfg : _fc_allowedOrigins cfg
+
+-- | Decide the @Access-Control-Allow-Origin@ value for a request, given the
+-- request's @Origin@ header (if any).
+--
+-- If the request's @Origin@ is in the allowed set ('corsAllowedOrigins'),
+-- echo it back verbatim — a browser reaches a loopback server via
+-- @http:\/\/localhost:\<port\>@ while @http:\/\/127.0.0.1:\<port\>@ is a
+-- distinct origin, so a single fixed value would break one of them.
+-- Otherwise fall back to a single allowed origin: @http:\/\/localhost:\<port\>@
+-- for a loopback bind (the canonical browser entry point), or the bound-host
+-- origin for a non-loopback bind.
+corsAllowedOrigin :: FrontendConfig -> Maybe BS.ByteString -> BS.ByteString
+corsAllowedOrigin cfg mOrigin =
+  case mOrigin of
+    Just o
+      | normalizeOrigin (TE.decodeUtf8Lenient o) `elem` allowedNorm -> o
+    _ -> TE.encodeUtf8 fallback
+  where
+    allowedNorm = map normalizeOrigin (corsAllowedOrigins cfg)
+    fallback
+      | isLoopbackHost (_fsc_bindHost cfg) =
+          "http://localhost:" <> T.pack (show (_fsc_port cfg))
+      | otherwise = boundHostOrigin cfg
+
+-- | CORS middleware that sets the @Access-Control-Allow-Origin@ header by
+-- echoing an allowed request @Origin@ (or a safe fallback — see
+-- 'corsAllowedOrigin') and handles OPTIONS preflight requests with a 200
+-- response.
 corsMiddleware :: FrontendConfig -> Middleware
 corsMiddleware cfg app req respond
   | requestMethod req == "OPTIONS" =
@@ -81,7 +152,7 @@ corsMiddleware cfg app req respond
         respond (mapResponseHeaders (corsHeaders ++) resp)
   where
     origin :: BS.ByteString
-    origin = "http://localhost:" <> BS8.pack (show (_fsc_port cfg))
+    origin = corsAllowedOrigin cfg (lookup "Origin" (requestHeaders req))
 
     corsHeaders :: [HTTP.Header]
     corsHeaders =
@@ -109,7 +180,9 @@ runFrontend cfg mEnv logger = do
   let logInfo = _lh_logInfo logger
   logInfo "PureClaw frontend server"
   logInfo $ "  Serving: " <> T.pack (_fsc_staticDir cfg)
-  logInfo $ "  URL:     http://localhost:" <> T.pack (show (_fsc_port cfg))
+  logInfo $ "  URL:     http://" <> T.pack (_fsc_bindHost cfg)
+              <> ":" <> T.pack (show (_fsc_port cfg))
+  mapM_ (_lh_logWarn logger) (nonLoopbackWarning cfg)
   counterTv <- newTVarIO 0
   let cap = 1024 :: Int
       settings = Warp.setOnOpen  (onOpenCounter counterTv cap)

@@ -205,6 +205,18 @@ spec = do
       parse "/tab rename 3 my shell label" `shouldBe`
         Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabRenameCmd 3 "my shell label")))
 
+    -- /tabs <sub> aliases /tab <sub> (plural form accepts subcommands).
+    it "P16b: parseInput \"/tabs rename 0 hi\" aliases /tab rename 0 hi" $
+      parse "/tabs rename 0 hi" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabRenameCmd 0 "hi")))
+
+    it "P16b: parseInput \"/tabs close 0\" aliases /tab close 0" $
+      parse "/tabs close 0" `shouldBe`
+        Right (RT.ParsedSlashCmd (Slash.CmdTab (Slash.TabCloseCmd 0 Slash.ForceNo)))
+
+    it "P16b: bare parseInput \"/tabs\" still lists (CmdTab TabListCmd)" $
+      parse "/tabs" `shouldBe` Right (RT.ParsedSlashCmd (Slash.CmdTab Slash.TabListCmd))
+
     it "P17: no-regression — each existing slash command (/help, /status, /session, /target, /provider, /model, /vault, /harness, /mcp, /channel, /transcript, /agent, /new, /last) routes unchanged" $ do
       -- Each existing slash command routes through the existing
       -- 'Slash.parseSlashCommand' grammar — wrapped here as

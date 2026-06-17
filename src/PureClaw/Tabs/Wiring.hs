@@ -39,12 +39,15 @@ module PureClaw.Tabs.Wiring
     -- * Exec wiring (exposed for tests \/ reuse)
   , mkExecDeps
   , mkTabDispatchDeps
+  , ensureRestoredRuntimes
     -- * Effective tool registry (exposed for tests \/ reuse)
   , effectiveRegistry
   , execOneTool
     -- * Session resolution (exposed for tests \/ reuse)
   , SessionStore
   , resolveSession
+    -- * Wizard menus (exposed for tests \/ reuse)
+  , recentSessions
   ) where
 
 import Control.Concurrent.STM (atomically, readTBQueue, writeTBQueue)
@@ -53,7 +56,7 @@ import Control.Exception qualified as E
 import Control.Monad (forever)
 import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -84,9 +87,10 @@ import PureClaw.Routing.TabDispatch (TabDispatchDeps (..))
 import PureClaw.Routing.TabDispatch qualified as Dispatch
 import PureClaw.Routing.Types qualified as RT
 import PureClaw.Session.Handle qualified as Session
+import PureClaw.Session.Title qualified as Title
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Tabs qualified as Tabs
-import PureClaw.Tabs.Exec (ExecDeps (..), Runtime, ensure, release, sendTo)
+import PureClaw.Tabs.Exec (Exec, ExecDeps (..), Runtime, ensure, release, sendTo)
 import PureClaw.Tabs.RelayWriter
   ( RelayWriterDeps (..)
   , lookupSink
@@ -103,8 +107,11 @@ import PureClaw.Tabs.Types
   ( ConversationKey
   , RelayMode (..)
   , Tab (..)
+  , TabList
   , TabRef (..)
+  , TabStatus (..)
   , resolveCursorSlot
+  , toList
   )
 import PureClaw.MCP (mcpRegistry)
 import PureClaw.Tools.Registry
@@ -137,31 +144,38 @@ type SessionStore = IORef (Map Core.SessionId Session.SessionHandle)
 -- | The Tabs-as-View production loop (replaces 'runAgentLoopWith' at the 8c.2
 -- flip). Forks the relay-writer thread, registers the CLI sink, then reads the
 -- channel and dispatches each inbound message per conversation.
-runTabbedLoop :: AgentEnv -> IO ()
-runTabbedLoop env = do
+runTabbedLoop
+  :: AgentEnv
+  -> SessionStore
+  -> (Core.SessionId -> Maybe Text -> IO (Either Text ()))
+     -- ^ The session-description seam (built per 'ServerMode' in
+     -- "PureClaw.CLI.Commands"); threaded into the dispatcher deps so @\/rename@
+     -- on a session tab sets the session's canonical, cross-process name.
+  -> IO ()
+runTabbedLoop env store setSessionDescription = do
   _lh_logInfo logger "Tabbed agent loop started"
-  store <- newIORef Map.empty
   let execDeps   = mkExecDeps env store
       relayDeps  = RelayWriterDeps
         { _rw_sinks   = _env_sinks env
         , _rw_cursors = readIORef (_env_cursors env)
         , _rw_tabs    = Tabs.readTabs (_env_tabRegistry env)
         , _rw_default = defaultRelayMode
+        , _rw_modelOf = modelOf store
         }
   -- (a) Fork the relay-writer thread draining the ref-tagged tab-output queue.
   _ <- _env_fork env $ forever $ do
     (ref, ev) <- atomically (readTBQueue (_env_tabOutQ env))
     processOutput relayDeps (_env_relayWriter env) ref ev
   -- The dispatcher deps are built once; they close over the live env + store.
-  let dispatchDeps = mkTabDispatchDeps env execDeps store
+  let dispatchDeps = mkTabDispatchDeps env execDeps store setSessionDescription
   -- Read the first inbound message to learn the CLI conversation key, register
   -- its sink, then loop. (b) + (c).
-  loop store dispatchDeps
+  loop dispatchDeps
   where
     channel = _env_channel env
     logger  = _env_logger env
 
-    loop store dispatchDeps = do
+    loop dispatchDeps = do
       receiveResult <- try @E.IOException (_ch_receive channel)
       case receiveResult of
         Left _    -> _lh_logInfo logger "Session ended"
@@ -183,10 +197,10 @@ runTabbedLoop env = do
           -- mirroring legacy dispatchMsg's T.null(T.strip) guard (pureclaw-z9h).
           -- Source capture above is preserved even for empty content.
           if T.null (T.strip (_im_content msg))
-            then loop store dispatchDeps
+            then loop dispatchDeps
             else do
               Dispatch.handleInbound dispatchDeps convKey (_im_content msg)
-              loop store dispatchDeps
+              loop dispatchDeps
 
 -- | The 'ConversationKey' for a message source: its channel + conversation id
 -- (invariant I3 — the dispatcher keys cursors\/relay by this pair).
@@ -235,6 +249,24 @@ activeBoundSession env store convKey = do
 defaultRelayMode :: RelayMode
 defaultRelayMode = FocusedOnly
 
+-- | Resolve a tab's model name for the relay's focused speaker prefix
+-- (@\/N \<model\>: @). A @BoundSession@ resolves its pooled 'Session.SessionHandle'
+-- from @store@ (the running tab's session is always cached there) and reads its
+-- current @_sm_model@; an empty model string and a @BoundHarness@ (no model)
+-- both yield 'Nothing', so the prefix renders slot-only (@\/N: @). This reads
+-- only the in-memory store + meta 'IORef' — no disk I/O on the relay path.
+modelOf :: SessionStore -> TabRef -> IO (Maybe Text)
+modelOf store = \case
+  BoundSession sid -> do
+    m <- readIORef store
+    case Map.lookup sid m of
+      Nothing -> pure Nothing
+      Just sh -> do
+        meta <- readIORef (Session._sh_meta sh)
+        let model = SessionTypes._sm_model meta
+        pure (if T.null model then Nothing else Just model)
+  BoundHarness _ -> pure Nothing
+
 -- ---------------------------------------------------------------------------
 -- Exec wiring — the real _ex_startRuntime closure
 -- ---------------------------------------------------------------------------
@@ -257,6 +289,25 @@ mkExecDeps env store = ExecDeps { _ex_startRuntime = startRuntime }
     startRuntime = \case
       BoundSession sid -> startProvider env store sid
       BoundHarness hid -> startHarness env hid
+
+-- | Boot-time runtime restore. 'PureClaw.Tabs.Persist.loadTabs' restores the
+-- persisted 'TabList' into the registry ('PureClaw.Tabs.overwriteTabs'), but a
+-- restored tab is only /bound/ — the bind-time 'ensure' that live creation
+-- performs ('PureClaw.Routing.TabDispatch.bindNewTab' \/ @routeToNew@) never ran
+-- for it, so its 'Exec' runtime is absent. The first message routed to such a
+-- tab then fails with 'PureClaw.Handles.Tab.TabNotFound' (\"tab: not found\")
+-- instead of resuming the session — the symptom seen after a gateway restart.
+--
+-- This re-establishes the invariant by 'ensure'-ing each restored ref exactly
+-- once (balancing the one 'release' per @\/close@), so a 'BoundSession'
+-- reconnects with its transcript context reseeded ('startProvider') and a live
+-- 'BoundHarness' re-attaches. 'Dead' tombstones are skipped — they carry no
+-- runtime and drop input by design (Tabs-as-View §8); a dead harness is already
+-- pruned at load ('PureClaw.Tabs.Persist.reconcileTabs'), so its conversation
+-- falls through to a fresh default session instead.
+ensureRestoredRuntimes :: ExecDeps -> Exec -> TabList -> IO ()
+ensureRestoredRuntimes deps ex =
+  mapM_ (ensure deps ex . _tab_ref) . filter ((/= Dead) . _tab_status) . toList
 
 -- | Enqueue a ref-tagged output event onto the tab-output queue (the relay
 -- writer's source).
@@ -507,8 +558,16 @@ openSessionFromDisk env sid = do
 -- '_td_newDefaultSession' mints a fresh default-provider session and caches its
 -- handle in @store@; the wizard candidate lists come from the harness registry
 -- and the sessions directory; '_td_fallthrough' handles non-tab slash commands.
-mkTabDispatchDeps :: AgentEnv -> ExecDeps -> SessionStore -> Dispatch.TabDispatchDeps
-mkTabDispatchDeps env execDeps store = TabDispatchDeps
+mkTabDispatchDeps
+  :: AgentEnv
+  -> ExecDeps
+  -> SessionStore
+  -> (Core.SessionId -> Maybe Text -> IO (Either Text ()))
+     -- ^ The session-description seam threaded from the caller (built per
+     -- 'ServerMode' in "PureClaw.CLI.Commands"). Used by @\/rename@ on a
+     -- @BoundSession@ tab to set the session's canonical, cross-process name.
+  -> Dispatch.TabDispatchDeps
+mkTabDispatchDeps env execDeps store setSessionDescription = TabDispatchDeps
   { _td_tabs              = _env_tabRegistry env
   , _td_cursors           = _env_cursors env
   , _td_wizard            = _env_wizard env
@@ -525,6 +584,7 @@ mkTabDispatchDeps env execDeps store = TabDispatchDeps
   , _td_fallthrough       = fallthrough env store
   , _td_onTabsChanged     = _env_onTabsChanged env
   , _td_spawnHarness      = _env_startHarness env
+  , _td_setSessionDescription = setSessionDescription
   }
 
 -- | Emit a dispatcher banner\/reply to a conversation's registered sink. The
@@ -618,18 +678,16 @@ recentHarnesses env = do
        , isLive (Registry._he_liveness e)
        ]
 
--- | Recent sessions (id + label) for the @\/tab@ wizard menu.
+-- | Recent sessions (id + title) for the @\/tab@ wizard menu. Titles are
+-- computed by the shared 'Title.sessionTitle' so the TUI wizard and the web
+-- frontend display a session's name identically — including the
+-- first-message snippet fallback for sessions with no custom description
+-- (web parity).
 recentSessions :: AgentEnv -> IO [(Core.SessionId, Text)]
 recentSessions env = do
   dir   <- sessionsDirOf env
   metas <- Session.listSessions dir Nothing 50
-  pure [ (SessionTypes._sm_id m, sessionLabel m) | m <- metas ]
-
--- | A terse session label for the wizard menu.
-sessionLabel :: SessionTypes.SessionMeta -> Text
-sessionLabel m =
-  fromMaybe (Core.unSessionId (SessionTypes._sm_id m))
-            (SessionTypes._sm_description m)
+  mapM (\m -> (,) (SessionTypes._sm_id m) <$> Title.sessionTitle dir m) metas
 
 -- | Liveness probe used by the wizard when a harness pick is resolved.
 liveHarness :: AgentEnv -> Registry.HarnessId -> IO Bool

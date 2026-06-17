@@ -606,12 +606,11 @@ body {
 }
 .editable-title-pencil {
   flex-shrink: 0;
-  opacity: 0;
+  /* Always visible (muted) for discoverability; brightens to accent on hover. */
+  opacity: 1;
   color: var(--text-faint);
   transition: opacity var(--duration-fast) ease, color var(--duration-fast) ease;
 }
-.editable-title:hover .editable-title-pencil,
-.editable-title:focus-visible .editable-title-pencil { opacity: 1; }
 .editable-title:hover .editable-title-pencil { color: var(--accent-primary); }
 
 .editable-title-input {

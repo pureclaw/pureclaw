@@ -275,6 +275,14 @@ Development patterns and standards are documented in `.claude/guides/`:
 
 ## Notes
 
+### Terminology
+
+- **TUI** refers to running `pureclaw tui` from the command line (the interactive
+  terminal). It is not a separate Brick/Vty UI — `pureclaw tui` runs the standard
+  tabbed agent loop (`runTabbedLoop` → `handleInbound`) over the local CLI channel,
+  the same dispatch path the Signal/Telegram channels use. "chat" generally refers
+  to those remote channels; the "frontend" is the web UI (`PureClaw.Frontend.*`).
+
 <!-- Add project-specific notes, conventions, or constraints here.
      Examples: "Always use server components for data fetching",
      "The payments module is legacy — do not refactor without approval" -->

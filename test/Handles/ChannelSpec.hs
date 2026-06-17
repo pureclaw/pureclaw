@@ -1,5 +1,8 @@
 module Handles.ChannelSpec (spec) where
 
+import Control.Exception (try)
+import Data.Either (isLeft)
+import Data.Text (Text)
 import Test.Hspec
 
 import PureClaw.Core.Errors
@@ -53,3 +56,41 @@ spec = do
       let msg = OutgoingMessage "response"
       show msg `shouldContain` "response"
       msg `shouldBe` msg
+
+  describe "mkCaptureChannelHandle" $ do
+    it "buffers multiple _ch_send messages joined by newline" $ do
+      (h, readOut) <- mkCaptureChannelHandle
+      _ch_send h (OutgoingMessage "first")
+      _ch_send h (OutgoingMessage "second")
+      out <- readOut
+      out `shouldBe` "first\nsecond"
+
+    it "captures _ch_sendError and _ch_sendChunk output too" $ do
+      (h, readOut) <- mkCaptureChannelHandle
+      _ch_send h (OutgoingMessage "ok")
+      _ch_sendError h (TemporaryError "boom")
+      _ch_sendChunk h (ChunkText "chunk")
+      out <- readOut
+      out `shouldBe` "ok\nboom\nchunk"
+
+    it "is non-streaming" $ do
+      (h, _) <- mkCaptureChannelHandle
+      _ch_streaming h `shouldBe` False
+
+    it "throws InteractiveUnsupported on prompt" $ do
+      (h, _) <- mkCaptureChannelHandle
+      r <- try (_ch_prompt h "API key: ") :: IO (Either InteractiveUnsupported Text)
+      case r of
+        Left (InteractiveUnsupported label) -> label `shouldBe` "API key: "
+        Right _ -> expectationFailure "expected InteractiveUnsupported"
+
+    it "throws InteractiveUnsupported on promptSecret and readSecret" $ do
+      (h, _) <- mkCaptureChannelHandle
+      r1 <- try (_ch_promptSecret h "pw") :: IO (Either InteractiveUnsupported Text)
+      r2 <- try (_ch_readSecret h)        :: IO (Either InteractiveUnsupported Text)
+      (isLeft r1, isLeft r2) `shouldBe` (True, True)
+
+    it "throws on _ch_receive" $ do
+      (h, _) <- mkCaptureChannelHandle
+      r <- try (_ch_receive h) :: IO (Either InteractiveUnsupported IncomingMessage)
+      isLeft r `shouldBe` True
