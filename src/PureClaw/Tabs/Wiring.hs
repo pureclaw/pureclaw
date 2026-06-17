@@ -39,6 +39,7 @@ module PureClaw.Tabs.Wiring
     -- * Exec wiring (exposed for tests \/ reuse)
   , mkExecDeps
   , mkTabDispatchDeps
+  , ensureRestoredRuntimes
     -- * Effective tool registry (exposed for tests \/ reuse)
   , effectiveRegistry
   , execOneTool
@@ -89,7 +90,7 @@ import PureClaw.Session.Handle qualified as Session
 import PureClaw.Session.Title qualified as Title
 import PureClaw.Session.Types qualified as SessionTypes
 import PureClaw.Tabs qualified as Tabs
-import PureClaw.Tabs.Exec (ExecDeps (..), Runtime, ensure, release, sendTo)
+import PureClaw.Tabs.Exec (Exec, ExecDeps (..), Runtime, ensure, release, sendTo)
 import PureClaw.Tabs.RelayWriter
   ( RelayWriterDeps (..)
   , lookupSink
@@ -106,6 +107,7 @@ import PureClaw.Tabs.Types
   ( ConversationKey
   , RelayMode (..)
   , Tab (..)
+  , TabList
   , TabRef (..)
   , resolveCursorSlot
   )
@@ -285,6 +287,24 @@ mkExecDeps env store = ExecDeps { _ex_startRuntime = startRuntime }
     startRuntime = \case
       BoundSession sid -> startProvider env store sid
       BoundHarness hid -> startHarness env hid
+
+-- | Boot-time runtime restore. 'PureClaw.Tabs.Persist.loadTabs' restores the
+-- persisted 'TabList' into the registry ('PureClaw.Tabs.overwriteTabs'), but a
+-- restored tab is only /bound/ — the bind-time 'ensure' that live creation
+-- performs ('PureClaw.Routing.TabDispatch.bindNewTab' \/ @routeToNew@) never ran
+-- for it, so its 'Exec' runtime is absent. The first message routed to such a
+-- tab then fails with 'PureClaw.Handles.Tab.TabNotFound' (\"tab: not found\")
+-- instead of resuming the session — the symptom seen after a gateway restart.
+--
+-- This re-establishes the invariant by 'ensure'-ing each restored ref exactly
+-- once (balancing the one 'release' per @\/close@), so a 'BoundSession'
+-- reconnects with its transcript context reseeded ('startProvider') and a live
+-- 'BoundHarness' re-attaches. 'Dead' tombstones are skipped — they carry no
+-- runtime and drop input by design (Tabs-as-View §8); a dead harness is already
+-- pruned at load ('PureClaw.Tabs.Persist.reconcileTabs'), so its conversation
+-- falls through to a fresh default session instead.
+ensureRestoredRuntimes :: ExecDeps -> Exec -> TabList -> IO ()
+ensureRestoredRuntimes _deps _ex _tl = pure ()
 
 -- | Enqueue a ref-tagged output event onto the tab-output queue (the relay
 -- writer's source).

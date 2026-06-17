@@ -13,6 +13,7 @@ import Data.IORef
   , writeIORef
   )
 import Data.Map.Strict qualified as Map
+import Data.Either (isLeft, isRight)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text, isInfixOf)
 import Data.Text.IO qualified as TIO
@@ -58,10 +59,27 @@ import PureClaw.Session.Handle
   , noOpOnFirstStreamDoneRef
   )
 import PureClaw.Session.Types qualified as SessionTypes
-import PureClaw.Tabs (readTabs, resolveCursorSlot, toList)
+import PureClaw.Tabs
+  ( TabList
+  , TabRef (..)
+  , TabStatus (..)
+  , appendTab
+  , emptyTabs
+  , readTabs
+  , resolveCursorSlot
+  , setStatus
+  , toList
+  )
+import PureClaw.Tabs.Exec
+  ( ExecDeps (..)
+  , Runtime (..)
+  , newExec
+  , sendTo
+  )
 import PureClaw.Tabs.RelayWriter (lookupSink)
 import PureClaw.Tabs.Wiring
   ( effectiveRegistry
+  , ensureRestoredRuntimes
   , execOneTool
   , recentSessions
   , resolveSession
@@ -364,6 +382,11 @@ readSource env = do
 -- | The conversation key for a CLI conversation id (channel + conversation).
 cliKey :: Text -> (ChannelKind, ConversationId)
 cliKey conv = (CkCli, ConversationId conv)
+
+-- | Append a ref to a 'TabList', keeping the list unchanged on the
+-- structurally-impossible rejection (only fresh, unique refs are appended here).
+appendOrKeep :: TabRef -> TabList -> TabList
+appendOrKeep ref tl = either (const tl) snd (appendTab ref tl)
 
 -- | Whether a CLI conversation's cursor currently resolves to a live tab in the
 -- env's registry. Proves that conversation's plain-text iteration auto-started
@@ -717,6 +740,39 @@ spec = do
             status `shouldContain'` "Total input tokens:  0"
             status `shouldContain'` "Total output tokens: 0"
           [] -> expectationFailure "expected a /status block in the sent log"
+
+  describe "ensureRestoredRuntimes — boot-time runtime restore (reconnect after restart)" $ do
+    it "ensures a runtime for each restored Live tab so delivery succeeds, and skips Dead tombstones" $ do
+      -- Reproduce the post-restart symptom at the Exec seam. On a gateway
+      -- restart, 'overwriteTabs' rebinds the persisted tabs into the registry
+      -- but their runtimes were never 'ensure'd, so 'sendTo' to a restored ref
+      -- returns Left TabNotFound — surfaced to the user as
+      -- "couldn't deliver your message — tab: not found". The boot restore must
+      -- 'ensure' each Live restored ref (reconnect) while leaving Dead
+      -- tombstones runtime-less.
+      startsRef <- newIORef (0 :: Int)
+      let deps = ExecDeps
+            { _ex_startRuntime = \_ref -> do
+                modifyIORef' startsRef (+ 1)
+                pure Runtime
+                  { _rt_send = \_ -> pure (Right ())
+                  , _rt_stop = pure ()
+                  }
+            }
+          liveRef = BoundSession (SessionId "restored-live")
+          deadRef = BoundSession (SessionId "restored-dead")
+          tl = setStatus deadRef Dead
+                 (appendOrKeep deadRef (appendOrKeep liveRef emptyTabs))
+      ex <- newExec
+      ensureRestoredRuntimes deps ex tl
+      -- The Live tab reconnected: delivery now succeeds (no TabNotFound).
+      rLive <- sendTo ex liveRef "after restart"
+      rLive `shouldSatisfy` isRight
+      -- The Dead tombstone was skipped: it has no runtime.
+      rDead <- sendTo ex deadRef "to a tombstone"
+      rDead `shouldSatisfy` isLeft
+      -- Exactly one runtime was started — the Live tab only.
+      readIORef startsRef `shouldReturn` 1
 
   describe "resolveSession — wizard-reopen fallback loads real session (pureclaw-apv)" $ do
     it "loads the REAL on-disk session.json (model + description), not a fabricated one" $
