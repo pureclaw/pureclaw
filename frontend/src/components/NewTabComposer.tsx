@@ -193,21 +193,10 @@ export function NewTabComposer({ spec }: NewTabComposerProps) {
             </Row>
           )}
 
-          <Row label="Backend" htmlFor="harness-backend">
-            <select
-              id="harness-backend"
-              value={spec.backendTag}
-              onChange={(e) => spec.handleBackendTagChange(e.target.value as BackendTag)}
-              style={inputStyle}
-            >
-              <option value="local">Local</option>
-              <option value="tmux">tmux</option>
-              <option value="ssh">SSH</option>
-              <option value="container">Container</option>
-            </select>
-          </Row>
-
-          <BackendFields tag={spec.backendTag} config={spec.backendConfig} onConfigUpdate={spec.updateBackendConfig} includeContainer={true} />
+          {/* Harnesses always run inside a tmux session — there's no
+              backend choice to make, so the composer skips the selector and
+              renders the tmux session field directly. */}
+          <BackendFields tag="tmux" config={spec.backendConfig} onConfigUpdate={spec.updateBackendConfig} />
 
           <Row label="Working Directory" htmlFor="harness-workdir">
             <input
@@ -406,7 +395,7 @@ function BackendFields({
               backend (`canonical-<idx>`) and ignored for placement, so the
               user only picks the session. buildBackendPayload still sends
               `window: ''` to satisfy the backend's required decode. */}
-          <Row label="Session Name" htmlFor="backend-session">
+          <Row label="Tmux Session Name" htmlFor="backend-session">
             <input
               id="backend-session"
               type="text"

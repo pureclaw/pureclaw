@@ -62,10 +62,16 @@ data ProviderSpec = ProviderSpec
   } deriving stock (Show, Eq)
 
 -- | Configuration for a harness-backed session (an external CLI tool managed
--- via a terminal backend).
+-- in a tmux session).
+--
+-- A harness ALWAYS runs in tmux — that is the only viable way PureClaw drives
+-- an external CLI tool — so the spec carries its tmux coordinates directly
+-- ('_h_tmux') rather than a general 'TerminalBackend'. 'TerminalBackend' (local
+-- \/ ssh \/ container \/ tmux) is reserved for tool-call execution environments
+-- (raw-shell tabs, provider tool backends), a separate concern.
 data HarnessSpec = HarnessSpec
   { _h_flavour   :: !HarnessFlavour
-  , _h_backend   :: !TerminalBackend
+  , _h_tmux      :: !TmuxConfig
   , _h_cwd       :: !(Maybe Text)
   , _h_args      :: ![Text]
   , _h_harnessId :: !(Maybe HarnessId)
@@ -75,7 +81,7 @@ data HarnessSpec = HarnessSpec
     -- @session.json@ files written before this field decode with
     -- @_h_harnessId == Nothing@ (tolerant @.:? "harnessId"@), and the key is
     -- emitted ONLY when 'Just' (emit-when-Just, like '_h_cwd'). The tmux
-    -- window name in '_h_backend' is /dual-written/ alongside it for one
+    -- window name in '_h_tmux' is /dual-written/ alongside it for one
     -- release so a back-out path and the legacy name-keyed routing fallback
     -- both keep working until the registry is the sole key.
   , _h_claudeSessionUuid :: !(Maybe Text)
@@ -379,7 +385,7 @@ instance Aeson.FromJSON ProviderSpec where
 instance Aeson.ToJSON HarnessSpec where
   toJSON hs = Aeson.object $
     [ "flavour" .= _h_flavour hs
-    , "backend" .= _h_backend hs
+    , "tmux"    .= _h_tmux hs
     ] ++ maybe [] (\c -> ["cwd" .= c]) (_h_cwd hs)
       ++ ["args" .= _h_args hs | not (null (_h_args hs))]
       ++ maybe [] (\hid -> ["harnessId" .= hid]) (_h_harnessId hs)
@@ -390,7 +396,7 @@ instance Aeson.FromJSON HarnessSpec where
   parseJSON = Aeson.withObject "HarnessSpec" $ \o ->
     HarnessSpec
       <$> o .: "flavour"
-      <*> o .: "backend"
+      <*> o .: "tmux"
       <*> o .:? "cwd"
       <*> o .:? "args" .!= []
       <*> o .:? "harnessId"

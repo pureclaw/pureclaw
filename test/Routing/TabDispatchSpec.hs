@@ -51,7 +51,7 @@ import PureClaw.Routing.TabDispatch
 import PureClaw.Session.Kind
   ( HarnessFlavour (..)
   , HarnessSpec (..)
-  , TerminalBackend (..)
+  , TmuxConfig (..)
   )
 import PureClaw.Tabs
   ( TabRegistry
@@ -512,14 +512,15 @@ tabNewSpec = describe "cmdTabNew (/tab new)" $ do
 
 tabNewHarnessSpec :: Spec
 tabNewHarnessSpec = describe "cmdTabNew harness (/tab new harness)" $ do
-  it "spawns a claude-code/local harness, binds the tab, ensures, switches" $ do
+  it "spawns a claude-code tmux harness, binds the tab, ensures, switches" $ do
     let hid = harn "1"
     f <- spawnFakes (SpawnsRef (BoundHarness hid) "claude-code-0")
     handleInbound (f_deps f) convA "/tab new harness"
-    -- _td_spawnHarness called exactly once with a default claude-code/local spec
+    -- _td_spawnHarness called exactly once with a default claude-code spec whose
+    -- tmux coords are empty placeholders (the spawn layer assigns the real ones)
     specs <- spawnedSpecs f
     map _h_flavour specs `shouldBe` [HClaudeCode]
-    map _h_backend specs `shouldBe` [TbLocal]
+    map _h_tmux specs `shouldBe` [TmuxConfig "" "" Nothing]
     map _h_cwd specs `shouldBe` [Nothing]
     map _h_args specs `shouldBe` [[]]
     map _h_harnessId specs `shouldBe` [Nothing]
@@ -537,7 +538,7 @@ tabNewHarnessSpec = describe "cmdTabNew harness (/tab new harness)" $ do
     handleInbound (f_deps f) convA "/tab new harness claude-code"
     specs <- spawnedSpecs f
     map _h_flavour specs `shouldBe` [HClaudeCode]
-    map _h_backend specs `shouldBe` [TbLocal]
+    map _h_tmux specs `shouldBe` [TmuxConfig "" "" Nothing]
     tl <- readTabs (f_reg f)
     map _tab_ref (toList tl) `shouldBe` [BoundHarness hid]
     ensured f `shouldReturn` [BoundHarness hid]

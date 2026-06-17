@@ -66,7 +66,6 @@ import PureClaw.Session.Types
   , ProviderSpec (..)
   , HarnessSpec (..)
   , HarnessFlavour (..)
-  , TerminalBackend (..)
   , TmuxConfig (..)
   , fixedFlavourLookup
   , inferProviderId
@@ -208,11 +207,10 @@ spec = do
         newSid <- decodeSessionId respBody
         meta <- readSessionMeta tmpDir newSid
         case _sm_kind meta of
-          SkHarness hs -> case _h_backend hs of
-            TbTmux tc -> do
-              _tc_session tc `shouldBe` "pureclaw"
-              _tc_window tc  `shouldBe` "claude-code-0"
-            other -> expectationFailure ("expected TbTmux backend, got " <> show other)
+          SkHarness hs -> do
+            let tc = _h_tmux hs
+            _tc_session tc `shouldBe` "pureclaw"
+            _tc_window tc  `shouldBe` "claude-code-0"
           other -> expectationFailure ("expected SkHarness kind, got " <> show other)
 
     -- WU6 (D6.2/D6.3): the claudeSessionUuid + canonicalCwd the spawn returns
@@ -327,11 +325,11 @@ spec = do
   describe "POST /api/tabs/new (harness spawn — WU4 broker publish)" $
     -- D4: a successful harness spawn publishes exactly one
     -- ActivityChanged (SaSessionCreated meta) event whose meta carries the
-    -- REAL spawned backend (TbTmux with the spawn's window), not the
-    -- placeholder 'local' backend in the request. This covers the
+    -- REAL spawned tmux coordinates (the spawn's window), not the
+    -- placeholder tmux coords in the request. This covers the
     -- @Just broker -> _streamBroker_publish ...@ arm of createHarnessTab
     -- and validates the post-spawn-meta fix.
-    it "publishes the post-spawn meta carrying the real TbTmux backend (D4)" $ do
+    it "publishes the post-spawn meta carrying the real tmux coordinates (D4)" $ do
       withSystemTempDirectory "pureclaw-wu4-d4" $ \tmpDir -> do
         broker <- mkInProcessBroker defaultBrokerConfig
         eSub   <- _streamBroker_subscribe broker
@@ -347,10 +345,7 @@ spec = do
         let created = [ m | ActivityChanged _ (SaSessionCreated m) <- evs ]
         case created of
           [m] -> case _sm_kind m of
-            SkHarness hs -> case _h_backend hs of
-              TbTmux tc -> _tc_window tc `shouldBe` "claude-code-0"
-              other -> expectationFailure
-                ("expected TbTmux backend in published meta, got " <> show other)
+            SkHarness hs -> _tc_window (_h_tmux hs) `shouldBe` "claude-code-0"
             other -> expectationFailure
               ("expected SkHarness kind in published meta, got " <> show other)
           other -> expectationFailure
@@ -2982,22 +2977,23 @@ spec = do
   -- -----------------------------------------------------------------------
 
   describe "resolveHarnessSession (WU7 — D7.3)" $ do
-    -- D7.3: a spec with no tmux session (the frontend's placeholder 'local'
-    -- request backend) resolves to the default "pureclaw".
+    -- D7.3: a spec with an empty tmux session (the New-Harness composer omits
+    -- the session when the user leaves it blank) resolves to the default
+    -- "pureclaw".
     it "defaults to \"pureclaw\" when the spec has no tmux session (D7.3)" $
-      resolveHarnessSession (harnessSpecWithBackend TbLocal)
+      resolveHarnessSession (harnessSpecWithTmux (TmuxConfig "" "" Nothing))
         `shouldBe` "pureclaw"
 
     -- D7.3: an empty _tc_session is treated as unspecified -> default.
     it "treats an empty _tc_session as unspecified (D7.3)" $
       resolveHarnessSession
-        (harnessSpecWithBackend (TbTmux (TmuxConfig "" "w" Nothing)))
+        (harnessSpecWithTmux (TmuxConfig "" "w" Nothing))
         `shouldBe` "pureclaw"
 
     -- D7.3: a spec specifying a non-empty _tc_session is honored verbatim.
     it "honors a non-empty _tc_session (D7.3)" $
       resolveHarnessSession
-        (harnessSpecWithBackend (TbTmux (TmuxConfig "my-proj" "w" Nothing)))
+        (harnessSpecWithTmux (TmuxConfig "my-proj" "w" Nothing))
         `shouldBe` "my-proj"
 
   describe "POST /api/tabs/new (harness id persistence — WU7)" $ do
@@ -3063,9 +3059,7 @@ spec = do
         case _sm_kind meta of
           SkHarness hs -> do
             _h_harnessId hs `shouldBe` Just fakeStartedHid
-            case _h_backend hs of
-              TbTmux tc -> _tc_session tc `shouldBe` "pureclaw"
-              other -> expectationFailure ("expected TbTmux, got " <> show other)
+            _tc_session (_h_tmux hs) `shouldBe` "pureclaw"
           other -> expectationFailure ("expected SkHarness, got " <> show other)
 
     -- D7.3 (end-to-end): a request specifying a custom _tc_session is honored —
@@ -3082,9 +3076,7 @@ spec = do
         newSid <- decodeSessionId respBody
         meta <- readSessionMeta tmpDir newSid
         case _sm_kind meta of
-          SkHarness hs -> case _h_backend hs of
-            TbTmux tc -> _tc_session tc `shouldBe` "my-proj"
-            other -> expectationFailure ("expected TbTmux, got " <> show other)
+          SkHarness hs -> _tc_session (_h_tmux hs) `shouldBe` "my-proj"
           other -> expectationFailure ("expected SkHarness, got " <> show other)
 
     -- D7.4: first-prompt routing still works via the persisted id. After
@@ -3633,7 +3625,7 @@ spec = do
     it "returns Just the tmux window for a legacy tmux harness (no id)" $
       harnessKeyFromKind
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] Nothing Nothing Nothing))
+          (TmuxConfig "pureclaw" "claude-code-2" Nothing) Nothing [] Nothing Nothing Nothing))
         `shouldBe` Just "claude-code-2"
 
     -- WU6: when a HarnessId is present, harnessKeyFromKind returns the durable
@@ -3642,14 +3634,8 @@ spec = do
       let hid = Registry.parseHarnessId "44444444-4444-4444-8444-444444444444"
       harnessKeyFromKind
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] hid Nothing Nothing))
+          (TmuxConfig "pureclaw" "claude-code-2" Nothing) Nothing [] hid Nothing Nothing))
         `shouldBe` (Registry.harnessIdToText <$> hid)
-
-    it "returns Nothing for a non-tmux harness backend" $
-      harnessKeyFromKind
-        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          TbLocal Nothing [] Nothing Nothing Nothing))
-        `shouldBe` Nothing
 
     it "returns Nothing for a provider session" $
       harnessKeyFromKind
@@ -3657,24 +3643,18 @@ spec = do
         `shouldBe` Nothing
 
   describe "shouldRouteToHarness (WU1)" $ do
-    it "is True for a tmux-backed harness" $
+    it "is True for a harness (harnesses always run in tmux)" $
       shouldRouteToHarness
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] Nothing Nothing Nothing))
+          (TmuxConfig "pureclaw" "claude-code-2" Nothing) Nothing [] Nothing Nothing Nothing))
         `shouldBe` True
 
-    it "is True for a tmux-backed harness that carries a HarnessId (WU6)" $ do
+    it "is True for a harness that carries a HarnessId (WU6)" $ do
       let hid = Registry.parseHarnessId "55555555-5555-4555-8555-555555555555"
       shouldRouteToHarness
         (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          (TbTmux (TmuxConfig "pureclaw" "claude-code-2" Nothing)) Nothing [] hid Nothing Nothing))
+          (TmuxConfig "pureclaw" "claude-code-2" Nothing) Nothing [] hid Nothing Nothing))
         `shouldBe` True
-
-    it "is False for a non-tmux harness backend" $
-      shouldRouteToHarness
-        (SkHarness (HarnessSpec (fixedFlavourLookup "claude-code")
-          TbLocal Nothing [] Nothing Nothing Nothing))
-        `shouldBe` False
 
     it "is False for a provider session" $
       shouldRouteToHarness
@@ -3684,7 +3664,7 @@ spec = do
   describe "_fe_startHarness default stub (WU1)" $
     it "returns Left for the unwired test FrontendEnv" $ do
       env <- mkTestFrontendEnv
-      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") TbLocal Nothing [] Nothing Nothing Nothing
+      let spec' = HarnessSpec (fixedFlavourLookup "claude-code") (TmuxConfig "" "" Nothing) Nothing [] Nothing Nothing Nothing
       result <- _fe_startHarness env spec' mkNoOpTranscriptHandle
       case result of
         Left _  -> pure ()
@@ -3870,9 +3850,11 @@ providerNewTabBody = Aeson.encode $ object
       ]
   ]
 
--- | A harness New-tab request body. The request carries a placeholder
--- @local@ backend (the frontend has no tmux coordinates yet); the spawn
--- replaces it with the real 'TmuxConfig' from the 'StartedHarness'.
+-- | A harness New-tab request body. The request carries placeholder tmux
+-- coordinates (empty session\/window — the New-Harness composer leaves them
+-- blank); the spawn replaces them with the real 'TmuxConfig' from the
+-- 'StartedHarness'. A harness always runs in tmux, so the coords live under
+-- the @tmux@ key (not the tool-call @backend@ key).
 harnessNewTabBody :: LBS.ByteString
 harnessNewTabBody = Aeson.encode $ object
   [ "kind" .= object
@@ -3880,12 +3862,12 @@ harnessNewTabBody = Aeson.encode $ object
       , "session_kind" .= object
           [ "tag"     .= ("harness" :: Text)
           , "flavour" .= ("claude-code" :: Text)
-          , "backend" .= object [ "tag" .= ("local" :: Text) ]
+          , "tmux"    .= object [ "window" .= ("" :: Text) ]
           ]
       ]
   ]
 
--- | A harness New-tab request body that specifies a tmux backend with an
+-- | A harness New-tab request body that specifies tmux coordinates with an
 -- explicit @session@ (WU7, D7.3). The window is a placeholder the spawn path
 -- overrides; only the session is honored for placement.
 harnessNewTabBodyWithSession :: Text -> LBS.ByteString
@@ -3895,21 +3877,20 @@ harnessNewTabBodyWithSession session = Aeson.encode $ object
       , "session_kind" .= object
           [ "tag"     .= ("harness" :: Text)
           , "flavour" .= ("claude-code" :: Text)
-          , "backend" .= object
-              [ "tag"     .= ("tmux" :: Text)
-              , "session" .= session
+          , "tmux"    .= object
+              [ "session" .= session
               , "window"  .= ("requested-window" :: Text)
               ]
           ]
       ]
   ]
 
--- | A minimal 'HarnessSpec' carrying the given backend (WU7 unit tests for
--- 'resolveHarnessSession'). All other fields are inert defaults.
-harnessSpecWithBackend :: TerminalBackend -> HarnessSpec
-harnessSpecWithBackend backend = HarnessSpec
+-- | A minimal 'HarnessSpec' carrying the given tmux coordinates (WU7 unit tests
+-- for 'resolveHarnessSession'). All other fields are inert defaults.
+harnessSpecWithTmux :: TmuxConfig -> HarnessSpec
+harnessSpecWithTmux tmux = HarnessSpec
   { _h_flavour   = HClaudeCode
-  , _h_backend   = backend
+  , _h_tmux      = tmux
   , _h_cwd       = Nothing
   , _h_args      = []
   , _h_harnessId = Nothing
@@ -4059,7 +4040,7 @@ mkRecordingFakeHarnessHandle ownTranscript sentRef canned = HarnessHandle
   }
 
 -- | Write a harness-backed session to disk: @session.json@ whose
--- @_sm_kind@ is 'SkHarness' over a 'TbTmux' backend with the given window
+-- @_sm_kind@ is 'SkHarness' over a 'TmuxConfig' with the given window
 -- name (the harness map key), plus an empty (but present) transcript so
 -- the @/send@ handler's 404 existence check passes.
 writeHarnessSession :: FilePath -> Text -> Text -> IO ()
@@ -4068,11 +4049,11 @@ writeHarnessSession baseDir sid windowKey = do
   createDirectoryIfMissing True dir
   let hSpecRec = HarnessSpec
         { _h_flavour = HClaudeCode
-        , _h_backend = TbTmux (TmuxConfig
+        , _h_tmux = TmuxConfig
             { _tc_session = "pureclaw"
             , _tc_window  = windowKey
             , _tc_pane    = Nothing
-            })
+            }
         , _h_cwd       = Nothing
         , _h_args      = []
         , _h_harnessId = Nothing
@@ -4106,11 +4087,11 @@ writeHarnessSessionWithId baseDir sid windowKey mHidTxt = do
   createDirectoryIfMissing True dir
   let hSpecRec = HarnessSpec
         { _h_flavour = HClaudeCode
-        , _h_backend = TbTmux (TmuxConfig
+        , _h_tmux = TmuxConfig
             { _tc_session = "pureclaw"
             , _tc_window  = windowKey
             , _tc_pane    = Nothing
-            })
+            }
         , _h_cwd       = Nothing
         , _h_args      = []
         , _h_harnessId = mHidTxt >>= Registry.parseHarnessId
@@ -4356,7 +4337,7 @@ writeHarnessBranchSource baseDir sid = do
   let dir = baseDir </> T.unpack sid
   createDirectoryIfMissing True dir
   let hSpec = HarnessSpec (fixedFlavourLookup "claude-code")
-        (TbTmux (TmuxConfig "cc" "cc" Nothing)) Nothing [] Nothing Nothing Nothing
+        (TmuxConfig "cc" "cc" Nothing) Nothing [] Nothing Nothing Nothing
       meta = SessionMeta
         { _sm_id                = SessionId sid
         , _sm_agent             = Nothing

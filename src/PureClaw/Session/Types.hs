@@ -254,7 +254,7 @@ parseSessionKind o model agent = do
       Just rt | Just name <- T.stripPrefix "harness:" rt ->
         pure (SkHarness (HarnessSpec
           (fixedFlavourLookup name)
-          (TbTmux (TmuxConfig name name Nothing))
+          (TmuxConfig name name Nothing)
           Nothing
           []
           Nothing

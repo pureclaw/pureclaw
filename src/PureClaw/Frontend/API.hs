@@ -277,7 +277,7 @@ data FrontendEnv = FrontendEnv
 -- | Result of successfully starting a harness via '_fe_startHarness'.
 data StartedHarness = StartedHarness
   { _shh_key  :: !Text        -- ^ harness map key = canonical <> "-" <> show windowIdx (also the tmux window name)
-  , _shh_tmux :: !TmuxConfig  -- ^ coordinates to persist in the session's _sm_kind HarnessSpec._h_backend
+  , _shh_tmux :: !TmuxConfig  -- ^ coordinates to persist in the session's _sm_kind HarnessSpec._h_tmux
   , _shh_id   :: !Registry.HarnessId
     -- ^ The durable 'Registry.HarnessId' generated for the spawned harness and
     -- registered in the 'HarnessRegistry' (WU4). 'createHarnessTab' persists it
@@ -366,21 +366,22 @@ defaultHarnessSession = "pureclaw"
 
 -- | Resolve the tmux session name a harness should be spawned into from the
 -- requested 'HarnessSpec' (WU7, the epic's core fix). The session is read from
--- the spec's 'TbTmux' backend '_tc_session' when it is non-empty; otherwise it
--- falls back to 'defaultHarnessSession' (@"pureclaw"@). A non-tmux backend
--- (the frontend's placeholder @local@ request backend) likewise resolves to the
--- default. The WINDOW is auto-assigned by the spawn path (@canonical-\<idx\>@);
--- honoring a caller-specified '_tc_window' for placement is deferred
--- (pureclaw-jlc), so this reads only the session, never the window.
+-- the spec's '_h_tmux' '_tc_session' when it is non-empty; otherwise it falls
+-- back to 'defaultHarnessSession' (@"pureclaw"@) — the New-Harness composer
+-- omits the session when the user leaves the field blank. The WINDOW is
+-- auto-assigned by the spawn path (@canonical-\<idx\>@); honoring a
+-- caller-specified '_tc_window' for placement is deferred (pureclaw-jlc), so
+-- this reads only the session, never the window.
 resolveHarnessSession :: HarnessSpec -> Text
-resolveHarnessSession spec = case _h_backend spec of
-  TbTmux tc
-    | not (T.null (_tc_session tc)) -> _tc_session tc
-  _                                 -> defaultHarnessSession
+resolveHarnessSession spec
+  | not (T.null session) = session
+  | otherwise            = defaultHarnessSession
+  where
+    session = _tc_session (_h_tmux spec)
 
--- | The durable routing key for a session kind, if it is a tmux-backed
--- harness. @Just k@ => route this session to a harness; @Nothing@ => provider
--- session.
+-- | The durable routing key for a session kind, if it is a harness. @Just k@ =>
+-- route this session to a harness; @Nothing@ => provider session. A harness
+-- always runs in tmux, so a harness session always yields a key.
 --
 -- WU6 makes this /id-primary with a name fallback/: when the persisted
 -- 'HarnessSpec' carries a 'Registry.HarnessId' (the durable anchor), the key
@@ -391,18 +392,15 @@ resolveHarnessSession spec = case _h_backend spec of
 -- The registry is EMPTY until later work units populate it, so until then this
 -- yields the window name and routing stays on the PR #74 path unchanged.
 harnessKeyFromKind :: SessionKind -> Maybe Text
-harnessKeyFromKind (SkHarness hs) = case _h_backend hs of
-  TbTmux tc -> Just (maybe (_tc_window tc) Registry.harnessIdToText (_h_harnessId hs))
-  _         -> Nothing
+harnessKeyFromKind (SkHarness hs) =
+  Just (maybe (_tc_window (_h_tmux hs)) Registry.harnessIdToText (_h_harnessId hs))
 harnessKeyFromKind _ = Nothing
 
--- | The dual-written tmux window name for a tmux-backed harness session, used
--- as the legacy name-fallback routing key when an id lookup misses (WU6).
--- @Nothing@ for any non-tmux / non-harness kind.
+-- | The dual-written tmux window name for a harness session, used as the legacy
+-- name-fallback routing key when an id lookup misses (WU6). @Nothing@ for any
+-- non-harness kind.
 harnessWindowFromKind :: SessionKind -> Maybe Text
-harnessWindowFromKind (SkHarness hs) = case _h_backend hs of
-  TbTmux tc -> Just (_tc_window tc)
-  _         -> Nothing
+harnessWindowFromKind (SkHarness hs) = Just (_tc_window (_h_tmux hs))
 harnessWindowFromKind _ = Nothing
 
 -- | Routing decision: does this session route to a harness (vs the LLM provider)?
@@ -1752,7 +1750,7 @@ spawnHarnessSession env spec sk = do
       -- '_tc_session' is the resolved session honored by '_fe_startHarness'.
       modifyIORef' (_sh_meta sh) $ \m ->
         m { _sm_kind = SkHarness
-              (spec { _h_backend           = TbTmux (_shh_tmux st)
+              (spec { _h_tmux              = _shh_tmux st
                     , _h_harnessId         = Just (_shh_id st)
                     , _h_claudeSessionUuid = _shh_claudeSessionUuid st
                     , _h_canonicalCwd      = _shh_canonicalCwd st
@@ -1768,8 +1766,8 @@ spawnHarnessSession env spec sk = do
       Registry.modifyEntry (_fe_harnessRegistry env) (_shh_id st)
         (\e -> e { Registry._he_sessionId = Just (unSessionId sid) })
       -- Read back the post-spawn meta so the live broadcast carries the real
-      -- TbTmux backend (the persisted session.json above is already correct;
-      -- the original 'meta' still holds the placeholder backend).
+      -- tmux coordinates (the persisted session.json above is already correct;
+      -- the original 'meta' still holds the placeholder tmux coords).
       updatedMeta <- readIORef (_sh_meta sh)
       pure (Right (sid, _shh_id st, updatedMeta, _shh_key st))
 

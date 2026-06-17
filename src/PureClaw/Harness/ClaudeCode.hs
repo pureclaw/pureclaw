@@ -59,7 +59,6 @@ import PureClaw.Session.Kind
   ( HarnessFlavour (..)
   , HarnessSpec (..)
   , SessionKind (..)
-  , TerminalBackend (..)
   , TmuxConfig (..)
   )
 import PureClaw.Session.Types (SessionMeta (..), newSessionId)
@@ -538,7 +537,7 @@ adoptValidated deps reg th sessionsDir session windowName = do
             , _sm_agent             = Nothing
             , _sm_kind              = SkHarness HarnessSpec
                 { _h_flavour   = HClaudeCode
-                , _h_backend   = TbTmux TmuxConfig
+                , _h_tmux      = TmuxConfig
                     { _tc_session = session
                     , _tc_window  = safeName
                     , _tc_pane    = Nothing

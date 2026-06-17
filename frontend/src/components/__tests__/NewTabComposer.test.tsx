@@ -113,7 +113,9 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
 
     expect(screen.getByLabelText('Flavour')).toBeInTheDocument()
-    expect(screen.getByLabelText('Backend')).toBeInTheDocument()
+    // Harnesses always run in a tmux session — there is no Backend selector.
+    expect(screen.queryByLabelText('Backend')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Tmux Session Name')).toBeInTheDocument()
     expect(screen.queryByLabelText('Provider')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Model')).not.toBeInTheDocument()
   })
@@ -169,12 +171,14 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     expect((screen.getByLabelText('Bottom send button') as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('SSH backend with no host disables the bottom send', async () => {
+  it('SSH tool backend with no host disables the bottom send', async () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
-    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'ssh' } })
+    await waitFor(() => {
+      expect((screen.getByLabelText('Model') as HTMLSelectElement).value).toBe('claude-sonnet-4-5')
+    })
+    fireEvent.change(screen.getByLabelText('Tool Backend'), { target: { value: 'ssh' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
     expect((screen.getByLabelText('Bottom send button') as HTMLButtonElement).disabled).toBe(true)
@@ -199,12 +203,14 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     expect((screen.getByLabelText('Bottom send button') as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('container backend with no target disables the bottom send', async () => {
+  it('container tool backend with no target disables the bottom send', async () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
-    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'container' } })
+    await waitFor(() => {
+      expect((screen.getByLabelText('Model') as HTMLSelectElement).value).toBe('claude-sonnet-4-5')
+    })
+    fireEvent.change(screen.getByLabelText('Tool Backend'), { target: { value: 'container' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
     expect((screen.getByLabelText('Bottom send button') as HTMLButtonElement).disabled).toBe(true)
@@ -272,17 +278,18 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     )
   })
 
-  it('tmux backend has a Session Name field but no Window field (window is auto-assigned)', async () => {
+  it('New Harness always uses tmux: shows Tmux Session Name, no Backend selector, no Window field', async () => {
     vi.stubGlobal('fetch', defaultMockFetch())
     render(<ComposerHarness onSubmit={onSubmit} />)
 
     fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
-    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
 
-    // Session Name is still there...
-    expect(screen.getByLabelText('Session Name')).toBeInTheDocument()
-    // ...but the Window input has been removed — the backend auto-assigns
-    // a canonical window name, so the user never picks one.
+    // No Backend choice — harnesses always run in tmux.
+    expect(screen.queryByLabelText('Backend')).not.toBeInTheDocument()
+    // The tmux session field is present, labelled to make the tmux-ness clear.
+    expect(screen.getByLabelText('Tmux Session Name')).toBeInTheDocument()
+    // The Window input is still absent — the backend auto-assigns a
+    // canonical window name, so the user never picks one.
     expect(screen.queryByLabelText('Window')).not.toBeInTheDocument()
   })
 
@@ -291,8 +298,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     render(<ComposerHarness onSubmit={onSubmit} />)
 
     fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
-    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
-    fireEvent.change(screen.getByLabelText('Session Name'), { target: { value: 'main' } })
+    fireEvent.change(screen.getByLabelText('Tmux Session Name'), { target: { value: 'main' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
     fireEvent.click(screen.getByLabelText('Bottom send button'))
@@ -304,10 +310,10 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
           session_kind: {
             tag: 'harness',
             flavour: 'claude-code',
-            // window is emitted unconditionally for tmux (auto-assigned
-            // server-side, ignored for placement) so the required
-            // `o .: "window"` backend decode still succeeds.
-            backend: { tag: 'tmux', session: 'main', window: '' },
+            // Harness tmux coords live under `tmux` (a flat TmuxConfig), not
+            // `backend`. window is emitted unconditionally (auto-assigned
+            // server-side) so the required `o .: "window"` decode still succeeds.
+            tmux: { session: 'main', window: '' },
             args: [],
           },
         },
@@ -321,7 +327,6 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     render(<ComposerHarness onSubmit={onSubmit} />)
 
     fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
-    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
 
     fireEvent.change(screen.getByLabelText('Bottom message input'), { target: { value: 'hi' } })
     fireEvent.click(screen.getByLabelText('Bottom send button'))
@@ -333,7 +338,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
           session_kind: {
             tag: 'harness',
             flavour: 'claude-code',
-            backend: { tag: 'tmux', window: '' },
+            tmux: { window: '' },
             args: [],
           },
         },
@@ -347,8 +352,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     render(<ComposerHarness onSubmit={onSubmit} />)
 
     fireEvent.click(screen.getByRole('radio', { name: 'New Harness' }))
-    fireEvent.change(screen.getByLabelText('Backend'), { target: { value: 'tmux' } })
-    fireEvent.change(screen.getByLabelText('Session Name'), { target: { value: 'main' } })
+    fireEvent.change(screen.getByLabelText('Tmux Session Name'), { target: { value: 'main' } })
     fireEvent.change(screen.getByLabelText('Working Directory'), {
       target: { value: '/home/me/project' },
     })
@@ -367,7 +371,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
             // `working_dir` would be silently dropped to Nothing and the harness
             // would start in the default directory.
             cwd: '/home/me/project',
-            backend: { tag: 'tmux', session: 'main', window: '' },
+            tmux: { session: 'main', window: '' },
             args: [],
           },
         },
