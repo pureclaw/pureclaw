@@ -248,7 +248,7 @@ spec = do
           (ProviderId "anthropic") (ModelId "claude-sonnet-4-5") Nothing))))
       containsKindStr "harness"
         (encodeKind (Tab.TkSession (SK.SkHarness (SK.HarnessSpec
-          SK.HClaudeCode SK.TbLocal Nothing [] Nothing Nothing Nothing))))
+          SK.HClaudeCode (SK.TmuxConfig "" "" Nothing) Nothing [] Nothing Nothing Nothing))))
       containsKindStr "shell"
         (encodeKind (Tab.TkRawShell SK.TbLocal))
       containsKindStr "ssh"

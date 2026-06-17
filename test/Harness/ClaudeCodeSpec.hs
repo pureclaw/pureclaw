@@ -778,11 +778,9 @@ spec = do
           [meta] -> case _sm_kind meta of
             SkHarness hs -> do
               _h_harnessId hs `shouldBe` Just hid
-              case _h_backend hs of
-                TbTmux tc -> do
-                  _tc_session tc `shouldBe` adoptableSession
-                  _tc_window tc  `shouldBe` safeName
-                other -> expectationFailure ("expected TbTmux backend, got " <> show other)
+              let tc = _h_tmux hs
+              _tc_session tc `shouldBe` adoptableSession
+              _tc_window tc  `shouldBe` safeName
             other -> expectationFailure ("expected SkHarness kind, got " <> show other)
           other -> expectationFailure ("expected exactly one session.json, got " <> show (length other))
 

@@ -310,10 +310,10 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
           session_kind: {
             tag: 'harness',
             flavour: 'claude-code',
-            // window is emitted unconditionally for tmux (auto-assigned
-            // server-side, ignored for placement) so the required
-            // `o .: "window"` backend decode still succeeds.
-            backend: { tag: 'tmux', session: 'main', window: '' },
+            // Harness tmux coords live under `tmux` (a flat TmuxConfig), not
+            // `backend`. window is emitted unconditionally (auto-assigned
+            // server-side) so the required `o .: "window"` decode still succeeds.
+            tmux: { session: 'main', window: '' },
             args: [],
           },
         },
@@ -338,7 +338,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
           session_kind: {
             tag: 'harness',
             flavour: 'claude-code',
-            backend: { tag: 'tmux', window: '' },
+            tmux: { window: '' },
             args: [],
           },
         },
@@ -371,7 +371,7 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
             // `working_dir` would be silently dropped to Nothing and the harness
             // would start in the default directory.
             cwd: '/home/me/project',
-            backend: { tag: 'tmux', session: 'main', window: '' },
+            tmux: { session: 'main', window: '' },
             args: [],
           },
         },

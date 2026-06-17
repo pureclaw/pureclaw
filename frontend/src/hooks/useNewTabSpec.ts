@@ -280,14 +280,20 @@ export function useNewTabSpec(): NewTabSpec {
       if (agent.trim()) sessionKind.agent = agent.trim()
       return { kind: { tag: 'session', session_kind: sessionKind } }
     }
-    // kind === 'harness'. Harnesses always run in a tmux session — the
-    // composer offers no backend choice, so the payload is hard-wired to
-    // tmux (the session name, if any, comes from backendConfig.session).
+    // kind === 'harness'. Harnesses always run in a tmux session — the composer
+    // offers no backend choice. The tmux coordinates live under the `tmux` key
+    // (a flat TmuxConfig: session + window), distinct from a provider's `backend`
+    // (the tool-call execution environment). `window` is sent unconditionally
+    // (the backend's TmuxConfig decode requires it); it is auto-assigned
+    // server-side, so '' is fine. `session` is omitted when blank (defaults to
+    // "pureclaw" at spawn).
     const effectiveFlavour = flavour === 'custom' ? customBinary.trim() : flavour
+    const tmux: Record<string, unknown> = { window: backendConfig.window ?? '' }
+    if (backendConfig.session) tmux.session = backendConfig.session
     const sessionKind: Record<string, unknown> = {
       tag: 'harness',
       flavour: effectiveFlavour,
-      backend: buildBackendPayload('tmux', backendConfig),
+      tmux,
       args: parseArgs(extraArgs),
     }
     // Field name must be `cwd` — the backend's FromJSON HarnessSpec

@@ -62,7 +62,7 @@ import PureClaw.Core.Types (SessionId)
 import PureClaw.Session.Kind
   ( HarnessFlavour (..)
   , HarnessSpec (..)
-  , TerminalBackend (..)
+  , TmuxConfig (..)
   , fixedFlavourLookup
   )
 import PureClaw.Tabs
@@ -598,9 +598,10 @@ cmdTabNew ctx rest = case kindKeyword of
         Right newRef -> bindNewTab ctx newRef "new tab"
 
 -- | @\/tab new harness [\<flavour\>]@: build a default 'HarnessSpec' (flavour
--- from the optional argument, defaulting to @claude-code@; local backend; no
--- cwd\/args\/ids) and spawn it through '_td_spawnHarness'. On success bind the
--- returned 'TabRef' into a new tab; on failure emit the error.
+-- from the optional argument, defaulting to @claude-code@; empty tmux coords —
+-- the spawn layer assigns the real session\/window; no cwd\/args\/ids) and spawn
+-- it through '_td_spawnHarness'. On success bind the returned 'TabRef' into a
+-- new tab; on failure emit the error.
 spawnHarness :: Ctx -> [Text] -> IO ()
 spawnHarness ctx flavourArgs = do
   result <- _td_spawnHarness (_ctx_deps ctx) spec
@@ -613,7 +614,7 @@ spawnHarness ctx flavourArgs = do
       []      -> HClaudeCode
     spec = HarnessSpec
       { _h_flavour           = flavour
-      , _h_backend           = TbLocal
+      , _h_tmux              = TmuxConfig "" "" Nothing
       , _h_cwd               = Nothing
       , _h_args              = []
       , _h_harnessId         = Nothing

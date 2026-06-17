@@ -182,7 +182,7 @@ defaultProviderSpec = ProviderSpec
 defaultHarnessSpec :: HarnessSpec
 defaultHarnessSpec = HarnessSpec
   { _h_flavour   = HClaudeCode
-  , _h_backend   = TbLocal
+  , _h_tmux      = TmuxConfig "" "" Nothing
   , _h_cwd       = Nothing
   , _h_args      = []
   , _h_harnessId = Nothing

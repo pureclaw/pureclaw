@@ -2117,7 +2117,7 @@ executeSessionCommand env sub ctx = do
             Just _ -> createSession env ctx agentName
                         (SessionTypes.SkHarness (SessionTypes.HarnessSpec
                           (SessionTypes.fixedFlavourLookup name)
-                          (SessionTypes.TbTmux (SessionTypes.TmuxConfig name name Nothing))
+                          (SessionTypes.TmuxConfig name name Nothing)
                           Nothing [] Nothing Nothing Nothing))
         _ -> createSession env ctx agentName
                (SessionTypes.SkProvider (SessionTypes.ProviderSpec
