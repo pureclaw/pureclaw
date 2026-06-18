@@ -532,13 +532,43 @@ describe('NewTabComposer (presentation) + useNewTabSpec (state)', () => {
     const scanCall = mockFetch.mock.calls.find((c) => c[0] === '/api/discovery/scan')!
     expect((scanCall[1] as RequestInit).method).toBe('POST')
 
-    // Options reflect the returned windows (session:windowName).
+    // Options reflect the returned windows as "session:index name" — the index
+    // makes the label unique within a session (window names alone repeat).
     const select = await screen.findByLabelText('Detected Session') as HTMLSelectElement
     await waitFor(() => {
-      expect(screen.getByRole('option', { name: 'work:claude' })).toBeInTheDocument()
+      expect(screen.getByRole('option', { name: 'work:0 claude' })).toBeInTheDocument()
     })
-    expect(screen.getByRole('option', { name: 'side:codex' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'side:1 codex' })).toBeInTheDocument()
     expect(select).toBeInTheDocument()
+  })
+
+  it('disambiguates same-named windows in one session by their index (label + distinct option values)', async () => {
+    // tmux window names default to the running command and repeat. Two windows
+    // in session "work" are both named "zsh"; the picker must still tell them
+    // apart — distinct labels (by index) AND distinct option values so a click
+    // selects the intended one.
+    vi.stubGlobal('fetch', attachMockFetch([
+      { session: 'work', window_name: 'zsh', window_index: 0, pane_pid: 111 },
+      { session: 'work', window_name: 'zsh', window_index: 1, pane_pid: 222 },
+    ]))
+    render(<ComposerHarness onSubmit={onSubmit} />)
+    fireEvent.click(screen.getByRole('radio', { name: 'Existing Harness' }))
+
+    const select = await screen.findByLabelText('Detected Session') as HTMLSelectElement
+    const opt0 = await screen.findByRole('option', { name: 'work:0 zsh' }) as HTMLOptionElement
+    const opt1 = await screen.findByRole('option', { name: 'work:1 zsh' }) as HTMLOptionElement
+    expect(opt0).toBeInTheDocument()
+    expect(opt1).toBeInTheDocument()
+    // The two same-named windows MUST carry distinct option values, else the
+    // <select> cannot represent which one is chosen.
+    expect(opt0.value).not.toBe(opt1.value)
+
+    // Selecting the SECOND "zsh" (index 1) round-trips through the spec by index
+    // and the dropdown reflects that exact option — not the first name match.
+    fireEvent.change(select, { target: { value: opt1.value } })
+    await waitFor(() => {
+      expect(select.value).toBe(opt1.value)
+    })
   })
 
   it('W3.3: a manual-entry fallback lets the user specify a session/window not in the dropdown', async () => {

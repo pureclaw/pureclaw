@@ -785,7 +785,9 @@ export default function App() {
       if (composerSpec.kind === 'attach') {
         const session = composerSpec.attachSession.trim()
         const targetWindow = composerSpec.attachWindow.trim()
-        const result = await adoptWindow(session, targetWindow)
+        // The window index (unique within a session) disambiguates same-named
+        // windows; null for manual entry, where the server matches by name.
+        const result = await adoptWindow(session, targetWindow, composerSpec.attachWindowIndex)
         if (!result.ok) {
           setAttachError(
             'Could not attach to that session — adoption was denied (a headless run can’t confirm consent) or the window no longer exists. Please try again.',

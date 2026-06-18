@@ -628,7 +628,7 @@ spec = do
               , _ccd_harnessPidOf = \_ _ -> pure Nothing  -- non-flavour window: OK
               , _ccd_captureNamed = \_ _ _ -> pure (Just backlog)
               }
-        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-3"
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing "win-3"
         case result of
           Left e -> expectationFailure ("adopt failed: " <> show e)
           Right (hid, _hh) -> do
@@ -679,7 +679,7 @@ spec = do
               , _ccd_harnessPidOf = \_ _ -> error "harnessPidOf must not run without a shell PID"
               , _ccd_captureNamed = \_ w _ -> modifyIORef' captureTgts (w :) >> pure (Just "")
               }
-        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken dotted
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing dotted
         case result of
           Left e -> expectationFailure ("adopt of dotted window failed: " <> show e)
           Right _ -> do
@@ -695,6 +695,53 @@ spec = do
             let allTargets = mTs <> pTs <> cTs
             allTargets `shouldSatisfy` all (== safeName)
             allTargets `shouldSatisfy` notElem dotted
+
+    it "adopts the window at the GIVEN INDEX even when another unmarked window shares its name (disambiguation)" $
+      withSystemTempDirectory "pcl-adopt-byindex" $ \tmp -> do
+        -- tmux window names default to the running command and REPEAT, so a name
+        -- is not unique within a session. The picker therefore supplies the
+        -- window INDEX (unique). Two unmarked windows are both named "zsh"; we
+        -- adopt index 2 and must rename INDEX 2 — not the first name match (1).
+        reg <- Reg.newRegistry
+        renamesRef <- newIORef ([] :: [(Text, Text, Text)])  -- (session, target, newName)
+        let safeName = "adopted-" <> T.take 8 (Reg.harnessIdToText fixedId)
+            rows = [ adoptableRow 1 "zsh", adoptableRow 2 "zsh" ]
+            deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure rows
+              , _ccd_renameWindow = \s t n -> modifyIORef' renamesRef ((s, t, n) :)
+              , _ccd_panePidOf    = \_ _ -> pure (Just 4242)
+              , _ccd_harnessPidOf = \_ _ -> pure Nothing
+              , _ccd_captureNamed = \_ _ _ -> pure (Just "")
+              }
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken (Just 2) "zsh"
+        case result of
+          Left e  -> expectationFailure ("adopt by index failed: " <> show e)
+          Right _ -> do
+            -- The rename targets INDEX "2" (the picked one), NOT the first name
+            -- match at index 1. With name-only matching this would be "1".
+            renames <- readIORef renamesRef
+            renames `shouldBe` [(adoptableSession, "2", safeName)]
+
+    it "refuses (NO mutation) when the given INDEX has no unmarked match, and names the index in the diagnostic" $
+      withSystemTempDirectory "pcl-adopt-badindex" $ \tmp -> do
+        reg <- Reg.newRegistry
+        renamesRef <- newIORef ([] :: [(Text, Text, Text)])
+        let -- index 0 is the only unmarked window; the picker asked for index 9.
+            rows = [ adoptableRow 0 "zsh" ]
+            deps = okDeps
+              { _ccd_sweep        = \_ -> pure rows
+              , _ccd_renameWindow = \s t n -> modifyIORef' renamesRef ((s, t, n) :)
+              }
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken (Just 9) "zsh"
+        case result of
+          Right _ -> expectationFailure "expected Left when no window has the given index"
+          Left (HarnessTmuxNotAvailable msg) -> do
+            T.isInfixOf "9" msg `shouldBe` True
+            T.isInfixOf adoptableSession msg `shouldBe` True
+          Left other -> expectationFailure
+            ("expected HarnessTmuxNotAvailable, got " <> show other)
+        readIORef renamesRef >>= (`shouldBe` [])
 
     it "returns Left HarnessTmuxNotAvailable when no unmarked window matches — and performs NO mutation" $
       withSystemTempDirectory "pcl-adopt-missing" $ \tmp -> do
@@ -712,7 +759,7 @@ spec = do
               , _ccd_renameWindow = \s t n -> modifyIORef' renamesRef ((s, t, n) :)
               , _ccd_setMarker    = \s w u -> modifyIORef' markersRef ((s, w, u) :)
               }
-        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-gone"
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing "win-gone"
         case result of
           Right _ -> expectationFailure "expected Left when the window is not found"
           Left err -> case err of
@@ -749,7 +796,7 @@ spec = do
               , _ccd_captureNamed = \_ _ _ -> pure (Just fullScreen)
               }
         Right (_, hh) <-
-          adoptExternalWindow deps reg transcript tmp mkToken "win-baseline"
+          adoptExternalWindow deps reg transcript tmp mkToken Nothing "win-baseline"
         out <- _hh_receive hh
         -- The pre-adoption backlog (incl. its SECRET marker) is excluded.
         TE.decodeUtf8Lenient out `shouldNotSatisfy` T.isInfixOf "SECRET"
@@ -770,7 +817,7 @@ spec = do
               , _ccd_captureNamed = \_ _ _ -> pure (Just "line\n")
               }
         Right (hid, _) <-
-          adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-sess"
+          adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing "win-sess"
         -- Exactly one session dir was created; its session.json loads and
         -- carries the harness id + adopted tmux coordinates (SAFE renamed name).
         metas <- loadAllSessionMetas tmp
@@ -793,7 +840,7 @@ spec = do
               , _ccd_panePidOf    = \_ _ -> pure (Just 7)
               , _ccd_captureNamed = \_ _ _ -> pure (Just "line\n")
               }
-        _ <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken "win-sess"
+        _ <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing "win-sess"
         -- handleSend treats a session as existing iff transcript.jsonl is present;
         -- the spawn path creates it via mkFileTranscriptHandle, so adopt must too.
         sessionDirs <- listDirectory tmp
@@ -881,7 +928,7 @@ spec = do
             token = case authorizeAdoption ConsentInteractive adoptable of
               Right tok -> tok
               Left e    -> error ("test setup: gate denied: " <> show e)
-        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token "-rm-rf"
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token Nothing "-rm-rf"
         case result of
           Right _   -> expectationFailure "expected adopt to refuse an invalid window name"
           -- Force the refusal value: it is a HarnessNotAuthorized carrying the
@@ -917,7 +964,7 @@ spec = do
             token = case authorizeAdoption ConsentInteractive adoptable of
               Right tok -> tok
               Left e    -> error ("test setup: gate denied: " <> show e)
-        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token "ok-window"
+        result <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp token Nothing "ok-window"
         case result of
           Right _ -> expectationFailure "expected adopt to refuse an invalid session name"
           Left _  -> pure ()

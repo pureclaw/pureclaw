@@ -840,7 +840,7 @@ spec = do
       adoptCalls <- newIORef (0 :: Int)
       let env = env0
             { _fe_consentChannel = ConsentHeadless  -- the ONLY denial cause
-            , _fe_adopt          = \_ _ -> do
+            , _fe_adopt          = \_ _ _ -> do
                 modifyIORef' adoptCalls (+ 1)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
@@ -861,7 +861,7 @@ spec = do
       adoptCalls <- newIORef (0 :: Int)
       let env = env0
             { _fe_consentChannel = ConsentInteractive
-            , _fe_adopt          = \_ _ -> do
+            , _fe_adopt          = \_ _ _ -> do
                 modifyIORef' adoptCalls (+ 1)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
@@ -878,7 +878,7 @@ spec = do
       adoptCalls <- newIORef (0 :: Int)
       let env = env0
             { _fe_consentChannel = ConsentWeb
-            , _fe_adopt          = \_ _ -> do
+            , _fe_adopt          = \_ _ _ -> do
                 modifyIORef' adoptCalls (+ 1)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
@@ -892,7 +892,7 @@ spec = do
       let hid = mustParseHid "11111111-1111-4111-8111-111111111111"
           env = env0
             { _fe_consentChannel = ConsentWeb
-            , _fe_adopt          = \_ _ -> do
+            , _fe_adopt          = \_ _ _ -> do
                 -- Mirror the real adopt mechanism: register an OriginAdopted entry
                 -- carrying the created PureClaw session id.
                 Registry.insertEntry (_fe_harnessRegistry env0)
@@ -910,7 +910,7 @@ spec = do
       adoptCalls <- newIORef (0 :: Int)
       let env = env0
             { _fe_consentChannel = ConsentInteractive
-            , _fe_adopt          = \_ _ -> do
+            , _fe_adopt          = \_ _ _ -> do
                 modifyIORef' adoptCalls (+ 1)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
@@ -930,7 +930,7 @@ spec = do
       gotWindow <- newIORef Nothing
       let env = env0
             { _fe_consentChannel = ConsentInteractive
-            , _fe_adopt          = \(_tok :: AdoptedHarness) w -> do
+            , _fe_adopt          = \(_tok :: AdoptedHarness) _idx w -> do
                 writeIORef gotWindow (Just w)
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
@@ -938,11 +938,46 @@ spec = do
       st `shouldBe` HTTP.status200
       readIORef gotWindow `shouldReturn` Just "win-7"
 
+    it "forwards the window_index (unique within a session) to _fe_adopt when the picker supplies it" $ do
+      -- The detected-windows picker disambiguates same-named windows by INDEX.
+      -- The endpoint must hand that index to the adopt mechanism so it targets
+      -- the picked window, not the first name match.
+      env0 <- mkTestFrontendEnv
+      gotIndex <- newIORef (Just (-1))  -- sentinel distinct from Nothing / Just 2
+      let env = env0
+            { _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ mIdx _ -> do
+                writeIORef gotIndex mIdx
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+          body = Aeson.encode $ object
+            [ "session"           .= ("scratch" :: Text)
+            , "window"            .= ("zsh" :: Text)
+            , "window_index"      .= (2 :: Int)
+            , "consent_confirmed" .= True
+            ]
+      (st, _) <- postJSON env ["api", "adopt"] body
+      st `shouldBe` HTTP.status200
+      readIORef gotIndex `shouldReturn` Just 2
+
+    it "passes Nothing to _fe_adopt when no window_index is supplied (manual entry → name fallback)" $ do
+      env0 <- mkTestFrontendEnv
+      gotIndex <- newIORef (Just 7)  -- sentinel: must be overwritten with Nothing
+      let env = env0
+            { _fe_consentChannel = ConsentInteractive
+            , _fe_adopt          = \_ mIdx _ -> do
+                writeIORef gotIndex mIdx
+                pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
+            }
+      (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "zsh")
+      st `shouldBe` HTTP.status200
+      readIORef gotIndex `shouldReturn` Nothing
+
     it "syncs the legacy _fe_harnesses map on a successful adopt (D-ADD-2)" $ do
       env0 <- mkTestFrontendEnv
       let env = env0
             { _fe_consentChannel = ConsentInteractive
-            , _fe_adopt          = \_ _ ->
+            , _fe_adopt          = \_ _ _ ->
                 pure (Right (mustParseHid "11111111-1111-4111-8111-111111111111", mkNoOpHarnessHandle))
             }
       (st, _) <- postJSON env ["api", "adopt"] (adoptBody "scratch" "win-9")
@@ -959,7 +994,7 @@ spec = do
           reg = _fe_harnessRegistry env0
           env = env0
             { _fe_consentChannel = ConsentInteractive
-            , _fe_adopt          = \tok w -> do
+            , _fe_adopt          = \tok _idx w -> do
                 Registry.insertEntry reg
                   ((baseEntry hid w (Just mkNoOpHarnessHandle))
                     { Registry._he_session    = "scratch"
@@ -3700,7 +3735,7 @@ mkTestFrontendEnvWith maxTabs = do
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
     , _fe_consentChannel = ConsentHeadless  -- fail-closed default; adopt tests override
-    , _fe_adopt        = \_ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
+    , _fe_adopt        = \_ _ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ()) (\_ _ _ -> pure ())
     , _fe_killWindow   = \_ _ -> pure ()
     , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"

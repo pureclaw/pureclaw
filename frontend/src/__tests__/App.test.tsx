@@ -43,10 +43,11 @@ const { dismissSpy, acknowledgeSpy, adoptSpy, scanSpy, destroySpy } = vi.hoisted
 
 // Mutable overrides for the useNewTabSpec mock so a test can drive the
 // composer kind (e.g. 'attach') and the attach session/window selection.
-const specOverride: { kind: string; attachSession: string; attachWindow: string } = {
+const specOverride: { kind: string; attachSession: string; attachWindow: string; attachWindowIndex: number | null } = {
   kind: 'provider',
   attachSession: '',
   attachWindow: '',
+  attachWindowIndex: null,
 }
 
 vi.mock('../lib/streamClient', () => ({
@@ -135,8 +136,10 @@ vi.mock('../hooks/useNewTabSpec', () => ({
     // Attach (Existing Harness) fields.
     attachSession: specOverride.attachSession,
     attachWindow: specOverride.attachWindow,
+    attachWindowIndex: specOverride.attachWindowIndex,
     setAttachSession: vi.fn(),
     setAttachWindow: vi.fn(),
+    setAttachWindowIndex: vi.fn(),
     attachManual: false,
     setAttachManual: vi.fn(),
     discoverableWindows: [],
@@ -234,6 +237,7 @@ beforeEach(() => {
   specOverride.kind = 'provider'
   specOverride.attachSession = ''
   specOverride.attachWindow = ''
+  specOverride.attachWindowIndex = null
   window.history.replaceState(null, '', '/')
   // jsdom has no layout; ChatArea scrolls refs into view.
   HTMLElement.prototype.scrollIntoView = vi.fn() as unknown as HTMLElement['scrollIntoView']
@@ -731,7 +735,7 @@ describe('App harness controls view (RH/HC)', () => {
 })
 
 describe('App Existing-Harness (attach) compose flow', () => {
-  it('W3.4: submitting "Existing Harness" calls adoptWindow(session, window) and does NOT POST /api/tabs/new', async () => {
+  it('W3.4: submitting "Existing Harness" calls adoptWindow(session, window, windowIndex) and does NOT POST /api/tabs/new', async () => {
     const fetchMock = mockFetchOk('unused')
     specOverride.kind = 'attach'
     specOverride.attachSession = 'work'
@@ -748,7 +752,7 @@ describe('App Existing-Harness (attach) compose flow', () => {
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => {
-      expect(adoptSpy).toHaveBeenCalledWith('work', 'claude')
+      expect(adoptSpy).toHaveBeenCalledWith('work', 'claude', null)
     })
     // Adoption does NOT go through the tab-create endpoint.
     expect(fetchMock.mock.calls.some((c) => c[0] === '/api/tabs/new')).toBe(false)
@@ -784,7 +788,7 @@ describe('App Existing-Harness (attach) compose flow', () => {
     fireEvent.change(input, { target: { value: 'hello harness' } })
     await act(async () => { fireEvent.click(utils.getByRole('button', { name: /^Send/ })) })
     await waitFor(() => {
-      expect(adoptSpy).toHaveBeenCalledWith('work', 'claude')
+      expect(adoptSpy).toHaveBeenCalledWith('work', 'claude', null)
       // The typed first message is sent to the adopted harness's session.
       expect(fetchMock.mock.calls.some((c) =>
         c[0] === '/api/sessions/sess-adopt-1/send'
