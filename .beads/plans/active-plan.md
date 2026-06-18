@@ -1,7 +1,7 @@
 # Active Plan
 <!-- approved: 2026-06-16 (design-review 5/5; plan-review 3/3) -->
 <!-- user-approved: true (execution: subagent-driven) -->
-<!-- status: in-progress -->
+<!-- status: abandoned (2026-06-18: superseded by work on issue #61; resumable from branch feat/web-frontend-slash-dispatch) -->
 
 ## Canonical plan
 docs/superpowers/plans/2026-06-16-unify-tab-and-session-name.md
