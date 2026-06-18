@@ -71,12 +71,26 @@ spec = do
 
     it "newWindowNamedArgs creates a named window without a workdir" $ do
       let argv = newWindowNamedArgs "pureclaw" "claude-code-x" Nothing "the-cmd"
-      argv `shouldBe` ["new-window", "-t", "pureclaw", "-n", "claude-code-x", "the-cmd"]
+      argv `shouldBe` ["new-window", "-t", "pureclaw:", "-n", "claude-code-x", "the-cmd"]
 
     it "newWindowNamedArgs honors an optional working directory" $ do
       let argv = newWindowNamedArgs "pureclaw" "claude-code-x" (Just "/tmp/work") "the-cmd"
       argv `shouldBe`
-        ["new-window", "-t", "pureclaw", "-n", "claude-code-x", "-c", "/tmp/work", "the-cmd"]
+        ["new-window", "-t", "pureclaw:", "-n", "claude-code-x", "-c", "/tmp/work", "the-cmd"]
+
+    -- Regression: new-window's @-t@ is an INSERTION-WINDOW target, not a
+    -- session target. A BARE session name (@-t pureclaw@) is resolved by tmux
+    -- as a window-name match in the CURRENT session first — so if the user has
+    -- a window named @pureclaw@ in their attached session, the launch lands on
+    -- that window's index ("create window failed: index 0 in use") and the
+    -- harness silently never starts. The trailing colon (@-t pureclaw:@) pins
+    -- the target to the SESSION named @pureclaw@, so tmux allocates the next
+    -- free window index there regardless of same-named windows elsewhere.
+    it "newWindowNamedArgs targets the SESSION (trailing colon), not a bare name" $ do
+      let argv = newWindowNamedArgs "pureclaw" "claude-code-x" Nothing "the-cmd"
+      -- The target must be the session form, never the ambiguous bare name.
+      drop 1 (takeWhile (/= "-n") argv) `shouldBe` ["-t", "pureclaw:"]
+      argv `shouldNotContain` ["-t", "pureclaw"]
 
   -- D6.3 (regression) — the launch path (`cd <dir>` + the stealth-launch
   -- command, in addHarnessWindowNamed / realSendNamed) must STILL EXECUTE: it
@@ -548,6 +562,47 @@ spec = do
           sendToWindowNamed sName wName (BC.pack "echo PURECLAW_NAMED_MARKER")
           out <- captureWindowNamed sName wName 300
           BC.unpack out `shouldContain` "PURECLAW_NAMED_MARKER"
+          stopTmuxSession sName
+
+    -- The existing-session branch must FAIL LOUD: a failing `tmux new-window`
+    -- (here, an absent target session) returns Left rather than swallowing the
+    -- error as success. Previously it returned Right (), so a launch that never
+    -- created a window or ran a command looked successful — leaving a phantom
+    -- registry entry the reconciler later evicts.
+    it "addHarnessWindowNamed surfaces a new-window failure as Left" $ do
+      available <- requireTmux
+      case available of
+        Left _ -> pendingWith "tmux not available on this system"
+        Right () -> do
+          -- TmuxSessionExisted -> the new-window branch; `new-window -t
+          -- '<missing>:'` fails ("can't find session") for an absent session.
+          result <- addHarnessWindowNamed TmuxSessionExisted
+                      "pureclaw-test-absent-session" "claude-code-0" "/bin/echo" [] Nothing
+          result `shouldSatisfy` isLeft
+
+    -- The first harness in a freshly created session reuses window 0; a second
+    -- harness (session now exists) appends window 1. This pins the placement so
+    -- a fresh session does not strand an idle shell in window 0 (regression for
+    -- the dead `name == index` freshness heuristic that always opened window 1).
+    it "reuses window 0 for the first harness, appends for the next" $ do
+      available <- requireTmux
+      case available of
+        Left _ -> pendingWith "tmux not available on this system"
+        Right () -> do
+          let sName = "pureclaw-test-window0-reuse"
+          stopTmuxSession sName
+          -- A long-lived command keeps both windows alive for the assertions
+          -- (the new-window branch closes the window when its command exits).
+          created <- startTmuxSessionStatus sName
+          created `shouldBe` Right TmuxSessionCreated
+          r1 <- addHarnessWindowNamed TmuxSessionCreated sName "claude-code-0" "/bin/sleep" ["30"] Nothing
+          r1 `shouldSatisfy` isRight
+          ws1 <- listSessionWindows sName
+          ws1 `shouldBe` [(0, "claude-code-0")]
+          r2 <- addHarnessWindowNamed TmuxSessionExisted sName "claude-code-1" "/bin/sleep" ["30"] Nothing
+          r2 `shouldSatisfy` isRight
+          ws2 <- listSessionWindows sName
+          ws2 `shouldBe` [(0, "claude-code-0"), (1, "claude-code-1")]
           stopTmuxSession sName
 
     -- D1.6 — harnessPidOf returns Nothing for a bogus shell pid

@@ -87,11 +87,15 @@ data ClaudeCodeDeps = ClaudeCodeDeps
     -- ^ Locate the @claude@ binary (production: @findExecutable \"claude\"@).
   , _ccd_checkTmux    :: IO (Either HarnessError ())
     -- ^ Confirm tmux is available (production: 'requireTmux').
-  , _ccd_addWindow    :: Text -> Text -> FilePath -> [Text] -> Maybe FilePath -> IO (Either HarnessError ())
-    -- ^ Create the harness window: @session windowName binary args workDir@
-    --   (production: 'addHarnessWindowNamed').
-  , _ccd_startSession :: Text -> IO (Either HarnessError ())
-    -- ^ Ensure the tmux session exists (production: 'startTmuxSession').
+  , _ccd_addWindow    :: TmuxSessionStatus -> Text -> Text -> FilePath -> [Text] -> Maybe FilePath -> IO (Either HarnessError ())
+    -- ^ Create the harness window:
+    --   @sessionStatus session windowName binary args workDir@. The status
+    --   (from '_ccd_startSession') tells the window step whether to reuse the
+    --   freshly created session's window 0 or append a new window (production:
+    --   'addHarnessWindowNamed').
+  , _ccd_startSession :: Text -> IO (Either HarnessError TmuxSessionStatus)
+    -- ^ Ensure the tmux session exists, reporting whether it was just created
+    --   or already existed (production: 'startTmuxSessionStatus').
   , _ccd_setMarker    :: Text -> Text -> Text -> IO ()
     -- ^ Stamp the @\@pcl_id@ marker: @session windowName uuidText@
     --   (production: 'setWindowMarker').
@@ -137,7 +141,7 @@ defaultClaudeCodeDeps = ClaudeCodeDeps
   , _ccd_findClaude   = Dir.findExecutable "claude"
   , _ccd_checkTmux    = requireTmux
   , _ccd_addWindow    = addHarnessWindowNamed
-  , _ccd_startSession = startTmuxSession
+  , _ccd_startSession = startTmuxSessionStatus
   , _ccd_setMarker    = setWindowMarker
   , _ccd_renameWindow = renameWindowNamed
   , _ccd_setRemain    = setRemainOnExit
@@ -288,13 +292,16 @@ mkClaudeCodeHarnessWith deps policy th session windowName _windowIdx mWorkDir ex
                 Left cmdErr -> pure (Left (HarnessNotAuthorized cmdErr))
                 Right authorizedCmd -> do
                   let program = getCommandProgram authorizedCmd
-                  -- Step 5: Start tmux session (idempotent)
+                  -- Step 5: Start tmux session (idempotent), learning whether
+                  -- we just created it or it already existed.
                   sessionResult <- _ccd_startSession deps session
                   case sessionResult of
                     Left err -> pure (Left err)
-                    Right () -> do
-                      -- Step 6: Add harness window (named)
-                      windowResult <- _ccd_addWindow deps session windowName program extraArgs mWorkDir
+                    Right sessionStatus -> do
+                      -- Step 6: Add harness window (named). A freshly created
+                      -- session reuses its window 0 so the first harness lands
+                      -- there; an existing session gets a new window.
+                      windowResult <- _ccd_addWindow deps sessionStatus session windowName program extraArgs mWorkDir
                       case windowResult of
                         Left err -> pure (Left err)
                         Right () -> do
