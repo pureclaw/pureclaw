@@ -167,7 +167,10 @@ cycleTurn deps ctx = do
   streamedRef <- Ref.newIORef False
   -- Mirror Loop's @try@ around the stream so a throwing provider does not
   -- bring the turn down. The sink, not @_env_channel@, receives framing.
-  streamResult <- E.try @E.SomeException $
+  -- Catches SYNCHRONOUS provider failures only — async exceptions are
+  -- re-thrown (see 'tryStreamSync') so a tab's '_rt_stop' can actually cancel a
+  -- worker blocked mid-stream.
+  streamResult <- tryStreamSync $
     _turn_stream deps req $ \case
       P.StreamText t   -> Ref.writeIORef streamedRef True >> _turn_emit deps (TurnChunk sid t)
       P.StreamWarning _ -> pure ()      -- non-fatal; logged by prod sink elsewhere
@@ -208,6 +211,24 @@ cycleTurn deps ctx = do
       case mResp of
         Nothing   -> pure ctx        -- no StreamDone captured: stop gracefully
         Just resp -> handleResponse deps ctx resp
+
+-- | Run the provider stream, returning 'Left' for a SYNCHRONOUS provider
+-- failure (so a throwing provider does not bring the turn down — the legacy
+-- behaviour) but RE-THROWING async exceptions.
+--
+-- A catch-all @try \@SomeException@ would also catch 'AsyncCancelled' (it is a
+-- 'SomeException'), so when a tab's '_rt_stop' (@Async.cancel@) throws it to a
+-- worker blocked mid-stream, the catch would swallow it: the worker would loop
+-- on, never terminate, and the canceller's @wait@ would block forever — the
+-- provider-runtime teardown hang (a 6h CI timeout). Re-throwing any
+-- 'E.SomeAsyncException' (which wraps 'AsyncCancelled', 'ThreadKilled', …) lets
+-- cancellation propagate and kill the worker.
+tryStreamSync :: IO a -> IO (Either E.SomeException a)
+tryStreamSync act = do
+  result <- E.try act
+  case result of
+    Left e | Just (E.SomeAsyncException _) <- E.fromException e -> E.throwIO e
+    _ -> pure result
 
 -- | Fold a captured response into the context: append + record the assistant
 -- message, then either finish (no tool calls) or run the calls and re-complete
