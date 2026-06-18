@@ -66,6 +66,7 @@ import PureClaw.Tabs.Runtimes
   )
 import PureClaw.Tabs.Types (TabRef (..))
 import System.Exit (ExitCode (..))
+import System.Timeout (timeout)
 
 -- ---------------------------------------------------------------------------
 -- Shared fakes / helpers
@@ -391,7 +392,31 @@ spec = do
       result <- sendUntilLeft rt 50
       -- Force the Left payload: back-pressure surfaces as 'TabConcurrencyLimit'.
       assertConcurrencyLimit result
-      _rt_stop rt
+      -- Bound teardown so a regression that swallows the cancel surfaces as a
+      -- fast failure here instead of a 6h CI hang (see "stop while mid-stream").
+      stopWithin rt
+
+  describe "mkProviderRuntime — stop while mid-stream" $
+    it "cancels a worker blocked inside the provider stream (no teardown hang)" $ do
+      -- The worker reaches the provider stream and blocks there forever; '_rt_stop'
+      -- must still terminate it. A catch-all @try@ that swallowed the
+      -- 'AsyncCancelled' from '_rt_stop' (Async.cancel) would leave the worker
+      -- alive and the canceller's wait blocked forever — the provider-runtime
+      -- teardown hang. The MVar handshake makes "worker is mid-stream" exact, so
+      -- this is deterministic, not timing-dependent.
+      started <- newEmptyMVar
+      gate    <- newEmptyMVar          -- never filled: the stream blocks forever
+      emits   <- newIORef []
+      records <- newIORef []
+      seedRef <- newIORef (Ctx.emptyContext Nothing)
+      let stallStream _req _cb = putMVar started () >> takeMVar gate
+          deps = mkProvDeps stallStream noExec
+                            (recordingEmit emits) (\m -> modifyIORef' records (++ [m]))
+                            (readIORef seedRef)
+      rt <- mkProviderRuntime deps
+      _rt_send rt "go" `shouldReturn` Right ()
+      takeMVar started                 -- worker is now blocked INSIDE the stream
+      stopWithin rt
 
   describe "mkHarnessRuntime — send queue full" $
     it "returns Left when the writer is stalled and the bounded queue fills" $ do
@@ -423,10 +448,20 @@ spec = do
       recvDone  <- newEmptyMVar
       signalled <- newIORef False
       fh <- mkFakeHarness scriptRef statusRef recvDone signalled
-      emits <- newIORef []
-      let deps = mkHarnDeps (_fh_handle fh) (recordingEmit emits)
+      emits   <- newIORef []
+      emitted <- newEmptyMVar       -- fires once when the drainer EMITS a FullMsg
+      -- Synchronise on the EMIT, not on _hh_receive: the fake signals recvDone
+      -- INSIDE receive, BEFORE the drainer emits the FullMsg, so gating on
+      -- recvDone could race _rt_stop ahead of the emit (cancelling the drainer
+      -- mid-cycle -> "[] does not contain [\"out\"]"). Gating on the emit is exact.
+      let recordingEmitThenSignal r ev = do
+            recordingEmit emits r ev
+            case ev of
+              FullMsg _ _ -> void (tryPutMVar emitted ())
+              _           -> pure ()
+          deps = mkHarnDeps (_fh_handle fh) recordingEmitThenSignal
       rt <- mkHarnessRuntime deps
-      takeMVar recvDone             -- drainer consumed the scripted output
+      takeMVar emitted              -- drainer has emitted the FullMsg
       sendR <- _rt_send rt "cmd"
       sendR `shouldSatisfy` isRight
       forwarded <- takeMVar (_fh_sendDone fh)  -- block until writer forwarded it
@@ -499,3 +534,12 @@ assertConcurrencyLimit = \case
     expectationFailure ("expected TabConcurrencyLimit, got " <> show other)
   Right ()                         ->
     expectationFailure "expected Left (back-pressure), got Right ()"
+
+-- | Stop a runtime, asserting teardown COMPLETES within a generous bound. A
+-- runtime whose worker swallows the cancel never terminates, so '_rt_stop'
+-- (Async.cancel) would block forever; the timeout converts that regression into
+-- a fast, clear test failure instead of a multi-hour CI hang.
+stopWithin :: Runtime -> Expectation
+stopWithin rt = do
+  done <- timeout 5000000 (_rt_stop rt)   -- 5s; teardown is otherwise instant
+  done `shouldBe` Just ()
