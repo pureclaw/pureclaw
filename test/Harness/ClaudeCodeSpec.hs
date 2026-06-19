@@ -441,14 +441,17 @@ spec = do
           hasUnsafeFlag argv `shouldBe` True
 
   describe "response extraction (pure)" $ do
-    it "isIdle is True when the prompt is present and no busy markers" $
-      isIdle "some text \x276F " `shouldBe` True
+    -- isIdle is now defined via the observer (classifyClaude): HasIdle iff
+    -- the screen has no working or approval lines (Task 8 redefinition).
+    it "isIdle is True for a bare-prompt idle frame" $
+      isIdle "\x276F" `shouldBe` True
 
-    it "isIdle is False while Thinking" $
-      isIdle "\x276F Thinking..." `shouldBe` False
+    it "isIdle is False for a spinner/working frame" $
+      -- "✶ …" is a working line: spinner glyph ✶ (U+2736) + "…"
+      isIdle "\x2736 \x2026" `shouldBe` False
 
-    it "isIdle is False without the prompt glyph" $
-      isIdle "no prompt here" `shouldBe` False
+    it "isIdle is False for an approval/needs-input frame" $
+      isIdle "Do you want to proceed?" `shouldBe` False
 
     it "isResponseMarker recognises the ⏺ and ⬤ markers" $ do
       isResponseMarker "\x23FA hello" `shouldBe` True

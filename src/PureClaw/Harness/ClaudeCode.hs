@@ -791,14 +791,11 @@ harnessStop deps reg hid = do
 -- Response extraction (pure)
 -- ---------------------------------------------------------------------------
 
--- | Check if Claude Code is idle (showing prompt, not busy).
+-- | Idle iff the flavour observer classifies the screen as settled (replaces
+-- the stale ❯\/⠋ heuristic; the input box ❯ is always present, so it
+-- cannot mean idle on its own).
 isIdle :: Text -> Bool
-isIdle screen =
-  let hasPrompt = T.isInfixOf "\x276F" screen   -- ❯
-      isBusy    = T.isInfixOf "\x280B" screen    -- ⠋ (spinner)
-                || T.isInfixOf "Thinking" screen
-                || T.isInfixOf "Running" screen
-  in hasPrompt && not isBusy
+isIdle screen = Obs._ho_classify Obs.claudeObserver screen == Obs.HasIdle
 
 -- | Drop the first @n@ scrollback lines from a raw capture (B3 baseline
 -- mechanism). The baseline is the number of pre-existing lines to EXCLUDE.
