@@ -424,6 +424,9 @@ test-suite pureclaw-test
     -- Shared test AgentEnv builder
     Support.AgentEnv
     Support.AgentEnvSpec
+    -- Global test-home isolation (keeps tests out of the real ~/.pureclaw)
+    Support.Isolation
+    Support.IsolationSpec
   hs-source-dirs:   test
   build-tool-depends:
     pureclaw:pureclaw

@@ -147,6 +147,8 @@ import qualified Routing.TabDispatchSpec
 import qualified Tabs.WiringSpec
 -- Shared test AgentEnv builder
 import qualified Support.AgentEnvSpec
+-- Global test-home isolation (keeps tests out of the real ~/.pureclaw)
+import qualified Support.IsolationSpec
 -- WU1 (live transcript streaming)
 import qualified Frontend.StreamBrokerSpec
 -- WU2 (broadcasting transcript decorator)
@@ -309,6 +311,8 @@ main = hspec $ do
   describe "Tabs.Wiring"          Tabs.WiringSpec.spec
   -- Shared test AgentEnv builder
   describe "Support.AgentEnv"     Support.AgentEnvSpec.spec
+  -- Global test-home isolation (keeps tests out of the real ~/.pureclaw)
+  describe "Support.Isolation"    Support.IsolationSpec.spec
   -- WU1 (live transcript streaming)
   describe "Frontend.StreamBroker" Frontend.StreamBrokerSpec.spec
   -- WU2 (broadcasting transcript decorator)
