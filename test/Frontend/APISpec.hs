@@ -28,6 +28,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import PureClaw.Agent.AgentDef (mkAgentName, unAgentName)
+import PureClaw.CLI.Config (getPureclawDir)
 import PureClaw.Core.Types (ChannelKind (..), ConversationId (..), ModelId (..), SessionId (..), ToolCallId (..), UserId (..), mkMessageSource)
 import PureClaw.Frontend.API
 import PureClaw.Frontend.StreamBroker
@@ -3731,6 +3732,9 @@ mkTestFrontendEnvWith maxTabs = do
   cursorsRef  <- newIORef emptyCursors
   exec        <- newExec
   agentEnv    <- mkTestAgentEnv
+  -- Derive storage dirs from the isolated test home (see Support.Isolation)
+  -- so they live under the disposable /tmp tree and never leak across runs.
+  pureclawDir <- getPureclawDir
   pure FrontendEnv
     { _fe_harnesses    = harnessRef
     , _fe_harnessRegistry = harnessReg
@@ -3738,13 +3742,13 @@ mkTestFrontendEnvWith maxTabs = do
     , _fe_adopt        = \_ _ _ -> pure (Left (HarnessBinaryNotFound "adopt not wired in test"))
     , _fe_releaseTmux  = ReleaseTmux (\_ _ -> pure Nothing) (\_ _ -> pure ()) (\_ _ _ -> pure ())
     , _fe_killWindow   = \_ _ -> pure ()
-    , _fe_sessionsDir  = "/tmp/pureclaw-test-sessions"
+    , _fe_sessionsDir  = pureclawDir </> "sessions"
     , _fe_recentLimit  = 20
     , _fe_provider     = provRef
     , _fe_model        = modelRef
     , _fe_systemPrompt = Nothing
     , _fe_logger       = logger
-    , _fe_agentsDir    = "/tmp/pureclaw-test-agents"
+    , _fe_agentsDir    = pureclawDir </> "agents"
     , _fe_defaultAgent = Nothing
     , _fe_maxTabs      = maxTabs
     , _fe_tabRegistry  = tabReg

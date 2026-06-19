@@ -2,6 +2,8 @@ module Main where
 
 import Test.Hspec
 
+import Support.Isolation (withIsolatedHome)
+
 import qualified Auth.AnthropicOAuthSpec
 import qualified Core.TypesSpec
 import qualified Core.SessionIdValidatorSpec
@@ -171,7 +173,10 @@ import qualified Tab.ContainerSpec
 import qualified Routing.DepthLimitSpec
 
 main :: IO ()
-main = hspec $ do
+-- Redirect HOME (and friends) to a throwaway /tmp directory for the entire
+-- run, so no spec can touch the developer's real ~/.pureclaw store. The tree
+-- is removed afterwards, even when hspec exits non-zero on failures.
+main = withIsolatedHome $ hspec $ do
   describe "Auth.AnthropicOAuth" Auth.AnthropicOAuthSpec.spec
   describe "Core.Types" Core.TypesSpec.spec
   describe "Core.SessionIdValidator" Core.SessionIdValidatorSpec.spec
