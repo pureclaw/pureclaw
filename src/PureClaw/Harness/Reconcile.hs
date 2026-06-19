@@ -582,6 +582,12 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
     -- Detect working→settle transitions and record one Response per settled id,
     -- deduped against the last response recorded for that id. Returns the
     -- updated id-text → last-response map.
+    --
+    -- Per-entry snapshot + record IO is wrapped in 'try @SomeException' (D5.3
+    -- resilience, extended to the settle path): a non-async failure (disk full,
+    -- permission error, session dir deleted mid-tick) is logged and skipped so
+    -- that sibling entries still get recorded and the loop never dies.
+    -- 'AsyncCancelled' is always re-raised (project-wide invariant).
     settle prev obs prevResponses = do
       newPairs <- forM (settledIds prev obs) $ \idText ->
         case Reg.parseHarnessId idText of
@@ -592,12 +598,22 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
               Just e
                 | Just realSid <- Reg._he_sessionId e
                 , Just hh      <- Reg._he_handle e -> do
-                    resp <- _hh_snapshot hh 0
-                    let prevResp = Map.lookup idText prevResponses
-                    if not (T.null (T.strip resp)) && prevResp /= Just resp
-                      then do _rd_recordResponse deps (SessionId realSid) resp
-                              pure (Just (idText, resp))
-                      else pure Nothing
+                    r <- try @SomeException $ do
+                      resp <- _hh_snapshot hh 0
+                      let prevResp = Map.lookup idText prevResponses
+                      if not (T.null (T.strip resp)) && prevResp /= Just resp
+                        then do _rd_recordResponse deps (SessionId realSid) resp
+                                pure (Just (idText, resp))
+                        else pure Nothing
+                    case r of
+                      Left err
+                        | Just AsyncCancelled <- fromException err -> throwIO err
+                        | otherwise -> do
+                            _lh_logWarn logger
+                              ("reconcile: settle snapshot/record for " <> idText
+                                 <> " failed: " <> T.pack (show err) <> " — skipping")
+                            pure Nothing
+                      Right res -> pure res
               -- A harness with no real sessionId or no attached handle is
               -- skipped (Phase-1 limitation): a boot-discovered, handle-less
               -- entry is not auto-recorded until a handle exists.

@@ -38,13 +38,41 @@ observerFor _           = genericObserver
 -- ── Claude Code ────────────────────────────────────────────────────────────
 
 -- | Spinner glyphs Claude rotates while working (Dingbats range + a few extras).
+-- NOTE: the response-marker characters ⏺ (U+23FA), ● (U+25CF), and ⬤ (U+2B24)
+-- are intentionally NOT included here — they introduce those glyph characters as
+-- actual content (e.g. "⏺ Let me check the other call sites…") and must NOT be
+-- classified as working-spinner lines.  'isResponseMarkerLine' handles them for
+-- extraction; classification sees them only via the idle-prompt path.
 claudeSpinnerGlyphs :: [Char]
-claudeSpinnerGlyphs = "\x23FA\x25CF\x2B24\x2022\x2726\x2732\x2733\x2734\x2735\x2736\x2737\x2738\x2739\x273A\x273B\x273C\x273D\x273E\x273F\x2605\xB7\x2022\x22C6\x2642\x2666\xB7\x00B7\x2019\x2022\x2605\x2736\x2737\x2738\x2739\x273A\x273B\x273C\x273D\x273E\x273F\xB7\x22C6\x22C7"
+claudeSpinnerGlyphs =
+  "\x2022"   -- •  BULLET
+  <> "\x2019"   -- '  RIGHT SINGLE QUOTATION MARK (used in some spinner patterns)
+  <> "\x2726"   -- ✦  BLACK FOUR POINTED STAR
+  <> "\x2732"   -- ✲  OPEN CENTRE ASTERISK
+  <> "\x2733"   -- ✳  EIGHT SPOKED ASTERISK
+  <> "\x2734"   -- ✴  EIGHT POINTED BLACK STAR
+  <> "\x2735"   -- ✵  EIGHT POINTED PINWHEEL STAR
+  <> "\x2736"   -- ✶  SIX POINTED BLACK STAR
+  <> "\x2737"   -- ✷  EIGHT POINTED RECTILINEAR BLACK STAR
+  <> "\x2738"   -- ✸  HEAVY EIGHT POINTED RECTILINEAR BLACK STAR
+  <> "\x2739"   -- ✹  TWELVE POINTED BLACK STAR
+  <> "\x273A"   -- ✺  SIXTEEN POINTED ASTERISK
+  <> "\x273B"   -- ✻  TEARDROP-SPOKED ASTERISK
+  <> "\x273C"   -- ✼  OPEN CENTRE TEARDROP-SPOKED ASTERISK
+  <> "\x273D"   -- ✽  HEAVY TEARDROP-SPOKED ASTERISK
+  <> "\x273E"   -- ✾  SIX PETALLED BLACK AND WHITE FLORETTE
+  <> "\x273F"   -- ✿  BLACK FLORETTE
+  <> "\x2605"   -- ★  BLACK STAR
+  <> "\x22C6"   -- ⋆  STAR OPERATOR
+  <> "\x22C7"   -- ⋇  DIVISION TIMES
+  <> "\x2642"   -- ♂  MALE SIGN (used in some Hermes spinner patterns)
+  <> "\x2666"   -- ♦  BLACK DIAMOND SUIT
+  <> "\x00B7"   -- ·  MIDDLE DOT
+  <> "\x2026"   -- …  HORIZONTAL ELLIPSIS (shouldn't start a line, belt-and-suspenders)
 
 -- Additional spinner chars observed in the wild (Hermes, faryo patterns).
--- Claude Code uses the ✶ (U+2736) glyph and ⏺ (U+23FA) as status/response markers.
+-- Claude Code uses the ✶ (U+2736) glyph as the primary working-status marker.
 -- The status line for "working" looks like: ✶ Smooshing… (4m 55s · ↓ 16.6k tokens)
--- So we also need to match U+2736 STAR (✶) and U+22C6 STAR OPERATOR (⋆).
 
 -- | A working/status line: starts with a spinner/star glyph followed by
 -- a description containing ellipsis or a token counter in parens, or the
@@ -52,32 +80,13 @@ claudeSpinnerGlyphs = "\x23FA\x25CF\x2B24\x2022\x2726\x2732\x2733\x2734\x2735\x2
 isClaudeWorkingLine :: Text -> Bool
 isClaudeWorkingLine raw =
   let l = T.stripStart raw
-  in (not (T.null l) && (isSpinnerGlyph (T.head l))
+  in (not (T.null l) && isSpinnerGlyph (T.head l)
        && (T.isInfixOf "\x2026" l || T.isInfixOf "..." l))   -- … or ...
      || hasTokenCounter l
      || T.isInfixOf "esc to interrupt" (T.toLower l)
   where
-    -- Spinner glyphs: ✶ ⏺ ● ⬤ • ⋆ ✢ ✱ ✲ ✳ ✴ ✵ ✶ ✷ ✸ ✹ ✺ ✻ ✼ ✽ ✾ ✿ ★ · and more
+    -- A spinner glyph is any character in 'claudeSpinnerGlyphs'.
     isSpinnerGlyph c = c `elem` claudeSpinnerGlyphs
-                    || c == '\x2736'   -- ✶  SIX POINTED BLACK STAR
-                    || c == '\x22C6'   -- ⋆  STAR OPERATOR
-                    || c == '\x2022'   -- •  BULLET
-                    || c == '\x00B7'   -- ·  MIDDLE DOT
-                    || c == '\x2026'   -- … (shouldn't start a line but just in case)
-                    || c == '\x2732'   -- ✲
-                    || c == '\x2733'   -- ✳
-                    || c == '\x2734'   -- ✴
-                    || c == '\x2735'   -- ✵
-                    || c == '\x2737'   -- ✷
-                    || c == '\x2738'   -- ✸
-                    || c == '\x2739'   -- ✹
-                    || c == '\x273A'   -- ✺
-                    || c == '\x273B'   -- ✻
-                    || c == '\x273C'   -- ✼
-                    || c == '\x273D'   -- ✽
-                    || c == '\x273E'   -- ✾
-                    || c == '\x273F'   -- ✿
-                    || c == '\x2605'   -- ★
     hasTokenCounter t =
       T.isInfixOf "tokens" (T.toLower t)
       && T.isInfixOf "(" t && T.isInfixOf ")" t

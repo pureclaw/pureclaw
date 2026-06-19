@@ -22,7 +22,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
 import Control.Monad (replicateM_, void)
 import Control.Concurrent.STM (atomically, readTBQueue)
-import Control.Exception (throwIO, ErrorCall (..))
+import Control.Exception (IOException, throwIO, ErrorCall (..))
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -464,6 +464,84 @@ spec = do
           threadDelay (20 * tick)
       xs <- readIORef recorded
       xs `shouldBe` [(SessionId "sess-1", "spontaneous output")]
+
+    -- Finding 1: a non-async exception thrown by '_rd_recordResponse' (or
+    -- '_hh_snapshot') on one settled harness must NOT kill the reconcile loop.
+    -- The loop must:
+    --   * log a warning for the failing entry;
+    --   * keep running;
+    --   * still record the Response for a SECOND, healthy harness that settles
+    --     on a later tick.
+    -- RED on the unfixed code: the exception propagates to the 'outer' handler
+    -- which logs + returns (exits) — the healthy harness's record is never seen.
+    it "Finding 1: settle path survives a non-async IOException from _rd_recordResponse" $ do
+      recorded  <- newIORef ([] :: [(SessionId, Text)])
+      (logRef, capLog) <- mkCapturingLog
+
+      reg <- Reg.newRegistry
+
+      -- Harness A: its _rd_recordResponse throws an IOException on settle.
+      hidA <- Reg.newHarnessId
+      let hhA = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "response-A" }
+      Reg.insertEntry reg
+        ((mkEntry hidA settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-A"
+          , Reg._he_handle    = Just hhA
+          })
+
+      -- Harness B: healthy; sits at Thinking until a later set of idle frames.
+      hidB <- Reg.newHarnessId
+      let win_B = "claude-code-1"
+          hhB   = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "response-B" }
+      Reg.insertEntry reg
+        ((mkEntry hidB win_B (Just 300) (Just 400) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-B"
+          , Reg._he_handle    = Just hhB
+          })
+
+      -- The injected _rd_recordResponse throws for sess-A, succeeds for sess-B.
+      let record sid txt =
+            if sid == SessionId "sess-A"
+              then throwIO (userError "disk full" :: IOException)
+              else modifyIORef' recorded ((sid, txt) :)
+
+      -- Frame script: both harnesses start busy, then settle (idle×2 for the
+      -- stability gate).  We map by window name so each gets its own sequence.
+      framesA <- newIORef [busyFrame, busyFrame, idleFrame]
+      framesB <- newIORef [busyFrame, busyFrame, busyFrame, idleFrame]
+
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+          deps = ReconcileDeps
+            { _rd_sessions = pure ["pureclaw"]
+            , _rd_sweep    = \_ -> pure
+                [ mkRow 0 settleHid (Reg.harnessIdToText hidA) (Just 100) False
+                , mkRow 1 win_B     (Reg.harnessIdToText hidB) (Just 300) False
+                ]
+            , _rd_capture  = \_session windowName -> do
+                let ref = if windowName == settleHid then framesA else framesB
+                xs <- readIORef ref
+                case xs of
+                  []       -> pure (Just idleFrame)
+                  [x]      -> pure (Just x)
+                  (x : ys) -> do writeIORef ref ys; pure (Just x)
+            , _rd_harnessAlive   = \_ -> pure True
+            , _rd_stampLegacy     = \_ _ -> pure Nothing
+            , _rd_evict           = \_ _ -> pure ()
+            , _rd_recordResponse  = record
+            }
+
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker capLog) $ \_a -> do
+          threadDelay (30 * tick)
+
+      -- The healthy harness (B) must have been recorded despite A's failure.
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-B", "response-B")]
+
+      -- The loop must have logged a warning about the failing settle.
+      logs <- readIORef logRef
+      any (\m -> "settle snapshot/record" `T.isInfixOf` m) logs `shouldBe` True
 
   describe "reconcileTick — D5.5 / D5.7 (non-ours rows are never captured)" $ do
     it "a PID-mismatched marker row is logged + treated as not-ours (never captured, entry → Orphaned)" $ do

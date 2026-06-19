@@ -59,3 +59,27 @@ spec = do
         `shouldBe` HasWorking
     it "maps non-Claude flavours to the generic observer" $
       _ho_classify (observerFor HCodex) "✶ anything" `shouldBe` HasIdle
+
+  -- Finding 2: response markers (⏺ ● ⬤) must NOT be classified as HasWorking
+  -- even when the line contains an ellipsis.  They are NOT spinner glyphs —
+  -- they appear as the first character of actual Claude replies (e.g.
+  -- "⏺ Let me check the other call sites…").  Before the fix, such a line
+  -- would be misclassified HasWorking → the turn would never settle → the
+  -- watcher would never record the reply.
+  describe "response-marker lines are NOT HasWorking (Finding 2)" $ do
+    it "⏺ with an ellipsis + idle prompt classifies as HasIdle, not HasWorking" $ do
+      -- Frame: a response line starting with ⏺ that contains an ellipsis,
+      -- followed by the bare idle-input prompt.  The whole frame must read
+      -- HasIdle (the turn settled), not HasWorking.
+      let frame = "\x23FA Let me check the other call sites\x2026\n\x276F"
+      _ho_classify claudeObserver frame `shouldBe` HasIdle
+    it "● (U+25CF) with an ellipsis + idle prompt classifies as HasIdle" $ do
+      let frame = "\x25CF Reviewing the diff\x2026\n\x276F"
+      _ho_classify claudeObserver frame `shouldBe` HasIdle
+    it "⬤ (U+2B24) with an ellipsis + idle prompt classifies as HasIdle" $ do
+      let frame = "\x2B24 Analysing results\x2026\n\x276F"
+      _ho_classify claudeObserver frame `shouldBe` HasIdle
+    -- Positive regression guard: a genuine spinner glyph STILL reads HasWorking.
+    it "✶ (U+2736) with an ellipsis still classifies as HasWorking (spinner glyph)" $ do
+      let frame = "\x2736 Smooshing\x2026 (4s)"
+      _ho_classify claudeObserver frame `shouldBe` HasWorking
