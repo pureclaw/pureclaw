@@ -1,0 +1,6 @@
+⏺ Done. Applied the fix to foo.ts and ran the tests.
+
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  arrakis /path [Opus 4.8 | ctx: 77% left]

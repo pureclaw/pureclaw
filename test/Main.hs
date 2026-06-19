@@ -102,6 +102,7 @@ import qualified Harness.JsonlTailSpec
 import qualified Harness.ReconcileSpec
 import qualified Harness.RegistrySpec
 import qualified Harness.TmuxSpec
+import qualified Harness.ObserverSpec
 import qualified Transcript.CombinatorSpec
 import qualified Transcript.ProviderSpec
 import qualified Session.TypesSpec
@@ -270,6 +271,7 @@ main = hspec $ do
   describe "Harness.Reconcile" Harness.ReconcileSpec.spec
   describe "Harness.Registry" Harness.RegistrySpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec
+  describe "Harness.Observer" Harness.ObserverSpec.spec
   describe "Transcript.Combinator" Transcript.CombinatorSpec.spec
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
   describe "Session.Types" Session.TypesSpec.spec

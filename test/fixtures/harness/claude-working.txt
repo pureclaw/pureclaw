@@ -1,0 +1,9 @@
+⏺ Reading the file to understand the layout.
+
+  Read 1 file (ctrl+o to expand)
+
+✶ Smooshing… (4m 55s · ↓ 16.6k tokens)
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  arrakis /path [Opus 4.8 | ctx: 77% left]
