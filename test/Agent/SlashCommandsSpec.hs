@@ -328,6 +328,8 @@ spec = do
       parseSlashCommand "/harness output"          `shouldBe` Just (CmdHarness (HarnessOutput Nothing 0))
       parseSlashCommand "/harness output coder"    `shouldBe` Just (CmdHarness (HarnessOutput (Just "coder") 0))
       parseSlashCommand "/harness output coder 40" `shouldBe` Just (CmdHarness (HarnessOutput (Just "coder") 40))
+      parseSlashCommand "/harness output 40"       `shouldBe` Just (CmdHarness (HarnessOutput Nothing 40))
+      parseSlashCommand "/harness output coder 40abc" `shouldBe` Just (CmdHarness (HarnessOutput (Just "coder") 40))
 
   describe "executeSlashCommand" $ do
     let mkEnv sentRef = do
