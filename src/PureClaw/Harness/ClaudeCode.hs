@@ -336,6 +336,7 @@ mkClaudeCodeHarnessWith deps policy th session windowName _windowIdx mWorkDir ex
                                 , Reg._he_shellPid    = mShellPid
                                 , Reg._he_harnessPid  = mHarnessPid
                                 , Reg._he_origin      = Reg.OriginSpawned
+                                , Reg._he_flavour     = HClaudeCode
                                 , Reg._he_liveness    = Reg.LivenessIdle
                                 , Reg._he_extModified = False
                                 , Reg._he_stale       = False
@@ -562,6 +563,7 @@ adoptValidated deps reg th sessionsDir session mWindowIndex windowName = do
             , Reg._he_shellPid    = mShellPid
             , Reg._he_harnessPid  = mHarnessPid
             , Reg._he_origin      = Reg.OriginAdopted
+            , Reg._he_flavour     = HClaudeCode
             , Reg._he_liveness    = Reg.LivenessIdle
             , Reg._he_extModified = False
             , Reg._he_stale       = False

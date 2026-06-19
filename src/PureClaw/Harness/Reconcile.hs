@@ -15,7 +15,8 @@
 --      marked live. A row with no recorded shell PID falls back to a second
 --      signal (the window-name prefix) to defend against PID reuse.
 --   3. Liveness classification (ours only): @Exited@ on @pane_dead@ or a dead
---      harness PID; @Idle@\/@Thinking@ via a screen capture + 'isIdle'; an
+--      harness PID; @Idle@\/@Thinking@\/@AwaitingInput@ via a screen capture
+--      classified by the entry's per-flavour observer (with a stability gate); an
 --      entry whose corroborated window is absent from the sweep → @Orphaned@.
 --   4. 'Reg.mergeReconcile' the observed fields into the registry atomically.
 --   5. /Symmetric diff/ (D5.2): emit one 'ActivityChanged' per entry whose
@@ -47,10 +48,11 @@ module PureClaw.Harness.Reconcile
     -- * Pure classification + corroboration
   , CorroborationResult (..)
   , corroborate
-  , classifyLiveness
+  , classifyFromObserver
   , livenessToActivity
   , diffLiveness
     -- * Reconcile tick + loop
+  , TickObservation (..)
   , reconcileTick
   , runReconcileLoopWith
   , runReconcileLoop
@@ -82,8 +84,9 @@ import PureClaw.Frontend.StreamBroker
   , StreamBroker (..)
   )
 import PureClaw.Handles.Log (LogHandle (..))
-import PureClaw.Harness.ClaudeCode (isIdle)
+import PureClaw.Harness.Observer qualified as Obs
 import PureClaw.Harness.Registry qualified as Reg
+import PureClaw.Session.Kind qualified as Kind
 import PureClaw.Harness.Tmux
   ( TmuxWindowRow (..)
   , captureWindowNamed
@@ -108,10 +111,13 @@ data ReconcileDeps = ReconcileDeps
   , _rd_sweep :: Text -> IO [TmuxWindowRow]
     -- ^ One server sweep of a session (production: 'readMarkers'). May throw on
     --   a transient tmux failure; the loop catches it and marks entries stale.
-  , _rd_capture :: Text -> Text -> IO Bool
-    -- ^ Capture @session windowName@ and report whether the screen reads idle
-    --   (production: 'captureWindowNamed' + 'isIdle'). Only called for
-    --   corroborated, live (not pane_dead) windows.
+  , _rd_capture :: Text -> Text -> IO (Maybe Text)
+    -- ^ Capture @session windowName@ and return the raw screen text, or
+    --   'Nothing' if the capture failed (production: 'captureWindowNamed'
+    --   decoded leniently, wrapped in 'try'). The classifier (per-flavour
+    --   observer) decides liveness from the raw text; @Nothing@ disables the
+    --   stability gate for the tick. Only called for corroborated, live (not
+    --   pane_dead) windows.
   , _rd_harnessAlive :: Int -> IO Bool
     -- ^ Whether a recorded harness PID is still alive (production: a
     --   'harnessPidOf'-style liveness probe). Distinguishes @Exited@
@@ -131,7 +137,8 @@ data ReconcileDeps = ReconcileDeps
   }
 
 -- | Production dependency set. Sweeps the @\"pureclaw\"@ session plus any other
--- session on the server; capture\/idle via 'captureWindowNamed' + 'isIdle';
+-- session on the server; capture via 'captureWindowNamed' (classified by the
+-- per-flavour observer in 'classifyFromObserver');
 -- harness liveness via 'harnessPidOf'; legacy stamping via 'setWindowMarker'.
 defaultReconcileDeps :: ReconcileDeps
 defaultReconcileDeps = ReconcileDeps
@@ -141,8 +148,10 @@ defaultReconcileDeps = ReconcileDeps
       pure (dedup ("pureclaw" : others))
   , _rd_sweep = readMarkers
   , _rd_capture = \session windowName -> do
-      bytes <- captureWindowNamed session windowName 50
-      pure (isIdle (TE.decodeUtf8Lenient bytes))
+      r <- try @SomeException (captureWindowNamed session windowName 50)
+      pure $ case r of
+        Left _      -> Nothing
+        Right bytes -> Just (TE.decodeUtf8Lenient bytes)
   , _rd_harnessAlive = \shellPid -> do
       -- Re-derive the harness PID by descending from the recorded shell PID and
       -- matching the flavour comm. If the descent still finds the agent binary
@@ -210,20 +219,34 @@ corroborate e row =
 -- ---------------------------------------------------------------------------
 
 -- | Classify a corroborated window's liveness from @(paneDead, harnessAlive,
--- isIdle)@:
+-- stable, screen)@ via the entry's per-flavour 'Obs.HarnessObserver':
 --
 --   * @pane_dead@ OR a dead harness PID ⇒ 'Reg.LivenessExited' (the window is
 --     present but the agent is gone).
---   * otherwise the screen capture decides: idle ⇒ 'Reg.LivenessIdle',
---     busy ⇒ 'Reg.LivenessThinking'.
+--   * otherwise the observer's 3-state screen classifier decides:
+--     working ⇒ 'Reg.LivenessThinking', awaiting-input ⇒
+--     'Reg.LivenessAwaitingInput', idle ⇒ 'Reg.LivenessIdle' only once the
+--     capture is /stable/ across ticks (an unstable idle frame stays
+--     'Reg.LivenessThinking', defending against mid-spinner frames).
 --
 -- 'Reg.LivenessOrphaned' is NOT produced here — it is assigned to entries whose
 -- corroborated window is /absent/ from the sweep (see 'reconcileTick').
-classifyLiveness :: Bool -> Bool -> Bool -> Reg.Liveness
-classifyLiveness paneDead harnessAlive idle
+classifyFromObserver
+  :: Obs.HarnessObserver
+  -> Bool  -- ^ pane_dead
+  -> Bool  -- ^ harness PID alive
+  -> Bool  -- ^ the capture is stable (unchanged since the previous tick)
+  -> Text  -- ^ raw screen capture
+  -> Reg.Liveness
+classifyFromObserver obs paneDead harnessAlive stable screen
   | paneDead || not harnessAlive = Reg.LivenessExited
-  | idle                         = Reg.LivenessIdle
-  | otherwise                    = Reg.LivenessThinking
+  | otherwise = case Obs._ho_classify obs screen of
+      Obs.HasWorking       -> Reg.LivenessThinking
+      Obs.HasAwaitingInput -> Reg.LivenessAwaitingInput
+      -- An idle-looking screen is only trusted once it is STABLE across ticks:
+      -- a single idle-marker frame mid-stream is treated as still Thinking
+      -- (the spinner may simply be between frames).
+      Obs.HasIdle          -> if stable then Reg.LivenessIdle else Reg.LivenessThinking
 
 -- | Map a registry 'Reg.Liveness' to the broker's 'HarnessActivity' vocabulary.
 -- Both @Exited@ and @Orphaned@ collapse to 'HarnessStopped' (the frontend's
@@ -266,21 +289,36 @@ diffLiveness prev next =
 -- Reconcile tick (IO)
 -- ---------------------------------------------------------------------------
 
--- | A single reconcile pass: sweep, corroborate, classify, merge, and return
--- the per-entry liveness snapshot keyed by 'Reg.HarnessId' text (for the loop's
--- diff). On a transient sweep failure the registry's entries are marked
--- '_he_stale' (holding last-known liveness) and the snapshot reflects the held
--- state; the tick never throws on a sweep failure.
+-- | The per-entry observation a single 'reconcileTick' produces, keyed by the
+-- entry's 'Reg.HarnessId' text in the returned map. It carries the SessionId the
+-- loop publishes under, the classified liveness for the diff, and the raw screen
+-- capture taken this tick (so the loop can feed it back as next tick's @prevCap@
+-- for the stability gate). The held\/orphaned paths set '_to_capture' to
+-- 'Nothing' (no fresh capture was taken).
+data TickObservation = TickObservation
+  { _to_sessionId :: !Text            -- ^ @sidOf e@ (the recorded sessionId, or the label fallback).
+  , _to_liveness  :: !Reg.Liveness    -- ^ classified liveness this tick.
+  , _to_capture   :: !(Maybe Text)    -- ^ raw capture taken this tick, if any.
+  }
+
+-- | A single reconcile pass: sweep, corroborate, classify, merge, and return the
+-- per-entry observation map keyed by 'Reg.HarnessId' text (for the loop's diff
+-- + stability gate). Takes the previous tick's raw captures (id-text → last raw)
+-- so the per-flavour observer can apply its stability gate. On a transient sweep
+-- failure the registry's entries are marked '_he_stale' (holding last-known
+-- liveness) and the observation reflects the held state; the tick never throws
+-- on a sweep failure.
 reconcileTick
   :: ReconcileDeps
   -> Reg.HarnessRegistry
   -> LogHandle
-  -> IO (Map Text (Text, Reg.Liveness), [Text])
-  -- ^ @(liveness snapshot keyed by id-text, sessionIds of entries auto-evicted
-  --   this tick)@. Evicted entries are removed from the snapshot map (so the
-  --   next diff does not re-report them) and the loop emits one final
-  --   disappearance event per returned sessionId.
-reconcileTick deps reg logger = do
+  -> Map Text Text                          -- ^ previous captures (id-text → last raw)
+  -> IO (Map Text TickObservation, [Text])
+  -- ^ @(per-id observation, sessionIds of entries auto-evicted this tick)@.
+  --   Evicted entries are removed from the observation map (so the next diff
+  --   does not re-report them) and the loop emits one final disappearance event
+  --   per returned sessionId.
+reconcileTick deps reg logger prevCaps = do
   sessions <- _rd_sessions deps
   -- Sweep every session; a failed sweep yields Nothing (we then hold stale).
   sweepResults <- forM sessions $ \session -> do
@@ -325,15 +363,15 @@ reconcileTick deps reg logger = do
             -- entry's last-known liveness and mark it stale, exactly as a sweep
             -- failure does — never repaint it from a capture error, never let
             -- the exception propagate to the loop's crash handler.
-            r <- try @SomeException (classifyRow deps e row)
+            r <- try @SomeException (classifyRow deps e row (Map.lookup idText prevCaps))
             case r of
               Left err -> do
                 _lh_logWarn logger
                   ("reconcile: capture/liveness probe for @pcl_id " <> idText
                      <> " failed: " <> T.pack (show err) <> " — holding last-known liveness")
                 pure (mkObservedHeld e)
-              Right liveness ->
-                pure (mkObservedLive e row liveness)
+              Right (liveness, mCap) ->
+                pure (mkObservedLive e row liveness mCap)
   let observed = map snd observedPairs
   Reg.mergeReconcile reg observed
   let snapMap = Map.fromList [ (k, v) | (k, v) <- map fst observedPairs ]
@@ -360,16 +398,17 @@ reconcileTick deps reg logger = do
       snapMap'    = foldr Map.delete snapMap evictedKeys
   pure (snapMap', map snd evictedSids)
   where
-    -- Each result is ((keyText, (sessionId, liveness)), ObservedHarness).
-    mkObservedHeld :: Reg.HarnessEntry -> ((Text, (Text, Reg.Liveness)), Reg.ObservedHarness)
+    -- Each result is ((keyText, TickObservation), ObservedHarness). The held and
+    -- orphaned paths take no fresh capture, so '_to_capture' is 'Nothing'.
+    mkObservedHeld :: Reg.HarnessEntry -> ((Text, TickObservation), Reg.ObservedHarness)
     mkObservedHeld e =
       let live = Reg._he_liveness e
-      in ( (Reg.harnessIdToText (Reg._he_id e), (sidOf e, live))
+      in ( (Reg.harnessIdToText (Reg._he_id e), tickObs e live Nothing)
          , (baseObserved e live) { Reg._oh_stale = True } )
 
-    mkObservedOrphaned :: Reg.HarnessEntry -> ((Text, (Text, Reg.Liveness)), Reg.ObservedHarness)
+    mkObservedOrphaned :: Reg.HarnessEntry -> ((Text, TickObservation), Reg.ObservedHarness)
     mkObservedOrphaned e =
-      ( (Reg.harnessIdToText (Reg._he_id e), (sidOf e, Reg.LivenessOrphaned))
+      ( (Reg.harnessIdToText (Reg._he_id e), tickObs e Reg.LivenessOrphaned Nothing)
       , (baseObserved e Reg.LivenessOrphaned)
           { Reg._oh_liveness = Reg.LivenessOrphaned
             -- The corroborated window is absent this tick: advance the
@@ -378,11 +417,11 @@ reconcileTick deps reg logger = do
           } )
 
     mkObservedLive
-      :: Reg.HarnessEntry -> TmuxWindowRow -> Reg.Liveness
-      -> ((Text, (Text, Reg.Liveness)), Reg.ObservedHarness)
-    mkObservedLive e row liveness =
+      :: Reg.HarnessEntry -> TmuxWindowRow -> Reg.Liveness -> Maybe Text
+      -> ((Text, TickObservation), Reg.ObservedHarness)
+    mkObservedLive e row liveness mCap =
       let extMod = _twr_windowName row /= Reg._he_windowName e
-      in ( (Reg.harnessIdToText (Reg._he_id e), (sidOf e, liveness))
+      in ( (Reg.harnessIdToText (Reg._he_id e), tickObs e liveness mCap)
          , Reg.ObservedHarness
              { Reg._oh_id          = Reg._he_id e
              , Reg._oh_session     = Reg._he_session e
@@ -413,15 +452,32 @@ reconcileTick deps reg logger = do
       , Reg._oh_orphanedTicks = Reg._he_orphanedTicks e
       }
 
+    tickObs :: Reg.HarnessEntry -> Reg.Liveness -> Maybe Text -> TickObservation
+    tickObs e live mCap = TickObservation
+      { _to_sessionId = sidOf e
+      , _to_liveness  = live
+      , _to_capture   = mCap
+      }
+
     sidOf :: Reg.HarnessEntry -> Text
     sidOf e = fromMaybe (Reg._he_label e) (Reg._he_sessionId e)
 
 -- | Classify a corroborated window's liveness, capturing the screen only when
 -- the window is alive (not pane_dead and the harness PID is present). A
 -- @pane_dead@ window is NEVER captured (D5.4\/D5.5).
-classifyRow :: ReconcileDeps -> Reg.HarnessEntry -> TmuxWindowRow -> IO Reg.Liveness
-classifyRow deps e row
-  | _twr_paneDead row = pure Reg.LivenessExited
+--
+-- Takes the entry's PREVIOUS raw capture (the stability gate input) and returns
+-- @(liveness, capture-taken-this-tick)@ so the loop can carry the capture
+-- forward as the next tick's @prevCap@. A failed/skipped capture returns
+-- 'Nothing', which disables the stability gate for that tick.
+classifyRow
+  :: ReconcileDeps
+  -> Reg.HarnessEntry
+  -> TmuxWindowRow
+  -> Maybe Text                    -- ^ previous capture for this entry
+  -> IO (Reg.Liveness, Maybe Text)
+classifyRow deps e row prevCap
+  | _twr_paneDead row = pure (Reg.LivenessExited, Nothing)
   | otherwise = do
       -- Liveness of the agent process: re-derive it by descending from the live
       -- shell PID (the row's @#{pane_pid}@). We only bother when we recorded a
@@ -431,10 +487,15 @@ classifyRow deps e row
         (Just _, Just shellPid) -> _rd_harnessAlive deps shellPid
         _                       -> pure True
       if not alive
-        then pure Reg.LivenessExited
+        then pure (Reg.LivenessExited, Nothing)
         else do
-          idle <- _rd_capture deps (Reg._he_session e) (_twr_windowName row)
-          pure (classifyLiveness False True idle)
+          mCap <- _rd_capture deps (Reg._he_session e) (_twr_windowName row)
+          let cap    = fromMaybe "" mCap
+              -- The screen is "stable" only when we got a capture this tick AND
+              -- it is byte-identical to the previous tick's capture.
+              stable = isJust mCap && mCap == prevCap
+              obs    = Obs.observerFor (Reg._he_flavour e)
+          pure (classifyFromObserver obs False True stable cap, mCap)
 
 -- ---------------------------------------------------------------------------
 -- The loop
@@ -481,13 +542,16 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
   threadDelay tickMicros
   -- Baseline tick: emits no transitions. Any eviction on this first tick still
   -- emits its final disappearance event (an eviction is not a diff transition).
-  (initial, evicted0) <- reconcileTick deps reg logger
+  -- The first tick has no previous captures, so the stability gate sees nothing
+  -- stable (a fresh idle frame reads Thinking until a second identical capture).
+  (initial, evicted0) <- reconcileTick deps reg logger Map.empty
   publishEvictions evicted0
-  loop initial
+  loop (livenessSnap initial) (capSnap initial)
   where
-    loop prev = do
+    loop prev prevCaps = do
       threadDelay tickMicros
-      (next, evicted) <- reconcileTick deps reg logger
+      (obs, evicted) <- reconcileTick deps reg logger prevCaps
+      let next = livenessSnap obs
       forM_ (diffLiveness prev next) $ \(sid, liveness) ->
         _streamBroker_publish broker
           (ActivityChanged (SessionId sid) (SaHarnessStatus (livenessToActivity liveness)))
@@ -495,7 +559,15 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
       -- already Orphaned, so the diff above does NOT re-emit it; this guarantees
       -- the frontend sees it leave even though no liveness transition occurred.
       publishEvictions evicted
-      loop next
+      loop next (capSnap obs)
+
+    -- Project the observation map into the (sessionId, liveness) snapshot the
+    -- 'diffLiveness' publish path consumes, and into the carry-forward captures.
+    livenessSnap :: Map Text TickObservation -> Map Text (Text, Reg.Liveness)
+    livenessSnap = Map.map (\o -> (_to_sessionId o, _to_liveness o))
+
+    capSnap :: Map Text TickObservation -> Map Text Text
+    capSnap = Map.mapMaybe _to_capture
 
     publishEvictions = mapM_ $ \sid ->
       _streamBroker_publish broker
@@ -550,6 +622,7 @@ bootReconstruct deps reg logger = do
         , Reg._he_shellPid    = _twr_panePid row
         , Reg._he_harnessPid  = Nothing
         , Reg._he_origin      = Reg.OriginDiscovered
+        , Reg._he_flavour     = Kind.HClaudeCode
         , Reg._he_liveness    = live
         , Reg._he_extModified = False
         , Reg._he_stale       = False

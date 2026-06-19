@@ -47,6 +47,7 @@ import Data.UUID.V4 qualified as UUIDv4
 
 import PureClaw.Handles.Harness (HarnessHandle)
 import PureClaw.Harness.Id (HarnessId (..), harnessIdToText, parseHarnessId)
+import PureClaw.Session.Kind qualified as Kind
 
 -- ---------------------------------------------------------------------------
 -- Identity
@@ -105,6 +106,10 @@ data HarnessEntry = HarnessEntry
     -- ^ Recorded harness-process PID (the agent binary) — trust anchor.
   , _he_origin      :: !HarnessOrigin
     -- ^ How PureClaw came to manage this harness.
+  , _he_flavour     :: !Kind.HarnessFlavour
+    -- ^ The harness tool flavour (Claude Code, Codex, …). Selects the
+    --   per-flavour 'PureClaw.Harness.Observer.HarnessObserver' the reconcile
+    --   loop uses to classify the screen capture.
   , _he_liveness    :: !Liveness
     -- ^ Current reconciled liveness.
   , _he_extModified :: !Bool

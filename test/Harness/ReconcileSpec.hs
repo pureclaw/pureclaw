@@ -43,9 +43,11 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   )
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
+import PureClaw.Harness.Observer (claudeObserver)
 import PureClaw.Harness.Reconcile
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux (TmuxWindowRow (..))
+import PureClaw.Session.Kind qualified as Kind
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -61,6 +63,7 @@ mkEntry hid windowName shellPid harnessPid liveness = Reg.HarnessEntry
   , Reg._he_shellPid    = shellPid
   , Reg._he_harnessPid  = harnessPid
   , Reg._he_origin      = Reg.OriginSpawned
+  , Reg._he_flavour     = Kind.HClaudeCode
   , Reg._he_liveness    = liveness
   , Reg._he_extModified = False
   , Reg._he_stale       = False
@@ -83,6 +86,13 @@ mkRow idx name pclId panePid paneDead = TmuxWindowRow
 recvWithin :: Int -> Subscription -> IO (Maybe BrokerEvent)
 recvWithin micros sub =
   timeout micros $ atomically $ readTBQueue (_sub_queue sub)
+
+-- | A raw screen frame the claudeObserver classifies as working (HasWorking ⇒
+-- Thinking), and one it classifies as idle (HasIdle ⇒ Idle once stable). The
+-- fake '_rd_capture' returns these to drive the observer-based classifier.
+busyFrame, idleFrame :: Text
+busyFrame = "\x2736 Smooshing\x2026 (4m 55s)"   -- ✶ working/status line
+idleFrame = "ready when you are"                -- neither working nor approval
 
 -- | Deterministic deps: a queue of sweeps (one per tick; the last repeats),
 -- a captured-windows recorder, and a settable idle/capture map.
@@ -116,7 +126,11 @@ fakeDeps f = ReconcileDeps
   , _rd_capture  = \_session windowName -> do
       modifyIORef' (f_capturedWindows f) (++ [windowName])
       m <- readIORef (f_idleByWindow f)
-      pure (Map.findWithDefault True windowName m)
+      -- Map the test's idle/busy intent onto a raw frame the claudeObserver
+      -- classifies: an idle frame reads HasIdle (⇒ Idle once stable), a busy
+      -- frame reads HasWorking (⇒ Thinking). Default (unmapped) is idle.
+      let idle = Map.findWithDefault True windowName m
+      pure (Just (if idle then idleFrame else busyFrame))
   , _rd_harnessAlive = \pid -> do
       m <- readIORef (f_aliveByPid f)
       pure (Map.findWithDefault True pid m)
@@ -167,16 +181,28 @@ spec = do
       corroborate e good `shouldBe` Corroborated
       corroborate e bad  `shouldBe` PidMismatch
 
-  describe "liveness classification (D5.4)" $ do
-    -- Args are (paneDead, harnessAlive, isIdle).
-    it "pane_dead → Exited" $
-      classifyLiveness True True True `shouldBe` Reg.LivenessExited
+  describe "observer-based classification (3-state + stability gate)" $ do
+    -- The approval frame the claudeObserver recognizes (busyFrame/idleFrame are
+    -- the shared module-level fixtures).
+    let approvalFrame = "Do you want to proceed?"           -- approval prompt
+    -- Args are (observer, paneDead, harnessAlive, stable, screen).
+    it "pane_dead → Exited regardless of the screen" $
+      classifyFromObserver claudeObserver True True True busyFrame
+        `shouldBe` Reg.LivenessExited
     it "harness PID gone → Exited (window present, not pane_dead)" $
-      classifyLiveness False False True `shouldBe` Reg.LivenessExited
-    it "alive + idle screen → Idle" $
-      classifyLiveness False True True `shouldBe` Reg.LivenessIdle
-    it "alive + busy screen → Thinking" $
-      classifyLiveness False True False `shouldBe` Reg.LivenessThinking
+      classifyFromObserver claudeObserver False False True busyFrame
+        `shouldBe` Reg.LivenessExited
+    it "classifies a spinner frame as Thinking regardless of stability" $ do
+      classifyFromObserver claudeObserver False True True  busyFrame
+        `shouldBe` Reg.LivenessThinking
+      classifyFromObserver claudeObserver False True False busyFrame
+        `shouldBe` Reg.LivenessThinking
+    it "classifies an approval frame as AwaitingInput" $
+      classifyFromObserver claudeObserver False True True approvalFrame
+        `shouldBe` Reg.LivenessAwaitingInput
+    it "an idle-marker frame is Thinking until it is stable across ticks" $ do
+      classifyFromObserver claudeObserver False True False idleFrame `shouldBe` Reg.LivenessThinking
+      classifyFromObserver claudeObserver False True True  idleFrame `shouldBe` Reg.LivenessIdle
 
   describe "symmetric diff (D5.2 — disappearance emits an event)" $ do
     it "an entry whose liveness changed emits its new liveness" $ do
@@ -207,6 +233,8 @@ spec = do
       livenessToActivity Reg.LivenessThinking `shouldBe` HarnessThinking
       livenessToActivity Reg.LivenessExited   `shouldBe` HarnessStopped
       livenessToActivity Reg.LivenessOrphaned `shouldBe` HarnessStopped
+    it "maps AwaitingInput to needs-input" $
+      livenessToActivity Reg.LivenessAwaitingInput `shouldBe` HarnessNeedsInput
 
   describe "reconcileTick — D5.1 (update entries by id)" $
     it "updates a registered entry's liveness + coordinate from the sweep" $ do
@@ -219,7 +247,7 @@ spec = do
         [Right [mkRow 0 "renamed-window" (Reg.harnessIdToText hid) (Just 100) False]]
         (Map.singleton "renamed-window" False)  -- busy ⇒ Thinking
         Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e   `shouldBe` Reg.LivenessThinking
       Reg._he_windowName e `shouldBe` "renamed-window"
@@ -233,7 +261,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) True]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessExited
       -- A pane_dead window is never captured.
@@ -245,7 +273,7 @@ spec = do
       hid <- Reg.newHarnessId
       Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
       f <- mkFakes [Right []] Map.empty Map.empty  -- empty sweep
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessOrphaned
 
@@ -257,7 +285,7 @@ spec = do
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
         Map.empty
         (Map.singleton 100 False)  -- descent from shell PID 100 finds no agent
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessExited
 
@@ -276,7 +304,7 @@ spec = do
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
         (Map.singleton "claude-code-0" False)  -- busy screen ⇒ Thinking
         Map.empty
-      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle
+      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessThinking
       -- The alive-probe was NOT consulted (no recorded harness PID).
@@ -321,7 +349,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 9999) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       cap <- readIORef (f_capturedWindows f)
       cap `shouldBe` []  -- never captured the spoofed window
       [e] <- Reg.snapshot reg
@@ -333,7 +361,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "stranger" "00000000-0000-0000-0000-000000000000" (Just 7) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       cap <- readIORef (f_capturedWindows f)
       cap `shouldBe` []
 
@@ -344,7 +372,7 @@ spec = do
       Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessThinking)
       (logRef, logger) <- mkCapturingLog
       f <- mkFakes [Left (userError "tmux hiccup")] Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg logger
+      _ <- reconcileTick (fakeDeps f) reg logger Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_stale e    `shouldBe` True
       Reg._he_liveness e `shouldBe` Reg.LivenessThinking  -- held, not repainted
@@ -366,7 +394,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (f0 f) reg logger
+      _ <- reconcileTick (f0 f) reg logger Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_stale e    `shouldBe` True
       Reg._he_liveness e `shouldBe` Reg.LivenessThinking  -- held, not repainted
@@ -392,7 +420,7 @@ spec = do
           ]]
         (Map.singleton "claude-code-1" False)  -- good entry's screen is busy
         Map.empty
-      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle
+      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle Map.empty
       entries <- Reg.snapshot reg
       let byId i = case [ e | e <- entries, Reg._he_id e == i ] of
             (e : _) -> e
@@ -440,9 +468,14 @@ spec = do
       broker <- mkInProcessBroker defaultBrokerConfig
       eSub   <- _streamBroker_subscribe broker
       sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      -- A busy (working) window: it reads Thinking on every tick (working frames
+      -- ignore the stability gate), so subsequent identical ticks produce no
+      -- transition. This isolates the "first tick is a silent baseline" invariant
+      -- from the legitimate idle-stability flip (an idle window would read
+      -- Thinking on tick 1, then Idle once the capture is stable on tick 2).
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
-        (Map.singleton "claude-code-0" True)
+        (Map.singleton "claude-code-0" False)
         Map.empty
       let tick = 40_000
       Async.withAsync
@@ -581,7 +614,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 9999) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg logger
+      _ <- reconcileTick (fakeDeps f) reg logger Map.empty
       logs <- readIORef logRef
       any (\m -> "no corroborating PID" `T.isInfixOf` m) logs `shouldBe` True
 
@@ -620,7 +653,7 @@ spec = do
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
       -- Run threshold-1 orphaned ticks: the entry must survive every one.
       replicateM_ (defaultOrphanGraceTicks - 1) $ do
-        _ <- reconcileTick deps reg mkNoOpLogHandle
+        _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty
         pure ()
       snap <- Reg.snapshot reg
       map Reg._he_id snap `shouldBe` [hid]            -- still present (retained)
@@ -645,8 +678,8 @@ spec = do
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
       -- Run threshold-1 ticks (retained), then the threshold-th tick evicts.
-      replicateM_ (defaultOrphanGraceTicks - 1) (void (reconcileTick deps reg mkNoOpLogHandle))
-      (_snap, evictedSids) <- reconcileTick deps reg mkNoOpLogHandle
+      replicateM_ (defaultOrphanGraceTicks - 1) (void (reconcileTick deps reg mkNoOpLogHandle Map.empty))
+      (_snap, evictedSids) <- reconcileTick deps reg mkNoOpLogHandle Map.empty
       -- Registry: the entry is gone.
       snap <- Reg.snapshot reg
       map Reg._he_id snap `shouldBe` []
@@ -677,16 +710,20 @@ spec = do
         Map.empty
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 1
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 2
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 2
       afterTwo <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterTwo) `shouldBe` [2]
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- live again ⇒ reset
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- live again ⇒ reset
       afterLive <- Reg.snapshot reg
       [eLive] <- pure afterLive
-      Reg._he_liveness eLive      `shouldBe` Reg.LivenessIdle
+      -- The window reappeared this tick but its capture is not yet stable across
+      -- ticks (the preceding ticks were empty sweeps, so there is no prior
+      -- capture to match), so the idle frame reads Thinking — the point here is
+      -- the entry is LIVE again (not Orphaned), which resets the grace counter.
+      Reg._he_liveness eLive      `shouldBe` Reg.LivenessThinking
       Reg._he_orphanedTicks eLive `shouldBe` 0       -- counter reset
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan again ⇒ count restarts at 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan again ⇒ count restarts at 1
       afterReorphan <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterReorphan) `shouldBe` [1]
       evicted <- readIORef evictRef
@@ -712,7 +749,7 @@ spec = do
       f <- mkFakes [Right []] Map.empty Map.empty
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictArgs (++ [(i, l)]) }
-      replicateM_ defaultOrphanGraceTicks (void (reconcileTick deps reg mkNoOpLogHandle))
+      replicateM_ defaultOrphanGraceTicks (void (reconcileTick deps reg mkNoOpLogHandle Map.empty))
       -- Registry entry evicted...
       snap <- Reg.snapshot reg
       map Reg._he_id snap `shouldBe` []
@@ -749,14 +786,14 @@ spec = do
         Map.empty Map.empty
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 1
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 2
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 3
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 2
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 3
       afterThree <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterThree) `shouldBe` [3]
       -- The failed sweep: counter HELD (not advanced to 4, not reset to 0), the
       -- entry stays Orphaned + marked stale, and it is NOT evicted.
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- transient failure
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- transient failure
       afterFail <- Reg.snapshot reg
       [eHeld] <- pure afterFail
       Reg._he_orphanedTicks eHeld `shouldBe` 3                       -- HELD, not advanced/reset
@@ -764,7 +801,7 @@ spec = do
       Reg._he_stale eHeld         `shouldBe` True                    -- the blip marked it stale
       readIORef evictRef `shouldReturn` []                          -- NOT evicted by the blip
       -- The next real (empty) sweep resumes advancing from the held value.
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan again
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan again
       afterResume <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterResume) `shouldBe` [4]
       readIORef evictRef `shouldReturn` []

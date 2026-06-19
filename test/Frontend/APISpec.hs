@@ -4192,6 +4192,7 @@ baseEntry hid window mHandle = Registry.HarnessEntry
   , Registry._he_shellPid    = Nothing
   , Registry._he_harnessPid  = Nothing
   , Registry._he_origin      = Registry.OriginSpawned
+  , Registry._he_flavour     = HClaudeCode
   , Registry._he_liveness    = Registry.LivenessIdle
   , Registry._he_extModified = False
   , Registry._he_stale       = False
