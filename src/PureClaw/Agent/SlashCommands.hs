@@ -180,6 +180,7 @@ data HarnessSubCommand
   | HarnessStop Text           -- ^ Stop a named harness
   | HarnessList                -- ^ List running harnesses
   | HarnessAttach              -- ^ Show tmux attach command
+  | HarnessOutput (Maybe Text) Int -- ^ Show last response (N=0) or last N relevant lines
   | HarnessUnknown Text        -- ^ Unrecognised subcommand
   deriving stock (Show, Eq)
 
@@ -413,6 +414,7 @@ harnessCommandSpecs =
   , CommandSpec "/harness stop <name>"   "Stop a running harness"               GroupHarness (harnessArgP "stop" HarnessStop)
   , CommandSpec "/harness list"          "List running harnesses"               GroupHarness (harnessExactP "list" HarnessList)
   , CommandSpec "/harness attach"        "Show tmux attach command"             GroupHarness (harnessExactP "attach" HarnessAttach)
+  , CommandSpec "/harness output [name] [N]" "Show recent harness output (last response, or last N lines)" GroupHarness harnessOutputP
   ]
 
 agentCommandSpecs :: [CommandSpec]
@@ -861,6 +863,20 @@ harnessArgP sub mkCmd t =
              then Nothing
              else Just (CmdHarness (mkCmd arg))
      else Nothing
+
+-- | Parse "/harness output [name] [N]".
+-- If N is given and name is omitted, the bare integer parses as N (no name).
+harnessOutputP :: Text -> Maybe SlashCommand
+harnessOutputP t =
+  case T.words t of
+    (cmd : "output" : rest) | T.toLower cmd == "/harness" ->
+      Just $ CmdHarness $ case rest of
+        []        -> HarnessOutput Nothing 0
+        [a]       -> case Data.Maybe.listToMaybe (reads (T.unpack a)) of
+                       Just (n, "") -> HarnessOutput Nothing n
+                       _            -> HarnessOutput (Just a) 0
+        (a : b : _) -> HarnessOutput (Just a) (maybe 0 id (fmap fst (Data.Maybe.listToMaybe (reads (T.unpack b)))))
+    _ -> Nothing
 
 -- | Catch-all for any "/harness <X>" not matched by 'allCommandSpecs'.
 harnessUnknownFallback :: Text -> Maybe SlashCommand
@@ -1900,6 +1916,24 @@ executeHarnessCommand env sub ctx = do
       send "tmux attach -t pureclaw"
       pure ctx
 
+    HarnessOutput mName n -> do
+      harnesses <- readIORef (_env_harnesses env)
+      let pick = case mName of
+            Just nm -> Map.lookup nm harnesses
+            Nothing -> case Map.toList harnesses of
+                         [(_, hh)] -> Just hh   -- exactly one running → use it
+                         _         -> Nothing
+      case pick of
+        Nothing -> do
+          send (case mName of
+                  Just nm -> "No running harness named '" <> nm <> "'."
+                  Nothing -> "Specify a harness name: /harness output <name> [N].")
+          pure ctx
+        Just hh -> do
+          out <- _hh_snapshot hh n
+          send (if T.null (T.strip out) then "(no recent output)" else out)
+          pure ctx
+
     HarnessUnknown subcmd
       | T.null subcmd -> do
           -- Bare /harness: show status + available subcommands
@@ -1919,6 +1953,7 @@ executeHarnessCommand env sub ctx = do
                 , "  /harness stop <name>   — Stop a harness"
                 , "  /harness list          — List harnesses"
                 , "  /harness attach        — Show tmux attach command"
+                , "  /harness output [name] [N]  — Show recent harness output"
                 ]
           send output
           pure ctx

@@ -324,6 +324,11 @@ spec = do
     it "strips surrounding whitespace from the /bg prompt" $ do
       parseSlashCommand "/bg   do thing  " `shouldBe` Just (CmdBg "do thing")
 
+    it "parses /harness output with optional name and N" $ do
+      parseSlashCommand "/harness output"          `shouldBe` Just (CmdHarness (HarnessOutput Nothing 0))
+      parseSlashCommand "/harness output coder"    `shouldBe` Just (CmdHarness (HarnessOutput (Just "coder") 0))
+      parseSlashCommand "/harness output coder 40" `shouldBe` Just (CmdHarness (HarnessOutput (Just "coder") 40))
+
   describe "executeSlashCommand" $ do
     let mkEnv sentRef = do
           vaultRef    <- newIORef Nothing
@@ -432,6 +437,59 @@ spec = do
       Map.null harnesses `shouldBe` True
       entries <- Reg.snapshot reg
       length entries `shouldBe` 0
+
+    it "HarnessOutput sends the snapshot text for the named harness" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env0 <- mkEnv sentRef
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "latest harness reply" }
+      writeIORef (_env_harnesses env0) (Map.fromList [("coder", hh)])
+      _ <- executeSlashCommand env0 (CmdHarness (HarnessOutput (Just "coder") 0)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> t `shouldSatisfy` T.isInfixOf "latest harness reply"
+        Nothing -> expectationFailure "Expected snapshot output"
+
+    it "HarnessOutput reports error for unknown harness name" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env0 <- mkEnv sentRef
+      _ <- executeSlashCommand env0 (CmdHarness (HarnessOutput (Just "ghost") 0)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "No running harness named 'ghost'"
+        Nothing -> expectationFailure "Expected error message"
+
+    it "HarnessOutput with no name uses sole running harness" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env0 <- mkEnv sentRef
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "sole harness output" }
+      writeIORef (_env_harnesses env0) (Map.fromList [("only-one", hh)])
+      _ <- executeSlashCommand env0 (CmdHarness (HarnessOutput Nothing 0)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> t `shouldSatisfy` T.isInfixOf "sole harness output"
+        Nothing -> expectationFailure "Expected snapshot output"
+
+    it "HarnessOutput with no name and multiple harnesses asks for explicit name" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env0 <- mkEnv sentRef
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "output" }
+      writeIORef (_env_harnesses env0) (Map.fromList [("a", hh), ("b", hh)])
+      _ <- executeSlashCommand env0 (CmdHarness (HarnessOutput Nothing 0)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "Specify a harness name"
+        Nothing -> expectationFailure "Expected error message"
+
+    it "HarnessOutput sends '(no recent output)' when snapshot is blank" $ do
+      sentRef <- newIORef (Nothing :: Maybe Text)
+      env0 <- mkEnv sentRef
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "   " }
+      writeIORef (_env_harnesses env0) (Map.fromList [("coder", hh)])
+      _ <- executeSlashCommand env0 (CmdHarness (HarnessOutput (Just "coder") 0)) (emptyContext Nothing)
+      sent <- readIORef sentRef
+      case sent of
+        Just t  -> T.unpack t `shouldContain` "(no recent output)"
+        Nothing -> expectationFailure "Expected fallback message"
 
     it "/status shows session info" $ do
       sentRef <- newIORef (Nothing :: Maybe Text)
