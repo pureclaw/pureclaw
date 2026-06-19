@@ -850,6 +850,20 @@ spec = do
             txExists `shouldBe` True
           other -> expectationFailure ("expected exactly one session dir, got " <> show (length other))
 
+    it "_hh_snapshot returns the latest extracted response (no polling)" $
+      withSystemTempDirectory "pcl-snap" $ \tmp -> do
+        reg <- Reg.newRegistry
+        let deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure [adoptableRow 0 "win-snap"]
+              , _ccd_panePidOf    = \_ _ -> pure (Just 7)
+              , _ccd_captureNamed = \_ _ _ -> pure (Just (TE.encodeUtf8
+                  "\x23FA Hello from the harness.\n\10095\n"))
+              }
+        Right (_, hh) <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing "win-snap"
+        out <- _hh_snapshot hh 0
+        out `shouldSatisfy` T.isInfixOf "Hello from the harness."
+
   describe "discovered handle" $ do
     it "mkDiscoveredClaudeCodeHandle threads the real session name" $ do
       let transcript = mkNoOpTranscriptHandle

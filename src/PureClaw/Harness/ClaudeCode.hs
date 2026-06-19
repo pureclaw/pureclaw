@@ -49,6 +49,7 @@ import System.FilePath ((</>))
 import System.Process.Typed qualified as P
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Transcript
+import PureClaw.Harness.Observer (observerFor, _ho_extractResponse, _ho_relevantTail)
 import PureClaw.Harness.Registry (HarnessId, HarnessRegistry)
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux
@@ -397,12 +398,22 @@ mkClaudeCodeHandleWithBaseline
 mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do
   baselineRef <- newIORef baseline
   pure HarnessHandle
-    { _hh_send    = harnessSend deps reg hid th baselineRef
-    , _hh_receive = harnessReceive deps reg hid th baselineRef
-    , _hh_name    = "Claude Code"
-    , _hh_session = session
-    , _hh_status  = harnessStatus deps reg hid
-    , _hh_stop    = harnessStop deps reg hid
+    { _hh_send     = harnessSend deps reg hid th baselineRef
+    , _hh_receive  = harnessReceive deps reg hid th baselineRef
+    , _hh_snapshot = \n -> do
+        mCoord <- currentCoord reg hid
+        case mCoord of
+          Nothing -> pure ""
+          Just (sess, win) -> do
+            raw <- fromMaybe "" <$> _ccd_captureNamed deps sess win (if n <= 0 then 0 else max n 50)
+            let obs = observerFor HClaudeCode
+            pure $ if n <= 0
+              then _ho_extractResponse obs 0 raw
+              else _ho_relevantTail obs n raw
+    , _hh_name     = "Claude Code"
+    , _hh_session  = session
+    , _hh_status   = harnessStatus deps reg hid
+    , _hh_stop     = harnessStop deps reg hid
     }
 
 -- ---------------------------------------------------------------------------
@@ -855,12 +866,18 @@ stripMarker line =
 mkDiscoveredClaudeCodeHandle :: TranscriptHandle -> Text -> Text -> IO HarnessHandle
 mkDiscoveredClaudeCodeHandle th session windowName =
   pure HarnessHandle
-    { _hh_send    = discoveredSend th session windowName
-    , _hh_receive = discoveredReceive th session windowName
-    , _hh_name    = "Claude Code"
-    , _hh_session = session
-    , _hh_status  = realStatus session windowName
-    , _hh_stop    = stopHarnessWindowNamed session windowName
+    { _hh_send     = discoveredSend th session windowName
+    , _hh_receive  = discoveredReceive th session windowName
+    , _hh_snapshot = \n -> do
+        raw <- fromMaybe "" <$> realCaptureNamed session windowName (if n <= 0 then 0 else max n 50)
+        let obs = observerFor HClaudeCode
+        pure $ if n <= 0
+          then _ho_extractResponse obs 0 raw
+          else _ho_relevantTail obs n raw
+    , _hh_name     = "Claude Code"
+    , _hh_session  = session
+    , _hh_status   = realStatus session windowName
+    , _hh_stop     = stopHarnessWindowNamed session windowName
     }
 
 -- | Send for a discovered (registry-less) handle: log the request, then send by
