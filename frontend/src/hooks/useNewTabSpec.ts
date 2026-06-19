@@ -72,6 +72,11 @@ export interface NewTabSpec {
   /** The tmux window name to attach to. */
   attachWindow: string
   setAttachWindow: (v: string) => void
+  /** The tmux window INDEX to attach to — the only identifier unique within a
+   *  session (names repeat). Set when a window is picked from the detected
+   *  dropdown; null for manual entry (the server then matches by name). */
+  attachWindowIndex: number | null
+  setAttachWindowIndex: (v: number | null) => void
   /** When true, the user has opted into manual session/window entry instead
    *  of (or in addition to) the detected-sessions dropdown. */
   attachManual: boolean
@@ -146,6 +151,7 @@ export function useNewTabSpec(): NewTabSpec {
   // Attach (Existing Harness)
   const [attachSession, setAttachSession] = useState('')
   const [attachWindow, setAttachWindow] = useState('')
+  const [attachWindowIndex, setAttachWindowIndex] = useState<number | null>(null)
   const [attachManual, setAttachManual] = useState(false)
   const { windows: discoverableWindows, error: discoveryError, scan: scanDiscoverable } = useDiscoverableWindows()
 
@@ -317,6 +323,7 @@ export function useNewTabSpec(): NewTabSpec {
     backendConfig, updateBackendConfig,
     attachSession, setAttachSession,
     attachWindow, setAttachWindow,
+    attachWindowIndex, setAttachWindowIndex,
     attachManual, setAttachManual,
     discoverableWindows, discoveryError, scanDiscoverable,
     validationError,

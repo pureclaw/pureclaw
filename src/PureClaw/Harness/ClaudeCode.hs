@@ -449,9 +449,17 @@ adoptExternalWindow
   -> TranscriptHandle
   -> FilePath            -- ^ sessions base directory (where @session.json@ is linked)
   -> AdoptedHarness      -- ^ capability token (REQUIRED — type-enforced, D4.3)
-  -> Text                -- ^ tmux window name to adopt
+  -> Maybe Int           -- ^ tmux window INDEX to adopt. The index is the only
+                         --   identifier UNIQUE within a session (window names
+                         --   default to the running command and repeat), so the
+                         --   detected-windows picker supplies it. 'Nothing' falls
+                         --   back to matching by name — used by manual entry,
+                         --   which has no index to offer.
+  -> Text                -- ^ tmux window name: the match target when no index is
+                         --   given, and always used in diagnostics + the legacy
+                         --   name-keyed routing map.
   -> IO (Either HarnessError (HarnessId, HarnessHandle))
-adoptExternalWindow deps reg th sessionsDir token windowName = do
+adoptExternalWindow deps reg th sessionsDir token mWindowIndex windowName = do
   let session = adoptedSession token
   -- WU8 Part A (§8 C3/C4 defense-in-depth): the adopted coordinates originate
   -- from the server-wide sweep (attacker-writable) and the allow-list (a literal
@@ -459,12 +467,13 @@ adoptExternalWindow deps reg th sessionsDir token windowName = do
   -- BEFORE any tmux mutation — a leading @-@ / @:@ / control char never reaches
   -- set-option, capture-pane, or registration. The argv defense already holds;
   -- this refuses the most-exposed path outright (no marker stamped, nothing
-  -- registered, no session.json written).
+  -- registered, no session.json written). The window name is validated even on
+  -- the index path: it still flows into diagnostics and the legacy routing map.
   if not (validateTmuxIdent session && validateTmuxIdent windowName)
     then pure (Left (HarnessNotAuthorized
       (CommandNotAllowed ("invalid tmux identifier for adoption: "
         <> session <> ":" <> windowName))))
-    else adoptValidated deps reg th sessionsDir session windowName
+    else adoptValidated deps reg th sessionsDir session mWindowIndex windowName
 
 -- | The adopt mechanism proper, reached only AFTER both tmux identifiers have
 -- passed 'validateTmuxIdent' (WU8 Part A). Split out so the guard in
@@ -475,21 +484,32 @@ adoptValidated
   -> TranscriptHandle
   -> FilePath
   -> Text                -- ^ validated tmux session name
-  -> Text                -- ^ validated tmux window name
+  -> Maybe Int           -- ^ tmux window index (preferred, unique); 'Nothing' → by name
+  -> Text                -- ^ validated tmux window name (match target when no index)
   -> IO (Either HarnessError (HarnessId, HarnessHandle))
-adoptValidated deps reg th sessionsDir session windowName = do
+adoptValidated deps reg th sessionsDir session mWindowIndex windowName = do
   -- Step 1: fresh identity.
   hid <- _ccd_newId deps
-  -- Step 2: resolve the user-picked window to its INDEX via a fresh scan. The
-  -- scan reads @#{window_name}@ as DATA, so a name containing @.@ (or a purely
-  -- numeric name) cannot be misparsed here. We pick the FIRST UNMARKED window
-  -- whose name matches (mirrors discovery's adoptable filter — avoids grabbing
-  -- an already-ours duplicate-named window). If none matches, the window is
+  -- Step 2: resolve the user-picked window via a fresh scan. When the picker
+  -- supplied a window INDEX we match on it — the index is the only identifier
+  -- UNIQUE within a session, so two windows sharing a name (e.g. both @zsh@)
+  -- stay distinguishable. Manual entry has no index, so we fall back to the
+  -- FIRST UNMARKED window whose NAME matches (mirrors discovery's adoptable
+  -- filter — avoids grabbing an already-ours duplicate-named window). The scan
+  -- reads @#{window_name}@ as DATA, so a name containing @.@ (or a purely
+  -- numeric name) cannot be misparsed here. If none matches, the window is
   -- gone\/already adopted: refuse with NO mutation (maps to 503).
   rows <- _ccd_sweep deps session
-  case find (\r -> _twr_windowName r == windowName && _twr_pclId r == "") rows of
+  let matchesPick r = case mWindowIndex of
+        Just idx -> _twr_windowIndex r == idx
+        Nothing  -> _twr_windowName r == windowName
+      pickDesc = case mWindowIndex of
+        Just idx -> "at index " <> T.pack (show idx)
+                      <> " (named " <> windowName <> ")"
+        Nothing  -> "named " <> windowName
+  case find (\r -> matchesPick r && _twr_pclId r == "") rows of
     Nothing -> pure (Left (HarnessTmuxNotAvailable
-      ("adopt: no unmarked window named " <> windowName
+      ("adopt: no unmarked window " <> pickDesc
         <> " in session " <> session)))
     Just row -> do
       let idx = _twr_windowIndex row

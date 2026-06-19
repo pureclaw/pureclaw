@@ -168,6 +168,29 @@ describe('adoptWindow', () => {
     })
   })
 
+  it('includes window_index in the body when a window index is supplied (picker disambiguation)', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({ session_id: 'sess-1' }) })
+    await adoptWindow('work', 'zsh', 1)
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(JSON.parse((call[1] as RequestInit).body as string)).toEqual({
+      session: 'work',
+      window: 'zsh',
+      window_index: 1,
+      consent_confirmed: true,
+    })
+  })
+
+  it('omits window_index from the body for manual entry (no index → server matches by name)', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({ session_id: 'sess-1' }) })
+    await adoptWindow('work', 'zsh', null)
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(JSON.parse((call[1] as RequestInit).body as string)).toEqual({
+      session: 'work',
+      window: 'zsh',
+      consent_confirmed: true,
+    })
+  })
+
   it('returns sessionId:null when the server omits session_id', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => ({ adopted: true }) })
     expect(await adoptWindow('work', 'editor')).toEqual({ ok: true, sessionId: null })

@@ -474,12 +474,19 @@ export async function acknowledgeTab(index: number): Promise<boolean> {
 export async function adoptWindow(
   session: string,
   window: string,
+  windowIndex: number | null = null,
 ): Promise<{ ok: boolean; sessionId: string | null }> {
   try {
+    // The window INDEX is the only identifier unique within a session (names
+    // repeat). The detected-windows picker supplies it so adoption targets the
+    // chosen window; manual entry has no index, so it's omitted and the server
+    // falls back to matching by name.
+    const body: Record<string, unknown> = { session, window, consent_confirmed: true }
+    if (windowIndex !== null) body.window_index = windowIndex
     const res = await fetch('/api/adopt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session, window, consent_confirmed: true }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) return { ok: false, sessionId: null }
     const data = (await res.json().catch(() => ({}))) as { session_id?: string | null }

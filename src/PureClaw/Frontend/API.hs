@@ -158,12 +158,15 @@ data FrontendEnv = FrontendEnv
     -- denied even with a valid consent body (design §8 B2, SEC-1\/FEAS-2). This
     -- is the SOLE remaining adoption gate now that the allow-list was dropped.
     -- Tests default to 'ConsentHeadless' (fail-closed).
-  , _fe_adopt        :: AdoptedHarness -> Text -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle))
+  , _fe_adopt        :: AdoptedHarness -> Maybe Int -> Text -> IO (Either HarnessError (Registry.HarnessId, HarnessHandle))
     -- ^ Adopt an external, discovered tmux window into the registry. The
     -- 'AdoptedHarness' argument is the capability token from 'authorizeAdoption'
     -- (its value constructor is unexported, so this seam is impossible to call
     -- without first passing the consent + allow-list gate — D4.3, type-enforced).
-    -- The 'Text' is the window name to adopt; the session rides in the token.
+    -- The 'Maybe Int' is the window INDEX (unique within the session — supplied
+    -- by the detected-windows picker; 'Nothing' for manual entry, which matches
+    -- by name). The 'Text' is the window name (match target when no index);
+    -- the session rides in the token.
     -- The dispatcher wires the real 'adoptExternalWindow' mechanism (which
     -- stamps @\@pcl_id@, sets the capture baseline to the current scrollback
     -- end, registers an @OriginAdopted@ entry, and links a @session.json@); the
@@ -685,6 +688,10 @@ handleDiscoveryScan _env respond = do
 data AdoptRequest = AdoptRequest
   { _ar_session          :: !Text
   , _ar_window           :: !Text
+  , _ar_windowIndex      :: !(Maybe Int)
+    -- ^ The tmux window index of the picked window — the only identifier UNIQUE
+    --   within a session. Sent by the detected-windows picker; absent for manual
+    --   entry (which falls back to matching by name).
   , _ar_consentConfirmed :: !Bool
   }
 
@@ -693,6 +700,7 @@ instance FromJSON AdoptRequest where
     AdoptRequest
       <$> o .: "session"
       <*> o .: "window"
+      <*> o .:? "window_index"
       <*> o .:? "consent_confirmed" .!= False
 
 -- | @POST \/api\/adopt@ — adopt an external (discovered, UNMARKED) tmux window
@@ -732,7 +740,7 @@ handleAdopt env req respond = do
               respond $ jsonResponse status403
                 (object ["error" .= ("adoption requires an interactive consent channel" :: Text)])
             Right token -> do
-              result <- _fe_adopt env token (_ar_window ar)
+              result <- _fe_adopt env token (_ar_windowIndex ar) (_ar_window ar)
               case result of
                 Left err ->
                   respond $ harnessErrorResponse err
@@ -753,6 +761,7 @@ handleAdopt env req respond = do
                       , "harness_id"  .= Registry.harnessIdToText hid
                       , "session"     .= _ar_session ar
                       , "window"      .= _ar_window ar
+                      , "window_index" .= _ar_windowIndex ar
                       , "session_id"  .= (mEntry >>= Registry._he_sessionId)
                       ])
 

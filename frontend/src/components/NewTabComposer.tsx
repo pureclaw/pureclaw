@@ -241,12 +241,14 @@ export function NewTabComposer({ spec }: NewTabComposerProps) {
 
 // ── Existing Harness (attach) section ─────────────────────────────────
 
-/** Encode a detected window as a single <option> value so a dropdown
- *  selection round-trips BOTH the session and window name. The NUL
- *  separator can't appear in a tmux name. */
+/** Encode a detected window as a single <option> value so a dropdown selection
+ *  round-trips the session, the window INDEX, and the window name. The index is
+ *  included because window names repeat within a session, so name alone can't
+ *  identify the picked window — two same-named windows would collide to one
+ *  value. The NUL separator can't appear in a tmux name. */
 const ATTACH_SEP = ' '
-function encodeWindow(w: { session: string; windowName: string }): string {
-  return `${w.session}${ATTACH_SEP}${w.windowName}`
+function encodeWindow(w: { session: string; windowIndex: number; windowName: string }): string {
+  return `${w.session}${ATTACH_SEP}${w.windowIndex}${ATTACH_SEP}${w.windowName}`
 }
 
 function ExistingHarnessSection({ spec }: { spec: NewTabSpec }) {
@@ -255,9 +257,12 @@ function ExistingHarnessSection({ spec }: { spec: NewTabSpec }) {
   // Fall back to manual entry automatically when there's nothing to pick
   // (empty scan or a scan error), or when the user opted in explicitly.
   const showManual = spec.attachManual || (!hasWindows)
+  // Match the current selection by session + INDEX (the unique key) so a picked
+  // window resolves even when another window shares its name.
   const selectedValue =
-    spec.attachSession && windows.some((w) => w.session === spec.attachSession && w.windowName === spec.attachWindow)
-      ? encodeWindow({ session: spec.attachSession, windowName: spec.attachWindow })
+    spec.attachWindowIndex !== null &&
+    windows.some((w) => w.session === spec.attachSession && w.windowIndex === spec.attachWindowIndex)
+      ? encodeWindow({ session: spec.attachSession, windowIndex: spec.attachWindowIndex, windowName: spec.attachWindow })
       : ''
 
   return (
@@ -283,16 +288,23 @@ function ExistingHarnessSection({ spec }: { spec: NewTabSpec }) {
             id="attach-detected"
             value={selectedValue}
             onChange={(e) => {
-              const [session, windowName] = e.target.value.split(ATTACH_SEP)
+              if (e.target.value === '') {
+                spec.setAttachSession('')
+                spec.setAttachWindow('')
+                spec.setAttachWindowIndex(null)
+                return
+              }
+              const [session, windowIndex, windowName] = e.target.value.split(ATTACH_SEP)
               spec.setAttachSession(session ?? '')
               spec.setAttachWindow(windowName ?? '')
+              spec.setAttachWindowIndex(windowIndex === undefined ? null : Number(windowIndex))
             }}
             style={inputStyle}
           >
             <option value="">(pick a detected session)</option>
             {windows.map((w) => (
               <option key={encodeWindow(w)} value={encodeWindow(w)}>
-                {w.session}:{w.windowName}
+                {w.session}:{w.windowIndex} {w.windowName}
               </option>
             ))}
           </select>
@@ -324,7 +336,11 @@ function ExistingHarnessSection({ spec }: { spec: NewTabSpec }) {
               id="attach-session"
               type="text"
               value={spec.attachSession}
-              onChange={(e) => spec.setAttachSession(e.target.value)}
+              onChange={(e) => {
+                spec.setAttachSession(e.target.value)
+                // Manual edit invalidates any picked index — match by name.
+                spec.setAttachWindowIndex(null)
+              }}
               style={inputStyle}
               placeholder="tmux session name"
             />
@@ -334,7 +350,11 @@ function ExistingHarnessSection({ spec }: { spec: NewTabSpec }) {
               id="attach-window"
               type="text"
               value={spec.attachWindow}
-              onChange={(e) => spec.setAttachWindow(e.target.value)}
+              onChange={(e) => {
+                spec.setAttachWindow(e.target.value)
+                // Manual edit invalidates any picked index — match by name.
+                spec.setAttachWindowIndex(null)
+              }}
               style={inputStyle}
               placeholder="tmux window name"
             />
