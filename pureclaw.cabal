@@ -107,6 +107,7 @@ library
     PureClaw.Harness.Discovery
     PureClaw.Harness.JsonlTail
     PureClaw.Harness.Reconcile
+    PureClaw.Harness.Id
     PureClaw.Harness.Registry
     PureClaw.Harness.Tmux
     PureClaw.Harness.Observer

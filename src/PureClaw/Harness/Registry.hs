@@ -15,8 +15,8 @@
 -- Leaf module: it may import 'PureClaw.Handles.Harness' (for 'HarnessHandle')
 -- and standard libraries only — never @Agent@\/@Frontend@\/@CLI@.
 module PureClaw.Harness.Registry
-  ( -- * Identity
-    HarnessId
+  ( -- * Identity (re-exported from PureClaw.Harness.Id)
+    HarnessId (..)
   , newHarnessId
   , parseHarnessId
   , harnessIdToText
@@ -40,52 +40,21 @@ module PureClaw.Harness.Registry
   ) where
 
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
-import Data.Aeson (FromJSON (..), ToJSON (..))
-import Data.Aeson qualified as Aeson
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Data.UUID (UUID)
-import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUIDv4
 
 import PureClaw.Handles.Harness (HarnessHandle)
+import PureClaw.Harness.Id (HarnessId (..), harnessIdToText, parseHarnessId)
 
 -- ---------------------------------------------------------------------------
 -- Identity
 -- ---------------------------------------------------------------------------
 
--- | A PureClaw-assigned, UUID-backed harness identity. This is the canonical
--- key for the registry and the durable anchor that survives tmux window
--- rename\/move and PureClaw restart (persisted in @session.json@).
-newtype HarnessId = HarnessId { unHarnessId :: UUID }
-  deriving stock (Eq, Ord, Show)
-
 -- | Generate a fresh random 'HarnessId' (UUID v4).
 newHarnessId :: IO HarnessId
 newHarnessId = HarnessId <$> UUIDv4.nextRandom
-
--- | Parse a 'HarnessId' from its canonical UUID text representation.
--- Returns 'Nothing' for any non-UUID input.
-parseHarnessId :: Text -> Maybe HarnessId
-parseHarnessId = fmap HarnessId . UUID.fromText
-
--- | Render a 'HarnessId' as its canonical UUID text representation.
-harnessIdToText :: HarnessId -> Text
-harnessIdToText = UUID.toText . unHarnessId
-
--- | Round-trippable JSON: a 'HarnessId' is encoded as the canonical UUID
--- string (D2.4). We hand-write the codec rather than @deriving newtype@ so the
--- on-the-wire shape (a plain string) is explicit and decode rejects malformed
--- UUIDs with a clear error.
-instance ToJSON HarnessId where
-  toJSON = Aeson.String . harnessIdToText
-
-instance FromJSON HarnessId where
-  parseJSON = Aeson.withText "HarnessId" $ \t ->
-    case parseHarnessId t of
-      Just hid -> pure hid
-      Nothing  -> fail ("invalid HarnessId (not a UUID): " <> show t)
 
 -- ---------------------------------------------------------------------------
 -- Entry types
