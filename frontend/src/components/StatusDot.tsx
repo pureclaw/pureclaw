@@ -10,6 +10,7 @@ const dotClass: Record<AgentStatus, string> = {
 const activityDotClass: Record<HarnessActivity, string> = {
   'thinking': 'dot dot-thinking',
   'idle': 'dot dot-idle',
+  'needs-input': 'dot dot-needs',
   'stopped': 'dot dot-completed',
 }
 

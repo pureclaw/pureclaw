@@ -108,10 +108,11 @@ data HarnessOrigin
 -- states: the former is the orthogonal '_he_extModified' flag, and the latter
 -- maps to the '_he_stale' flag (hold last-known liveness).
 data Liveness
-  = LivenessIdle      -- ^ Window present, harness running, not actively working.
-  | LivenessThinking  -- ^ Harness actively working (screen-capture heuristic).
-  | LivenessExited    -- ^ Harness PID gone or @pane_dead@, window still present.
-  | LivenessOrphaned  -- ^ No live window+PID for this id.
+  = LivenessIdle           -- ^ Window present, harness running, not actively working.
+  | LivenessThinking       -- ^ Harness actively working (screen-capture heuristic).
+  | LivenessAwaitingInput  -- ^ Window present, harness blocked on an approval/menu prompt.
+  | LivenessExited         -- ^ Harness PID gone or @pane_dead@, window still present.
+  | LivenessOrphaned       -- ^ No live window+PID for this id.
   deriving stock (Eq, Show)
 
 -- | A registry entry: the durable identity plus the reconciled health\/coordinate

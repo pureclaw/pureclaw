@@ -235,3 +235,8 @@ spec = do
             _ts_index t0 `shouldBe` 0
             _ts_index t1 `shouldBe` 1
           other -> expectationFailure ("expected 2 snapshots, got " <> show (length other))
+
+  -- Task 3: livenessToTabStatus — LivenessAwaitingInput maps to "running"
+  describe "livenessToTabStatus LivenessAwaitingInput" $ do
+    it "maps LivenessAwaitingInput to \"running\" (state shown via activity dot, not tab badge)" $
+      livenessToTabStatus Registry.LivenessAwaitingInput `shouldBe` "running"

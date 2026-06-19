@@ -104,10 +104,11 @@ instance ToJSON TabSnapshot where
 -- words so the frontend can render the state→visual table.
 livenessToTabStatus :: Registry.Liveness -> Text
 livenessToTabStatus lv = case lv of
-  Registry.LivenessIdle     -> "idle"
-  Registry.LivenessThinking -> "running"
-  Registry.LivenessExited   -> "exited"
-  Registry.LivenessOrphaned -> "orphaned"
+  Registry.LivenessIdle          -> "idle"
+  Registry.LivenessThinking      -> "running"
+  Registry.LivenessAwaitingInput -> "running"  -- distinct state shown via the activity dot, not the tab badge
+  Registry.LivenessExited        -> "exited"
+  Registry.LivenessOrphaned      -> "orphaned"
 
 -- | Map a registry 'Registry.HarnessOrigin' to the @TabSnapshot@ origin
 -- vocabulary (the §7 origin pill): @\"spawned\"@ (we launched it),

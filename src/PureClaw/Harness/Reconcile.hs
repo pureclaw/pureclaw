@@ -229,10 +229,11 @@ classifyLiveness paneDead harnessAlive idle
 -- Both @Exited@ and @Orphaned@ collapse to 'HarnessStopped' (the frontend's
 -- richer state→glyph mapping is Phase 2).
 livenessToActivity :: Reg.Liveness -> HarnessActivity
-livenessToActivity Reg.LivenessIdle     = HarnessIdle
-livenessToActivity Reg.LivenessThinking = HarnessThinking
-livenessToActivity Reg.LivenessExited   = HarnessStopped
-livenessToActivity Reg.LivenessOrphaned = HarnessStopped
+livenessToActivity Reg.LivenessIdle          = HarnessIdle
+livenessToActivity Reg.LivenessThinking      = HarnessThinking
+livenessToActivity Reg.LivenessAwaitingInput = HarnessNeedsInput
+livenessToActivity Reg.LivenessExited        = HarnessStopped
+livenessToActivity Reg.LivenessOrphaned      = HarnessStopped
 
 -- ---------------------------------------------------------------------------
 -- Pure symmetric diff (D5.2)

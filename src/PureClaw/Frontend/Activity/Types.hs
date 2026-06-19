@@ -17,10 +17,12 @@ import Data.Aeson (ToJSON (..))
 data HarnessActivity
   = HarnessThinking
   | HarnessIdle
+  | HarnessNeedsInput  -- ^ Window present, harness blocked on an approval/menu prompt.
   | HarnessStopped
   deriving stock (Show, Eq)
 
 instance ToJSON HarnessActivity where
-  toJSON HarnessThinking = Aeson.String "thinking"
-  toJSON HarnessIdle     = Aeson.String "idle"
-  toJSON HarnessStopped  = Aeson.String "stopped"
+  toJSON HarnessThinking   = Aeson.String "thinking"
+  toJSON HarnessIdle       = Aeson.String "idle"
+  toJSON HarnessNeedsInput = Aeson.String "needs-input"
+  toJSON HarnessStopped    = Aeson.String "stopped"

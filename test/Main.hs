@@ -159,6 +159,8 @@ import qualified Frontend.StreamGoldensSpec
 import qualified Frontend.StreamIntegrationSpec
 -- WU4 (activity probe loop)
 import qualified Frontend.ActivityProbeSpec
+-- Task 3: HarnessActivity ToJSON unit tests
+import qualified Frontend.ActivityTypesSpec
 -- Frontend.APISpec is already imported at the top of this block (from main)
 -- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
 import qualified Frontend.TabsViewSpec
@@ -323,6 +325,8 @@ main = hspec $ do
   describe "Frontend.StreamIntegration" Frontend.StreamIntegrationSpec.spec
   -- WU4 (activity probe loop)
   describe "Frontend.ActivityProbe" Frontend.ActivityProbeSpec.spec
+  -- Task 3: HarnessActivity ToJSON
+  describe "Frontend.ActivityTypes" Frontend.ActivityTypesSpec.spec
   -- Frontend.APISpec is registered earlier (from main's WU-7 unified endpoint)
   -- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
   describe "Frontend.TabsView" Frontend.TabsViewSpec.spec

@@ -368,6 +368,8 @@ test-suite pureclaw-test
     Frontend.StreamIntegrationSpec
     -- Frontend (live transcript streaming — WU4)
     Frontend.ActivityProbeSpec
+    -- Frontend Activity.Types unit tests (Task 3)
+    Frontend.ActivityTypesSpec
     -- Frontend (live transcript streaming — WU6: HTTP-API regression)
     Frontend.APISpec
     Harness.ClaudeCodeSpec

@@ -1041,6 +1041,9 @@ spec = do
     it "gives Exited and Orphaned distinct status strings (no longer collapsed)" $
       livenessToTabStatus Registry.LivenessExited
         `shouldNotBe` livenessToTabStatus Registry.LivenessOrphaned
+    -- Task 3: LivenessAwaitingInput → "running" (distinct state shown via activity dot)
+    it "maps LivenessAwaitingInput to \"running\"" $
+      livenessToTabStatus Registry.LivenessAwaitingInput `shouldBe` "running"
 
   describe "harnessOriginToText (P2-WU1 — origin pill mapping)" $ do
     it "maps OriginSpawned to \"spawned\"" $
