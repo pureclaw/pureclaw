@@ -453,6 +453,9 @@ spec = do
     it "isIdle is False for an approval/needs-input frame" $
       isIdle "Do you want to proceed?" `shouldBe` False
 
+    it "is NOT idle when a spinner/working line is present even though the ❯ input box is shown (regression)" $
+      isIdle "\x2736 Smooshing\x2026 (4s \xB7 16k tokens)\n\x276F" `shouldBe` False
+
     it "isResponseMarker recognises the ⏺ and ⬤ markers" $ do
       isResponseMarker "\x23FA hello" `shouldBe` True
       isResponseMarker "\x2B24 hello" `shouldBe` True
