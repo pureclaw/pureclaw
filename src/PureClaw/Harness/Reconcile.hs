@@ -83,6 +83,7 @@ import PureClaw.Frontend.StreamBroker
   , SessionActivity (..)
   , StreamBroker (..)
   )
+import PureClaw.Handles.Harness (HarnessHandle (..))
 import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Harness.Observer qualified as Obs
 import PureClaw.Harness.Registry qualified as Reg
@@ -134,6 +135,14 @@ data ReconcileDeps = ReconcileDeps
     --   delete is done by the loop itself, in 'reconcileTick'); it must NOT
     --   touch @session.json@ so the session reappears in Recent Sessions.
     --   Tests inject a recorder to assert the @(id, label)@ that was evicted.
+  , _rd_recordResponse :: SessionId -> Text -> IO ()
+    -- ^ Output watcher (Task 7). Records ONE harness @Response@ transcript entry
+    --   for a session on a working→settle transition. The loop reuses the
+    --   entry's '_hh_snapshot' to capture the latest response (per-flavour,
+    --   behind the handle) and dedupes against the last response it recorded for
+    --   that id, so a steady-state idle does not re-record. Production wires this
+    --   to append a @Response@ entry to the session transcript (via a
+    --   broadcasting file transcript handle); tests inject a recorder.
   }
 
 -- | Production dependency set. Sweeps the @\"pureclaw\"@ session plus any other
@@ -172,6 +181,9 @@ defaultReconcileDeps = ReconcileDeps
     -- overrides this seam via 'runReconcileLoopWith'). Crucially this never
     -- deletes @session.json@.
   , _rd_evict = \_hid _label -> pure ()
+    -- Default recorder is a no-op: the production transcript wiring is injected
+    -- in CLI.Commands (which has 'sessionsDir' + the broker in scope).
+  , _rd_recordResponse = \_sid _txt -> pure ()
   }
   where
     dedup = go []
@@ -546,9 +558,11 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
   -- stable (a fresh idle frame reads Thinking until a second identical capture).
   (initial, evicted0) <- reconcileTick deps reg logger Map.empty
   publishEvictions evicted0
-  loop (livenessSnap initial) (capSnap initial)
+  -- The baseline tick has no previous liveness, so it is not a "transition"
+  -- and never records a Response; settle detection begins on the second tick.
+  loop (livenessSnap initial) (capSnap initial) Map.empty
   where
-    loop prev prevCaps = do
+    loop prev prevCaps prevResponses = do
       threadDelay tickMicros
       (obs, evicted) <- reconcileTick deps reg logger prevCaps
       let next = livenessSnap obs
@@ -559,7 +573,45 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
       -- already Orphaned, so the diff above does NOT re-emit it; this guarantees
       -- the frontend sees it leave even though no liveness transition occurred.
       publishEvictions evicted
-      loop next (capSnap obs)
+      -- Output watcher (Task 7): for each id that just transitioned from
+      -- Thinking to a settled state (Idle / AwaitingInput), snapshot the latest
+      -- response and record ONE Response transcript entry (deduped).
+      prevResponses' <- settle prev obs prevResponses
+      loop next (capSnap obs) prevResponses'
+
+    -- Detect working→settle transitions and record one Response per settled id,
+    -- deduped against the last response recorded for that id. Returns the
+    -- updated id-text → last-response map.
+    settle prev obs prevResponses = do
+      newPairs <- forM (settledIds prev obs) $ \idText ->
+        case Reg.parseHarnessId idText of
+          Nothing  -> pure Nothing
+          Just hid -> do
+            mEntry <- Reg.lookupById reg hid
+            case mEntry of
+              Just e
+                | Just realSid <- Reg._he_sessionId e
+                , Just hh      <- Reg._he_handle e -> do
+                    resp <- _hh_snapshot hh 0
+                    let prevResp = Map.lookup idText prevResponses
+                    if not (T.null (T.strip resp)) && prevResp /= Just resp
+                      then do _rd_recordResponse deps (SessionId realSid) resp
+                              pure (Just (idText, resp))
+                      else pure Nothing
+              -- A harness with no real sessionId or no attached handle is
+              -- skipped (Phase-1 limitation): a boot-discovered, handle-less
+              -- entry is not auto-recorded until a handle exists.
+              _ -> pure Nothing
+      pure (foldr (uncurry Map.insert) prevResponses (catMaybes newPairs))
+
+    -- Ids whose PREVIOUS liveness was Thinking and whose NEW liveness (this
+    -- tick) is Idle or AwaitingInput — the working→settle edge.
+    settledIds prev obs =
+      [ idText
+      | (idText, o) <- Map.toList obs
+      , _to_liveness o `elem` [Reg.LivenessIdle, Reg.LivenessAwaitingInput]
+      , Just (_, Reg.LivenessThinking) <- [Map.lookup idText prev]
+      ]
 
     -- Project the observation map into the (sessionId, liveness) snapshot the
     -- 'diffLiveness' publish path consumes, and into the carry-forward captures.

@@ -42,6 +42,7 @@ import PureClaw.Frontend.StreamBroker
   , defaultBrokerConfig
   , mkInProcessBroker
   )
+import PureClaw.Handles.Harness (HarnessHandle (..), mkNoOpHarnessHandle)
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Harness.Observer (claudeObserver)
 import PureClaw.Harness.Reconcile
@@ -136,6 +137,7 @@ fakeDeps f = ReconcileDeps
       pure (Map.findWithDefault True pid m)
   , _rd_stampLegacy = \_session _windowName -> pure Nothing
   , _rd_evict = \_hid _label -> pure ()
+  , _rd_recordResponse = \_sid _txt -> pure ()
   }
 
 -- | A log handle that records every warn\/error message into an 'IORef' so a
@@ -339,6 +341,129 @@ spec = do
               sid `shouldBe` SessionId "label-fallback"
             other -> expectationFailure $
               "expected a HarnessStopped event under the label, got: " <> show other
+
+  describe "output watcher — record Response on settle (Task 7)" $ do
+    -- These tests drive the real loop (the settle detection lives in the loop,
+    -- not in 'reconcileTick'). A scripted per-tick capture sequence
+    -- spinner→spinner→idle→idle produces a working→idle settle on the tick
+    -- where two identical idle frames pass the stability gate. The fake handle's
+    -- '_hh_snapshot' returns a fixed response the recorder captures.
+    let settleHid = "claude-code-0"
+
+        -- Build deps whose '_rd_capture' replays a per-tick frame script (the
+        -- last frame repeats) and whose '_rd_recordResponse' appends to a ref.
+        settleDeps
+          :: Text                          -- ^ the entry's @pcl_id (harness id text)
+          -> IORef [Text]                  -- ^ per-tick capture script
+          -> (SessionId -> Text -> IO ())  -- ^ recordResponse
+          -> ReconcileDeps
+        settleDeps pclId frames record = ReconcileDeps
+          { _rd_sessions = pure ["pureclaw"]
+          , _rd_sweep    = \_ -> pure
+              [ mkRow 0 settleHid pclId (Just 100) False ]
+          , _rd_capture  = \_session _windowName -> do
+              xs <- readIORef frames
+              case xs of
+                []       -> pure (Just idleFrame)
+                [x]      -> pure (Just x)
+                (x : ys) -> do writeIORef frames ys; pure (Just x)
+          , _rd_harnessAlive   = \_ -> pure True
+          , _rd_stampLegacy     = \_ _ -> pure Nothing
+          , _rd_evict           = \_ _ -> pure ()
+          , _rd_recordResponse  = record
+          }
+
+    it "records exactly one Response on a working→idle settle, then dedups" $ do
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the answer" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      -- spinner, spinner, idle, idle, idle... → Idle settle once two idle
+      -- frames are stable; subsequent idle ticks must dedup to zero.
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-1", "the answer")]
+
+    it "records the approval prompt on a working→awaiting-input settle" $ do
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the prompt" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      -- spinner, then an approval frame (AwaitingInput needs no stability gate).
+      let approvalFrame = "Do you want to proceed?"
+      frames <- newIORef [busyFrame, approvalFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-1", "the prompt")]
+
+    it "skips recording when _he_sessionId is Nothing (label-only entry)" $ do
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the answer" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Nothing
+          , Reg._he_label     = settleHid
+          , Reg._he_handle    = Just hh
+          })
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` []
+
+    it "records output produced with no preceding send (direct-tmux: spinner→idle)" $ do
+      -- No /send happened; the harness just produced output. The settle on a
+      -- spinner→idle transition still records it (the loop watches liveness, not
+      -- send calls).
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "spontaneous output" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-1", "spontaneous output")]
 
   describe "reconcileTick — D5.5 / D5.7 (non-ours rows are never captured)" $ do
     it "a PID-mismatched marker row is logged + treated as not-ours (never captured, entry → Orphaned)" $ do
