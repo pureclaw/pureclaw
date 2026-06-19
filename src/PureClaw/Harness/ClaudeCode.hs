@@ -49,7 +49,7 @@ import System.FilePath ((</>))
 import System.Process.Typed qualified as P
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Transcript
-import PureClaw.Harness.Observer (observerFor, _ho_extractResponse, _ho_relevantTail)
+import PureClaw.Harness.Observer qualified as Obs
 import PureClaw.Harness.Registry (HarnessId, HarnessRegistry)
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux
@@ -406,10 +406,10 @@ mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do
           Nothing -> pure ""
           Just (sess, win) -> do
             raw <- fromMaybe "" <$> _ccd_captureNamed deps sess win (if n <= 0 then 0 else max n 50)
-            let obs = observerFor HClaudeCode
+            let obs = Obs.observerFor HClaudeCode
             pure $ if n <= 0
-              then _ho_extractResponse obs 0 raw
-              else _ho_relevantTail obs n raw
+              then Obs._ho_extractResponse obs 0 raw
+              else Obs._ho_relevantTail obs n raw
     , _hh_name     = "Claude Code"
     , _hh_session  = session
     , _hh_status   = harnessStatus deps reg hid
@@ -870,10 +870,10 @@ mkDiscoveredClaudeCodeHandle th session windowName =
     , _hh_receive  = discoveredReceive th session windowName
     , _hh_snapshot = \n -> do
         raw <- fromMaybe "" <$> realCaptureNamed session windowName (if n <= 0 then 0 else max n 50)
-        let obs = observerFor HClaudeCode
+        let obs = Obs.observerFor HClaudeCode
         pure $ if n <= 0
-          then _ho_extractResponse obs 0 raw
-          else _ho_relevantTail obs n raw
+          then Obs._ho_extractResponse obs 0 raw
+          else Obs._ho_relevantTail obs n raw
     , _hh_name     = "Claude Code"
     , _hh_session  = session
     , _hh_status   = realStatus session windowName
