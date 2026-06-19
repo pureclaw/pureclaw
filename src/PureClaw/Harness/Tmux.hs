@@ -387,7 +387,7 @@ pasteBufferNamedArgs sessionName windowName =
 captureNamedArgs :: Text -> Text -> Int -> [String]
 captureNamedArgs sessionName windowName lineCount =
   [ "capture-pane", "-t", windowTarget sessionName windowName
-  , "-p", "-S", "-" <> show lineCount
+  , "-p", "-J", "-S", "-" <> show lineCount
   ]
 
 -- | @kill-window@ argv targeting a window by name.
