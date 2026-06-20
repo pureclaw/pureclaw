@@ -410,20 +410,15 @@ git commit -m "feat(frontend): growing-message indicator for streaming harness e
 
 - [ ] **Step 1: Failing tests** (`test/Harness/ReconcileSpec.hs`). **Use the Phase-1 "output watcher" tests (added in Phase 1 Task 7, in this same file) as the EXACT harness**: they drive `runReconcileLoopWith Reconcile.defaultTickMicros deps reg broker logger` under `Async.withAsync`, register one entry with `_he_sessionId = Just "sess-1"` + `_he_handle = Just hh`, script `_rd_capture` to return busy/idle frames across ticks, and capture recorded responses in an `IORef` via the `_rd_recordResponse` stub. Extend that harness: the fake handle's `_hh_snapshotTurn` returns a growing turn across ticks; `_rd_publishUpdate` and `_rd_recordResponse` stubs push the received `TranscriptEntry` into separate `IORef [(SessionId, TranscriptEntry)]`s; `_rd_mintTurn = pure ("turn-1", fixedTs)`. Decode an entry's payload with `decodePayload (_te_payload e)` (the inverse of `encodePayload`, from `PureClaw.Transcript.Types`). Tests:
 
-```haskell
-    it "publishes EntryUpdated with a stable id as the turn grows, then finalizes once on settle" $ do
-      -- _hh_snapshotTurn returns "A" on tick 1, "A\nB" on tick 2; capture frames: busy, busy, idle
-      -- assert: every published update entry has _te_id == "turn-1";
-      --         decoded update payloads == ["A", "A\nB"];
-      --         exactly ONE recorded (final) entry, _te_id == "turn-1", decoded payload == "A\nB".
-      pending  -- replace with the concrete asserts using the extended Phase-1 harness above
-    it "does not re-publish an unchanged turn (two identical working ticks → one update)" pending
-    it "retires the turn id at settle so the next turn mints a fresh id" pending
-    it "skips when _he_sessionId is Nothing or _he_handle is Nothing" pending
-    it "loop survives a throwing _rd_publishUpdate (logged + skipped, other harness still updates)" pending
-```
+Write these as FULL `it` blocks with concrete assertions (NOT `pending` — a committed `pending`/`xit` asserts nothing and is a plan failure here; the RED step must be a genuine assertion/compile failure). A payload decodes via `T.decodeUtf8 <$> decodePayload (_te_payload e)` (`decodePayload :: Text -> Maybe ByteString`, exported from `PureClaw.Transcript.Types`). Each test reuses the Phase-1 watcher harness verbatim and adds the recording stubs + fixed `_rd_mintTurn`:
 
-Replace each `pending` with concrete assertions built on the extended harness (the Phase-1 watcher test shows every primitive needed: `Async.withAsync`, the registry entry builder, the scripted `_rd_capture`, the recording stubs, and the `threadDelay`/settle timing). Do NOT leave `pending` in the committed test — they are placeholders for you to fill against the real harness.
+1. **`stable id as the turn grows, then one final on settle`** — `_hh_snapshotTurn` returns `"A"` then `"A\nB"` across two working ticks; capture frames `busy, busy, idle`; `_rd_mintTurn = pure ("turn-1", fixedTs)`. Assert: every captured update entry has `_te_id == "turn-1"`; the decoded update payloads are `["A", "A\nB"]`; exactly ONE captured final entry, `_te_id == "turn-1"`, decoded payload `"A\nB"`.
+2. **`unchanged turn published once`** — `_hh_snapshotTurn` returns `"A"` on two consecutive working ticks → assert exactly ONE update captured.
+3. **`turn id retired at settle`** — after a turn settles, a SECOND turn (frames `idle, busy, idle` with `_rd_mintTurn` yielding `"turn-2"` on its second call) produces a final with `_te_id == "turn-2"` (fresh id, not `"turn-1"`). (Make `_rd_mintTurn` a counter-backed `IORef` stub returning `turn-1` then `turn-2`.)
+4. **`skips unbound harness`** — an entry with `_he_sessionId == Nothing` (or `_he_handle == Nothing`) produces NO updates and NO final.
+5. **`loop survives a throwing _rd_publishUpdate`** — the stub throws a non-async `IOException` for harness A on its working tick; assert the loop keeps running and a SECOND healthy harness B still gets its update/final (proves the per-entry `try` + AsyncCancelled re-raise).
+
+Each `it` ends with real `shouldBe`/`shouldSatisfy` on the captured `IORef`s.
 
 - [ ] **Step 2: Run red.** FAIL.
 - [ ] **Step 3: Implement.**
@@ -436,11 +431,15 @@ mkTurnEntry turnId ts payload = TranscriptEntry
   , _te_durationMs = Nothing, _te_correlationId = turnId, _te_metadata = Map.empty }
 ```
 `ReconcileDeps`: change `_rd_recordResponse :: SessionId -> TranscriptEntry -> IO ()`; add `_rd_publishUpdate :: SessionId -> TranscriptEntry -> IO ()` and `_rd_mintTurn :: IO (Text, UTCTime)`. `defaultReconcileDeps`: `_rd_publishUpdate = \_ _ -> pure ()`, `_rd_mintTurn = (,) <$> (UUID.toText <$> UUID.nextRandom) <*> getCurrentTime`, `_rd_recordResponse = \_ _ -> pure ()`.
-Loop: thread `turnMap :: Map Text (Text, UTCTime, Text)`. Per tick, after the existing classify/diff/eviction:
-- **Updates:** for each id whose `_to_liveness == LivenessThinking` and the entry is bound (`Just realSid`, `Just hh`): `try @SomeException $ do` `turn <- _hh_snapshotTurn hh`; when `not (T.null (T.strip turn))`: get-or-mint `(turnId, ts)` from `turnMap` (mint via `_rd_mintTurn` if absent); when `turn /= lastPushed`: `_rd_publishUpdate (SessionId realSid) (mkTurnEntry turnId ts turn)` and update `turnMap[id] = (turnId, ts, turn)`. (AsyncCancelled re-raised; other errors logged + skipped.)
-- **Settle (reuse the existing `settledIds`):** for a settling id present in `turnMap`: build `mkTurnEntry turnId ts lastPushed` (or re-snapshot once for the final), `_rd_recordResponse (SessionId realSid) entry`, then DELETE id from `turnMap`. (If a turn settled without ever being in `turnMap` — e.g. produced text only on the settle tick — mint and record once.) Preserve the Phase-1 `prevResponses` content-dedup so a re-settle doesn't double-record.
-Thread `turnMap` as a new `loop` argument (init `Map.empty`).
-Production wiring (`CLI/Commands.hs`): `_rd_recordResponse = \sid entry -> bracket (mkBroadcastingFileTranscriptHandle (Just broker) sid logger (path sid)) (\rth -> _th_flush rth >> _th_close rth) (\rth -> _th_record rth entry)`; `_rd_publishUpdate = \sid entry -> _streamBroker_publish broker (EntryUpdated sid entry)`; `_rd_mintTurn` = default. Delete the old `recordResponseEntry` text-builder (or keep only if still used elsewhere — it's superseded by `mkTurnEntry`).
+**Loop state: replace Phase-1's `prevResponses` with a single `turnMap :: Map Text (Text, UTCTime, Text)`** (id-text → `(turnId, startTs, lastPushedTurnText)`). The Phase-1 settle path (which used `_hh_snapshot hh 0` = LAST BLOCK + the `prevResponses` content-dedup) is REMOVED and replaced by the turn-based settle below — so there is exactly ONE dedup state (`turnMap`), all keyed on whole-turn text, and the final's content comes from the SAME whole-turn extraction as the updates (resolves the dual-state + final-content ambiguities). `_hh_snapshot` (last-block) is no longer called by the watcher; it remains for `/harness output`. Thread `turnMap` as the loop's third argument in place of `prevResponses` (init `Map.empty`). Per tick, after the existing classify/diff/eviction:
+
+- **Updates** — for each id whose `_to_liveness == LivenessThinking` and entry is bound (`Just realSid <- _he_sessionId`, `Just hh <- _he_handle`): inside `try @SomeException` (AsyncCancelled re-raised, other errors logged + skipped): `turn <- _hh_snapshotTurn hh`; when `not (T.null (T.strip turn))`: look up `turnMap[id]`; if absent, `(turnId, ts) <- _rd_mintTurn`; if present reuse its `(turnId, ts)`; when `turn /= lastPushed` (or no prior): `_rd_publishUpdate (SessionId realSid) (mkTurnEntry turnId ts turn)` and set `turnMap[id] = (turnId, ts, turn)`.
+- **Settle** (the existing `settledIds`: prev `Thinking` → now `Idle`/`AwaitingInput`), for a bound id: inside `try @SomeException`:
+  - **If `id ∈ turnMap`** (the normal case — the turn streamed): `_rd_recordResponse (SessionId realSid) (mkTurnEntry turnId ts lastPushed)` using the SAME `(turnId, ts)` and the **whole-turn `lastPushed`** text (NOT a re-snapshot, NOT last-block); then DELETE `id` from `turnMap`.
+  - **Else** (a turn that settled before any working tick was observed — fast turn): `turn <- _hh_snapshotTurn hh` (whole-turn, NOT `_hh_snapshot`); if non-empty: `(turnId, ts) <- _rd_mintTurn`; `_rd_recordResponse (SessionId realSid) (mkTurnEntry turnId ts turn)`. (Nothing to delete; never entered `turnMap`.)
+  - Dedup/no-double-record is structural: `settledIds` fires only on the `Thinking→Idle` EDGE (once per turn), and the turn id is retired from `turnMap` at settle — there is no `prevResponses` content-comparison anymore. Two distinct turns get distinct minted ids (correct — they are different messages).
+
+Production wiring (`CLI/Commands.hs`): `_rd_recordResponse = \sid entry -> bracket (mkBroadcastingFileTranscriptHandle (Just broker) sid logger (sessionsDir </> T.unpack (unSessionId sid) </> "transcript.jsonl")) (\rth -> _th_flush rth >> _th_close rth) (\rth -> _th_record rth entry)`; `_rd_publishUpdate = \sid entry -> _streamBroker_publish broker (EntryUpdated sid entry)`; `_rd_mintTurn = (,) <$> (UUID.toText <$> UUID.nextRandom) <*> getCurrentTime`. DELETE the old `recordResponseEntry` text-builder (superseded by `mkTurnEntry`; confirm no other caller via grep). Add the needed imports to `Reconcile.hs` for `defaultReconcileDeps._rd_mintTurn` (`Data.UUID.V4`/`Data.UUID` and `Data.Time` — both already in `pureclaw.cabal`). NOTE: the discovered-handle capture in Task 2 uses the local alias `realCaptureNamed` (what the existing discovered `_hh_snapshot` uses), not `captureWindowNamed`.
 - [ ] **Step 4: Run green** — `--match "/Reconcile/"`, then full suite; build clean under `-Werror` (all `_rd_recordResponse` fakes in ReconcileSpec updated to the entry signature).
 - [ ] **Step 5: Commit**
 
@@ -457,6 +456,7 @@ git commit -m "feat(reconcile): live in-place turn updates (stable id) + finaliz
 - [ ] `nix develop . --command cabal test` — full suite green.
 - [ ] `nix develop . --command cabal test --enable-coverage` — ≥95% per `.coverage-thresholds.json`.
 - [ ] `cd frontend && npx tsc --noEmit && npx vitest run` — green.
+- [ ] No vacuous tests: `git diff main..HEAD` contains no committed `pending`, `xit`, or `xdescribe` (every planned test asserts real behavior).
 - [ ] Manual smoke (live, on a real Claude harness): send a multi-step request from the web UI; confirm a single message grows in place across ~2s ticks with a streaming indicator, then finalizes (indicator clears) and persists once (one entry in the transcript, no duplicate).
 
 ## Self-review notes
@@ -464,5 +464,7 @@ git commit -m "feat(reconcile): live in-place turn updates (stable id) + finaliz
 - **Spec coverage:** whole-turn extraction → Task 1; `_hh_snapshotTurn` → Task 2; `EntryUpdated`/`SeEntryUpdate` ephemeral wire → Task 3; `reconcileEntries` replace + streaming flag → Task 4; growing-message indicator → Task 5; stable-id live updates + finalize-once → Task 6.
 - **Streaming flag derivation:** refined from the spec's "field on the wire entry" to "derived from the event type" (`entry-update` ⇒ streaming) — simpler, keeps the Haskell `TranscriptEntry` unpolluted (never persists a streaming flag). Functionally identical to the spec's intent.
 - **Turn-boundary:** confirmed empirically — Claude renders the submitted user message as a `❯ <text>` line; `isClaudeUserLine` is reliable (Task 1).
-- **Loop state:** the turn map lives in the loop fold (not on `HarnessEntry`), like Phase 1's prevCaps/prevResponses.
+- **Single dedup state:** Phase-1's `prevResponses` (last-block) is REPLACED by the whole-turn `turnMap`; the settle finalizes from `turnMap`'s `lastPushed` whole-turn text (same `turnId`/`ts` as the updates), so the persisted final IS the last live state — no duplicate, no truncation, no dual-state. `_hh_snapshot` (last-block) is no longer called by the watcher (still used by `/harness output`). Turn-id retirement at settle is the only dedup needed (settle fires once per Thinking→Idle edge).
+- **No vacuous tests:** Task 6 tests are full `it` blocks with concrete assertions (no `pending`), and Final Verification greps the diff to enforce it.
+- **Loop state** lives in the loop fold (not on `HarnessEntry`), like Phase 1's prevCaps.
 - **Known Phase-2 limits (carried from spec):** reconnect mid-turn shows the last persisted state and re-streams within a tick; server restart mid-turn risks one content-deduped duplicate; provider/LLM path untouched.
