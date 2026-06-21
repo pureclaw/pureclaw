@@ -33,25 +33,27 @@ data HarnessError
 
 -- | Capability handle for interacting with a harness (e.g. Claude Code in tmux).
 data HarnessHandle = HarnessHandle
-  { _hh_send     :: ByteString -> IO ()   -- ^ Write to harness input
-  , _hh_receive  :: IO ByteString         -- ^ Read harness output (scrollback capture)
-  , _hh_snapshot :: Int -> IO Text        -- ^ One-shot capture+extract via the flavour observer
-  , _hh_name     :: Text                  -- ^ Human-readable name
-  , _hh_session  :: Text                  -- ^ tmux session name
-  , _hh_status   :: IO HarnessStatus      -- ^ Check if running
-  , _hh_stop     :: IO ()                 -- ^ Kill and cleanup
+  { _hh_send         :: ByteString -> IO ()   -- ^ Write to harness input
+  , _hh_receive      :: IO ByteString         -- ^ Read harness output (scrollback capture)
+  , _hh_snapshot     :: Int -> IO Text        -- ^ One-shot capture+extract via the flavour observer
+  , _hh_snapshotTurn :: IO Text               -- ^ One-shot full capture → whole-turn extraction (flavour observer)
+  , _hh_name         :: Text                  -- ^ Human-readable name
+  , _hh_session      :: Text                  -- ^ tmux session name
+  , _hh_status       :: IO HarnessStatus      -- ^ Check if running
+  , _hh_stop         :: IO ()                 -- ^ Kill and cleanup
   }
 
 -- | No-op harness handle for testing.
 mkNoOpHarnessHandle :: HarnessHandle
 mkNoOpHarnessHandle = HarnessHandle
-  { _hh_send     = \_ -> pure ()
-  , _hh_receive  = pure ""
-  , _hh_snapshot = \_ -> pure ""
-  , _hh_name     = ""
-  , _hh_session  = ""
-  , _hh_status   = pure HarnessRunning
-  , _hh_stop     = pure ()
+  { _hh_send         = \_ -> pure ()
+  , _hh_receive      = pure ""
+  , _hh_snapshot     = \_ -> pure ""
+  , _hh_snapshotTurn = pure ""
+  , _hh_name         = ""
+  , _hh_session      = ""
+  , _hh_status       = pure HarnessRunning
+  , _hh_stop         = pure ()
   }
 
 -- | Prefix harness output with the origin name on the first line only.

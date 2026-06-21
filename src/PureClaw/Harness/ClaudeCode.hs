@@ -411,6 +411,13 @@ mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do
             pure $ if n <= 0
               then Obs._ho_extractResponse obs 0 raw
               else Obs._ho_relevantTail obs n raw
+    , _hh_snapshotTurn = do
+        mCoord <- currentCoord reg hid
+        case mCoord of
+          Nothing -> pure ""
+          Just (sess, win) -> do
+            raw <- fromMaybe "" <$> _ccd_captureNamed deps sess win 0
+            pure (Obs._ho_extractTurn (Obs.observerFor HClaudeCode) 0 raw)
     , _hh_name     = "Claude Code"
     , _hh_session  = session
     , _hh_status   = harnessStatus deps reg hid
@@ -873,6 +880,9 @@ mkDiscoveredClaudeCodeHandle th session windowName =
         pure $ if n <= 0
           then Obs._ho_extractResponse obs 0 raw
           else Obs._ho_relevantTail obs n raw
+    , _hh_snapshotTurn = do
+        raw <- fromMaybe "" <$> realCaptureNamed session windowName 0
+        pure (Obs._ho_extractTurn (Obs.observerFor HClaudeCode) 0 raw)
     , _hh_name     = "Claude Code"
     , _hh_session  = session
     , _hh_status   = realStatus session windowName
