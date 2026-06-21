@@ -116,6 +116,10 @@ import PureClaw.Transcript.Types (Direction (..), TranscriptEntry (..), encodeEn
 data ServerEvent
   = SeHello   !Text !UTCTime
   | SeEntry   !SessionId !TranscriptEntry
+    -- | Ephemeral in-progress update for a harness message being streamed.
+    -- Encodes as @{type:"entry-update"}@; the frontend infers streaming from
+    -- the event type (no @streaming@ field on the Haskell side).
+  | SeEntryUpdate !SessionId !TranscriptEntry
   | SeActivity !SessionId !ActivityKind
   | SeReplayEnd !SessionId !(Maybe Text)
   | SeOverflow
@@ -191,6 +195,11 @@ encodeServerEvent (SeHello pv started) = object
   ]
 encodeServerEvent (SeEntry sid entry) = object
   [ "type"      .= ("entry" :: Text)
+  , "sessionId" .= unSessionId sid
+  , "entry"     .= toEntryInfo entry
+  ]
+encodeServerEvent (SeEntryUpdate sid entry) = object
+  [ "type"      .= ("entry-update" :: Text)
   , "sessionId" .= unSessionId sid
   , "entry"     .= toEntryInfo entry
   ]
@@ -739,6 +748,14 @@ writerLoop sub conn cs = loop
         _ -> case focus of
           Just fsid | fsid == sid -> sendEvent conn (SeEntry sid entry)
           _ -> pure ()
+    handleEvent (EntryUpdated sid entry) = do
+      replaying <- readIORef (_conn_replayMode cs)
+      focus     <- readIORef (_conn_focus cs)
+      case focus of
+        Just fsid | fsid == sid -> case replaying of
+          Just rsid | rsid == sid -> pure ()  -- drop during replay; re-sent next tick
+          _                       -> sendEvent conn (SeEntryUpdate sid entry)
+        _ -> pure ()
     handleEvent (ActivityChanged sid (SaEntryAt t)) =
       sendEvent conn (SeActivity sid (AkEntryAt t))
     handleEvent (ActivityChanged sid (SaHarnessStatus s)) =
