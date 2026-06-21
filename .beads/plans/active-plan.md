@@ -1,22 +1,36 @@
 # Active Plan
-<!-- approved: 2026-06-16 (design-review 5/5; plan-review 3/3) -->
+<!-- approved: 2026-06-21 (plan-review 3/3, iteration 2) -->
 <!-- user-approved: true (execution: subagent-driven) -->
-<!-- status: in-progress -->
+<!-- status: complete (WU1 d04dfd6, WU2 9b657c8; final review READY TO MERGE; suite green 2829/0) -->
 
 ## Canonical plan
-docs/superpowers/plans/2026-06-16-unify-tab-and-session-name.md
-Spec: docs/superpowers/specs/2026-06-16-unify-tab-and-session-name-design.md
-Branch: feat/web-frontend-slash-dispatch
+docs/superpowers/plans/2026-06-21-harness-output-streaming-reliability.md
+Branch: feat/harness-live-edit
+RED test committed: d944fbd (test/Harness/ReconcileSpec.hs — "records a fast turn the watcher only ever samples as Idle")
 
 ## Goal
-Make the displayed name a single SESSION property (override -> first-message default),
-identical in Active Tabs and Recent Sessions and across TUI/web; remove _tab_name.
+Make automatic harness output reliable by driving streaming + finalize off
+turn-content change/stabilization instead of the ephemeral Thinking→settle
+liveness edge (root cause; reproduced by the committed RED test).
 
-## Tasks
-- [ ] Task 1: Shared PureClaw.Session.Title (sessionTitle + moved firstMessageSnippet)
-- [ ] Task 2: TUI parity (recentSessions -> sessionTitle)
-- [ ] Task 3: _td_setSessionDescription seam (threaded param, not AgentEnv field) + /tab rename re-target + ServerMode closure + description cap (120)
-- [ ] Task 4: Remove _tab_name + _ts_name; add _ts_label; tab labels from session; tabs.json back-compat
-- [ ] Task 5: Frontend join across 3 consumers (ActiveTabs/HarnessControls/deriveAgent) + never-blank fallback
-- [ ] Task 6: Always-visible rename pencil (CSS)
-- [ ] Task 7: Cross-surface parity tests + coverage + verification
+## Work units
+- [x] WU1: Content-driven watcher — replace publishUpdates/settle with a single
+      stepTurns pass over a richer TurnState (stable id, last text, stable-tick
+      counter, active flag). Stream on growth; finalize when idle/awaiting +
+      stable ≥ defaultSettleStableTicks(=1); finalize active turns on terminal
+      transition (Exited/Orphaned/absent) from last streamed text; dedup
+      unchanged content; new id per new turn. Preserve resilience + same-id
+      frontend contract. Files: src/PureClaw/Harness/Reconcile.hs,
+      test/Harness/ReconcileSpec.hs. DoD #1-8 in the canonical plan.
+- [x] WU2: Widen _hh_snapshotTurn capture extent from -S -0 (visible only) to a
+      named scrollback-inclusive constant (~200) at both handle sites. Files:
+      src/PureClaw/Harness/ClaudeCode.hs (+ test/Harness/ClaudeCodeSpec.hs).
+
+## Out of scope (documented in canonical plan)
+- CLI/TUI _he_sessionId=Nothing (by design; frontend backfills, symptom unaffected)
+- Prose-less / tool-only turns (pre-existing extractTurnClaude behavior)
+
+## Gates
+- TDD throughout (RED already committed for the core case).
+- .coverage-thresholds.json 100% (lines/branches/functions/statements) — blocking.
+- Full suite green: nix develop . --command cabal test
