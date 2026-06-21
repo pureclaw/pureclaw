@@ -23,6 +23,14 @@ export interface EntryEvent {
   entry: TranscriptEntry
 }
 
+/** Emitted when a streaming entry's payload grows (Task 3). The entry already
+ *  exists in the transcript (same id); consumers should replace it in place. */
+export interface EntryUpdateEvent {
+  type: 'entry-update'
+  sessionId: string
+  entry: TranscriptEntry
+}
+
 /**
  * `SessionMeta` shape as emitted by the Haskell backend's `ToJSON SessionMeta`
  * (snake_case fields). Distinct from `SessionInfo` (camelCase) used by REST
@@ -93,6 +101,7 @@ export interface ListsEvent {
 export type ServerEvent =
   | HelloEvent
   | EntryEvent
+  | EntryUpdateEvent
   | ActivityEnvelope
   | ReplayEndEvent
   | OverflowEvent

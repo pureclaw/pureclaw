@@ -233,6 +233,18 @@ class StreamClientImpl implements StreamClient {
         }
         break
       }
+      case 'entry-update': {
+        // Dispatch only when the event matches the currently focused session.
+        // The entry is tagged `streaming: true` so consumers can replace-in-place
+        // and render a "still streaming" indicator.
+        if (
+          this.focusState.kind === 'focused' &&
+          this.focusState.sessionId === event.sessionId
+        ) {
+          for (const cb of this.entryListeners) cb({ ...event.entry, streaming: true })
+        }
+        break
+      }
       case 'activity':
         for (const cb of this.activityListeners) cb(event.sessionId, event.activity)
         break

@@ -32,7 +32,13 @@ export function reconcileEntries(
   incoming: TranscriptEntry,
 ): TranscriptEntry[] {
   for (let i = 0; i < existing.length; i++) {
-    if (existing[i]!.id === incoming.id) return existing
+    if (existing[i]!.id === incoming.id) {
+      // Replace in place (stable timestamp keeps sort order intact; streaming
+      // entry-update entries carry their original timestamp throughout).
+      const next = existing.slice()
+      next[i] = incoming
+      return next
+    }
   }
   // Find insertion index that keeps the array sorted by timestamp ascending.
   let insertAt = existing.length

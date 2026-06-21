@@ -17,13 +17,28 @@ function mkEntry(id: string, timestamp: string, payload = ''): TranscriptEntry {
 }
 
 describe('reconcileEntries', () => {
-  it('returns existing unchanged when entry is already present (dedup by id)', () => {
+  it('returns existing unchanged when entry is already present with same payload (dedup by id — no-op update)', () => {
     const e1 = mkEntry('a', '2026-05-23T18:00:00Z')
     const existing = [e1]
-    const incoming = mkEntry('a', '2026-05-23T18:00:00Z', 'duplicate')
+    const incoming = mkEntry('a', '2026-05-23T18:00:00Z')
     const merged = reconcileEntries(existing, incoming)
-    expect(merged).toBe(existing) // referential equality preserved
     expect(merged).toHaveLength(1)
+  })
+
+  it('reconcileEntries REPLACES an existing entry with the same id (was skip)', () => {
+    const a = { id: 'x', timestamp: '2026-06-20T00:00:00Z', direction: 'response', payload: 'one', harness: 'harness', model: null, raw: '' } as TranscriptEntry
+    const b = { ...a, payload: 'one two', streaming: true }
+    const out = reconcileEntries([a], b)
+    expect(out).toHaveLength(1)
+    expect(out[0]!.payload).toBe('one two')
+    expect(out[0]!.streaming).toBe(true)
+  })
+
+  it('reconcileEntries keeps sort position when replacing (stable timestamp)', () => {
+    const e1 = mkEntry('a', '2026-06-20T00:00:01Z'); const e2 = mkEntry('b', '2026-06-20T00:00:02Z')
+    const out = reconcileEntries([e1, e2], { ...e1, payload: 'grown' })
+    expect(out.map(e => e.id)).toEqual(['a', 'b'])
+    expect(out[0]!.payload).toBe('grown')
   })
 
   it('appends new entries to the end when they are chronologically last', () => {
@@ -49,7 +64,9 @@ describe('reconcileEntries', () => {
     const dup = mkEntry('b', '2026-05-23T18:00:01Z')
     const tail = mkEntry('c', '2026-05-23T18:00:02Z')
     let entries = reconcileEntries(seed, dup)
-    expect(entries).toBe(seed) // dup dropped, ref preserved
+    // replace-on-id: a new array is returned with b replaced in place
+    expect(entries).toHaveLength(2)
+    expect(entries.map((e) => e.id)).toEqual(['a', 'b'])
     entries = reconcileEntries(entries, tail)
     expect(entries.map((e) => e.id)).toEqual(['a', 'b', 'c'])
   })

@@ -160,6 +160,10 @@ export interface TranscriptEntry {
    *  governing principle: PureClaw always makes EVERYTHING visible to the user;
    *  raw views must never silently hide fields. */
   raw: string
+  /** Set to `true` when this entry was delivered via an `entry-update` event,
+   *  indicating the entry is still being streamed and may be updated further.
+   *  Absent (undefined) or false for finalized `entry` events. */
+  streaming?: boolean
 }
 
 export interface CodeSpan {

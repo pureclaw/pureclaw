@@ -351,6 +351,72 @@ describe('streamClient', () => {
     expect(seen).toEqual(['te-1'])
   })
 
+  it('entry-update for the focused session delivers entry with streaming===true', () => {
+    ref.socket!.simulateOpen()
+    client.focus('session-abc')
+    const seen: Array<{ id: string; streaming?: boolean }> = []
+    client.onEntry((e) => seen.push({ id: e.id, streaming: e.streaming }))
+    ref.socket!.simulateMessage({
+      type: 'entry-update',
+      sessionId: 'session-abc',
+      entry: {
+        id: 'te-1',
+        timestamp: '2026-06-20T00:00:00Z',
+        direction: 'response',
+        payload: 'hello world',
+        harness: null,
+        model: null,
+        raw: '',
+      },
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.id).toBe('te-1')
+    expect(seen[0]!.streaming).toBe(true)
+  })
+
+  it('entry-update for a different session is not dispatched to onEntry', () => {
+    ref.socket!.simulateOpen()
+    client.focus('session-abc')
+    const seen: string[] = []
+    client.onEntry((e) => seen.push(e.id))
+    ref.socket!.simulateMessage({
+      type: 'entry-update',
+      sessionId: 'session-other',
+      entry: {
+        id: 'te-x',
+        timestamp: '2026-06-20T00:00:00Z',
+        direction: 'response',
+        payload: '',
+        harness: null,
+        model: null,
+        raw: '',
+      },
+    })
+    expect(seen).toEqual([])
+  })
+
+  it('entry (not entry-update) delivers streaming falsy/undefined', () => {
+    ref.socket!.simulateOpen()
+    client.focus('session-abc')
+    const seen: Array<{ id: string; streaming?: boolean }> = []
+    client.onEntry((e) => seen.push({ id: e.id, streaming: e.streaming }))
+    ref.socket!.simulateMessage({
+      type: 'entry',
+      sessionId: 'session-abc',
+      entry: {
+        id: 'te-2',
+        timestamp: '2026-06-20T00:00:00Z',
+        direction: 'response',
+        payload: '',
+        harness: null,
+        model: null,
+        raw: '',
+      },
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.streaming).toBeFalsy()
+  })
+
   it('ignores unknown server event types (forward compat)', () => {
     ref.socket!.simulateOpen()
     const seen: string[] = []
