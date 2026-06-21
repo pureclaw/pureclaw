@@ -83,3 +83,34 @@ spec = do
     it "✶ (U+2736) with an ellipsis still classifies as HasWorking (spinner glyph)" $ do
       let frame = "\x2736 Smooshing\x2026 (4s)"
       _ho_classify claudeObserver frame `shouldBe` HasWorking
+
+  describe "claudeObserver._ho_extractTurn" $ do
+    it "returns ALL assistant blocks since the last user prompt (chrome/tool stripped)" $ do
+      cap <- BS.readFile "test/fixtures/harness/claude-turn-multi.txt"
+      let out = _ho_extractTurn claudeObserver 0 cap
+      out `shouldSatisfy` T.isInfixOf "Looking at the auth module"
+      out `shouldSatisfy` T.isInfixOf "Found the bug at auth.ts:42"
+      out `shouldSatisfy` T.isInfixOf "Applied the fix; the tests pass."
+      out `shouldNotSatisfy` T.isInfixOf "refactor the auth module"  -- not the user line
+      out `shouldNotSatisfy` T.isInfixOf "\x23FA"                    -- markers stripped
+      out `shouldNotSatisfy` T.isInfixOf "ctrl+o"                    -- chrome stripped
+      out `shouldNotSatisfy` T.isInfixOf "Update(auth.ts)"          -- tool line stripped
+      out `shouldNotSatisfy` T.isInfixOf "\x2500\x2500"             -- rule stripped
+    it "single block: returns just that block's text" $ do
+      cap <- BS.readFile "test/fixtures/harness/claude-turn-single.txt"
+      _ho_extractTurn claudeObserver 0 cap `shouldBe` "foo validates the session token and returns the user id."
+    it "no assistant content yet: returns empty" $ do
+      cap <- BS.readFile "test/fixtures/harness/claude-turn-empty.txt"
+      T.strip (_ho_extractTurn claudeObserver 0 cap) `shouldBe` ""
+
+  describe "isClaudeUserLine" $ do
+    it "a \x276F line WITH text is a user line" $
+      isClaudeUserLine "\x276F refactor the auth module" `shouldBe` True
+    it "a bare \x276F (idle input box) is NOT a user line" $
+      isClaudeUserLine "\x276F" `shouldBe` False
+    it "a numbered menu cursor \x276F 1. is NOT a user line" $
+      isClaudeUserLine "\x276F 1. Yes" `shouldBe` False
+
+  describe "genericObserver._ho_extractTurn" $
+    it "falls back to the cleaned tail (no user-boundary detection)" $
+      _ho_extractTurn genericObserver 0 (TE.encodeUtf8 "a\nb\nc") `shouldSatisfy` T.isInfixOf "c"

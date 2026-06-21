@@ -1,0 +1,4 @@
+❯ what does foo do?
+
+⏺ foo validates the session token and returns the user id.
+❯
