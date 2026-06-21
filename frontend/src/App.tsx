@@ -231,6 +231,7 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           blocks,
           meta: usageMeta,
           rawJson,
+          streaming: e.streaming,
         })
       } else {
         // Non-JSON response (e.g. harness output)
@@ -241,6 +242,7 @@ export function transcriptToMessages(entries: TranscriptEntry[]): Message[] {
           timestamp: ts,
           blocks: [{ id: 'raw-' + e.id, text: e.payload }],
           rawJson,
+          streaming: e.streaming,
         })
       }
     }

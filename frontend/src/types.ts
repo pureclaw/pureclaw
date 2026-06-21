@@ -201,7 +201,18 @@ export interface Message {
   agentStatus: AgentStatus
   timestamp: string
   blocks: MessageContent[]
+  /** Set on SYNTHETIC optimistic messages (pending-thinking, remote-thinking)
+   *  to show the TypingIndicator while the local UI awaits the LLM response.
+   *  Distinct from `streaming` — this is local optimistic state, not a
+   *  transcript-entry flag. */
   isGenerating?: boolean
+  /** Set to `true` when the derived message originates from a transcript entry
+   *  with `streaming: true` (i.e. an `entry-update` event — the entry is still
+   *  being written). Causes the TypingIndicator to render. Cleared (false or
+   *  absent) once the entry is finalized via a normal `entry` event. Kept
+   *  DISTINCT from `isGenerating` to avoid conflating transcript-streaming with
+   *  the local optimistic-pending UI. */
+  streaming?: boolean
   meta?: string            // e.g. model name, token usage
   rawJson?: string         // full transcript-entry payload (pretty-printed when JSON)
   /** Marks a TRANSIENT slash-command output bubble (kind:"slash" send

@@ -796,7 +796,7 @@ function ChatMessage({
             {message.meta}
           </span>
         )}
-        {message.isGenerating && <TypingIndicator />}
+        {(message.isGenerating || message.streaming) && <TypingIndicator />}
         <AnchorHandle anchorId={anchorId} />
         {message.rawJson !== undefined && (
           <JsonButton kind="message" onClick={() => setJsonOpen(true)} />

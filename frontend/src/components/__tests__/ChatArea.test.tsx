@@ -980,6 +980,101 @@ describe('transcriptToMessages thinking extraction (WU8)', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Task 5 — growing-message indicator for streaming harness entries
+// ---------------------------------------------------------------------------
+describe('streaming harness entry indicator', () => {
+  beforeEach(() => {
+    HTMLElement.prototype.scrollIntoView = vi.fn() as unknown as HTMLElement['scrollIntoView']
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function harnessResponseEntry(id: string, text: string, streaming?: boolean): TranscriptEntry {
+    return {
+      id,
+      timestamp: '2025-01-01T00:00:00Z',
+      direction: 'response',
+      payload: text,
+      harness: 'my-harness',
+      model: null,
+      raw: JSON.stringify({ _te_id: id, _te_payload: text }),
+      streaming,
+    }
+  }
+
+  it('shows the typing indicator on a message derived from a streaming:true entry', () => {
+    const msgs = transcriptToMessages([harnessResponseEntry('e1', 'partial output', true)])
+    const { container } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={msgs} />,
+    )
+    expect(container.querySelector('.typing-dot')).not.toBeNull()
+  })
+
+  it('hides the typing indicator on a message derived from a streaming:false (finalized) entry', () => {
+    const msgs = transcriptToMessages([harnessResponseEntry('e2', 'final output', false)])
+    const { container } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={msgs} />,
+    )
+    expect(container.querySelector('.typing-dot')).toBeNull()
+  })
+
+  it('hides the typing indicator on a message with no streaming field (absent = finalized)', () => {
+    const msgs = transcriptToMessages([harnessResponseEntry('e3', 'old entry')])
+    const { container } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={msgs} />,
+    )
+    expect(container.querySelector('.typing-dot')).toBeNull()
+  })
+
+  it('transcriptToMessages sets streaming:true on the derived message when entry.streaming is true', () => {
+    const msgs = transcriptToMessages([harnessResponseEntry('e4', 'partial', true)])
+    expect(msgs.length).toBeGreaterThan(0)
+    expect(msgs[0]!.streaming).toBe(true)
+  })
+
+  it('transcriptToMessages sets streaming:false (or absent) when entry.streaming is false', () => {
+    const msgs = transcriptToMessages([harnessResponseEntry('e5', 'done', false)])
+    expect(msgs.length).toBeGreaterThan(0)
+    // Either false or undefined — neither truthy value
+    expect(msgs[0]!.streaming).toBeFalsy()
+  })
+
+  it('existing isGenerating (optimistic pending-thinking) is not conflated with entry.streaming', () => {
+    // A synthetic message with isGenerating:true (optimistic local UI) must NOT
+    // render the same way as an entry-derived streaming message —
+    // both use TypingIndicator but through separate flags.
+    const optimisticMsg: Message = {
+      id: 'pending-thinking',
+      agentName: 'Assistant',
+      agentStatus: 'thinking',
+      timestamp: '12:00',
+      blocks: [],
+      isGenerating: true,
+    }
+    const { container: c1 } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[optimisticMsg]} />,
+    )
+    // isGenerating still shows the indicator (existing behavior unbroken)
+    expect(c1.querySelector('.typing-dot')).not.toBeNull()
+
+    // A finalized entry-derived message with streaming:false must NOT show it
+    const finalMsg: Message = {
+      id: 'e-final',
+      agentName: 'my-harness',
+      agentStatus: 'completed',
+      timestamp: '12:00',
+      blocks: [{ text: 'done' }],
+      streaming: false,
+    }
+    const { container: c2 } = render(
+      <ChatArea selectedAgent={makeAgent()} messages={[finalMsg]} />,
+    )
+    expect(c2.querySelector('.typing-dot')).toBeNull()
+  })
+})
+
 describe('ChatArea slash-command output bubble', () => {
   function slashMessage(id: string, text: string): Message {
     return {
