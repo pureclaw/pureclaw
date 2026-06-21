@@ -87,6 +87,8 @@ import PureClaw.Tabs.Types (TabRef (..))
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
+  , BrokerEvent (..)
+  , StreamBroker (..)
   , defaultBrokerConfig
   , mkInProcessBroker
   )
@@ -95,10 +97,6 @@ import PureClaw.Harness.Reconcile qualified as Reconcile
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Transcript (TranscriptHandle (..), mkNoOpTranscriptHandle)
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
-import PureClaw.Transcript.Types
-  (Direction (..), TranscriptEntry (..), encodePayload)
-import Data.UUID qualified as UUID
-import Data.UUID.V4 qualified as UUID
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -992,15 +990,20 @@ runChat consentChannel serverMode opts = do
         let reconcileDeps = Reconcile.defaultReconcileDeps
               { Reconcile._rd_evict = \_hid label ->
                   modifyIORef' harnessRef (Map.delete label)
-                -- Output watcher (Task 7): on a working→settle transition the
-                -- loop records ONE Response transcript entry for the session,
+                -- Output watcher (Task 6): on settle the loop records ONE Response
+                -- transcript entry for the session (the finalized turn),
                 -- broadcasting it to subscribers via the shared broker.
-              , Reconcile._rd_recordResponse = \sid txt -> do
+              , Reconcile._rd_recordResponse = \sid entry -> do
                   let path = sessionsDir </> T.unpack (unSessionId sid) </> "transcript.jsonl"
                   bracket
                     (mkBroadcastingFileTranscriptHandle (Just broker) sid logger path)
                     (\rth -> _th_flush rth >> _th_close rth)
-                    (`recordResponseEntry` txt)
+                    (`_th_record` entry)
+                -- Live in-place updates (Task 6): each time the in-progress turn
+                -- grows, publish an EPHEMERAL 'EntryUpdated' event (same stable
+                -- turn id) — never persisted.
+              , Reconcile._rd_publishUpdate = \sid entry ->
+                  _streamBroker_publish broker (EntryUpdated sid entry)
               }
         -- WU8 (#80): restore the persisted tab view BEFORE the frontend server
         -- (and the tabbed loop) start, so the very first sidebar lists snapshot
@@ -1401,22 +1404,6 @@ ignoreExc act = act `catch` \(_ :: SomeException) -> pure ()
 -- shape of @recordHarnessEntry … Response@ in "PureClaw.Frontend.API" — the
 -- output watcher (Task 7) uses it to land one settle-captured response on the
 -- session transcript.
-recordResponseEntry :: TranscriptHandle -> T.Text -> IO ()
-recordResponseEntry th payload = do
-  entryId <- UUID.toText <$> UUID.nextRandom
-  now <- getCurrentTime
-  _th_record th TranscriptEntry
-    { _te_id            = entryId
-    , _te_timestamp     = now
-    , _te_harness       = Just "harness"
-    , _te_model         = Nothing
-    , _te_direction     = Response
-    , _te_payload       = encodePayload (TE.encodeUtf8 payload)
-    , _te_durationMs    = Nothing
-    , _te_correlationId = entryId
-    , _te_metadata      = Map.empty
-    }
-
 -- | Render a 'HarnessError' to a concise user-facing 'Text' for the
 -- @\/tab new harness@ dispatcher (WU-B). Mirrors the surface
 -- 'PureClaw.Frontend.API.harnessErrorResponse' uses, but as plain text for the

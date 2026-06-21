@@ -51,6 +51,8 @@ module PureClaw.Harness.Reconcile
   , classifyFromObserver
   , livenessToActivity
   , diffLiveness
+    -- * Turn entry construction
+  , mkTurnEntry
     -- * Reconcile tick + loop
   , TickObservation (..)
   , reconcileTick
@@ -66,7 +68,7 @@ module PureClaw.Harness.Reconcile
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (AsyncCancelled (..))
 import Control.Exception (SomeException, fromException, handle, throwIO, try)
-import Control.Monad (forM, forM_)
+import Control.Monad (foldM, forM, forM_)
 import Data.Char (isDigit)
 import Data.Foldable (for_)
 import Data.Map.Strict (Map)
@@ -75,6 +77,9 @@ import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (UTCTime, getCurrentTime)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
 
 import PureClaw.Core.Types (SessionId (..))
 import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
@@ -82,6 +87,11 @@ import PureClaw.Frontend.StreamBroker
   ( BrokerEvent (..)
   , SessionActivity (..)
   , StreamBroker (..)
+  )
+import PureClaw.Transcript.Types
+  ( Direction (..)
+  , TranscriptEntry (..)
+  , encodePayload
   )
 import PureClaw.Handles.Harness (HarnessHandle (..))
 import PureClaw.Handles.Log (LogHandle (..))
@@ -135,14 +145,24 @@ data ReconcileDeps = ReconcileDeps
     --   delete is done by the loop itself, in 'reconcileTick'); it must NOT
     --   touch @session.json@ so the session reappears in Recent Sessions.
     --   Tests inject a recorder to assert the @(id, label)@ that was evicted.
-  , _rd_recordResponse :: SessionId -> Text -> IO ()
-    -- ^ Output watcher (Task 7). Records ONE harness @Response@ transcript entry
-    --   for a session on a working→settle transition. The loop reuses the
-    --   entry's '_hh_snapshot' to capture the latest response (per-flavour,
-    --   behind the handle) and dedupes against the last response it recorded for
-    --   that id, so a steady-state idle does not re-record. Production wires this
-    --   to append a @Response@ entry to the session transcript (via a
-    --   broadcasting file transcript handle); tests inject a recorder.
+  , _rd_recordResponse :: SessionId -> TranscriptEntry -> IO ()
+    -- ^ Finalize a turn (Task 6). Records ONE harness @Response@ transcript
+    --   entry for a session on a working→settle transition. The entry carries
+    --   the SAME turn id + start timestamp that the live updates used and the
+    --   whole-turn text last pushed during the turn (a structural dedup: settle
+    --   fires once per Thinking→Idle edge and the turn id is retired at settle,
+    --   so no content-compare is needed). Production wires this to append a
+    --   @Response@ entry to the session transcript (via a broadcasting file
+    --   transcript handle); tests inject a recorder.
+  , _rd_publishUpdate :: SessionId -> TranscriptEntry -> IO ()
+    -- ^ Live in-place turn update (Task 6). Publishes an EPHEMERAL @Response@
+    --   entry (same stable turn id) each time the in-progress whole turn grows,
+    --   so subscribers can render the message growing in place before it
+    --   finalizes. Production wires this to an 'EntryUpdated' broker publish (not
+    --   persisted); tests inject a recorder. Default is a no-op.
+  , _rd_mintTurn :: IO (Text, UTCTime)
+    -- ^ Mint a fresh turn id + start timestamp for a new turn (Task 6).
+    --   Production: a random UUID + 'getCurrentTime'; tests inject fixed values.
   }
 
 -- | Production dependency set. Sweeps the @\"pureclaw\"@ session plus any other
@@ -183,7 +203,12 @@ defaultReconcileDeps = ReconcileDeps
   , _rd_evict = \_hid _label -> pure ()
     -- Default recorder is a no-op: the production transcript wiring is injected
     -- in CLI.Commands (which has 'sessionsDir' + the broker in scope).
-  , _rd_recordResponse = \_sid _txt -> pure ()
+  , _rd_recordResponse = \_sid _entry -> pure ()
+    -- Default publishUpdate is a no-op: the production broker publish is injected
+    -- in CLI.Commands (which has the broker in scope).
+  , _rd_publishUpdate = \_sid _entry -> pure ()
+    -- Default turn minting: a fresh random UUID + the current wall-clock time.
+  , _rd_mintTurn = (,) . UUID.toText <$> UUID.nextRandom <*> getCurrentTime
   }
   where
     dedup = go []
@@ -269,6 +294,28 @@ livenessToActivity Reg.LivenessThinking      = HarnessThinking
 livenessToActivity Reg.LivenessAwaitingInput = HarnessNeedsInput
 livenessToActivity Reg.LivenessExited        = HarnessStopped
 livenessToActivity Reg.LivenessOrphaned      = HarnessStopped
+
+-- ---------------------------------------------------------------------------
+-- Turn entry construction (Task 6)
+-- ---------------------------------------------------------------------------
+
+-- | Build a harness @Response@ 'TranscriptEntry' for a turn. The same @turnId@
+-- and start timestamp are reused across every live update of a turn AND its
+-- final on settle, so the in-place update and the persisted final share one
+-- stable identity. The @turnId@ is also the correlation id (a harness turn is a
+-- self-contained response, not a request\/response pair).
+mkTurnEntry :: Text -> UTCTime -> Text -> TranscriptEntry
+mkTurnEntry turnId ts payload = TranscriptEntry
+  { _te_id            = turnId
+  , _te_timestamp     = ts
+  , _te_harness       = Just "harness"
+  , _te_model         = Nothing
+  , _te_direction     = Response
+  , _te_payload       = encodePayload (TE.encodeUtf8 payload)
+  , _te_durationMs    = Nothing
+  , _te_correlationId = turnId
+  , _te_metadata      = Map.empty
+  }
 
 -- ---------------------------------------------------------------------------
 -- Pure symmetric diff (D5.2)
@@ -559,10 +606,10 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
   (initial, evicted0) <- reconcileTick deps reg logger Map.empty
   publishEvictions evicted0
   -- The baseline tick has no previous liveness, so it is not a "transition"
-  -- and never records a Response; settle detection begins on the second tick.
+  -- and never records a Response; turn tracking begins on the second tick.
   loop (livenessSnap initial) (capSnap initial) Map.empty
   where
-    loop prev prevCaps prevResponses = do
+    loop prev prevCaps turnMap = do
       threadDelay tickMicros
       (obs, evicted) <- reconcileTick deps reg logger prevCaps
       let next = livenessSnap obs
@@ -573,52 +620,120 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
       -- already Orphaned, so the diff above does NOT re-emit it; this guarantees
       -- the frontend sees it leave even though no liveness transition occurred.
       publishEvictions evicted
-      -- Output watcher (Task 7): for each id that just transitioned from
-      -- Thinking to a settled state (Idle / AwaitingInput), snapshot the latest
-      -- response and record ONE Response transcript entry (deduped).
-      prevResponses' <- settle prev obs prevResponses
-      loop next (capSnap obs) prevResponses'
+      -- Output watcher (Task 6): publish a live in-place update for every id that
+      -- is still Thinking (the in-progress whole turn, stable id), then finalize
+      -- once per id that just transitioned Thinking→settled (Idle\/AwaitingInput).
+      turnMap'  <- publishUpdates obs turnMap
+      turnMap'' <- settle prev obs turnMap'
+      loop next (capSnap obs) turnMap''
 
-    -- Detect working→settle transitions and record one Response per settled id,
-    -- deduped against the last response recorded for that id. Returns the
-    -- updated id-text → last-response map.
+    -- Live updates: for each Thinking, bound id, snapshot the WHOLE turn and, if
+    -- it grew since the last push, publish an ephemeral update under the turn's
+    -- stable (minted-once) id. Each id's snapshot + publish is wrapped in
+    -- 'try @SomeException' (D5.3 resilience): a non-async failure is logged and
+    -- skipped so siblings still update and the loop never dies; 'AsyncCancelled'
+    -- is always re-raised (project-wide invariant). Returns the updated turn map.
+    publishUpdates obs turnMap = foldM step turnMap (thinkingIds obs)
+      where
+        step tm idText =
+          case Reg.parseHarnessId idText of
+            Nothing  -> pure tm
+            Just hid -> do
+              mEntry <- Reg.lookupById reg hid
+              case mEntry of
+                Just e
+                  | Just realSid <- Reg._he_sessionId e
+                  , Just hh      <- Reg._he_handle e -> do
+                      r <- try @SomeException $ do
+                        turn <- _hh_snapshotTurn hh
+                        if T.null (T.strip turn)
+                          then pure tm
+                          else do
+                            (turnId, ts) <- case Map.lookup idText tm of
+                              Just (tid, t0, _) -> pure (tid, t0)
+                              Nothing           -> _rd_mintTurn deps
+                            let lastPushed = (\(_, _, p) -> p) <$> Map.lookup idText tm
+                            if Just turn == lastPushed
+                              then pure tm
+                              else do
+                                _rd_publishUpdate deps (SessionId realSid)
+                                  (mkTurnEntry turnId ts turn)
+                                pure (Map.insert idText (turnId, ts, turn) tm)
+                      resolveTry "update" idText tm r
+                _ -> pure tm
+
+    -- Detect working→settle transitions and record ONE Response per settled id.
+    -- Dedup is structural: 'settledIds' fires once per Thinking→Idle edge and the
+    -- turn id is retired (deleted from the turn map) at settle, so no content
+    -- comparison is needed. Two distinct turns get distinct minted ids.
     --
     -- Per-entry snapshot + record IO is wrapped in 'try @SomeException' (D5.3
-    -- resilience, extended to the settle path): a non-async failure (disk full,
-    -- permission error, session dir deleted mid-tick) is logged and skipped so
-    -- that sibling entries still get recorded and the loop never dies.
-    -- 'AsyncCancelled' is always re-raised (project-wide invariant).
-    settle prev obs prevResponses = do
-      newPairs <- forM (settledIds prev obs) $ \idText ->
-        case Reg.parseHarnessId idText of
-          Nothing  -> pure Nothing
-          Just hid -> do
-            mEntry <- Reg.lookupById reg hid
-            case mEntry of
-              Just e
-                | Just realSid <- Reg._he_sessionId e
-                , Just hh      <- Reg._he_handle e -> do
-                    r <- try @SomeException $ do
-                      resp <- _hh_snapshot hh 0
-                      let prevResp = Map.lookup idText prevResponses
-                      if not (T.null (T.strip resp)) && prevResp /= Just resp
-                        then do _rd_recordResponse deps (SessionId realSid) resp
-                                pure (Just (idText, resp))
-                        else pure Nothing
-                    case r of
-                      Left err
-                        | Just AsyncCancelled <- fromException err -> throwIO err
-                        | otherwise -> do
-                            _lh_logWarn logger
-                              ("reconcile: settle snapshot/record for " <> idText
-                                 <> " failed: " <> T.pack (show err) <> " — skipping")
-                            pure Nothing
-                      Right res -> pure res
-              -- A harness with no real sessionId or no attached handle is
-              -- skipped (Phase-1 limitation): a boot-discovered, handle-less
-              -- entry is not auto-recorded until a handle exists.
-              _ -> pure Nothing
-      pure (foldr (uncurry Map.insert) prevResponses (catMaybes newPairs))
+    -- resilience): a non-async failure (disk full, permission error, session dir
+    -- deleted mid-tick) is logged and skipped so that sibling entries still get
+    -- recorded and the loop never dies. 'AsyncCancelled' is always re-raised.
+    settle prev obs turnMap = foldM step turnMap (settledIds prev obs)
+      where
+        step tm idText =
+          case Reg.parseHarnessId idText of
+            Nothing  -> pure tm
+            Just hid -> do
+              mEntry <- Reg.lookupById reg hid
+              case mEntry of
+                Just e
+                  | Just realSid <- Reg._he_sessionId e
+                  , Just hh      <- Reg._he_handle e -> do
+                      r <- try @SomeException $
+                        case Map.lookup idText tm of
+                          -- The normal case: the turn streamed at least one
+                          -- update. Finalize from the SAME (turnId, ts) and the
+                          -- whole-turn 'lastPushed' text (NOT a re-snapshot), then
+                          -- retire the turn id.
+                          Just (turnId, ts, lastPushed) -> do
+                            _rd_recordResponse deps (SessionId realSid)
+                              (mkTurnEntry turnId ts lastPushed)
+                            pure (Map.delete idText tm)
+                          -- A fast turn that settled before any working tick was
+                          -- observed: snapshot the whole turn once and finalize
+                          -- with a fresh minted id. Nothing to retire.
+                          Nothing -> do
+                            turn <- _hh_snapshotTurn hh
+                            if T.null (T.strip turn)
+                              then pure tm
+                              else do
+                                (turnId, ts) <- _rd_mintTurn deps
+                                _rd_recordResponse deps (SessionId realSid)
+                                  (mkTurnEntry turnId ts turn)
+                                pure tm
+                      resolveTry "settle snapshot/record" idText tm r
+                -- A harness with no real sessionId or no attached handle is
+                -- skipped (Phase-1 limitation): a boot-discovered, handle-less
+                -- entry is not auto-recorded until a handle exists.
+                _ -> pure tm
+
+    -- Resolve a per-entry 'try': re-raise 'AsyncCancelled', log + fall back to
+    -- the unchanged turn map on any other error, otherwise take the new map.
+    resolveTry
+      :: Text
+      -> Text
+      -> Map Text (Text, UTCTime, Text)
+      -> Either SomeException (Map Text (Text, UTCTime, Text))
+      -> IO (Map Text (Text, UTCTime, Text))
+    resolveTry what idText fallback r = case r of
+      Left err
+        | Just AsyncCancelled <- fromException err -> throwIO err
+        | otherwise -> do
+            _lh_logWarn logger
+              ("reconcile: " <> what <> " for " <> idText
+                 <> " failed: " <> T.pack (show err) <> " — skipping")
+            pure fallback
+      Right tm' -> pure tm'
+
+    -- Ids whose liveness THIS tick is Thinking — the in-progress turns to update.
+    thinkingIds obs =
+      [ idText
+      | (idText, o) <- Map.toList obs
+      , _to_liveness o == Reg.LivenessThinking
+      ]
 
     -- Ids whose PREVIOUS liveness was Thinking and whose NEW liveness (this
     -- tick) is Idle or AwaitingInput — the working→settle edge.

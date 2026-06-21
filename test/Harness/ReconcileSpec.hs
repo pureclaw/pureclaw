@@ -49,6 +49,11 @@ import PureClaw.Harness.Reconcile
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux (TmuxWindowRow (..))
 import PureClaw.Session.Kind qualified as Kind
+import PureClaw.Transcript.Types (TranscriptEntry (..), decodePayload)
+import Data.Text.Encoding qualified as TE
+import Data.Time (UTCTime)
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime (..), secondsToDiffTime)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -87,6 +92,15 @@ mkRow idx name pclId panePid paneDead = TmuxWindowRow
 recvWithin :: Int -> Subscription -> IO (Maybe BrokerEvent)
 recvWithin micros sub =
   timeout micros $ atomically $ readTBQueue (_sub_queue sub)
+
+-- | A fixed timestamp for deterministic turn minting in tests.
+fixedTs :: UTCTime
+fixedTs = UTCTime (fromGregorian 2026 6 18) (secondsToDiffTime 0)
+
+-- | Decode a 'TranscriptEntry' payload back to its 'Text' (the inverse of the
+-- payload encoding 'mkTurnEntry' performs).
+decodeEntryText :: TranscriptEntry -> Text
+decodeEntryText e = maybe "" TE.decodeUtf8 (decodePayload (_te_payload e))
 
 -- | A raw screen frame the claudeObserver classifies as working (HasWorking ⇒
 -- Thinking), and one it classifies as idle (HasIdle ⇒ Idle once stable). The
@@ -137,7 +151,9 @@ fakeDeps f = ReconcileDeps
       pure (Map.findWithDefault True pid m)
   , _rd_stampLegacy = \_session _windowName -> pure Nothing
   , _rd_evict = \_hid _label -> pure ()
-  , _rd_recordResponse = \_sid _txt -> pure ()
+  , _rd_recordResponse = \_sid _entry -> pure ()
+  , _rd_publishUpdate = \_sid _entry -> pure ()
+  , _rd_mintTurn = pure ("turn-1", fixedTs)
   }
 
 -- | A log handle that records every warn\/error message into an 'IORef' so a
@@ -353,9 +369,9 @@ spec = do
         -- Build deps whose '_rd_capture' replays a per-tick frame script (the
         -- last frame repeats) and whose '_rd_recordResponse' appends to a ref.
         settleDeps
-          :: Text                          -- ^ the entry's @pcl_id (harness id text)
-          -> IORef [Text]                  -- ^ per-tick capture script
-          -> (SessionId -> Text -> IO ())  -- ^ recordResponse
+          :: Text                                    -- ^ the entry's @pcl_id (harness id text)
+          -> IORef [Text]                            -- ^ per-tick capture script
+          -> (SessionId -> TranscriptEntry -> IO ()) -- ^ recordResponse
           -> ReconcileDeps
         settleDeps pclId frames record = ReconcileDeps
           { _rd_sessions = pure ["pureclaw"]
@@ -371,13 +387,15 @@ spec = do
           , _rd_stampLegacy     = \_ _ -> pure Nothing
           , _rd_evict           = \_ _ -> pure ()
           , _rd_recordResponse  = record
+          , _rd_publishUpdate   = \_ _ -> pure ()
+          , _rd_mintTurn        = pure ("turn-1", fixedTs)
           }
 
     it "records exactly one Response on a working→idle settle, then dedups" $ do
-      recorded <- newIORef ([] :: [(SessionId, Text)])
+      recorded <- newIORef ([] :: [(SessionId, TranscriptEntry)])
       reg <- Reg.newRegistry
       hid <- Reg.newHarnessId
-      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the answer" }
+      let hh = mkNoOpHarnessHandle { _hh_snapshotTurn = pure "the answer" }
       Reg.insertEntry reg
         ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
           { Reg._he_sessionId = Just "sess-1"
@@ -387,20 +405,20 @@ spec = do
       -- frames are stable; subsequent idle ticks must dedup to zero.
       frames <- newIORef [busyFrame, busyFrame, idleFrame]
       let deps = settleDeps (Reg.harnessIdToText hid) frames
-                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+                   (\sid e -> modifyIORef' recorded ((sid, e) :))
       broker <- mkInProcessBroker defaultBrokerConfig
       let tick = 40_000
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
           threadDelay (20 * tick)
       xs <- readIORef recorded
-      xs `shouldBe` [(SessionId "sess-1", "the answer")]
+      map (fmap decodeEntryText) xs `shouldBe` [(SessionId "sess-1", "the answer")]
 
     it "records the approval prompt on a working→awaiting-input settle" $ do
-      recorded <- newIORef ([] :: [(SessionId, Text)])
+      recorded <- newIORef ([] :: [(SessionId, TranscriptEntry)])
       reg <- Reg.newRegistry
       hid <- Reg.newHarnessId
-      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the prompt" }
+      let hh = mkNoOpHarnessHandle { _hh_snapshotTurn = pure "the prompt" }
       Reg.insertEntry reg
         ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
           { Reg._he_sessionId = Just "sess-1"
@@ -410,20 +428,20 @@ spec = do
       let approvalFrame = "Do you want to proceed?"
       frames <- newIORef [busyFrame, approvalFrame]
       let deps = settleDeps (Reg.harnessIdToText hid) frames
-                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+                   (\sid e -> modifyIORef' recorded ((sid, e) :))
       broker <- mkInProcessBroker defaultBrokerConfig
       let tick = 40_000
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
           threadDelay (20 * tick)
       xs <- readIORef recorded
-      xs `shouldBe` [(SessionId "sess-1", "the prompt")]
+      map (fmap decodeEntryText) xs `shouldBe` [(SessionId "sess-1", "the prompt")]
 
     it "skips recording when _he_sessionId is Nothing (label-only entry)" $ do
-      recorded <- newIORef ([] :: [(SessionId, Text)])
+      recorded <- newIORef ([] :: [(SessionId, TranscriptEntry)])
       reg <- Reg.newRegistry
       hid <- Reg.newHarnessId
-      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the answer" }
+      let hh = mkNoOpHarnessHandle { _hh_snapshotTurn = pure "the answer" }
       Reg.insertEntry reg
         ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
           { Reg._he_sessionId = Nothing
@@ -432,7 +450,7 @@ spec = do
           })
       frames <- newIORef [busyFrame, busyFrame, idleFrame]
       let deps = settleDeps (Reg.harnessIdToText hid) frames
-                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+                   (\sid e -> modifyIORef' recorded ((sid, e) :))
       broker <- mkInProcessBroker defaultBrokerConfig
       let tick = 40_000
       Async.withAsync
@@ -445,10 +463,10 @@ spec = do
       -- No /send happened; the harness just produced output. The settle on a
       -- spinner→idle transition still records it (the loop watches liveness, not
       -- send calls).
-      recorded <- newIORef ([] :: [(SessionId, Text)])
+      recorded <- newIORef ([] :: [(SessionId, TranscriptEntry)])
       reg <- Reg.newRegistry
       hid <- Reg.newHarnessId
-      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "spontaneous output" }
+      let hh = mkNoOpHarnessHandle { _hh_snapshotTurn = pure "spontaneous output" }
       Reg.insertEntry reg
         ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
           { Reg._he_sessionId = Just "sess-1"
@@ -456,14 +474,14 @@ spec = do
           })
       frames <- newIORef [busyFrame, busyFrame, idleFrame]
       let deps = settleDeps (Reg.harnessIdToText hid) frames
-                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+                   (\sid e -> modifyIORef' recorded ((sid, e) :))
       broker <- mkInProcessBroker defaultBrokerConfig
       let tick = 40_000
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
           threadDelay (20 * tick)
       xs <- readIORef recorded
-      xs `shouldBe` [(SessionId "sess-1", "spontaneous output")]
+      map (fmap decodeEntryText) xs `shouldBe` [(SessionId "sess-1", "spontaneous output")]
 
     -- Finding 1: a non-async exception thrown by '_rd_recordResponse' (or
     -- '_hh_snapshot') on one settled harness must NOT kill the reconcile loop.
@@ -475,14 +493,14 @@ spec = do
     -- RED on the unfixed code: the exception propagates to the 'outer' handler
     -- which logs + returns (exits) — the healthy harness's record is never seen.
     it "Finding 1: settle path survives a non-async IOException from _rd_recordResponse" $ do
-      recorded  <- newIORef ([] :: [(SessionId, Text)])
+      recorded  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
       (logRef, capLog) <- mkCapturingLog
 
       reg <- Reg.newRegistry
 
       -- Harness A: its _rd_recordResponse throws an IOException on settle.
       hidA <- Reg.newHarnessId
-      let hhA = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "response-A" }
+      let hhA = mkNoOpHarnessHandle { _hh_snapshotTurn = pure "response-A" }
       Reg.insertEntry reg
         ((mkEntry hidA settleHid (Just 100) (Just 200) Reg.LivenessThinking)
           { Reg._he_sessionId = Just "sess-A"
@@ -492,7 +510,7 @@ spec = do
       -- Harness B: healthy; sits at Thinking until a later set of idle frames.
       hidB <- Reg.newHarnessId
       let win_B = "claude-code-1"
-          hhB   = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "response-B" }
+          hhB   = mkNoOpHarnessHandle { _hh_snapshotTurn = pure "response-B" }
       Reg.insertEntry reg
         ((mkEntry hidB win_B (Just 300) (Just 400) Reg.LivenessThinking)
           { Reg._he_sessionId = Just "sess-B"
@@ -500,10 +518,10 @@ spec = do
           })
 
       -- The injected _rd_recordResponse throws for sess-A, succeeds for sess-B.
-      let record sid txt =
+      let record sid e =
             if sid == SessionId "sess-A"
               then throwIO (userError "disk full" :: IOException)
-              else modifyIORef' recorded ((sid, txt) :)
+              else modifyIORef' recorded ((sid, e) :)
 
       -- Frame script: both harnesses start busy, then settle (idle×2 for the
       -- stability gate).  We map by window name so each gets its own sequence.
@@ -529,6 +547,8 @@ spec = do
             , _rd_stampLegacy     = \_ _ -> pure Nothing
             , _rd_evict           = \_ _ -> pure ()
             , _rd_recordResponse  = record
+            , _rd_publishUpdate   = \_ _ -> pure ()
+            , _rd_mintTurn        = pure ("turn-1", fixedTs)
             }
 
       Async.withAsync
@@ -537,11 +557,257 @@ spec = do
 
       -- The healthy harness (B) must have been recorded despite A's failure.
       xs <- readIORef recorded
-      xs `shouldBe` [(SessionId "sess-B", "response-B")]
+      map (fmap decodeEntryText) xs `shouldBe` [(SessionId "sess-B", "response-B")]
 
       -- The loop must have logged a warning about the failing settle.
       logs <- readIORef logRef
       any (\m -> "settle snapshot/record" `T.isInfixOf` m) logs `shouldBe` True
+
+  describe "output watcher — live in-place turn updates + finalize (Task 6)" $ do
+    let liveHid = "claude-code-0"
+
+        -- Deps for one harness: a per-tick capture frame script (liveness) and
+        -- a separate per-tick turn script (the growing whole-turn snapshot the
+        -- handle's '_hh_snapshotTurn' returns). Updates + finals are captured
+        -- into separate refs; '_rd_mintTurn' is fixed.
+        liveDeps
+          :: Text                                     -- ^ the entry's @pcl_id
+          -> IORef [Text]                             -- ^ per-tick capture frames
+          -> (SessionId -> TranscriptEntry -> IO ())  -- ^ publishUpdate
+          -> (SessionId -> TranscriptEntry -> IO ())  -- ^ recordResponse
+          -> IO (Text, UTCTime)                       -- ^ mintTurn
+          -> ReconcileDeps
+        liveDeps pclId frames pub record mint = ReconcileDeps
+          { _rd_sessions = pure ["pureclaw"]
+          , _rd_sweep    = \_ -> pure
+              [ mkRow 0 liveHid pclId (Just 100) False ]
+          , _rd_capture  = \_session _windowName -> do
+              xs <- readIORef frames
+              case xs of
+                []       -> pure (Just idleFrame)
+                [x]      -> pure (Just x)
+                (x : ys) -> do writeIORef frames ys; pure (Just x)
+          , _rd_harnessAlive   = \_ -> pure True
+          , _rd_stampLegacy     = \_ _ -> pure Nothing
+          , _rd_evict           = \_ _ -> pure ()
+          , _rd_recordResponse  = record
+          , _rd_publishUpdate   = pub
+          , _rd_mintTurn        = mint
+          }
+
+        -- A handle whose '_hh_snapshotTurn' replays a per-tick turn script (the
+        -- last value repeats), modelling the whole turn growing across ticks.
+        scriptedTurnHandle :: IORef [Text] -> HarnessHandle
+        scriptedTurnHandle turns = mkNoOpHarnessHandle
+          { _hh_snapshotTurn = do
+              xs <- readIORef turns
+              case xs of
+                []       -> pure ""
+                [x]      -> pure x
+                (x : ys) -> do writeIORef turns ys; pure x
+          }
+
+    it "keeps a stable turn id as the turn grows, then records one final on settle" $ do
+      updates <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      finals  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      -- The whole turn grows "A" → "A\nB" across the two working ticks, then
+      -- repeats (the last value sticks through settle).
+      turns <- newIORef ["A", "A\nB"]
+      let hh = scriptedTurnHandle turns
+      Reg.insertEntry reg
+        ((mkEntry hid liveHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      -- busy, busy, idle, idle... → two working ticks, then an Idle settle.
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = liveDeps (Reg.harnessIdToText hid) frames
+                   (\sid e -> modifyIORef' updates ((sid, e) :))
+                   (\sid e -> modifyIORef' finals  ((sid, e) :))
+                   (pure ("turn-1", fixedTs))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      us <- reverse <$> readIORef updates
+      fs <- reverse <$> readIORef finals
+      -- Every update carries the SAME stable turn id.
+      map (_te_id . snd) us `shouldBe` replicate (length us) "turn-1"
+      -- The decoded update payloads grow in place: "A" then "A\nB".
+      map (decodeEntryText . snd) us `shouldBe` ["A", "A\nB"]
+      -- Exactly ONE final, same id, decoded payload is the last live state.
+      map (fmap (\e -> (_te_id e, decodeEntryText e))) fs
+        `shouldBe` [(SessionId "sess-1", ("turn-1", "A\nB"))]
+
+    it "publishes an unchanged turn only once" $ do
+      updates <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      finals  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      -- The turn text is identical "A" on both working ticks.
+      turns <- newIORef ["A"]
+      let hh = scriptedTurnHandle turns
+      Reg.insertEntry reg
+        ((mkEntry hid liveHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = liveDeps (Reg.harnessIdToText hid) frames
+                   (\sid e -> modifyIORef' updates ((sid, e) :))
+                   (\sid e -> modifyIORef' finals  ((sid, e) :))
+                   (pure ("turn-1", fixedTs))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      us <- readIORef updates
+      length us `shouldBe` 1
+      map (decodeEntryText . snd) us `shouldBe` ["A"]
+
+    it "retires the turn id at settle so a second turn gets a fresh id" $ do
+      updates <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      finals  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      -- Two distinct turns: "first" is the whole-turn text while turn 1 is
+      -- Thinking; "second" while turn 2 is Thinking. The last value sticks.
+      turns <- newIORef ["first", "first", "second", "second"]
+      let hh = scriptedTurnHandle turns
+      Reg.insertEntry reg
+        ((mkEntry hid liveHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      -- The stability gate needs TWO identical idle frames to read Idle. So:
+      -- busy(Thinking) → idle,idle(settle 1) → busy(Thinking) → idle,idle(settle 2).
+      frames <- newIORef [busyFrame, idleFrame, idleFrame, busyFrame, idleFrame, idleFrame]
+      -- A counter-backed mint: first call → turn-1, second call → turn-2.
+      mintCtr <- newIORef (0 :: Int)
+      let mint = do
+            n <- readIORef mintCtr
+            writeIORef mintCtr (n + 1)
+            pure (if n == 0 then "turn-1" else "turn-2", fixedTs)
+      let deps = liveDeps (Reg.harnessIdToText hid) frames
+                   (\sid e -> modifyIORef' updates ((sid, e) :))
+                   (\sid e -> modifyIORef' finals  ((sid, e) :))
+                   mint
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (30 * tick)
+      fs <- reverse <$> readIORef finals
+      -- Two finals, with distinct (fresh) turn ids — the second is "turn-2".
+      map (\(_, e) -> (_te_id e, decodeEntryText e)) fs
+        `shouldBe` [("turn-1", "first"), ("turn-2", "second")]
+
+    it "skips an unbound harness (no sessionId / no handle)" $ do
+      updates <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      finals  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      turns <- newIORef ["A", "A\nB"]
+      let hh = scriptedTurnHandle turns
+      -- Unbound: no real sessionId (label-only), even though a handle exists.
+      Reg.insertEntry reg
+        ((mkEntry hid liveHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Nothing
+          , Reg._he_label     = liveHid
+          , Reg._he_handle    = Just hh
+          })
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = liveDeps (Reg.harnessIdToText hid) frames
+                   (\sid e -> modifyIORef' updates ((sid, e) :))
+                   (\sid e -> modifyIORef' finals  ((sid, e) :))
+                   (pure ("turn-1", fixedTs))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      us <- readIORef updates
+      fs <- readIORef finals
+      us `shouldBe` []
+      fs `shouldBe` []
+
+    it "survives a throwing _rd_publishUpdate (a second harness still updates)" $ do
+      updates <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      finals  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      (logRef, capLog) <- mkCapturingLog
+      reg <- Reg.newRegistry
+
+      -- Harness A: publishUpdate throws a non-async IOException on its tick.
+      hidA <- Reg.newHarnessId
+      turnsA <- newIORef ["A"]
+      let hhA = scriptedTurnHandle turnsA
+      Reg.insertEntry reg
+        ((mkEntry hidA liveHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-A"
+          , Reg._he_handle    = Just hhA
+          })
+
+      -- Harness B: healthy; its update + final must still land.
+      hidB <- Reg.newHarnessId
+      turnsB <- newIORef ["B", "B\nC"]
+      let win_B = "claude-code-1"
+          hhB   = scriptedTurnHandle turnsB
+      Reg.insertEntry reg
+        ((mkEntry hidB win_B (Just 300) (Just 400) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-B"
+          , Reg._he_handle    = Just hhB
+          })
+
+      let pub sid e =
+            if sid == SessionId "sess-A"
+              then throwIO (userError "publish boom" :: IOException)
+              else modifyIORef' updates ((sid, e) :)
+          record sid e = modifyIORef' finals ((sid, e) :)
+
+      framesA <- newIORef [busyFrame, busyFrame, idleFrame]
+      framesB <- newIORef [busyFrame, busyFrame, idleFrame]
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+          deps = ReconcileDeps
+            { _rd_sessions = pure ["pureclaw"]
+            , _rd_sweep    = \_ -> pure
+                [ mkRow 0 liveHid (Reg.harnessIdToText hidA) (Just 100) False
+                , mkRow 1 win_B   (Reg.harnessIdToText hidB) (Just 300) False
+                ]
+            , _rd_capture  = \_session windowName -> do
+                let ref = if windowName == liveHid then framesA else framesB
+                xs <- readIORef ref
+                case xs of
+                  []       -> pure (Just idleFrame)
+                  [x]      -> pure (Just x)
+                  (x : ys) -> do writeIORef ref ys; pure (Just x)
+            , _rd_harnessAlive   = \_ -> pure True
+            , _rd_stampLegacy     = \_ _ -> pure Nothing
+            , _rd_evict           = \_ _ -> pure ()
+            , _rd_recordResponse  = record
+            , _rd_publishUpdate   = pub
+            , _rd_mintTurn        = pure ("turn-1", fixedTs)
+            }
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker capLog) $ \_a -> do
+          threadDelay (20 * tick)
+      us <- reverse <$> readIORef updates
+      fs <- readIORef finals
+      -- Harness B's updates landed despite A throwing on every working tick.
+      map (fmap decodeEntryText) us `shouldBe`
+        [(SessionId "sess-B", "B"), (SessionId "sess-B", "B\nC")]
+      -- Both harnesses still settled and recorded a final (B's content checked).
+      any (\(sid, e) -> sid == SessionId "sess-B" && decodeEntryText e == "B\nC") fs
+        `shouldBe` True
+      -- The loop logged a warning for the failing publish.
+      logs <- readIORef logRef
+      any (\m -> "update" `T.isInfixOf` m && "sess-A" `T.isInfixOf` m
+                   || "publish" `T.isInfixOf` m
+                   || "snapshot" `T.isInfixOf` m) logs `shouldBe` True
 
   describe "reconcileTick — D5.5 / D5.7 (non-ours rows are never captured)" $ do
     it "a PID-mismatched marker row is logged + treated as not-ours (never captured, entry → Orphaned)" $ do
