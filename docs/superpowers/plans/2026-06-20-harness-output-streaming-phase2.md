@@ -456,7 +456,7 @@ git commit -m "feat(reconcile): live in-place turn updates (stable id) + finaliz
 - [ ] `nix develop . --command cabal test` — full suite green.
 - [ ] `nix develop . --command cabal test --enable-coverage` — ≥95% per `.coverage-thresholds.json`.
 - [ ] `cd frontend && npx tsc --noEmit && npx vitest run` — green.
-- [ ] No vacuous tests: `git diff main..HEAD` contains no committed `pending`, `xit`, or `xdescribe` (every planned test asserts real behavior).
+- [ ] No vacuous tests: the Task-6 crux tests (and all required behavior) are FULL assertions, not placeholders. A bare `pending`/`xit`/`xdescribe` standing in for a required assertion is forbidden; a `pendingWith "<explicit rationale>"` for a genuinely-untestable-without-exposing-internals case is acceptable (matches the existing convention in `StreamIntegrationSpec.hs`).
 - [ ] Manual smoke (live, on a real Claude harness): send a multi-step request from the web UI; confirm a single message grows in place across ~2s ticks with a streaming indicator, then finalizes (indicator clears) and persists once (one entry in the transcript, no duplicate).
 
 ## Self-review notes
