@@ -41,7 +41,7 @@ import Data.Text qualified as T
 
 import PureClaw.Agent.AgentDef (AgentName, unAgentName)
 import PureClaw.Core.Types (ModelId (..), ProviderId (..))
-import PureClaw.Harness.Registry (HarnessId)
+import PureClaw.Harness.Id (HarnessId)
 
 -- ---------------------------------------------------------------------------
 -- Session kind

@@ -104,6 +104,7 @@ import qualified Harness.JsonlTailSpec
 import qualified Harness.ReconcileSpec
 import qualified Harness.RegistrySpec
 import qualified Harness.TmuxSpec
+import qualified Harness.ObserverSpec
 import qualified Transcript.CombinatorSpec
 import qualified Transcript.ProviderSpec
 import qualified Session.TypesSpec
@@ -162,6 +163,8 @@ import qualified Frontend.StreamGoldensSpec
 import qualified Frontend.StreamIntegrationSpec
 -- WU4 (activity probe loop)
 import qualified Frontend.ActivityProbeSpec
+-- Task 3: HarnessActivity ToJSON unit tests
+import qualified Frontend.ActivityTypesSpec
 -- Frontend.APISpec is already imported at the top of this block (from main)
 -- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
 import qualified Frontend.TabsViewSpec
@@ -277,6 +280,7 @@ main = withIsolatedHome $ hspec $ do
   describe "Harness.Reconcile" Harness.ReconcileSpec.spec
   describe "Harness.Registry" Harness.RegistrySpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec
+  describe "Harness.Observer" Harness.ObserverSpec.spec
   describe "Transcript.Combinator" Transcript.CombinatorSpec.spec
   describe "Transcript.Provider" Transcript.ProviderSpec.spec
   describe "Session.Types" Session.TypesSpec.spec
@@ -330,6 +334,8 @@ main = withIsolatedHome $ hspec $ do
   describe "Frontend.StreamIntegration" Frontend.StreamIntegrationSpec.spec
   -- WU4 (activity probe loop)
   describe "Frontend.ActivityProbe" Frontend.ActivityProbeSpec.spec
+  -- Task 3: HarnessActivity ToJSON
+  describe "Frontend.ActivityTypes" Frontend.ActivityTypesSpec.spec
   -- Frontend.APISpec is registered earlier (from main's WU-7 unified endpoint)
   -- Tabs-as-View (GitHub #79) WU3-FE (pure tabSnapshotsFromRegistry)
   describe "Frontend.TabsView" Frontend.TabsViewSpec.spec

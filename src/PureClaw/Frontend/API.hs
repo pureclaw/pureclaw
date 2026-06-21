@@ -44,7 +44,7 @@ module PureClaw.Frontend.API
 
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Control.Exception (IOException, SomeException, bracket, bracket_, try)
-import Control.Monad (filterM, unless, when)
+import Control.Monad (filterM, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (Value, ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?), (.!=))
 import Data.Aeson.Types qualified as AesonTypes
@@ -2120,34 +2120,31 @@ routeViaHandle
   -> (Response -> IO ResponseReceived)
   -> IO ResponseReceived
 routeViaHandle env sid hh userText transcriptPath postSend respond = do
-  -- 'handleSend' is the sole writer of THIS session's transcript: on the
-  -- fresh-create path the harness handle was given a no-op transcript
-  -- ('createHarnessTab'), and a restart-discovered handle records to the
-  -- CLI's own session transcript (a different file), so recording here never
-  -- duplicates an entry in this session transcript. 'bracket' guarantees the
-  -- transcript fd is flushed + closed even if '_hh_send'/'_hh_receive' throws
-  -- (tmux IO), so a failed send cannot leak a file descriptor.
+  -- 'handleSend' records the Request entry and injects keystrokes. The
+  -- Response entry is recorded by the reconcile watcher (Task 8 decoupling):
+  -- the send path no longer blocks on '_hh_receive', so the HTTP response
+  -- returns promptly with {"response":""} and the real reply arrives via the
+  -- WS stream (watcher → broker → WS). 'bracket' guarantees the transcript
+  -- fd is flushed + closed even if '_hh_send' throws (tmux IO), so a failed
+  -- send cannot leak a file descriptor.
   result <- try @SomeException $
     bracket
       (mkBroadcastingFileTranscriptHandle
          (_fe_broker env) (SessionId sid) (_fe_logger env) transcriptPath)
       (\th -> _th_flush th >> _th_close th)
       (\th -> do
-        -- Record the user message as a Request entry (mirrors 'harnesseSend').
+        -- Record the user message as a Request entry (mirrors 'harnessSend').
         recordHarnessEntry th Request userText
         _hh_send hh (TE.encodeUtf8 userText)
-        raw <- _hh_receive hh
-        let resp = sanitizeHarnessOutput (TE.decodeUtf8 raw)
-        -- Only record a Response entry when the harness produced output;
-        -- a blank reply must not leave an empty/duplicate entry.
-        unless (T.null (T.strip resp)) $
-          recordHarnessEntry th Response resp
-        pure resp)
+        -- Response is recorded by the reconcile watcher on settle; the send
+        -- path no longer blocks on _hh_receive (which mis-fired off the broken
+        -- isIdle and double-recorded against the watcher). Reply arrives via WS.
+        pure (mempty :: T.Text))
   case result of
     Left e -> do
       _lh_logError (_fe_logger env) $ "Harness send error: " <> T.pack (show e)
       respond $ jsonResponse status500 (object ["error" .= ("Harness send failed" :: Text)])
-    Right resp -> do
+    Right _ -> do
       touchSessionLastActive (_fe_sessionsDir env) (SessionId sid)
       broadcastLists env
       -- Synchronous-but-exception-proof post-send hook (e.g. the D6.5 id
@@ -2155,7 +2152,7 @@ routeViaHandle env sid hh userText transcriptPath postSend respond = do
       -- minor latency — but is exception-proof at the source, so it cannot fail
       -- the send the user is about to receive.
       postSend
-      respond $ jsonResponse status200 (object ["response" .= resp, "kind" .= ("assistant" :: Text)])
+      respond $ jsonResponse status200 (object ["response" .= ("" :: Text), "kind" .= ("assistant" :: Text)])
 
 -- | Lazy migration (D6.5): if a corroborated registry entry's label matches
 -- @windowName@, persist its 'Registry.HarnessId' onto the session's

@@ -22,7 +22,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
 import Control.Monad (replicateM_, void)
 import Control.Concurrent.STM (atomically, readTBQueue)
-import Control.Exception (throwIO, ErrorCall (..))
+import Control.Exception (IOException, throwIO, ErrorCall (..))
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -42,10 +42,13 @@ import PureClaw.Frontend.StreamBroker
   , defaultBrokerConfig
   , mkInProcessBroker
   )
+import PureClaw.Handles.Harness (HarnessHandle (..), mkNoOpHarnessHandle)
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
+import PureClaw.Harness.Observer (claudeObserver)
 import PureClaw.Harness.Reconcile
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux (TmuxWindowRow (..))
+import PureClaw.Session.Kind qualified as Kind
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -61,6 +64,7 @@ mkEntry hid windowName shellPid harnessPid liveness = Reg.HarnessEntry
   , Reg._he_shellPid    = shellPid
   , Reg._he_harnessPid  = harnessPid
   , Reg._he_origin      = Reg.OriginSpawned
+  , Reg._he_flavour     = Kind.HClaudeCode
   , Reg._he_liveness    = liveness
   , Reg._he_extModified = False
   , Reg._he_stale       = False
@@ -83,6 +87,13 @@ mkRow idx name pclId panePid paneDead = TmuxWindowRow
 recvWithin :: Int -> Subscription -> IO (Maybe BrokerEvent)
 recvWithin micros sub =
   timeout micros $ atomically $ readTBQueue (_sub_queue sub)
+
+-- | A raw screen frame the claudeObserver classifies as working (HasWorking ⇒
+-- Thinking), and one it classifies as idle (HasIdle ⇒ Idle once stable). The
+-- fake '_rd_capture' returns these to drive the observer-based classifier.
+busyFrame, idleFrame :: Text
+busyFrame = "\x2736 Smooshing\x2026 (4m 55s)"   -- ✶ working/status line
+idleFrame = "ready when you are"                -- neither working nor approval
 
 -- | Deterministic deps: a queue of sweeps (one per tick; the last repeats),
 -- a captured-windows recorder, and a settable idle/capture map.
@@ -116,12 +127,17 @@ fakeDeps f = ReconcileDeps
   , _rd_capture  = \_session windowName -> do
       modifyIORef' (f_capturedWindows f) (++ [windowName])
       m <- readIORef (f_idleByWindow f)
-      pure (Map.findWithDefault True windowName m)
+      -- Map the test's idle/busy intent onto a raw frame the claudeObserver
+      -- classifies: an idle frame reads HasIdle (⇒ Idle once stable), a busy
+      -- frame reads HasWorking (⇒ Thinking). Default (unmapped) is idle.
+      let idle = Map.findWithDefault True windowName m
+      pure (Just (if idle then idleFrame else busyFrame))
   , _rd_harnessAlive = \pid -> do
       m <- readIORef (f_aliveByPid f)
       pure (Map.findWithDefault True pid m)
   , _rd_stampLegacy = \_session _windowName -> pure Nothing
   , _rd_evict = \_hid _label -> pure ()
+  , _rd_recordResponse = \_sid _txt -> pure ()
   }
 
 -- | A log handle that records every warn\/error message into an 'IORef' so a
@@ -167,16 +183,28 @@ spec = do
       corroborate e good `shouldBe` Corroborated
       corroborate e bad  `shouldBe` PidMismatch
 
-  describe "liveness classification (D5.4)" $ do
-    -- Args are (paneDead, harnessAlive, isIdle).
-    it "pane_dead → Exited" $
-      classifyLiveness True True True `shouldBe` Reg.LivenessExited
+  describe "observer-based classification (3-state + stability gate)" $ do
+    -- The approval frame the claudeObserver recognizes (busyFrame/idleFrame are
+    -- the shared module-level fixtures).
+    let approvalFrame = "Do you want to proceed?"           -- approval prompt
+    -- Args are (observer, paneDead, harnessAlive, stable, screen).
+    it "pane_dead → Exited regardless of the screen" $
+      classifyFromObserver claudeObserver True True True busyFrame
+        `shouldBe` Reg.LivenessExited
     it "harness PID gone → Exited (window present, not pane_dead)" $
-      classifyLiveness False False True `shouldBe` Reg.LivenessExited
-    it "alive + idle screen → Idle" $
-      classifyLiveness False True True `shouldBe` Reg.LivenessIdle
-    it "alive + busy screen → Thinking" $
-      classifyLiveness False True False `shouldBe` Reg.LivenessThinking
+      classifyFromObserver claudeObserver False False True busyFrame
+        `shouldBe` Reg.LivenessExited
+    it "classifies a spinner frame as Thinking regardless of stability" $ do
+      classifyFromObserver claudeObserver False True True  busyFrame
+        `shouldBe` Reg.LivenessThinking
+      classifyFromObserver claudeObserver False True False busyFrame
+        `shouldBe` Reg.LivenessThinking
+    it "classifies an approval frame as AwaitingInput" $
+      classifyFromObserver claudeObserver False True True approvalFrame
+        `shouldBe` Reg.LivenessAwaitingInput
+    it "an idle-marker frame is Thinking until it is stable across ticks" $ do
+      classifyFromObserver claudeObserver False True False idleFrame `shouldBe` Reg.LivenessThinking
+      classifyFromObserver claudeObserver False True True  idleFrame `shouldBe` Reg.LivenessIdle
 
   describe "symmetric diff (D5.2 — disappearance emits an event)" $ do
     it "an entry whose liveness changed emits its new liveness" $ do
@@ -207,6 +235,8 @@ spec = do
       livenessToActivity Reg.LivenessThinking `shouldBe` HarnessThinking
       livenessToActivity Reg.LivenessExited   `shouldBe` HarnessStopped
       livenessToActivity Reg.LivenessOrphaned `shouldBe` HarnessStopped
+    it "maps AwaitingInput to needs-input" $
+      livenessToActivity Reg.LivenessAwaitingInput `shouldBe` HarnessNeedsInput
 
   describe "reconcileTick — D5.1 (update entries by id)" $
     it "updates a registered entry's liveness + coordinate from the sweep" $ do
@@ -219,7 +249,7 @@ spec = do
         [Right [mkRow 0 "renamed-window" (Reg.harnessIdToText hid) (Just 100) False]]
         (Map.singleton "renamed-window" False)  -- busy ⇒ Thinking
         Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e   `shouldBe` Reg.LivenessThinking
       Reg._he_windowName e `shouldBe` "renamed-window"
@@ -233,7 +263,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) True]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessExited
       -- A pane_dead window is never captured.
@@ -245,7 +275,7 @@ spec = do
       hid <- Reg.newHarnessId
       Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessIdle)
       f <- mkFakes [Right []] Map.empty Map.empty  -- empty sweep
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessOrphaned
 
@@ -257,7 +287,7 @@ spec = do
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
         Map.empty
         (Map.singleton 100 False)  -- descent from shell PID 100 finds no agent
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessExited
 
@@ -276,7 +306,7 @@ spec = do
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
         (Map.singleton "claude-code-0" False)  -- busy screen ⇒ Thinking
         Map.empty
-      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle
+      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_liveness e `shouldBe` Reg.LivenessThinking
       -- The alive-probe was NOT consulted (no recorded harness PID).
@@ -312,6 +342,207 @@ spec = do
             other -> expectationFailure $
               "expected a HarnessStopped event under the label, got: " <> show other
 
+  describe "output watcher — record Response on settle (Task 7)" $ do
+    -- These tests drive the real loop (the settle detection lives in the loop,
+    -- not in 'reconcileTick'). A scripted per-tick capture sequence
+    -- spinner→spinner→idle→idle produces a working→idle settle on the tick
+    -- where two identical idle frames pass the stability gate. The fake handle's
+    -- '_hh_snapshot' returns a fixed response the recorder captures.
+    let settleHid = "claude-code-0"
+
+        -- Build deps whose '_rd_capture' replays a per-tick frame script (the
+        -- last frame repeats) and whose '_rd_recordResponse' appends to a ref.
+        settleDeps
+          :: Text                          -- ^ the entry's @pcl_id (harness id text)
+          -> IORef [Text]                  -- ^ per-tick capture script
+          -> (SessionId -> Text -> IO ())  -- ^ recordResponse
+          -> ReconcileDeps
+        settleDeps pclId frames record = ReconcileDeps
+          { _rd_sessions = pure ["pureclaw"]
+          , _rd_sweep    = \_ -> pure
+              [ mkRow 0 settleHid pclId (Just 100) False ]
+          , _rd_capture  = \_session _windowName -> do
+              xs <- readIORef frames
+              case xs of
+                []       -> pure (Just idleFrame)
+                [x]      -> pure (Just x)
+                (x : ys) -> do writeIORef frames ys; pure (Just x)
+          , _rd_harnessAlive   = \_ -> pure True
+          , _rd_stampLegacy     = \_ _ -> pure Nothing
+          , _rd_evict           = \_ _ -> pure ()
+          , _rd_recordResponse  = record
+          }
+
+    it "records exactly one Response on a working→idle settle, then dedups" $ do
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the answer" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      -- spinner, spinner, idle, idle, idle... → Idle settle once two idle
+      -- frames are stable; subsequent idle ticks must dedup to zero.
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-1", "the answer")]
+
+    it "records the approval prompt on a working→awaiting-input settle" $ do
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the prompt" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      -- spinner, then an approval frame (AwaitingInput needs no stability gate).
+      let approvalFrame = "Do you want to proceed?"
+      frames <- newIORef [busyFrame, approvalFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-1", "the prompt")]
+
+    it "skips recording when _he_sessionId is Nothing (label-only entry)" $ do
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "the answer" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Nothing
+          , Reg._he_label     = settleHid
+          , Reg._he_handle    = Just hh
+          })
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` []
+
+    it "records output produced with no preceding send (direct-tmux: spinner→idle)" $ do
+      -- No /send happened; the harness just produced output. The settle on a
+      -- spinner→idle transition still records it (the loop watches liveness, not
+      -- send calls).
+      recorded <- newIORef ([] :: [(SessionId, Text)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      let hh = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "spontaneous output" }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      frames <- newIORef [busyFrame, busyFrame, idleFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid txt -> modifyIORef' recorded ((sid, txt) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-1", "spontaneous output")]
+
+    -- Finding 1: a non-async exception thrown by '_rd_recordResponse' (or
+    -- '_hh_snapshot') on one settled harness must NOT kill the reconcile loop.
+    -- The loop must:
+    --   * log a warning for the failing entry;
+    --   * keep running;
+    --   * still record the Response for a SECOND, healthy harness that settles
+    --     on a later tick.
+    -- RED on the unfixed code: the exception propagates to the 'outer' handler
+    -- which logs + returns (exits) — the healthy harness's record is never seen.
+    it "Finding 1: settle path survives a non-async IOException from _rd_recordResponse" $ do
+      recorded  <- newIORef ([] :: [(SessionId, Text)])
+      (logRef, capLog) <- mkCapturingLog
+
+      reg <- Reg.newRegistry
+
+      -- Harness A: its _rd_recordResponse throws an IOException on settle.
+      hidA <- Reg.newHarnessId
+      let hhA = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "response-A" }
+      Reg.insertEntry reg
+        ((mkEntry hidA settleHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-A"
+          , Reg._he_handle    = Just hhA
+          })
+
+      -- Harness B: healthy; sits at Thinking until a later set of idle frames.
+      hidB <- Reg.newHarnessId
+      let win_B = "claude-code-1"
+          hhB   = mkNoOpHarnessHandle { _hh_snapshot = \_ -> pure "response-B" }
+      Reg.insertEntry reg
+        ((mkEntry hidB win_B (Just 300) (Just 400) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-B"
+          , Reg._he_handle    = Just hhB
+          })
+
+      -- The injected _rd_recordResponse throws for sess-A, succeeds for sess-B.
+      let record sid txt =
+            if sid == SessionId "sess-A"
+              then throwIO (userError "disk full" :: IOException)
+              else modifyIORef' recorded ((sid, txt) :)
+
+      -- Frame script: both harnesses start busy, then settle (idle×2 for the
+      -- stability gate).  We map by window name so each gets its own sequence.
+      framesA <- newIORef [busyFrame, busyFrame, idleFrame]
+      framesB <- newIORef [busyFrame, busyFrame, busyFrame, idleFrame]
+
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+          deps = ReconcileDeps
+            { _rd_sessions = pure ["pureclaw"]
+            , _rd_sweep    = \_ -> pure
+                [ mkRow 0 settleHid (Reg.harnessIdToText hidA) (Just 100) False
+                , mkRow 1 win_B     (Reg.harnessIdToText hidB) (Just 300) False
+                ]
+            , _rd_capture  = \_session windowName -> do
+                let ref = if windowName == settleHid then framesA else framesB
+                xs <- readIORef ref
+                case xs of
+                  []       -> pure (Just idleFrame)
+                  [x]      -> pure (Just x)
+                  (x : ys) -> do writeIORef ref ys; pure (Just x)
+            , _rd_harnessAlive   = \_ -> pure True
+            , _rd_stampLegacy     = \_ _ -> pure Nothing
+            , _rd_evict           = \_ _ -> pure ()
+            , _rd_recordResponse  = record
+            }
+
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker capLog) $ \_a -> do
+          threadDelay (30 * tick)
+
+      -- The healthy harness (B) must have been recorded despite A's failure.
+      xs <- readIORef recorded
+      xs `shouldBe` [(SessionId "sess-B", "response-B")]
+
+      -- The loop must have logged a warning about the failing settle.
+      logs <- readIORef logRef
+      any (\m -> "settle snapshot/record" `T.isInfixOf` m) logs `shouldBe` True
+
   describe "reconcileTick — D5.5 / D5.7 (non-ours rows are never captured)" $ do
     it "a PID-mismatched marker row is logged + treated as not-ours (never captured, entry → Orphaned)" $ do
       reg <- Reg.newRegistry
@@ -321,7 +552,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 9999) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       cap <- readIORef (f_capturedWindows f)
       cap `shouldBe` []  -- never captured the spoofed window
       [e] <- Reg.snapshot reg
@@ -333,7 +564,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "stranger" "00000000-0000-0000-0000-000000000000" (Just 7) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle
+      _ <- reconcileTick (fakeDeps f) reg mkNoOpLogHandle Map.empty
       cap <- readIORef (f_capturedWindows f)
       cap `shouldBe` []
 
@@ -344,7 +575,7 @@ spec = do
       Reg.insertEntry reg (mkEntry hid "claude-code-0" (Just 100) (Just 200) Reg.LivenessThinking)
       (logRef, logger) <- mkCapturingLog
       f <- mkFakes [Left (userError "tmux hiccup")] Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg logger
+      _ <- reconcileTick (fakeDeps f) reg logger Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_stale e    `shouldBe` True
       Reg._he_liveness e `shouldBe` Reg.LivenessThinking  -- held, not repainted
@@ -366,7 +597,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (f0 f) reg logger
+      _ <- reconcileTick (f0 f) reg logger Map.empty
       [e] <- Reg.snapshot reg
       Reg._he_stale e    `shouldBe` True
       Reg._he_liveness e `shouldBe` Reg.LivenessThinking  -- held, not repainted
@@ -392,7 +623,7 @@ spec = do
           ]]
         (Map.singleton "claude-code-1" False)  -- good entry's screen is busy
         Map.empty
-      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle
+      _ <- reconcileTick (f0 f) reg mkNoOpLogHandle Map.empty
       entries <- Reg.snapshot reg
       let byId i = case [ e | e <- entries, Reg._he_id e == i ] of
             (e : _) -> e
@@ -440,9 +671,14 @@ spec = do
       broker <- mkInProcessBroker defaultBrokerConfig
       eSub   <- _streamBroker_subscribe broker
       sub    <- either (\e -> error ("subscribe: " <> show e)) pure eSub
+      -- A busy (working) window: it reads Thinking on every tick (working frames
+      -- ignore the stability gate), so subsequent identical ticks produce no
+      -- transition. This isolates the "first tick is a silent baseline" invariant
+      -- from the legitimate idle-stability flip (an idle window would read
+      -- Thinking on tick 1, then Idle once the capture is stable on tick 2).
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 100) False]]
-        (Map.singleton "claude-code-0" True)
+        (Map.singleton "claude-code-0" False)
         Map.empty
       let tick = 40_000
       Async.withAsync
@@ -581,7 +817,7 @@ spec = do
       f <- mkFakes
         [Right [mkRow 0 "claude-code-0" (Reg.harnessIdToText hid) (Just 9999) False]]
         Map.empty Map.empty
-      _ <- reconcileTick (fakeDeps f) reg logger
+      _ <- reconcileTick (fakeDeps f) reg logger Map.empty
       logs <- readIORef logRef
       any (\m -> "no corroborating PID" `T.isInfixOf` m) logs `shouldBe` True
 
@@ -620,7 +856,7 @@ spec = do
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
       -- Run threshold-1 orphaned ticks: the entry must survive every one.
       replicateM_ (defaultOrphanGraceTicks - 1) $ do
-        _ <- reconcileTick deps reg mkNoOpLogHandle
+        _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty
         pure ()
       snap <- Reg.snapshot reg
       map Reg._he_id snap `shouldBe` [hid]            -- still present (retained)
@@ -645,8 +881,8 @@ spec = do
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
       -- Run threshold-1 ticks (retained), then the threshold-th tick evicts.
-      replicateM_ (defaultOrphanGraceTicks - 1) (void (reconcileTick deps reg mkNoOpLogHandle))
-      (_snap, evictedSids) <- reconcileTick deps reg mkNoOpLogHandle
+      replicateM_ (defaultOrphanGraceTicks - 1) (void (reconcileTick deps reg mkNoOpLogHandle Map.empty))
+      (_snap, evictedSids) <- reconcileTick deps reg mkNoOpLogHandle Map.empty
       -- Registry: the entry is gone.
       snap <- Reg.snapshot reg
       map Reg._he_id snap `shouldBe` []
@@ -677,16 +913,20 @@ spec = do
         Map.empty
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 1
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 2
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 2
       afterTwo <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterTwo) `shouldBe` [2]
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- live again ⇒ reset
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- live again ⇒ reset
       afterLive <- Reg.snapshot reg
       [eLive] <- pure afterLive
-      Reg._he_liveness eLive      `shouldBe` Reg.LivenessIdle
+      -- The window reappeared this tick but its capture is not yet stable across
+      -- ticks (the preceding ticks were empty sweeps, so there is no prior
+      -- capture to match), so the idle frame reads Thinking — the point here is
+      -- the entry is LIVE again (not Orphaned), which resets the grace counter.
+      Reg._he_liveness eLive      `shouldBe` Reg.LivenessThinking
       Reg._he_orphanedTicks eLive `shouldBe` 0       -- counter reset
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan again ⇒ count restarts at 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan again ⇒ count restarts at 1
       afterReorphan <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterReorphan) `shouldBe` [1]
       evicted <- readIORef evictRef
@@ -712,7 +952,7 @@ spec = do
       f <- mkFakes [Right []] Map.empty Map.empty
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictArgs (++ [(i, l)]) }
-      replicateM_ defaultOrphanGraceTicks (void (reconcileTick deps reg mkNoOpLogHandle))
+      replicateM_ defaultOrphanGraceTicks (void (reconcileTick deps reg mkNoOpLogHandle Map.empty))
       -- Registry entry evicted...
       snap <- Reg.snapshot reg
       map Reg._he_id snap `shouldBe` []
@@ -749,14 +989,14 @@ spec = do
         Map.empty Map.empty
       let deps = (fakeDeps f)
             { _rd_evict = \i l -> modifyIORef' evictRef (++ [(i, l)]) }
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 1
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 2
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan 3
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 1
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 2
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan 3
       afterThree <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterThree) `shouldBe` [3]
       -- The failed sweep: counter HELD (not advanced to 4, not reset to 0), the
       -- entry stays Orphaned + marked stale, and it is NOT evicted.
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- transient failure
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- transient failure
       afterFail <- Reg.snapshot reg
       [eHeld] <- pure afterFail
       Reg._he_orphanedTicks eHeld `shouldBe` 3                       -- HELD, not advanced/reset
@@ -764,7 +1004,7 @@ spec = do
       Reg._he_stale eHeld         `shouldBe` True                    -- the blip marked it stale
       readIORef evictRef `shouldReturn` []                          -- NOT evicted by the blip
       -- The next real (empty) sweep resumes advancing from the held value.
-      _ <- reconcileTick deps reg mkNoOpLogHandle  -- orphan again
+      _ <- reconcileTick deps reg mkNoOpLogHandle Map.empty  -- orphan again
       afterResume <- Reg.snapshot reg
       (Reg._he_orphanedTicks <$> afterResume) `shouldBe` [4]
       readIORef evictRef `shouldReturn` []

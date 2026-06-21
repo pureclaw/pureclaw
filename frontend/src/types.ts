@@ -10,7 +10,7 @@ export interface Agent {
 
 // API types matching the Haskell backend
 
-export type HarnessActivity = 'thinking' | 'idle' | 'stopped'
+export type HarnessActivity = 'thinking' | 'idle' | 'needs-input' | 'stopped'
 
 export interface HarnessInfo {
   name: string

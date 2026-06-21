@@ -441,14 +441,20 @@ spec = do
           hasUnsafeFlag argv `shouldBe` True
 
   describe "response extraction (pure)" $ do
-    it "isIdle is True when the prompt is present and no busy markers" $
-      isIdle "some text \x276F " `shouldBe` True
+    -- isIdle is now defined via the observer (classifyClaude): HasIdle iff
+    -- the screen has no working or approval lines (Task 8 redefinition).
+    it "isIdle is True for a bare-prompt idle frame" $
+      isIdle "\x276F" `shouldBe` True
 
-    it "isIdle is False while Thinking" $
-      isIdle "\x276F Thinking..." `shouldBe` False
+    it "isIdle is False for a spinner/working frame" $
+      -- "✶ …" is a working line: spinner glyph ✶ (U+2736) + "…"
+      isIdle "\x2736 \x2026" `shouldBe` False
 
-    it "isIdle is False without the prompt glyph" $
-      isIdle "no prompt here" `shouldBe` False
+    it "isIdle is False for an approval/needs-input frame" $
+      isIdle "Do you want to proceed?" `shouldBe` False
+
+    it "is NOT idle when a spinner/working line is present even though the ❯ input box is shown (regression)" $
+      isIdle "\x2736 Smooshing\x2026 (4s \xB7 16k tokens)\n\x276F" `shouldBe` False
 
     it "isResponseMarker recognises the ⏺ and ⬤ markers" $ do
       isResponseMarker "\x23FA hello" `shouldBe` True
@@ -849,6 +855,20 @@ spec = do
             txExists <- doesFileExist (tmp </> d </> "transcript.jsonl")
             txExists `shouldBe` True
           other -> expectationFailure ("expected exactly one session dir, got " <> show (length other))
+
+    it "_hh_snapshot returns the latest extracted response (no polling)" $
+      withSystemTempDirectory "pcl-snap" $ \tmp -> do
+        reg <- Reg.newRegistry
+        let deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure [adoptableRow 0 "win-snap"]
+              , _ccd_panePidOf    = \_ _ -> pure (Just 7)
+              , _ccd_captureNamed = \_ _ _ -> pure (Just (TE.encodeUtf8
+                  "\x23FA Hello from the harness.\n\10095\n"))
+              }
+        Right (_, hh) <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing "win-snap"
+        out <- _hh_snapshot hh 0
+        out `shouldSatisfy` T.isInfixOf "Hello from the harness."
 
   describe "discovered handle" $ do
     it "mkDiscoveredClaudeCodeHandle threads the real session name" $ do

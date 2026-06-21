@@ -59,7 +59,12 @@ spec = do
 
     it "captureNamedArgs targets the window name with -p and scrollback" $ do
       let argv = captureNamedArgs "pureclaw" "claude-code-0" 300
-      argv `shouldBe` ["capture-pane", "-t", "pureclaw:claude-code-0", "-p", "-S", "-300"]
+      argv `shouldBe` ["capture-pane", "-t", "pureclaw:claude-code-0", "-p", "-J", "-S", "-300"]
+
+    it "joins wrapped lines with -J so long lines are not split" $
+      captureNamedArgs "sess" "win" 50
+        `shouldBe`
+        [ "capture-pane", "-t", "sess:win", "-p", "-J", "-S", "-50" ]
 
     it "killWindowNamedArgs targets the window name" $ do
       let argv = killWindowNamedArgs "pureclaw" "claude-code-0"

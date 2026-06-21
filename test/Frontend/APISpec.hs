@@ -1042,6 +1042,9 @@ spec = do
     it "gives Exited and Orphaned distinct status strings (no longer collapsed)" $
       livenessToTabStatus Registry.LivenessExited
         `shouldNotBe` livenessToTabStatus Registry.LivenessOrphaned
+    -- Task 3: LivenessAwaitingInput → "running" (distinct state shown via activity dot)
+    it "maps LivenessAwaitingInput to \"running\"" $
+      livenessToTabStatus Registry.LivenessAwaitingInput `shouldBe` "running"
 
   describe "harnessOriginToText (P2-WU1 — origin pill mapping)" $ do
     it "maps OriginSpawned to \"spawned\"" $
@@ -2357,8 +2360,9 @@ spec = do
 
   describe "POST /api/sessions/{sid}/send (harness routing — WU3)" $ do
     -- D3.1: an SkHarness session with a live handle registered under its
-    -- key routes the message to the handle (not the provider) and returns
-    -- the handle's sanitized output as the response.
+    -- key routes the message to the handle (not the provider). The send
+    -- path returns promptly with response="" (the real reply arrives via WS
+    -- from the reconcile watcher — Task 8 decoupling).
     it "routes a harness session to its live tmux handle, not the provider" $ do
       withSystemTempDirectory "pureclaw-hsend-d31" $ \tmpDir -> do
         let sid = "sess-harness-1"
@@ -2375,8 +2379,9 @@ spec = do
         (st, respBody) <- postJSON env ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("ping" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "harness says hi")
+          `shouldBe` Just (Aeson.String "")
         -- The harness handle received the bytes …
         sent <- readIORef sentRef
         sent `shouldBe` ["ping"]
@@ -2431,14 +2436,16 @@ spec = do
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("after restart" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "reconnected")
+          `shouldBe` Just (Aeson.String "")
         sent <- readIORef sentRef
         sent `shouldBe` ["after restart"]
 
-    -- D3.5: a successful harness send records exactly one Request and one
-    -- Response entry to the SESSION transcript (no duplicates).
-    it "records exactly one Request and one Response entry per send" $ do
+    -- D3.5: a successful harness send records exactly one Request entry to the
+    -- SESSION transcript. The Response is recorded by the reconcile watcher
+    -- (Task 8: send path no longer calls _hh_receive / records a Response).
+    it "records exactly one Request entry (no inline Response) per send" $ do
       withSystemTempDirectory "pureclaw-hsend-d35" $ \tmpDir -> do
         let sid = "sess-harness-tx"
             key = "claude-code-1"
@@ -2454,15 +2461,16 @@ spec = do
         let reqs  = [ e | e <- entries, _te_direction e == Request ]
             resps = [ e | e <- entries, _te_direction e == Response ]
         length reqs  `shouldBe` 1
-        length resps `shouldBe` 1
+        resps `shouldBe` []
         _te_payload (head reqs)  `shouldBe` "hi there"
-        _te_payload (head resps) `shouldBe` "the reply"
 
-    -- D3.5b (restart hardening): a restart-discovered handle records to its
-    -- OWN (CLI) transcript — a different file. Prove the SESSION transcript
-    -- still gets exactly one Request + one Response (handleSend is the sole
-    -- writer of the session transcript; no cross-file duplication).
-    it "keeps the session transcript at 1+1 when the handle records elsewhere" $ do
+    -- D3.5b (restart hardening): the send path records exactly one Request
+    -- to the SESSION transcript — no Response (the watcher owns that). The
+    -- mkRecordingFakeHarnessHandle simulates a restart-discovered handle
+    -- whose _hh_send writes to a separate CLI transcript file; since
+    -- _hh_receive is no longer called on the send path, the CLI file receives
+    -- only the send line (1 entry), not 2.
+    it "keeps the session transcript at 1+0 when the handle records elsewhere" $ do
       withSystemTempDirectory "pureclaw-hsend-d35b" $ \tmpDir -> do
         let sid = "sess-harness-restart"
             key = "claude-code-7"
@@ -2475,15 +2483,15 @@ spec = do
         (st, _) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("after restart" :: Text)]))
         st `shouldBe` HTTP.status200
-        -- Session transcript: exactly one Request + one Response.
+        -- Session transcript: exactly one Request, no inline Response.
         entries <- readSessionTranscript tmpDir sid
         length [ e | e <- entries, _te_direction e == Request ]  `shouldBe` 1
-        length [ e | e <- entries, _te_direction e == Response ] `shouldBe` 1
-        -- The handle's own (separate) transcript received its 2 lines —
-        -- proving the second recorder writes to a DIFFERENT file, not the
-        -- session transcript.
+        length [ e | e <- entries, _te_direction e == Response ] `shouldBe` 0
+        -- The handle's own (separate) transcript received its 1 send line;
+        -- _hh_receive is NOT called on the send path (Task 8), so only the
+        -- _hh_send line was appended — the CLI file has exactly 1 entry.
         cliRaw <- LBS.readFile cliTranscript
-        length (filter (not . LBS.null) (LBS.split 0x0a cliRaw)) `shouldBe` 2
+        length (filter (not . LBS.null) (LBS.split 0x0a cliRaw)) `shouldBe` 1
 
     -- D3.6: harness routing must work even when no provider/model are
     -- configured (the provider guard must not pre-empt the kind branch).
@@ -2500,14 +2508,16 @@ spec = do
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("hello" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "no-provider reply")
+          `shouldBe` Just (Aeson.String "")
         sent <- readIORef sentRef
         sent `shouldBe` ["hello"]
 
-    -- D3.7: a blank/whitespace harness reply yields 200 {"response":""}
-    -- with NO Response entry written (only the Request entry).
-    it "writes no Response entry when the harness reply is blank" $ do
+    -- D3.7: the send path never calls _hh_receive (Task 8 decoupling), so
+    -- the HTTP body is always {"response":""} — only a Request entry is
+    -- recorded inline; the Response is owned by the reconcile watcher.
+    it "responds 200 with empty response and records only a Request entry" $ do
       withSystemTempDirectory "pureclaw-hsend-d37" $ \tmpDir -> do
         let sid = "sess-harness-blank"
             key = "claude-code-4"
@@ -2528,26 +2538,60 @@ spec = do
         resps `shouldBe` []
 
     -- D3.8 (WU4 coverage): when the harness handle throws during
-    -- send/receive (e.g. tmux IO failure), 'sendToHarness' catches it,
+    -- _hh_send (e.g. tmux IO failure), 'routeViaHandle' catches it,
     -- logs, and responds 500 {"error":"Harness send failed"} — never a
     -- crash, never a silent provider fallback.
-    it "responds 500 when the harness handle throws during send/receive" $ do
+    -- (Task 8: _hh_receive is no longer called on the send path, so the
+    -- throw must come from _hh_send itself.)
+    it "responds 500 when the harness handle throws during send" $ do
       withSystemTempDirectory "pureclaw-hsend-d38" $ \tmpDir -> do
         let sid = "sess-harness-throw"
             key = "claude-code-9"
         writeHarnessSession tmpDir sid key
-        sentRef <- newIORef []
         env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
         modifyIORef' (_fe_harnesses env0)
-          (Map.insert key (mkThrowingHarnessHandle sentRef))
+          (Map.insert key mkSendThrowingHarnessHandle)
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("will throw" :: Text)]))
         st `shouldBe` HTTP.status500
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "error"
           `shouldBe` Just (Aeson.String "Harness send failed")
-        -- The send was attempted (bytes reached the handle) before the throw.
+
+  -- -----------------------------------------------------------------------
+  -- Task 8: decouple harness send from receive
+  -- -----------------------------------------------------------------------
+  describe "POST /api/sessions/{sid}/send (decouple send/receive — Task 8)" $ do
+    -- The send path records a Request entry and injects keystrokes via
+    -- _hh_send, then returns promptly with {"kind":"assistant","response":""}.
+    -- _hh_receive must NOT be called (the reconcile watcher owns Response
+    -- recording). A handle whose _hh_receive = error "..." proves this.
+    it "harness /send records a Request and injects keystrokes but records NO Response inline" $ do
+      withSystemTempDirectory "pureclaw-task8-decoupled" $ \tmpDir -> do
+        let sid = "sess-task8-decouple"
+            key = "claude-code-0"
+        writeHarnessSession tmpDir sid key
+        sentRef <- newIORef ([] :: [ByteString])
+        env0 <- mkTestFrontendEnvWithTabsAndDir [] tmpDir
+        -- A handle whose _hh_receive throws — proves it is never called.
+        let hh = (mkNoOpHarnessHandle)
+                   { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
+                   , _hh_receive = error "receive must not be called on the send path"
+                   }
+        modifyIORef' (_fe_harnesses env0) (Map.insert key hh)
+        (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
+          (Aeson.encode (object ["message" .= ("hello" :: Text)]))
+        st `shouldBe` HTTP.status200
+        -- Response is empty — reply arrives via WS stream from the watcher.
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
+          `shouldBe` Just (Aeson.String "")
+        lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "kind"
+          `shouldBe` Just (Aeson.String "assistant")
+        -- Keystrokes were injected.
         sent <- readIORef sentRef
-        sent `shouldBe` ["will throw"]
+        sent `shouldBe` [TE.encodeUtf8 "hello"]
+        -- Only a Request entry was recorded; no inline Response.
+        entries <- readSessionTranscript tmpDir sid
+        map _te_direction entries `shouldBe` [Request]
 
   -- -----------------------------------------------------------------------
   -- Task 7: slash-command short-circuit in handleSend
@@ -2787,8 +2831,9 @@ spec = do
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("ping" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "id-routed reply")
+          `shouldBe` Just (Aeson.String "")
         sent <- readIORef sentRef
         sent `shouldBe` ["ping"]
 
@@ -2798,8 +2843,8 @@ spec = do
     -- handle; and 'routeViaHandle' is the SOLE recorder of the session
     -- transcript (the adopted handle, like the spawned one, was given a no-op
     -- transcript). This proves a send to an adopted harness records exactly one
-    -- Request + one Response to the SESSION transcript — adoption is consistent
-    -- with the spawn-via-frontend path.
+    -- Request entry to the SESSION transcript (Task 8: Response is owned by the
+    -- reconcile watcher, not the send path) — adoption is consistent with spawn.
     it "records a send to an ADOPTED harness to the session transcript (WU8 Part B)" $ do
       withSystemTempDirectory "pureclaw-wu8-partb" $ \tmpDir -> do
         let sid    = "sess-adopted-route"
@@ -2818,21 +2863,20 @@ spec = do
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("hello adopted" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "adopted reply")
+          `shouldBe` Just (Aeson.String "")
         -- The keystrokes reached the adopted handle.
         sent <- readIORef sentRef
         sent `shouldBe` ["hello adopted"]
-        -- handleSend recorded exactly one Request + one Response to the SESSION
-        -- transcript (sole recorder — no double-write from the adopted handle,
-        -- whose own transcript is a no-op, mirroring the spawn path).
+        -- handleSend recorded exactly one Request entry to the SESSION transcript
+        -- (sole recorder; no inline Response — the watcher owns that).
         entries <- readSessionTranscript tmpDir sid
         let reqs  = [ e | e <- entries, _te_direction e == Request ]
             resps = [ e | e <- entries, _te_direction e == Response ]
         length reqs  `shouldBe` 1
-        length resps `shouldBe` 1
+        resps `shouldBe` []
         _te_payload (head reqs)  `shouldBe` "hello adopted"
-        _te_payload (head resps) `shouldBe` "adopted reply"
 
     -- D6.4: id not in the registry -> falls back to the legacy name-keyed
     -- _fe_harnesses map (the PR #74 path). Proves the name fallback survives.
@@ -2851,8 +2895,9 @@ spec = do
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("hi" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "name-fallback reply")
+          `shouldBe` Just (Aeson.String "")
         sent <- readIORef sentRef
         sent `shouldBe` ["hi"]
 
@@ -2870,8 +2915,9 @@ spec = do
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("legacy hi" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "legacy reply")
+          `shouldBe` Just (Aeson.String "")
         sent <- readIORef sentRef
         sent `shouldBe` ["legacy hi"]
 
@@ -2931,8 +2977,9 @@ spec = do
         (st, respBody) <- postJSON env0 ["api", "sessions", sid, "send"]
           (Aeson.encode (object ["message" .= ("fallthrough" :: Text)]))
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "name-path reply")
+          `shouldBe` Just (Aeson.String "")
         sent <- readIORef sentRef
         sent `shouldBe` ["fallthrough"]
 
@@ -2998,8 +3045,9 @@ spec = do
           (Aeson.encode (object ["message" .= ("first" :: Text)]))
         -- The send succeeded despite the throwing back-fill.
         st `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode respBody)) "response"
-          `shouldBe` Just (Aeson.String "matched")
+          `shouldBe` Just (Aeson.String "")
         -- The keystrokes were delivered.
         sent <- readIORef sentRef
         sent `shouldBe` ["first"]
@@ -3135,8 +3183,9 @@ spec = do
         (stSend, sendResp) <- postJSON env ["api", "sessions", newSid, "send"]
           (Aeson.encode (object ["message" .= ("first prompt" :: Text)]))
         stSend `shouldBe` HTTP.status200
+        -- Task 8: send returns "" immediately; reply arrives via WS stream.
         lookupKey (fromMaybe Aeson.Null (Aeson.decode sendResp)) "response"
-          `shouldBe` Just (Aeson.String "id-routed reply")
+          `shouldBe` Just (Aeson.String "")
         sent <- readIORef sentRef
         sent `shouldBe` ["first prompt"]
 
@@ -4019,12 +4068,13 @@ fakeStartHarnessWith harnessRef key hid mReg reqSpec _ = do
 -- surfaced — without spawning a real tmux process.
 mkFakeHarnessHandle :: IORef [ByteString] -> ByteString -> HarnessHandle
 mkFakeHarnessHandle sentRef canned = HarnessHandle
-  { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
-  , _hh_receive = pure canned
-  , _hh_name    = "fake-harness"
-  , _hh_session = "pureclaw"
-  , _hh_status  = pure HarnessRunning
-  , _hh_stop    = pure ()
+  { _hh_send     = \bs -> modifyIORef' sentRef (++ [bs])
+  , _hh_receive  = pure canned
+  , _hh_snapshot = \_ -> pure ""
+  , _hh_name     = "fake-harness"
+  , _hh_session  = "pureclaw"
+  , _hh_status   = pure HarnessRunning
+  , _hh_stop     = pure ()
   }
 
 -- | Read every event currently in a broker 'Subscription' queue, waiting up
@@ -4044,19 +4094,18 @@ drainBrokerQueue budgetMicros sub = do
         Nothing -> pure []
         Just ev -> (ev :) <$> drainNonBlocking
 
--- | A fake 'HarnessHandle' whose '_hh_receive' throws, exercising the
--- exception path in 'sendToHarness' (the @try \@SomeException@ around the
--- '_hh_send'\/'_hh_receive' interaction). It records the send like
--- 'mkFakeHarnessHandle' so the test can confirm the send happened before
--- the throw, then surfaces a 500.
-mkThrowingHarnessHandle :: IORef [ByteString] -> HarnessHandle
-mkThrowingHarnessHandle sentRef = HarnessHandle
-  { _hh_send    = \bs -> modifyIORef' sentRef (++ [bs])
-  , _hh_receive = throwIO (userError "boom")
-  , _hh_name    = "fake-throwing-harness"
-  , _hh_session = "pureclaw"
-  , _hh_status  = pure HarnessRunning
-  , _hh_stop    = pure ()
+-- | A fake 'HarnessHandle' whose '_hh_send' throws immediately. Used by
+-- D3.8 (Task 8) to exercise the 500 path: the send path no longer calls
+-- '_hh_receive', so the throw must come from '_hh_send'.
+mkSendThrowingHarnessHandle :: HarnessHandle
+mkSendThrowingHarnessHandle = HarnessHandle
+  { _hh_send     = \_ -> throwIO (userError "send boom")
+  , _hh_receive  = pure ""
+  , _hh_snapshot = \_ -> pure ""
+  , _hh_name     = "fake-send-throwing-harness"
+  , _hh_session  = "pureclaw"
+  , _hh_status   = pure HarnessRunning
+  , _hh_stop     = pure ()
   }
 
 -- | A fake handle that, like a restart-discovered REAL handle, ALSO records
@@ -4066,16 +4115,17 @@ mkThrowingHarnessHandle sentRef = HarnessHandle
 -- entries in the *session* transcript when the handle records elsewhere.
 mkRecordingFakeHarnessHandle :: FilePath -> IORef [ByteString] -> ByteString -> HarnessHandle
 mkRecordingFakeHarnessHandle ownTranscript sentRef canned = HarnessHandle
-  { _hh_send    = \bs -> do
+  { _hh_send     = \bs -> do
       modifyIORef' sentRef (++ [bs])
       LBS.appendFile ownTranscript (LBS.fromStrict bs <> "\n")
-  , _hh_receive = do
+  , _hh_receive  = do
       LBS.appendFile ownTranscript (LBS.fromStrict canned <> "\n")
       pure canned
-  , _hh_name    = "fake-recording-harness"
-  , _hh_session = "pureclaw"
-  , _hh_status  = pure HarnessRunning
-  , _hh_stop    = pure ()
+  , _hh_snapshot = \_ -> pure ""
+  , _hh_name     = "fake-recording-harness"
+  , _hh_session  = "pureclaw"
+  , _hh_status   = pure HarnessRunning
+  , _hh_stop     = pure ()
   }
 
 -- | Write a harness-backed session to disk: @session.json@ whose
@@ -4190,6 +4240,7 @@ baseEntry hid window mHandle = Registry.HarnessEntry
   , Registry._he_shellPid    = Nothing
   , Registry._he_harnessPid  = Nothing
   , Registry._he_origin      = Registry.OriginSpawned
+  , Registry._he_flavour     = HClaudeCode
   , Registry._he_liveness    = Registry.LivenessIdle
   , Registry._he_extModified = False
   , Registry._he_stale       = False

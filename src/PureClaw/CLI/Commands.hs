@@ -20,7 +20,7 @@ module PureClaw.CLI.Commands
   ) where
 
 import Control.Concurrent.Async qualified as Async
-import Control.Exception (IOException, SomeException, bracket_, catch, try)
+import Control.Exception (IOException, SomeException, bracket, bracket_, catch, try)
 import Control.Monad (filterM, unless, when)
 import Data.ByteString (ByteString)
 import Data.Either (fromRight)
@@ -93,7 +93,12 @@ import PureClaw.Frontend.StreamBroker
 import PureClaw.Harness.ClaudeCode (adoptExternalWindow, defaultClaudeCodeDeps)
 import PureClaw.Harness.Reconcile qualified as Reconcile
 import PureClaw.Harness.Registry qualified as Registry
-import PureClaw.Handles.Transcript (mkNoOpTranscriptHandle)
+import PureClaw.Handles.Transcript (TranscriptHandle (..), mkNoOpTranscriptHandle)
+import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
+import PureClaw.Transcript.Types
+  (Direction (..), TranscriptEntry (..), encodePayload)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -987,6 +992,15 @@ runChat consentChannel serverMode opts = do
         let reconcileDeps = Reconcile.defaultReconcileDeps
               { Reconcile._rd_evict = \_hid label ->
                   modifyIORef' harnessRef (Map.delete label)
+                -- Output watcher (Task 7): on a working→settle transition the
+                -- loop records ONE Response transcript entry for the session,
+                -- broadcasting it to subscribers via the shared broker.
+              , Reconcile._rd_recordResponse = \sid txt -> do
+                  let path = sessionsDir </> T.unpack (unSessionId sid) </> "transcript.jsonl"
+                  bracket
+                    (mkBroadcastingFileTranscriptHandle (Just broker) sid logger path)
+                    (\rth -> _th_flush rth >> _th_close rth)
+                    (`recordResponseEntry` txt)
               }
         -- WU8 (#80): restore the persisted tab view BEFORE the frontend server
         -- (and the tabbed loop) start, so the very first sidebar lists snapshot
@@ -1382,6 +1396,26 @@ resolveApiKey Nothing vaultKeyName vaultOpt = do
 -- is recoverable on the next mutation.
 ignoreExc :: IO () -> IO ()
 ignoreExc act = act `catch` \(_ :: SomeException) -> pure ()
+
+-- | Record a single harness @Response@ transcript entry. Mirrors the field
+-- shape of @recordHarnessEntry … Response@ in "PureClaw.Frontend.API" — the
+-- output watcher (Task 7) uses it to land one settle-captured response on the
+-- session transcript.
+recordResponseEntry :: TranscriptHandle -> T.Text -> IO ()
+recordResponseEntry th payload = do
+  entryId <- UUID.toText <$> UUID.nextRandom
+  now <- getCurrentTime
+  _th_record th TranscriptEntry
+    { _te_id            = entryId
+    , _te_timestamp     = now
+    , _te_harness       = Just "harness"
+    , _te_model         = Nothing
+    , _te_direction     = Response
+    , _te_payload       = encodePayload (TE.encodeUtf8 payload)
+    , _te_durationMs    = Nothing
+    , _te_correlationId = entryId
+    , _te_metadata      = Map.empty
+    }
 
 -- | Render a 'HarnessError' to a concise user-facing 'Text' for the
 -- @\/tab new harness@ dispatcher (WU-B). Mirrors the surface

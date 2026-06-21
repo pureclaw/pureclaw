@@ -23,6 +23,7 @@ import Test.Hspec
 
 import PureClaw.Core.Types (SessionId (..))
 import PureClaw.Harness.Registry qualified as Registry
+import PureClaw.Session.Kind qualified as Kind
 import PureClaw.Tabs.Types
   ( TabRef (..)
   , appendTab
@@ -66,6 +67,7 @@ mkEntry hid label = Registry.HarnessEntry
   , Registry._he_shellPid      = Nothing
   , Registry._he_harnessPid    = Nothing
   , Registry._he_origin        = Registry.OriginSpawned
+  , Registry._he_flavour       = Kind.HClaudeCode
   , Registry._he_liveness      = Registry.LivenessIdle
   , Registry._he_extModified   = False
   , Registry._he_stale         = False
@@ -235,3 +237,8 @@ spec = do
             _ts_index t0 `shouldBe` 0
             _ts_index t1 `shouldBe` 1
           other -> expectationFailure ("expected 2 snapshots, got " <> show (length other))
+
+  -- Task 3: livenessToTabStatus — LivenessAwaitingInput maps to "running"
+  describe "livenessToTabStatus LivenessAwaitingInput" $ do
+    it "maps LivenessAwaitingInput to \"running\" (state shown via activity dot, not tab badge)" $
+      livenessToTabStatus Registry.LivenessAwaitingInput `shouldBe` "running"

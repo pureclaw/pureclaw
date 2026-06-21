@@ -1,0 +1,9 @@
+❯ fix the bug in foo.ts
+
+⏺ I found the bug in foo.ts:42 — an off-by-one. Here is the fix.
+
+  Read 1 file (ctrl+o to expand)
+⏺ Applied the change and the tests pass.
+────────────────────────────────────────
+❯
+────────────────────────────────────────

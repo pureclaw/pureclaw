@@ -11,6 +11,7 @@ import Test.Hspec
 
 import PureClaw.Handles.Harness (mkNoOpHarnessHandle)
 import PureClaw.Harness.Registry
+import PureClaw.Session.Kind qualified as Kind
 
 -- | Deterministic test ids built from fixed UUID strings (no IO randomness),
 -- so assertions are stable.
@@ -34,6 +35,7 @@ mkEntry hid lbl = HarnessEntry
   , _he_shellPid    = Nothing
   , _he_harnessPid  = Nothing
   , _he_origin      = OriginSpawned
+  , _he_flavour     = Kind.HClaudeCode
   , _he_liveness    = LivenessIdle
   , _he_extModified = False
   , _he_stale       = False
@@ -307,6 +309,7 @@ spec = do
           , _he_shellPid    = Just 100
           , _he_harnessPid  = Just 200
           , _he_origin      = OriginDiscovered
+          , _he_flavour     = Kind.HClaudeCode
           , _he_liveness    = LivenessThinking
           , _he_extModified = True
           , _he_stale       = True

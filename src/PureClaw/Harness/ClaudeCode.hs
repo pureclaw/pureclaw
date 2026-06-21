@@ -49,6 +49,7 @@ import System.FilePath ((</>))
 import System.Process.Typed qualified as P
 import PureClaw.Handles.Harness
 import PureClaw.Handles.Transcript
+import PureClaw.Harness.Observer qualified as Obs
 import PureClaw.Harness.Registry (HarnessId, HarnessRegistry)
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux
@@ -335,6 +336,7 @@ mkClaudeCodeHarnessWith deps policy th session windowName _windowIdx mWorkDir ex
                                 , Reg._he_shellPid    = mShellPid
                                 , Reg._he_harnessPid  = mHarnessPid
                                 , Reg._he_origin      = Reg.OriginSpawned
+                                , Reg._he_flavour     = HClaudeCode
                                 , Reg._he_liveness    = Reg.LivenessIdle
                                 , Reg._he_extModified = False
                                 , Reg._he_stale       = False
@@ -397,12 +399,22 @@ mkClaudeCodeHandleWithBaseline
 mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do
   baselineRef <- newIORef baseline
   pure HarnessHandle
-    { _hh_send    = harnessSend deps reg hid th baselineRef
-    , _hh_receive = harnessReceive deps reg hid th baselineRef
-    , _hh_name    = "Claude Code"
-    , _hh_session = session
-    , _hh_status  = harnessStatus deps reg hid
-    , _hh_stop    = harnessStop deps reg hid
+    { _hh_send     = harnessSend deps reg hid th baselineRef
+    , _hh_receive  = harnessReceive deps reg hid th baselineRef
+    , _hh_snapshot = \n -> do
+        mCoord <- currentCoord reg hid
+        case mCoord of
+          Nothing -> pure ""
+          Just (sess, win) -> do
+            raw <- fromMaybe "" <$> _ccd_captureNamed deps sess win (if n <= 0 then 0 else max n 50)
+            let obs = Obs.observerFor HClaudeCode
+            pure $ if n <= 0
+              then Obs._ho_extractResponse obs 0 raw
+              else Obs._ho_relevantTail obs n raw
+    , _hh_name     = "Claude Code"
+    , _hh_session  = session
+    , _hh_status   = harnessStatus deps reg hid
+    , _hh_stop     = harnessStop deps reg hid
     }
 
 -- ---------------------------------------------------------------------------
@@ -551,6 +563,7 @@ adoptValidated deps reg th sessionsDir session mWindowIndex windowName = do
             , Reg._he_shellPid    = mShellPid
             , Reg._he_harnessPid  = mHarnessPid
             , Reg._he_origin      = Reg.OriginAdopted
+            , Reg._he_flavour     = HClaudeCode
             , Reg._he_liveness    = Reg.LivenessIdle
             , Reg._he_extModified = False
             , Reg._he_stale       = False
@@ -778,14 +791,11 @@ harnessStop deps reg hid = do
 -- Response extraction (pure)
 -- ---------------------------------------------------------------------------
 
--- | Check if Claude Code is idle (showing prompt, not busy).
+-- | Idle iff the flavour observer classifies the screen as settled (replaces
+-- the stale ❯\/⠋ heuristic; the input box ❯ is always present, so it
+-- cannot mean idle on its own).
 isIdle :: Text -> Bool
-isIdle screen =
-  let hasPrompt = T.isInfixOf "\x276F" screen   -- ❯
-      isBusy    = T.isInfixOf "\x280B" screen    -- ⠋ (spinner)
-                || T.isInfixOf "Thinking" screen
-                || T.isInfixOf "Running" screen
-  in hasPrompt && not isBusy
+isIdle screen = Obs._ho_classify Obs.claudeObserver screen == Obs.HasIdle
 
 -- | Drop the first @n@ scrollback lines from a raw capture (B3 baseline
 -- mechanism). The baseline is the number of pre-existing lines to EXCLUDE.
@@ -855,12 +865,18 @@ stripMarker line =
 mkDiscoveredClaudeCodeHandle :: TranscriptHandle -> Text -> Text -> IO HarnessHandle
 mkDiscoveredClaudeCodeHandle th session windowName =
   pure HarnessHandle
-    { _hh_send    = discoveredSend th session windowName
-    , _hh_receive = discoveredReceive th session windowName
-    , _hh_name    = "Claude Code"
-    , _hh_session = session
-    , _hh_status  = realStatus session windowName
-    , _hh_stop    = stopHarnessWindowNamed session windowName
+    { _hh_send     = discoveredSend th session windowName
+    , _hh_receive  = discoveredReceive th session windowName
+    , _hh_snapshot = \n -> do
+        raw <- fromMaybe "" <$> realCaptureNamed session windowName (if n <= 0 then 0 else max n 50)
+        let obs = Obs.observerFor HClaudeCode
+        pure $ if n <= 0
+          then Obs._ho_extractResponse obs 0 raw
+          else Obs._ho_relevantTail obs n raw
+    , _hh_name     = "Claude Code"
+    , _hh_session  = session
+    , _hh_status   = realStatus session windowName
+    , _hh_stop     = stopHarnessWindowNamed session windowName
     }
 
 -- | Send for a discovered (registry-less) handle: log the request, then send by
