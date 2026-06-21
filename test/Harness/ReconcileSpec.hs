@@ -483,6 +483,46 @@ spec = do
       xs <- readIORef recorded
       map (fmap decodeEntryText) xs `shouldBe` [(SessionId "sess-1", "spontaneous output")]
 
+    it "records a fast turn the watcher only ever samples as Idle (never Thinking)" $ do
+      -- ROOT CAUSE of unreliable streaming: a turn that completes entirely
+      -- between two 2-second polls is never sampled in a working state. The
+      -- watcher sees Idle→Idle with no Thinking edge, so 'settledIds' (which
+      -- requires prev==Thinking) never fires and the reply is NEVER recorded or
+      -- streamed — the user must fall back to '/harness output'. The watcher
+      -- must record a produced turn from its CONTENT, not only on a liveness
+      -- edge it happened to catch.
+      recorded <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      -- The first snapshot is taken at the startup-baseline settle (the loop's
+      -- baseline tick reads a fresh idle frame as Thinking because it has no
+      -- previous capture, producing one Thinking→Idle edge at startup). Return
+      -- "" there so that startup records nothing; every LATER snapshot — taken
+      -- once the loop has reached steady Idle — carries the fast turn's reply.
+      snapCount <- newIORef (0 :: Int)
+      let hh = mkNoOpHarnessHandle
+            { _hh_snapshotTurn = do
+                n <- atomicModifyIORef' snapCount (\k -> (k + 1, k))
+                pure (if n < 1 then "" else "fast answer")
+            }
+      Reg.insertEntry reg
+        ((mkEntry hid settleHid (Just 100) (Just 200) Reg.LivenessIdle)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just hh
+          })
+      -- Every sampled frame is idle: the watcher never catches a spinner, so the
+      -- harness sits at steady Idle for the whole run.
+      frames <- newIORef [idleFrame]
+      let deps = settleDeps (Reg.harnessIdToText hid) frames
+                   (\sid e -> modifyIORef' recorded ((sid, e) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      xs <- readIORef recorded
+      map (fmap decodeEntryText) xs `shouldBe` [(SessionId "sess-1", "fast answer")]
+
     -- Finding 1: a non-async exception thrown by '_rd_recordResponse' (or
     -- '_hh_snapshot') on one settled harness must NOT kill the reconcile loop.
     -- The loop must:
