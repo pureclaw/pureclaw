@@ -195,7 +195,7 @@ isClaudeToolLine raw =
       toolPrefixes = [ "Update(", "Edit(", "Write(", "Create(", "MultiEdit("
                      , "Read(", "Bash(", "Grep(", "Glob(", "LS(", "Task(", "TodoWrite(" ]
   in T.isPrefixOf "\x239C" l   -- ⎜ (rare)
-     || T.isPrefixOf "\x23BD" l
+     || T.isPrefixOf "\x23BD" l   -- ⎽ scan-line/box-drawing
      || T.isPrefixOf "\x2514" l
      || T.isPrefixOf "\x251C" l   -- └ ├ tree
      || T.isPrefixOf "\x2387" l   -- ⎇

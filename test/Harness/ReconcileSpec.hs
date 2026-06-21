@@ -805,9 +805,7 @@ spec = do
         `shouldBe` True
       -- The loop logged a warning for the failing publish.
       logs <- readIORef logRef
-      any (\m -> "update" `T.isInfixOf` m && "sess-A" `T.isInfixOf` m
-                   || "publish" `T.isInfixOf` m
-                   || "snapshot" `T.isInfixOf` m) logs `shouldBe` True
+      any (\m -> "reconcile: update for" `T.isInfixOf` m) logs `shouldBe` True
 
   describe "reconcileTick — D5.5 / D5.7 (non-ours rows are never captured)" $ do
     it "a PID-mismatched marker row is logged + treated as not-ours (never captured, entry → Orphaned)" $ do

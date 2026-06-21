@@ -24,8 +24,8 @@ async function fetchTranscriptSeed(sessionId: string): Promise<TranscriptEntry[]
 
 /**
  * Pure reconciler: insert `incoming` into `existing`, dedup by id, sort by
- * timestamp ascending. Returns the same reference when nothing changes so
- * React can short-circuit re-renders.
+ * timestamp ascending. Replaces the entry with a matching id (always returns
+ * a new array), or inserts new entries at the sorted position by timestamp.
  */
 export function reconcileEntries(
   existing: TranscriptEntry[],
