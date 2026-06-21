@@ -665,6 +665,104 @@ spec = do
             -- Quick sanity: send another op and observe no exception.
             sendFocus conn "session-d40-z" Nothing
 
+  -- ---------------------------------------------------------------------------
+  -- EntryUpdated dispatch tests (Task 3 addition)
+  --
+  -- The 'EntryUpdated' broker event is EPHEMERAL — it is forwarded to the
+  -- client only when the connection is focused on the event's session AND
+  -- NOT currently replaying that session.  The three cases below anchor the
+  -- two testable drop invariants; the replay-mode drop (case 3) is noted as
+  -- PENDING because the single-threaded reader loop makes the timing
+  -- unreliable without exposing internal state.
+  -- ---------------------------------------------------------------------------
+  describe "EntryUpdated dispatch — focused → sent" $
+    it "a connection focused on session S receives entry-update on EntryUpdated S" $
+      withSystemTempDirectory "stream-int-eu-focused" $ \tmp -> do
+        broker <- mkInProcessBroker defaultBrokerConfig
+        guard  <- mkStreamGuard 8
+        env    <- mkTestFrontendEnv tmp broker guard
+        let meta   = mkMeta "session-eu-focused"
+            sidVal = _sm_id meta
+        withStreamServer testAllowedOrigins env $ \port ->
+          openWSClient port (Just defaultOrigin) $ \conn -> do
+            expectHello conn
+            sendFocus conn (unSessionId sidVal) Nothing
+            -- Allow the reader thread to register the focus op.
+            threadDelay 50_000
+            -- Publish an EntryUpdated for the focused session.
+            let e = mkEntry "te-eu-focused-1" "streamed delta"
+            _streamBroker_publish broker (EntryUpdated sidVal e)
+            -- Walk incoming events until we observe an entry-update or
+            -- exhaust the retry budget.
+            let walk remaining
+                  | remaining <= (0 :: Int) =
+                      expectationFailure "no entry-update event observed"
+                  | otherwise = do
+                      bs <- recvOrFailTimeout 1_000_000 conn
+                      let v = decodeValue bs
+                      case eventType v of
+                        "entry-update" -> do
+                          show v `shouldContain` "te-eu-focused-1"
+                          show v `shouldContain` "streamed delta"
+                          show v `shouldContain`
+                            T.unpack (unSessionId sidVal)
+                        _ -> walk (remaining - 1)
+            walk 5
+
+  describe "EntryUpdated dispatch — non-focused → nothing" $
+    it "a connection focused on a DIFFERENT session receives NO entry-update on EntryUpdated S" $
+      withSystemTempDirectory "stream-int-eu-nonfocused" $ \tmp -> do
+        broker <- mkInProcessBroker defaultBrokerConfig
+        guard  <- mkStreamGuard 8
+        env    <- mkTestFrontendEnv tmp broker guard
+        let metaS = mkMeta "session-eu-target"
+            metaF = mkMeta "session-eu-other"
+            sidS  = _sm_id metaS  -- session that receives the event
+            sidF  = _sm_id metaF  -- session the connection is focused on
+        withStreamServer testAllowedOrigins env $ \port ->
+          openWSClient port (Just defaultOrigin) $ \conn -> do
+            expectHello conn
+            -- Focus on a DIFFERENT session (sidF), not the event's session.
+            sendFocus conn (unSessionId sidF) Nothing
+            threadDelay 50_000
+            -- Publish EntryUpdated for sidS (the unfocused session).
+            let e = mkEntry "te-eu-nonfocused-1" "should not arrive"
+            _streamBroker_publish broker (EntryUpdated sidS e)
+            -- Publish a known-good follow-up event for sidF so we have
+            -- something to drain to: an ActivityChanged that DOES flow.
+            _streamBroker_publish broker
+              (ActivityChanged sidF (SaHarnessStatus HarnessThinking))
+            -- Drain until we see the activity sentinel; fail if we ever
+            -- see an entry-update before it.
+            let drain remaining
+                  | remaining <= (0 :: Int) =
+                      expectationFailure
+                        "did not observe activity sentinel before budget exhausted"
+                  | otherwise = do
+                      m <- awaitTextMessage 1_000_000 conn
+                      case m of
+                        Nothing ->
+                          expectationFailure "timed out waiting for sentinel"
+                        Just bs -> do
+                          let v = decodeValue bs
+                          case eventType v of
+                            "entry-update" ->
+                              expectationFailure
+                                "received unexpected entry-update for unfocused session"
+                            "activity" ->
+                              -- Sentinel arrived without seeing a stale
+                              -- entry-update — invariant holds.
+                              pure ()
+                            _ -> drain (remaining - 1)
+            drain 10
+
+  describe "EntryUpdated dispatch — during replay → dropped" $
+    it "PENDING: replay-mode drop requires exposing internal ConnState" $
+      pendingWith
+        "ConnState._conn_replayMode is not exported; driving replay reliably \
+        \from outside requires either exporting the IORef or making the replay \
+        \async (WU3a concern #2). Cases 1 and 2 cover the testable invariants."
+
   -- --------------------------------------------------------------------
   -- Concern #3 from WU3a adversarial review — websocketsOr path
   -- binding. Documents the current behaviour: 'websocketsOr' routes
