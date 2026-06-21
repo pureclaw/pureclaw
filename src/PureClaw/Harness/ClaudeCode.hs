@@ -16,6 +16,8 @@ module PureClaw.Harness.ClaudeCode
     -- * Spawn arg construction (WU6 — exported for testing)
   , claudeCodeExtraArgs
   , hasUnsafeFlag
+    -- * Capture tuning
+  , snapshotTurnScrollback
     -- * Response extraction (exported for testing)
   , extractLastResponse
   , dropBaselineLines
@@ -132,6 +134,20 @@ data ClaudeCodeDeps = ClaudeCodeDeps
 -- | The comm name of the flavour binary used for harness-PID derivation.
 claudeComm :: Text
 claudeComm = "claude"
+
+-- | Scrollback extent used by '_hh_snapshotTurn' when capturing the pane.
+--
+-- 'snapshotTurnScrollback' is passed as the @lineCount@ argument to
+-- 'captureNamedArgs' (which becomes @capture-pane -S -\<lineCount\>@). A value
+-- of 200 provides several screens of scrollback so that a long turn whose
+-- prose has scrolled off the visible area can still be extracted in full by
+-- 'extractTurnClaude'.  This is DISTINCT from the baseline arg of
+-- '_ho_extractTurn' (always 0 — the already-seen line count within the
+-- captured buffer) and from the 'n' arg of '_hh_snapshot' (caller-supplied
+-- request, guarded by @if n <= 0 then 0 else max n 50@). Do NOT apply this
+-- constant to the '_hh_snapshot' sites.
+snapshotTurnScrollback :: Int
+snapshotTurnScrollback = 200
 
 -- | Production dependency set: every op wired to the real tmux primitives.
 -- All tmux subprocesses flow through the WU3 authorization seam
@@ -416,7 +432,7 @@ mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do
         case mCoord of
           Nothing -> pure ""
           Just (sess, win) -> do
-            raw <- fromMaybe "" <$> _ccd_captureNamed deps sess win 0
+            raw <- fromMaybe "" <$> _ccd_captureNamed deps sess win snapshotTurnScrollback
             pure (Obs._ho_extractTurn (Obs.observerFor HClaudeCode) 0 raw)
     , _hh_name     = "Claude Code"
     , _hh_session  = session
@@ -881,7 +897,7 @@ mkDiscoveredClaudeCodeHandle th session windowName =
           then Obs._ho_extractResponse obs 0 raw
           else Obs._ho_relevantTail obs n raw
     , _hh_snapshotTurn = do
-        raw <- fromMaybe "" <$> realCaptureNamed session windowName 0
+        raw <- fromMaybe "" <$> realCaptureNamed session windowName snapshotTurnScrollback
         pure (Obs._ho_extractTurn (Obs.observerFor HClaudeCode) 0 raw)
     , _hh_name     = "Claude Code"
     , _hh_session  = session

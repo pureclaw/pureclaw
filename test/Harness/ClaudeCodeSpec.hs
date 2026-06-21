@@ -882,6 +882,24 @@ spec = do
         out `shouldSatisfy` T.isInfixOf "Second step."
         out `shouldNotSatisfy` T.isInfixOf "do it"
 
+    it "_hh_snapshotTurn passes snapshotTurnScrollback as the capture extent" $
+      withSystemTempDirectory "pcl-snapturn-ext" $ \tmp -> do
+        reg <- Reg.newRegistry
+        capturedExtRef <- newIORef (Nothing :: Maybe Int)
+        let frame = TE.encodeUtf8 "\10095 do it\n\x23FA Step.\n\10095\n"
+            deps = okDeps
+              { _ccd_newId        = pure fixedId
+              , _ccd_sweep        = \_ -> pure [adoptableRow 0 "win-ext"]
+              , _ccd_panePidOf    = \_ _ -> pure (Just 7)
+              , _ccd_captureNamed = \_ _ ext -> do
+                  writeIORef capturedExtRef (Just ext)
+                  pure (Just frame)
+              }
+        Right (_, hh) <- adoptExternalWindow deps reg mkNoOpTranscriptHandle tmp mkToken Nothing "win-ext"
+        _ <- _hh_snapshotTurn hh
+        mExt <- readIORef capturedExtRef
+        mExt `shouldBe` Just snapshotTurnScrollback
+
   describe "discovered handle" $ do
     it "mkDiscoveredClaudeCodeHandle threads the real session name" $ do
       let transcript = mkNoOpTranscriptHandle
