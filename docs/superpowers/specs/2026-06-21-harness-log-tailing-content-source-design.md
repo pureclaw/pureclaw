@@ -163,6 +163,23 @@ window the gate identified):
 (mirrors `ClaudeCode.hs` `renameFile` pattern) carrying `{offset, lastRecordedId}`;
 a torn/garbage value parses to "fail closed → seek EOF," never offset 0.
 
+**Binding scope (what "restart" actually covers):** the tailer only runs for a
+harness the reconcile loop processes, which requires the entry to be **bound**
+(`withBoundEntry` needs `_he_handle` + `_he_sessionId`). A harness spawned in
+THIS PureClaw run is bound. After a PureClaw *process restart* a previously-
+spawned harness is boot-reconstructed as `OriginDiscovered` with
+`_he_handle`/`_he_sessionId` = `Nothing` and is NOT re-bound today — handle
+re-attach is a separate, deferred lifecycle (the existing detach/re-attach TODO
+in `Tabs/Wiring.hs`). **Post-process-restart re-streaming is therefore OUT OF
+SCOPE here** (a pre-existing limitation: such a harness does not stream at all
+until re-attach lands, independent of this feature), so there is trivially
+nothing to duplicate across a process restart today. The disk-seeded recorded-id
+set is **forward-safe, not vacuous**: it (1) prevents re-emission on any
+*within-run* re-read (rotation / offset-reset / provider re-selection), and (2)
+is exactly what makes a future re-attach correct — a re-bound harness's tailer
+would backfill against a transcript that already holds its earlier turns, and the
+seeded set suppresses the duplicates.
+
 **Implementation invariants (from architect re-confirm):**
 - The recorded-id set is a **captured `IORef`** constructed alongside
   `reconcileDeps` (`CLI/Commands.hs`), OUTSIDE the per-call bracket that opens a
