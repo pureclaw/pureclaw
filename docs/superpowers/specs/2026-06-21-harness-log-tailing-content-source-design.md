@@ -124,30 +124,44 @@ is NO persistence-layer dedup to lean on, and re-emitting a finalized turn WOULD
 duplicate it on disk and on context reload. The earlier draft's "persistence
 dedups by `_te_id`" was wrong.
 
-Correct mechanism, in order of authority:
+Correct mechanism (the **disk-seeded recorded-id set is the correctness guard**;
+the offset is only an optimization — this closes the record-vs-offset crash
+window the gate identified):
 
-1. **Persisted offset is the cross-restart correctness mechanism.** The tailer
-   persists its processed byte **offset (high-water mark)** per harness (next to
-   the session). On (re)start it **resumes from that offset** and processes only
-   NEW lines — it does NOT re-backfill already-recorded turns into the core
-   transcript. This is what prevents duplication across a PureClaw restart while
-   the harness keeps running. (First start of a freshly spawned harness has an
-   empty log, so there is nothing to re-emit.) The offset is persisted durably
-   (write-then-rename) so a crash cannot leave a torn value.
-2. **Deterministic, namespaced turn id** as a within-run + defense-in-depth
-   guard. The log provider's turn id is `derive(SessionId, firstAssistantUuid)`
-   — pinned at turn start and NOT changed as later assistant lines of the same
-   turn arrive (so mid-turn `EntryUpdated`s keep one id; replace-by-id holds).
-   Namespacing by `SessionId` prevents any cross-harness `_te_id` collision.
-3. **In-memory recorded-id set** per session for the process lifetime: the
-   wiring skips re-recording a `_te_id` already emitted this run (covers an
-   offset-reset/rotation re-read within a run). This set is fresh after restart —
-   the persisted offset (1) is the cross-restart guard, not this set.
+1. **Deterministic, namespaced turn id.** The log provider's turn id is
+   `derive(SessionId, firstAssistantUuid)` — a pure function of the session and
+   the **first assistant line's JSONL `uuid`** for the turn, pinned at turn start
+   and NOT changed as later assistant lines of the same turn arrive (so mid-turn
+   `EntryUpdated`s keep one id; replace-by-id holds). Namespacing by `SessionId`
+   prevents any cross-harness `_te_id` collision. The derivation is documented
+   (e.g. a UUIDv5 over `SessionId || firstAssistantUuid`) and stable across
+   restarts because it depends only on durable on-disk JSONL bytes.
+2. **Recorded-id set seeded from the existing transcript at tailer startup.**
+   When the tailer starts, it loads the set of turn ids already present in this
+   session's `transcript.jsonl` (one read of existing `_te_id`s) into an
+   in-memory set. The record wiring (the `_rd_recordResponse` closure) **refuses
+   to record a turn whose derived id is already in the set**, and adds each newly
+   recorded id to it. Because (1) is deterministic from durable bytes, a turn
+   re-folded after a crash/restart derives the **same** id, which is already in
+   the disk-seeded set → it is skipped. This makes the deterministic id an
+   ACTUAL dedup (something now refuses the duplicate write), closing both crash
+   windows: (a) turn recorded but offset not yet persisted → re-fold derives the
+   same id, already seeded from disk, skipped (no duplicate); (b) offset advanced
+   past an unrecorded turn → cannot happen, because the offset is not the guard.
+   We still do NOT modify `_th_record` (no per-write re-read); the set is read
+   ONCE at startup.
+3. **Persisted byte offset is an optimization only.** The tailer MAY persist its
+   processed offset per harness to skip re-folding already-processed history on
+   restart (cheaper than re-reading from 0). It is NOT relied on for correctness
+   (the id set is). **Missing/corrupt/absent offset fails closed:** for a
+   non-empty pre-existing log, seek to **EOF and record nothing historical**
+   (only new prose is surfaced); never default to offset 0 and re-backfill. A
+   freshly-spawned harness's log is empty, so there is nothing to re-emit anyway.
 
-We deliberately do NOT modify `_th_record` to do read-before-write upsert (it
-would re-read the whole transcript per write). Correctness comes from *not
-re-emitting* (offset resume) plus deterministic ids, not from a dedup at the
-sink.
+**Offset/state file:** `<sessionsDir>/<sessionId>/harness-logtail-<HarnessId>`
+(0600 under the existing 0700 session dir), written **write-then-rename**
+(mirrors `ClaudeCode.hs` `renameFile` pattern) carrying `{offset, lastRecordedId}`;
+a torn/garbage value parses to "fail closed → seek EOF," never offset 0.
 
 ### Lifecycle, liveness, fallback
 
@@ -204,8 +218,10 @@ from tmux always. Harness exit → cancel tailer.
   appears for a spawned-claude harness.
 - Over-cap / malformed / partial line → WU5 caps + fold totality + carry buffer;
   never crashes the loop.
-- Restart → resume from the persisted offset; only new lines processed → no
-  duplicate history (deterministic ids + in-memory recorded-set as defense).
+- Restart → recorded-id set seeded from the on-disk transcript; deterministic
+  ids re-derived from the same bytes are already in the set → skipped (no
+  duplicate), even if the persisted offset was stale at crash. Missing offset →
+  seek to EOF (record nothing historical), never re-backfill from 0.
 - Over-cap mid-turn → finalize the prose already surfaced under its stable id,
   emit the loud fallback, then switch to tmux at the next turn boundary (never
   fork the in-flight turn).
@@ -267,9 +283,11 @@ from tmux always. Harness exit → cancel tailer.
   (a) **structural single-writer** — a log-provider harness never calls the tmux
   `_hh_snapshotTurn` (recording fake counter stays 0) and `routeViaHandle`
   Request recording is unchanged;
-  (b) **offset-resume idempotency** — restart from a persisted offset re-emits
-  nothing; and a within-run rotation re-read is deduped by the recorded-id set →
-  one entry per derived turn id;
+  (b) **crash/restart idempotency** — record a turn, simulate a crash with a
+  STALE persisted offset, restart: the recorded-id set seeded from the on-disk
+  transcript causes the re-folded turn (same derived id) to be skipped → one
+  entry on disk, not two. Also: missing offset → seek-to-EOF records nothing
+  historical; within-run rotation re-read is deduped by the same set;
   (c) **merged DoD regression** — the existing `ReconcileSpec` tmux-provider
   tests (#3 once-only, #4 distinct ids, unchanged-once) still pass verbatim,
   proving the provider seam is additive;
@@ -279,9 +297,13 @@ from tmux always. Harness exit → cancel tailer.
   (f) **lifecycle** — provider engages on spawned-claude activation; tailer
   `Async` cancels on exit with `SomeAsyncException` re-raised, teardown
   `timeout`-bounded.
-- TDD throughout; 100% coverage gate (factor real-FS path resolution into a pure
-  function + thin IO shell to stay coverable, per the merged work's zero-waiver
-  norm); `-Wall -Werror`; hlint clean.
+- TDD throughout; coverage meets `.coverage-thresholds.json` (the source of
+  truth — currently 95% lines/branches/functions/statements, with a
+  `stagedWaivers` mechanism). Aim to add NO new waiver: factor real-FS path
+  resolution + the tailer IO behind injectable deps (`JsonlTailDeps`) with a pure
+  shell, and budget ONE CLI/integration test (spawn a claude harness, feed a
+  fixture log) to exercise the thin production wiring. `-Wall -Werror`; hlint
+  clean.
 
 ## Verification
 
