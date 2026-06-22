@@ -190,8 +190,14 @@ a torn/garbage value parses to "fail closed → seek EOF," never offset 0.
   `Map HarnessId (Async ())` (not a serialized field). The uuid is resolved
   ONCE (via `_he_sessionId` → `session.json` `HarnessSpec`) and the validated
   `ClaudeSessionUuid` + `SafeClaudeLogPath` are **captured in the provider
-  closure / cached** — NOT re-decoded from `session.json` every tick. Selection
-  engages once `_he_sessionId`/uuid resolve; thereafter it is **latched** (see
+  closure / cached** — NOT re-decoded from `session.json` every tick. The
+  selection predicate gates on **`flavour == claude-code && a ClaudeSessionUuid
+  resolves`** — NOT on `origin`: a PureClaw-spawned harness is boot-reconstructed
+  as `OriginDiscovered` after a restart, so an `origin == Spawned` gate would
+  defeat restart-idempotency. Only spawned-with-uuid harnesses persist
+  `_h_claudeSessionUuid` (adopted/CLI/non-claude lack it), so uuid-resolvability
+  is the correct capability signal across both origins. Selection engages once
+  `_he_sessionId`/uuid resolve; thereafter it is **latched** (see
   no-mid-turn-fork below).
 - **Async discipline:** each tailer runs under `withAsync`/`bracket`; on
   teardown it re-raises `SomeAsyncException` (NOT only `AsyncCancelled`) per the

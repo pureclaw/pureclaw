@@ -26,8 +26,9 @@
 ## Reused merged modules (do NOT reimplement)
 
 - `PureClaw.Harness.JsonlTail`: `Offset (Offset Integer)`, `Buffer`, `emptyBuffer`, `unBuffer`, `CompleteLine`/`unCompleteLine`, `splitLines :: ByteString -> Buffer -> ([CompleteLine], Buffer)`.
-- `PureClaw.Harness.ClaudeLogPath`: `SafeClaudeLogPath`, `getSafeClaudeLogPath :: SafeClaudeLogPath -> FilePath`, `mkSafeClaudeLogPath` (uuid-glob + containment + `O_NOFOLLOW` + owner/mode).
-- `PureClaw.Harness.ClaudeSession`: `ClaudeSessionUuid`, `unClaudeSessionUuid :: ClaudeSessionUuid -> Text`, `mkClaudeSessionUuid :: Text -> Either _ ClaudeSessionUuid`.
+- `PureClaw.Harness.ClaudeLogPath`: `SafeClaudeLogPath`, `getSafeClaudeLogPath :: SafeClaudeLogPath -> FilePath`, `ClaudeBase`, `resolveClaudeBase :: IO ClaudeBase`, `mkClaudeBase`, and `mkSafeClaudeLogPath :: ClaudeBase -> ClaudeSessionUuid -> Maybe FilePath -> IO (Either ClaudeLogPathError SafeClaudeLogPath)` (uuid-glob + containment + `O_NOFOLLOW` + owner/mode). NOTE the real arity: a `Left ClaudeLogPathError` (or the absence of a uuid) → tmux fallback for that harness.
+- `PureClaw.Harness.ClaudeSession`: `ClaudeSessionUuid`, `unClaudeSessionUuid :: ClaudeSessionUuid -> Text`, `mkClaudeSessionUuid :: Text -> Either ClaudeSessionUuidError ClaudeSessionUuid`.
+- `PureClaw.Harness.ClaudeLogConvert` total JSONL helpers — currently module-internal; **export** `decodeObject :: ByteString -> Maybe (KeyMap Value)`, `lookupText :: Text -> KeyMap Value -> Maybe Text`, `lookupObject :: Text -> KeyMap Value -> Maybe (KeyMap Value)`, `sanitizeBlock :: Value -> Value` (Task 2) and reuse them in `ClaudeLogProse` so the two paths cannot drift on JSON shape / sanitization.
 - `PureClaw.Handles.Harness.sanitizeHarnessOutput :: Text -> Text`.
 - `PureClaw.Handles.Transcript`: `_th_query :: TranscriptFilter -> IO [TranscriptEntry]`, `_th_record`.
 - `PureClaw.Transcript.Types`: `TranscriptEntry` (`_te_id`, `_te_direction`, `_te_correlationId`, …), `Direction (Request | Response)`.
@@ -173,7 +174,8 @@ spec = describe "ClaudeLogProse" $ do
 
 - [ ] **Step 2: Run, verify FAIL** — `... --match "/ClaudeLogProse/"` → module/symbol not found.
 
-- [ ] **Step 3: Implement** `ClaudeLogProse.hs`. Reuse `sanitizeHarnessOutput`; parse with `aeson` total helpers (decode to `Maybe Object`, look up `"type"`, `"uuid"`, `"message".content[]` text blocks). `deriveTurnId` = `UUID.toText (V5.generateNamed namespaceDNS (encodeUtf8 (sessionId <> ":" <> firstUuid)))` (use `Data.UUID.V5`). Keep every code path total (no partial functions); a missing/malformed field yields the unchanged state + `Nothing`.
+- [ ] **Step 3a: Export the shared helpers from `ClaudeLogConvert`.** Add `decodeObject`, `lookupText`, `lookupObject`, `sanitizeBlock` to `ClaudeLogConvert`'s export list (they exist module-internal at `ClaudeLogConvert.hs:159/198/205/212`). No behavior change; `cabal build` stays green. Commit separately: `refactor(claudelog): export total JSONL lookup/sanitize helpers for reuse`.
+- [ ] **Step 3b: Implement** `ClaudeLogProse.hs` REUSING those helpers (do NOT re-derive JSON parsing) + `sanitizeHarnessOutput` for the text. Extract `"type"`/`"uuid"` and the `message.content[]` `text` blocks via `decodeObject`/`lookupText`/`lookupObject`. `deriveTurnId sessionId firstUuid = UUID.toText (V5.generateNamed UUID.namespaceDNS (BS.unpack (TE.encodeUtf8 (sessionId <> ":" <> firstUuid))))` (`Data.UUID.V5`; `uuid` is already a build-dep). Keep every code path total (no partial functions); a missing/malformed field yields the unchanged state + `Nothing`.
 
 - [ ] **Step 4: Run, verify PASS** — `--match "/ClaudeLogProse/"` PASS; full suite green; confirm prose passes through `sanitizeHarnessOutput` (add an assertion with an ANSI-laden fixture line).
 
@@ -243,9 +245,10 @@ it "tailStep resets to re-read on shrink (size < offset)" $ do
 
 **Interfaces:**
 - Produces (`LogProvider.hs`):
-  - `data TurnProvider = TurnProvider { _tp_snapshot :: IO (Text, Bool), _tp_turnId :: IO (Maybe Text) }` — `_tp_snapshot` returns `(currentTurnText, finalized?)`; `_tp_turnId` returns `Just derivedId` for the log provider (pin once per turn) or `Nothing` to fall back to `_rd_mintTurn`.
+  - `data TurnProvider = TurnProvider { _tp_snapshot :: IO (Text, Bool), _tp_turnId :: IO (Maybe (Text, UTCTime)) }` — `_tp_snapshot` returns `(currentTurnText, finalized?)`; `_tp_turnId` returns `Just (derivedId, ts)` for the log provider (id + the JSONL event timestamp, pinned once per turn) or `Nothing` to fall back to `_rd_mintTurn :: IO (Text, UTCTime)`. (Carrying the timestamp avoids needing a second clock call — `mkTurnEntry` needs both id AND `UTCTime`.)
   - `tmuxProvider :: HarnessHandle -> TurnProvider` — `_tp_snapshot = (,) <$> _hh_snapshotTurn hh <*> pure False`; `_tp_turnId = pure Nothing` (preserves today's behavior verbatim).
-- Modifies `stepTurns`/`stepLiveEntry`/`startTurn` (`Reconcile.hs`) to consume a `HarnessId -> TurnProvider` selector threaded into the loop (default selector returns `tmuxProvider` from `_he_handle`): read turn text from `_tp_snapshot`; at `startTurn` use `_tp_turnId` if `Just` else `_rd_mintTurn`; treat `finalized==True` as an authoritative finalize that bypasses the idle-stability guard.
+  - `nullProvider :: TurnProvider` — `_tp_snapshot = pure ("", False)`; `_tp_turnId = pure Nothing` (for a handle-less entry).
+- Modifies `stepTurns`/`stepLiveEntry`/`startTurn` (`Reconcile.hs`) to consume a per-entry provider via a new `ReconcileDeps` field `_rd_providerFor :: Reg.HarnessEntry -> IO TurnProvider` (default `\e -> pure (maybe nullProvider tmuxProvider (Reg._he_handle e))`): read turn text from `_tp_snapshot`; at `startTurn` use `_tp_turnId`'s `(id, ts)` if `Just` else `_rd_mintTurn`; treat `finalized==True` as an authoritative finalize that bypasses the idle-stability guard. Add `_rd_providerFor` to `defaultReconcileDeps` so the production override site (`CLI/Commands.hs`) and `ActivityProbe` (which delegate to the default) need no change.
 
 - [ ] **Step 1: Write failing tests.**
 
@@ -268,7 +271,8 @@ it "tmuxProvider preserves _hh_snapshotTurn text and never finalizes/derives id"
 ```
 
 - [ ] **Step 2: Run, verify FAIL.**
-- [ ] **Step 3: Implement** `LogProvider.hs` + the minimal `stepTurns` changes. Keep the tmux path byte-identical (default selector → `tmuxProvider`). Thread the selector as a new field on `ReconcileDeps` (e.g. `_rd_providerFor :: Reg.HarnessEntry -> IO TurnProvider`, default `\e -> pure (maybe nullProvider tmuxProvider (Reg._he_handle e))`), so existing tests inject it like other deps. Latch: once a turn is active under a provider, do not switch providers until the turn finalizes (track in `TurnState`).
+- [ ] **Step 3: Implement** `LogProvider.hs` + the minimal `stepTurns` changes. Keep the tmux path byte-identical (default selector → `tmuxProvider`). Add `_rd_providerFor` to `ReconcileDeps` AND to `defaultReconcileDeps`. Latch: once a turn is active under a provider, do not switch providers until the turn finalizes (track in `TurnState`).
+- [ ] **Step 3b: Update every full-literal `ReconcileDeps { … }` construction site (REQUIRED — `-Werror -Wmissing-fields` will otherwise fail the build).** Add `_rd_providerFor = \e -> pure (maybe nullProvider tmuxProvider (Reg._he_handle e))` to each literal in `test/Harness/ReconcileSpec.hs` (sites at approximately lines 134, 377, 574, 621, 873, 913, 950, 1019, 1107 — grep `ReconcileDeps {` / `ReconcileDeps$` to find all). Production `CLI/Commands.hs` uses `defaultReconcileDeps { … }` and needs no field here; `ActivityProbe` delegates to the default. Run `nix develop . --command cabal build` to confirm ZERO `-Wmissing-fields` errors before proceeding.
 - [ ] **Step 4: Run, verify PASS.** Confirm the merged "output watcher" DoD tests (`#3` once-only, `#4` distinct ids, awaiting-input, Finding-1) still pass verbatim.
 - [ ] **Step 5: Commit** `feat(reconcile): turn-content provider seam (tmux default + log finalize/derived-id)`.
 
@@ -308,7 +312,7 @@ it "seedRecordedIds reads ids via the untrimmed query" $ do
 - [ ] **Step 3: Implement.** In `CLI/Commands.hs` where `reconcileDeps` is built (`~996`):
   1. Create `recordedIds <- newIORef Set.empty` (an IORef captured in the closure, OUTSIDE the per-call `bracket`).
   2. Wrap `_rd_recordResponse` with `recordOnce recordedIds` around the existing append.
-  3. Add `_rd_providerFor` selecting the log provider for an entry iff `flavour==HClaudeCode && origin==Spawned && uuid resolvable`: resolve `_he_sessionId → session.json HarnessSpec._h_claudeSessionUuid` ONCE, validate via `mkClaudeSessionUuid`, build `SafeClaudeLogPath` via `mkSafeClaudeLogPath`, seed `recordedIds` from that session's transcript (`seedRecordedIds`), start `runLogTailer` under `Async.withAsync`, store the `Async` in a sidecar `IORef (Map HarnessId (Async ()))`; cache the resulting `TurnProvider`. On reconcile-detected exit (reuse the `_rd_evict`/terminal signal), cancel + remove the `Async`.
+  3. Add `_rd_providerFor` selecting the log provider for an entry iff **`_he_flavour == HClaudeCode && a `ClaudeSessionUuid` resolves`** — gate on **uuid-resolvability, NOT origin**. (Rationale: a PureClaw-spawned harness is boot-reconstructed as `OriginDiscovered` after a restart — `Reconcile.hs:870` — so gating on `OriginSpawned` would wrongly route the restart case to tmux and defeat restart-idempotency. Only spawned-with-uuid harnesses persist `_h_claudeSessionUuid`; adopted/CLI/non-claude lack it, so uuid-presence is the correct capability signal across both `OriginSpawned` and `OriginDiscovered`.) Resolution, done ONCE then cached per `HarnessId`: `_he_sessionId → session.json HarnessSpec._h_claudeSessionUuid → mkClaudeSessionUuid` (validate); `base <- resolveClaudeBase`; `mkSafeClaudeLogPath base uuid (_h_canonicalCwd)` → on `Left _` (or no uuid), the provider is `tmuxProvider`/`nullProvider` (fallback, WARN once); on `Right safePath`, seed `recordedIds` from that session's transcript (`seedRecordedIds`), start `runLogTailer` under `Async.withAsync`, store the `Async` in a sidecar `IORef (Map HarnessId (Async ()))`, and cache the resulting log `TurnProvider`. On reconcile-detected exit (reuse the `_rd_evict`/terminal signal), cancel + remove the `Async`.
   4. The tailer's `ProseTurn` sink updates the provider's current `(text, finalized, derivedId)` state (an `IORef` the `TurnProvider` reads).
 - [ ] **Step 4: Run, verify PASS; full suite green; coverage check (`--enable-coverage`) — no new waiver.**
 - [ ] **Step 5: Commit** `feat(cli): log-tailer lifecycle + disk-seeded recorded-id dedup wiring`.
