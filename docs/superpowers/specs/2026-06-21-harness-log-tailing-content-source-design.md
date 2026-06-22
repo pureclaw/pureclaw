@@ -1,189 +1,200 @@
-# Design: Claude Code log-tailing as the harness content source
+# Design: Claude Code log as the live core content source (hybrid)
 
 - Date: 2026-06-21
-- Branch: feat/harness-live-edit (continues the harness output-streaming work)
-- Status: draft (pending spec self-review + user review + design-review gate)
-- Related: `docs/superpowers/plans/2026-06-21-harness-output-streaming-reliability.md`
-  (the content-driven tmux watcher — WU1/WU2, already merged into this branch)
+- Branch: feat/harness-live-edit
+- Status: draft (revised after discovering the harness-jsonl-capture epic;
+  pending design-review gate)
+- **Builds on the existing approved epic** `harness-jsonl-capture`
+  (`pureclaw-3oy.33`): design `docs/harness-jsonl-capture.md` (5/5), plan
+  `.beads/plans/harness-jsonl-capture-plan.md` (3/3). This document is a
+  **delta** on that epic, not a replacement of its merged foundation.
 
-## Problem
+## Relationship to the harness-jsonl-capture epic
 
-Even after the content-driven watcher (stepTurns), tmux pane scraping is
-fundamentally lossy: ANSI rendering, scrollback limits, and heuristic extraction
-(`extractTurnClaude`) mean harness output still does not always stream in, and
-the final reply is not guaranteed to land in the transcript. The user must fall
-back to `/harness output`.
+The epic already built and merged the hard parts (on this branch):
 
-Claude Code, however, writes a complete, structured JSONL transcript of every
-session to disk. Because PureClaw mints the session uuid (`--session-id <uuid>`,
-`claudeCodeExtraArgs`) and persists both `_h_claudeSessionUuid` and
-`_h_canonicalCwd` on the harness spec (`Session/Kind.hs:87,104`), we can locate
-and read that file — the ground truth of what the harness produced.
+| Merged | Module | Role |
+|---|---|---|
+| WU1 | `Harness.ClaudeSession` (`ClaudeSessionUuid`, `mintClaudeSessionUuid`) | CSPRNG uuid, validated newtype, redacted Show |
+| WU2 | `Harness.ClaudeLogPath` (`SafeClaudeLogPath`) | constructor-private path locator: uuid-glob, canonical containment, `O_NOFOLLOW`, owner/mode |
+| WU3 | `Harness.ClaudeLogConvert` (`convertLine`) | pure JSONL line → `TranscriptEntry` (full fidelity), `_te_id ← JSONL uuid`, `sanitizeHarnessOutput` applied |
+| WU4 | `Harness.JsonlTail` (`splitLines`, `Offset`, `Buffer`) | pure chunk→complete-line splitter |
+| WU6 | `ClaudeCode` spawn + `Session.Kind` `_h_claudeSessionUuid`/`_h_canonicalCwd` | mint+inject `--session-id`, persist uuid+cwd |
+| WU8 | frontend `App.tsx` | renders assistant/text/tool_use/tool_result/thinking |
 
-## Goal & success criteria
+**Pending in the epic:** WU5 (the live tailer loop IO), WU7 (optional-view
+capability + open/close backend), WU9 (frontend optional-view control), WU10
+(integration).
 
-- **Per-message reliability:** every assistant message appears in the session
-  transcript reliably, as soon as Claude finishes writing it to the log
-  (~1 tick latency). NOT token-by-token (explicitly not required).
-- **Guaranteed final:** the complete final assistant response is always recorded,
-  even if tmux missed every intermediate frame.
-- Applies to Claude Code harnesses with a known minted session uuid (primarily
-  frontend-spawned). Everything else falls back to today's tmux content path.
-- No regression to liveness/activity (thinking/idle/awaiting-input) display.
+## What changes vs the epic (the delta)
 
-## On-disk format (verified)
+The epic deliberately scoped the log as an **optional, opt-in, secondary VIEW**
+on a synthetic SessionId, governed by a prior **user decision**:
 
-`~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl`, one JSON object per line:
-```
-{ "type": "user"|"assistant"|"system"|<meta…>,
-  "message": { "role", "content": [ {type:"text"|"thinking"|"tool_use"|"tool_result", …} ],
-               "stop_reason", "model", "usage", … },
-  "sessionId", "cwd", "timestamp", "uuid", "parentUuid", "gitBranch", … }
-```
-Meta line types also appear (`mode`, `permission-mode`, `attachment`,
-`file-history-snapshot`, `ai-title`, `queue-operation`, `last-prompt`) and are
-ignored. A real `user` message starts a turn; `user` messages whose content is a
-`tool_result` are continuations of the current turn.
+> "the fundamental session experience must be guaranteed to work for every
+> harness flavour and **must not depend on any harness-specific log**" — and the
+> default transcript "shows exactly the messages PureClaw sent and received …
+> harness-agnostic." (`docs/harness-jsonl-capture.md`)
+
+That optional view does **not** fix the reported symptom — tmux scraping is
+lossy, so the **default** transcript still drops streaming output and can miss
+the final. The user has now **reopened that decision** and chosen the hybrid:
+
+> **New decision (2026-06-21):** for a **spawned claude-code harness**, the
+> JSONL log becomes the **live source of truth for the core transcript** — not a
+> separate opt-in view — with a **fail-safe fallback to today's tmux path** when
+> no log is available. Liveness/activity stays 100% tmux.
+
+So the delta is: **promote the WU5 tailer from an opt-in synthetic-session
+broadcast to the automatic, single-writer core-transcript source** for spawned
+claude-code harnesses. WU7's capability gate / open-close endpoints and WU9's
+optional-view UI are **superseded** for the core path (no opt-in control); they
+remain possible later for non-spawned/other flavours but are out of scope here.
+
+This is strictly safer than today for spawned claude-code, and it also fixes the
+epic's original bug (a turn typed directly into the tmux window never reached the
+frontend) — the log records every turn regardless of origin.
+
+## Goal & success criteria (unchanged from brainstorm)
+
+- **Per-message reliability:** every assistant/user message appears in the core
+  transcript reliably, ~1 poll after Claude writes it. NOT token-by-token.
+- **Guaranteed final:** the complete final response always lands, even if tmux
+  missed every frame (the log is durable on disk).
+- Applies to **spawned claude-code harnesses with a minted uuid**. Adopted / CLI
+  / non-claude / missing-or-over-cap log → today's tmux content path (no
+  regression). Loud fallback if a spawned-claude log is expected but absent.
+- No regression to liveness/activity display.
+
+## Fidelity decision (changed from the brainstorm's "prose only")
+
+The brainstorm chose "assistant prose only" — made before we knew `convertLine`
+exists. The hybrid **reuses `convertLine`**, which already emits full-fidelity,
+frontend-ready entries (assistant `Response` with content/usage/model; user
+`Request`; `tool_result` joined by `tool_use_id`; `thinking` carried through —
+all `sanitizeHarnessOutput`-filtered, all rendered by the merged WU8). Feeding
+these into the core transcript makes a harness session look like a native
+session and reuses merged, tested code rather than writing a lossy prose
+extractor. **Decision: full fidelity via `convertLine`.** (Flagged for user
+confirmation at spec review, since it reverses the earlier prose-only answer.)
 
 ## Architecture
 
-### Content-provider seam (the core idea)
+### Tailer (WU5) — built per the epic's approved DoD
 
-Introduce a per-harness **turn-content provider** — the single thing that
-answers "what is the current turn's assistant text?" — with two implementations,
-selected when the harness entry is registered:
+Implement WU5 exactly as the epic plan specifies (this resolves the security
+gate's DoS finding — the caps are already pinned):
+- `JsonlTailDeps` injectable seam (`readFrom :: SafeClaudeLogPath -> Offset ->
+  IO (ByteString, Offset)`, size probe, sanitizer, clock) + `defaultJsonlTailDeps`,
+  mirroring `ReconcileDeps`/`ClaudeCodeDeps`.
+- Backfill from offset 0, then live-tail appended bytes; `splitLines` (WU4)
+  buffers partial trailing lines; offset advances monotonically.
+- **DoS caps (D5.4):** max backfill 32 MiB, max single line 1 MiB, max buffered
+  partial 1 MiB → over-cap triggers the **loud "log unavailable" fallback**
+  (§H.4), never a silent partial read.
+- File shrink/disappear (D5.5) → re-read-from-0 signal; total `readFrom`.
+- Runs in an `Async`; **re-raises `AsyncCancelled`** (project invariant), swallows
+  only logged non-async exceptions (D5.3).
+- Locates the file ONLY through `SafeClaudeLogPath` (uuid-glob + containment +
+  `O_NOFOLLOW` + owner/mode); uuid is the validated `ClaudeSessionUuid`.
 
-- **Claude-log provider** — parses the JSONL transcript (chosen when the harness
-  is Claude Code AND we have a minted session uuid).
-- **tmux-snapshot provider** — today's `_hh_snapshotTurn` behavior (the fallback:
-  adopted / CLI / non-Claude / missing-or-stale log).
+### Core-transcript wiring (the new unit)
 
-This plugs into the **existing `stepTurns`** loop (from the merged
-output-streaming-reliability work): `stepTurns` already streams on content
-growth, dedups unchanged content, finalizes with a stable reused turn id, and
-preserves the frontend replace-by-id contract. We change only *where the turn
-text comes from*. Streaming/dedup/finalize machinery is reused unchanged.
-
-**Liveness stays 100% tmux** — `classifyRow`/`classifyFromObserver`
-(thinking/idle/awaiting-input, approval-prompt detection) is unchanged. The log
-provider feeds CONTENT only.
-
-### Locating the log
-
-The file name IS the globally-unique uuid, so we locate by **uuid filename**:
-1. Compute the expected dir from `_h_canonicalCwd` (Claude's `<cwd-slug>` rule)
-   and check `<dir>/<uuid>.jsonl` first (fast path).
-2. If not found there, fall back to a bounded scan of `~/.claude/projects/*/`
-   for `<uuid>.jsonl`.
-
-Locating by uuid filename sidesteps any fragility in reconstructing Claude's
-exact path-slug encoding: even if the slug rule differs, the uuid filename is
-unambiguous. The base dir honors `$CLAUDE_CONFIG_DIR`/`$HOME` (resolve once).
-
-### Tailing the log (incremental)
-
-Per harness, track a **byte offset** (and a small carry buffer for a partial
-trailing line). Each reconcile tick, for a log-provider harness:
-1. `stat` the file; if missing → provider yields "no log this tick" and the
-   watcher uses the tmux fallback for the entry (fail-safe).
-2. If size < offset (truncation/rotation) → reset offset to 0, clear carry.
-3. Read bytes `[offset, size)`, prepend carry, split on `\n`; the last element
-   (no trailing newline) becomes the new carry; advance offset by consumed bytes.
-4. Parse each complete line leniently; skip malformed lines and non-message meta
-   types; fold message lines into the turn model below.
-
-Reading is bounded IO wrapped so a transient failure never kills the loop
-(same resilience contract as the existing watcher: `try`, re-raise
-`AsyncCancelled`, log+skip otherwise).
-
-### Turn model & single-writer guarantee
-
-- A real `user` message (content is not solely a `tool_result`) **starts a new
-  turn**; capture its `uuid`/`timestamp`.
-- Assistant `text` blocks (ignore `thinking`/`tool_use` for the transcript, per
-  the "assistant prose, reliably" scope) until the next real user message are
-  the turn's response, **accumulated into one entry under a stable id** (reuse
-  the current growing-message / replace-on-id behavior).
-- **Finalize** the turn when the log shows it ended: the next real user message
-  appears, OR the latest assistant message carries a *terminal* `stop_reason`
-  (`end_turn` / `stop_sequence` / `max_tokens`) — explicitly NOT `tool_use`,
-  which means the turn continues after the tool result. This is a durable,
-  event-based final — strictly better than tmux stability-guessing. (The
-  next-user-message signal is the backstop if a terminal `stop_reason` is ever
-  absent.)
-- **Single writer:** when the log provider is active for a harness, the tmux
-  content path (the `stepTurns` tmux snapshot + its finalize) is **disabled** for
-  that harness; tmux feeds only liveness. Exactly one writer → no
-  double-recording. The send path (`routeViaHandle`) continues to record the
-  Request only (unchanged).
-
-The transcript stable-id contract is preserved: one minted turn id reused across
-`EntryUpdated` (per-message growth) and the final `EntryRecorded`
-(`mkTurnEntry`, `_te_id = turnId`), so the frontend replaces by id exactly as
-today.
-
-## Components / units
-
-1. **`PureClaw.Harness.ClaudeLog` (new, pure + thin IO):**
-   - PURE: parse a JSONL line → a typed record (or `Nothing` for meta/malformed);
-     fold a list of records into `[Turn]` (turn = stable key + accumulated
-     assistant text + finalized?); incremental fold given prior state + new lines.
-   - IO (thin, injectable seam): resolve the log path by uuid; read appended
-     bytes from an offset. Mirrors the `ClaudeCodeDeps`/`ReconcileDeps` seam
-     pattern so it is tested without a real `~/.claude`.
-2. **Provider selection + offset/carry state** threaded in the reconcile loop
-   alongside the existing `TurnState` map (one provider + tail-state per harness).
-3. **`stepTurns` integration:** the turn-text source becomes the selected
-   provider; finalize gains the log's event-based signal when the log provider is
-   active (stability-based finalize remains for the tmux provider).
+- **Lifecycle (automatic):** when a spawned claude-code harness with a
+  `_h_claudeSessionUuid` becomes active, start its tailer; stop it on harness
+  exit (reconcile-detected) or shutdown. Async handles held in a sidecar
+  `Map HarnessId (Async ())` (not a serialized field), as the epic specified.
+  Selection predicate (computed, never a stored flag): `flavour == claude-code
+  && origin == Spawned && uuid present` — resolved via `_he_sessionId → session.json
+  HarnessSpec`.
+- **Emission to the REAL session:** each `convertLine` result is published to the
+  harness's **actual `SessionId`** (the core transcript stream) and persisted —
+  NOT a synthetic id. The frontend renders it via the existing path (WU8).
+- **Idempotent upsert by `_te_id`:** `convertLine` sets `_te_id ← JSONL uuid`
+  (stable). Backfill-from-0 (on start/restart) re-reads the whole file, so the
+  transcript writer + broker MUST **dedup/upsert by `_te_id`** so replays do not
+  duplicate. The frontend already replaces-by-id; the **persistence layer must
+  also dedup by `_te_id`** (key requirement of this unit).
+- **Single writer (critical):** while the tailer is active for a harness, the
+  tmux content paths are **disabled** for it — BOTH the merged `stepTurns`
+  content recording AND `routeViaHandle`'s `Request` recording (`API.hs`). The
+  tailer is the **sole transcript writer**, capturing user prompts (incl.
+  out-of-band tmux-typed ones) and assistant turns from the log. tmux feeds only
+  liveness. Exactly one writer → no double-recording.
+- **Liveness unchanged:** `classifyRow`/`classifyFromObserver` (thinking / idle /
+  awaiting-input, approval prompts) untouched — 100% tmux.
+- **Fallback:** any harness without an active, valid tailer (non-claude, adopted,
+  CLI, no uuid, missing/over-cap log) keeps today's tmux content path verbatim.
 
 ## Data flow
 
-spawn (frontend) → mint uuid + persist `_h_claudeSessionUuid`/`_h_canonicalCwd`
-→ registry entry tagged log-capable → reconcile tick: log provider reads new
-JSONL lines → fold into turn text → `stepTurns` streams `EntryUpdated` on growth
-and records `EntryRecorded` on turn-end → broker → frontend (replace-by-id).
-Liveness in parallel from tmux as today.
+spawn (frontend) → mint uuid, persist `_h_claudeSessionUuid`/`_h_canonicalCwd`
+(WU6, merged) → harness active → start tailer (sidecar Async) → resolve
+`SafeClaudeLogPath` by uuid → backfill+tail JSONL → `convertLine` per line →
+publish to real SessionId + persist (dedup by `_te_id`) → broker → frontend
+(replace-by-id). tmux content path disabled for this harness; liveness from tmux
+as today. Harness exit → cancel tailer Async.
 
 ## Error handling / edge cases
 
-- Missing/not-yet-created log → tmux fallback for that entry (logs are created on
-  first interaction; until then there is nothing to stream anyway).
-- Malformed/partial line → buffered (partial) or skipped (malformed); never
-  crashes the fold.
-- File rotation/truncation → offset reset.
-- uuid present but file never appears (e.g. claude failed to start with that id)
-  → permanent tmux fallback for that harness; WARN once.
-- Non-Claude / adopted / CLI harness → tmux provider (no behavior change).
-- Multiple assistant text blocks in one turn → concatenated in order into the one
-  turn entry.
+- Log not yet created (logs appear on first interaction) → tmux fallback until it
+  exists; loud WARN if it never appears for a spawned-claude harness.
+- Over-cap / malformed / partial → handled by WU5 caps + `convertLine` totality
+  (skips) + carry buffer; never crashes the loop.
+- Restart / backfill replay → idempotent via `_te_id` dedup (no duplicate
+  history).
+- Harness exits mid-turn → the final assistant line is already on disk; the tail
+  (or a final backfill on the exit tick) captures it before teardown.
+- `_he_sessionId` not yet linked at first tick → selection re-evaluated each
+  tick (not latched), so the tailer starts once the link lands.
+
+## Security (resolves the design-review security blocker)
+
+All requirements are already met by merged modules + WU5's pinned caps; the spec
+makes them explicit for the core path:
+- Path access ONLY via `SafeClaudeLogPath` (uuid-glob, canonical containment,
+  `O_NOFOLLOW` leaf open, owner==euid, no group/other-write, redacted Show).
+- uuid is a validated `ClaudeSessionUuid` (cannot contain `/`,`..`,NUL); minted
+  via CSPRNG; spoof-resistant (globally-unique filename; >1 hit → typed
+  ambiguity error, never silently picked).
+- **DoS bounds (D5.4):** 32 MiB backfill / 1 MiB line / 1 MiB buffer caps →
+  loud fallback. Per-tick read is bounded; carry buffer is bounded.
+- All surfaced text flows through `sanitizeHarnessOutput` (`convertLine` already
+  does this); frontend treats content as untrusted (React escaping, no
+  `dangerouslySetInnerHTML`).
+- Selection from in-memory registry/spec, never a serialized "trusted" flag, so a
+  hostile `session.json` cannot coerce tailing of a foreign log.
+- Re-validate the `SafeClaudeLogPath` on offset-reset/rotation.
 
 ## Out of scope
 
-- Token-by-token sub-message streaming (explicitly not required).
-- Surfacing `tool_use`/`tool_result`/`thinking` into the transcript (assistant
-  prose only this iteration; tool activity stays visible via tmux + `/harness
-  output`). A possible later "everything-visible" enhancement.
-- Best-effort log **discovery** for adopted Claude harnesses we did not spawn
-  (no minted uuid) — deferred; risk of binding the wrong session.
-- Giving CLI/TUI harnesses an owning session (separate design).
+- Token-by-token streaming (not required).
+- Optional opt-in synthetic-session VIEW (epic WU7/WU9) — superseded by automatic
+  core wiring for spawned claude-code; not built here.
+- Best-effort log discovery for adopted claude harnesses (no minted uuid).
+- Non-claude flavours / CLI harnesses feeding the core from a log (no log).
 
 ## Testing
 
-- Pure parser + turn-fold: golden fixtures of real log lines — multi-text turn,
-  interleaved tool_use/tool_result, thinking blocks, partial trailing line,
-  malformed line, meta-type lines, turn boundary via new user message, turn end
-  via `stop_reason`, file rotation (offset reset).
-- Injected IO seam: provider integration in the reconcile loop tested with a fake
-  log source (no real `~/.claude`), same pattern as `Harness.ReconcileSpec`.
-- Single-writer: assert the tmux content path is disabled when the log provider
-  is active (no double-record).
-- TDD throughout; 100% coverage gate (`.coverage-thresholds.json`); `-Wall
+- Reuse WU5's enumerated tests (D5.6): offset monotonicity, partial buffering,
+  `AsyncCancelled` teardown, cap enforcement, shrink/disappear — over injected
+  `JsonlTailDeps` (no real `~/.claude`).
+- New core-wiring tests: (a) **single-writer** — when the tailer is active, the
+  tmux `stepTurns` content path and `routeViaHandle` Request recording are NOT
+  invoked (recording fakes whose counters must stay 0); (b) **idempotent replay**
+  — backfilling the same lines twice yields one entry per `_te_id`; (c) emission
+  goes to the harness's real SessionId; (d) fallback — a non-uuid harness uses the
+  tmux path unchanged; (e) lifecycle — tailer starts on spawned-claude activation,
+  cancels on exit.
+- Golden fixtures from the epic's WU0 (`test/fixtures/claude-jsonl/`).
+- TDD throughout; 100% coverage gate (factor real-FS path resolution into a pure
+  function + thin IO shell to stay coverable, as the CTO review noted); `-Wall
   -Werror`; hlint clean.
 
 ## Verification
 
 - `nix develop . --command cabal test` (+ `--enable-coverage`).
-- Manual: frontend-spawn a Claude harness, send a prompt that scrolls output
-  past the visible pane, confirm full reply streams per-message and the final is
-  recorded — without `/harness output`.
+- Manual: frontend-spawn a claude harness; (1) send a prompt whose output scrolls
+  past the visible pane — full reply streams per-message + final recorded without
+  `/harness output`; (2) type a message directly into the tmux window — it now
+  appears in the frontend transcript (the epic's original bug).
