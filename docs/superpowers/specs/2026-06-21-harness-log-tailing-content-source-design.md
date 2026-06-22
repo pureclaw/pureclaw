@@ -66,20 +66,30 @@ entries.
 
 The merged `stepTurns` loop already streams a turn on content growth, dedups,
 finalizes with a stable reused turn id, and preserves the frontend
-replace-by-id contract — sourcing the turn text from tmux (`_hh_snapshotTurn`).
-We introduce a per-harness **turn-content provider** and select it at harness
-activation:
+replace-by-id contract — sourcing the turn text from tmux (`_hh_snapshotTurn ::
+IO Text`) and minting turn ids via `_rd_mintTurn`. We introduce a per-harness
+**turn-content provider**, selected once at harness activation (NOT swapped
+mid-turn — see Lifecycle):
 
 - **Claude-log provider** (spawned claude-code with a uuid): supplies the
-  current turn's accumulated assistant prose (and a finalize signal) from the log.
+  current turn's accumulated assistant prose from the log.
 - **tmux-snapshot provider** (everything else): today's behavior, unchanged.
 
-`stepTurns` consumes the selected provider's turn text exactly as it consumes
-`_hh_snapshotTurn` today. Because there is exactly one turn-content source per
-harness, **single-writer for the assistant Response is structural** — no "disable
-the other path" branch. The existing **Request** recording in `routeViaHandle`
-(`API.hs`, UI sends) is **unchanged**; the log provider feeds only the assistant
-Response content.
+The provider is a **richer record than `IO Text`** — it returns, per tick, the
+current turn's prose text PLUS a `finalized?` flag PLUS a deterministic turn id
+(see Stable identity). `IO Text` alone cannot carry the finalize signal or the
+derived id, so `stepTurns` is **minimally modified** (not "unchanged"): (a) read
+turn text from the selected provider where it reads `_hh_snapshotTurn` today;
+(b) at `startTurn`, take the provider's derived id instead of `_rd_mintTurn` for
+the log provider; (c) treat the provider's `finalized?` as an authoritative
+finalize that short-circuits the idle-stability heuristic. The tmux provider
+keeps the existing `_hh_snapshotTurn` + `_rd_mintTurn` + stability-finalize
+behavior verbatim.
+
+Because there is exactly one turn-content source per harness, **single-writer for
+the assistant Response is structural** — no "disable the other path" branch. The
+existing **Request** recording in `routeViaHandle` (`API.hs`, UI sends) is
+**unchanged**; the log provider feeds only the assistant Response content.
 
 ### The log provider (builds WU5's tailer mechanics)
 
@@ -104,26 +114,68 @@ Response content.
   next real user event appears — a durable, event-based final fed into
   `stepTurns` (short-circuits its idle-stability guess for the log provider).
 
-### Stable identity & idempotent replay
+### Stable identity & idempotent replay (corrected — addresses the gate blocker)
 
-`stepTurns` reuses one minted turn id across a turn's updates + final. For the
-log provider the turn id MUST be **derived deterministically from the JSONL**
-(e.g. the turn's first assistant message `uuid`) rather than randomly minted, so
-that a backfill/restart re-reading the file does not create duplicate entries.
-The persistence layer + broker dedup/upsert by `_te_id` (the frontend already
-replaces by id). As an optimization the tailer MAY persist its byte offset per
-harness to skip already-processed history; correctness rests on the derived
-stable id, not on the offset surviving.
+**Constraint discovered in review:** the durable transcript write path is
+**append-only with no upsert** — `_th_record` (`Handles/Transcript.hs`) writes to
+an `O_APPEND` fd and never reads existing ids; the reload paths
+(`readReplaySlice`, `loadRecentMessages`) do **not** dedup by `_te_id`. So there
+is NO persistence-layer dedup to lean on, and re-emitting a finalized turn WOULD
+duplicate it on disk and on context reload. The earlier draft's "persistence
+dedups by `_te_id`" was wrong.
+
+Correct mechanism, in order of authority:
+
+1. **Persisted offset is the cross-restart correctness mechanism.** The tailer
+   persists its processed byte **offset (high-water mark)** per harness (next to
+   the session). On (re)start it **resumes from that offset** and processes only
+   NEW lines — it does NOT re-backfill already-recorded turns into the core
+   transcript. This is what prevents duplication across a PureClaw restart while
+   the harness keeps running. (First start of a freshly spawned harness has an
+   empty log, so there is nothing to re-emit.) The offset is persisted durably
+   (write-then-rename) so a crash cannot leave a torn value.
+2. **Deterministic, namespaced turn id** as a within-run + defense-in-depth
+   guard. The log provider's turn id is `derive(SessionId, firstAssistantUuid)`
+   — pinned at turn start and NOT changed as later assistant lines of the same
+   turn arrive (so mid-turn `EntryUpdated`s keep one id; replace-by-id holds).
+   Namespacing by `SessionId` prevents any cross-harness `_te_id` collision.
+3. **In-memory recorded-id set** per session for the process lifetime: the
+   wiring skips re-recording a `_te_id` already emitted this run (covers an
+   offset-reset/rotation re-read within a run). This set is fresh after restart —
+   the persisted offset (1) is the cross-restart guard, not this set.
+
+We deliberately do NOT modify `_th_record` to do read-before-write upsert (it
+would re-read the whole transcript per write). Correctness comes from *not
+re-emitting* (offset resume) plus deterministic ids, not from a dedup at the
+sink.
 
 ### Lifecycle, liveness, fallback
 
 - **Automatic lifecycle:** when a spawned claude-code harness with a uuid becomes
-  active, select the log provider and start its tailer (sidecar
-  `Map HarnessId (Async ())`, not a serialized field); cancel on harness exit
-  (reconcile-detected) or shutdown. Selection is computed each tick (not latched)
-  so it engages once `_he_sessionId`/uuid resolve.
-- **Liveness unchanged:** `classifyRow`/`classifyFromObserver` (thinking / idle /
-  awaiting-input, approval prompts) untouched — 100% tmux.
+  active, select the log provider and start its tailer in a sidecar
+  `Map HarnessId (Async ())` (not a serialized field). The uuid is resolved
+  ONCE (via `_he_sessionId` → `session.json` `HarnessSpec`) and the validated
+  `ClaudeSessionUuid` + `SafeClaudeLogPath` are **captured in the provider
+  closure / cached** — NOT re-decoded from `session.json` every tick. Selection
+  engages once `_he_sessionId`/uuid resolve; thereafter it is **latched** (see
+  no-mid-turn-fork below).
+- **Async discipline:** each tailer runs under `withAsync`/`bracket`; on
+  teardown it re-raises `SomeAsyncException` (NOT only `AsyncCancelled`) per the
+  recurring darwin-CI-hang invariant (`[[tabs-runtime-async-cancel-hang]]`),
+  swallowing only logged non-async exceptions; cancelled on reconcile-detected
+  harness exit and on shutdown; test teardown is `timeout`-bounded.
+- **No mid-turn provider fork:** the provider is chosen at activation (before any
+  turn; logs aren't written until first interaction) and is **not swapped while a
+  turn is active**. If the log goes over-cap / disappears mid-turn, the tailer
+  finalizes the prose already surfaced (under its stable id) and only THEN does
+  the harness fall back to the tmux provider at the next turn boundary — so a
+  single logical turn never forks across two providers / two ids.
+- **Liveness unchanged & finalize authority:** `classifyRow`/
+  `classifyFromObserver` (thinking / idle / awaiting-input, approval prompts) are
+  untouched — 100% tmux. For the log provider the **log's `finalized?` signal is
+  authoritative** and bypasses the tmux idle-stability guard, so a guaranteed
+  final is never held hostage to a stale "Thinking" tmux frame; tmux liveness
+  remains only the activity-glyph source.
 - **Fallback:** no active/valid log provider (non-claude, adopted, CLI, no uuid,
   missing/over-cap log) → tmux-snapshot provider = today's behavior, verbatim.
 
@@ -152,12 +204,15 @@ from tmux always. Harness exit → cancel tailer.
   appears for a spawned-claude harness.
 - Over-cap / malformed / partial line → WU5 caps + fold totality + carry buffer;
   never crashes the loop.
-- Restart / backfill replay → idempotent via JSONL-derived stable turn id (+
-  optional persisted offset); no duplicate history.
+- Restart → resume from the persisted offset; only new lines processed → no
+  duplicate history (deterministic ids + in-memory recorded-set as defense).
+- Over-cap mid-turn → finalize the prose already surfaced under its stable id,
+  emit the loud fallback, then switch to tmux at the next turn boundary (never
+  fork the in-flight turn).
 - Harness exits mid-turn → final assistant line already on disk; a final tail
   read before teardown captures it (then finalize).
-- Provider selection before `_he_sessionId`/uuid resolves → re-evaluated each
-  tick; engages when ready (logs aren't written until first interaction anyway).
+- Provider selection before `_he_sessionId`/uuid resolves → engages when ready
+  (logs aren't written until first interaction anyway), then latched per turn.
 
 ## Security (resolves the design-review security blocker)
 
@@ -165,12 +220,28 @@ from tmux always. Harness exit → cancel tailer.
   `O_NOFOLLOW` leaf open, owner==euid, no group/other-write, redacted Show).
 - uuid = validated `ClaudeSessionUuid` (no `/`,`..`,NUL; CSPRNG-minted;
   globally-unique filename; >1 hit → typed ambiguity, never silently picked).
-- **DoS bounds (WU5 D5.4):** 32 MiB backfill / 1 MiB line / 1 MiB buffer →
-  loud fallback. Per-tick read bounded; carry buffer bounded.
-- All surfaced prose flows through `sanitizeHarnessOutput`.
-- Provider selection from the in-memory registry/spec, never a serialized
-  "trusted" flag, so a hostile `session.json` cannot coerce tailing of a foreign
-  log. Re-validate `SafeClaudeLogPath` on offset-reset/rotation.
+- **DoS bounds (normative here, not by cross-reference):** the tailer enforces
+  **max backfill 32 MiB, max single line 1 MiB, max buffered partial 1 MiB**;
+  over-cap → loud "log unavailable" fallback, never a silent partial read. Since
+  `JsonlTail.splitLines` cannot self-cap, the carry-buffer cap is enforced by a
+  **bounded combinator at the JsonlTail boundary** (e.g. `splitLinesBounded ::
+  maxBuffer -> chunk -> Buffer -> Either OverCap (...)`) so the cap is
+  type-enforced and purely unit-testable. The per-tick read is independently
+  bounded (read `min(size-offset, maxChunk)`, drain over ticks) so a
+  rapidly-growing file cannot deliver an unbounded single chunk, and the
+  backfill cap applies on every shrink/disappear re-read.
+- All surfaced prose flows through `sanitizeHarnessOutput`. Note this is a
+  display/ANSI sanitizer, not a secret redactor — but it is the SAME treatment
+  tmux already gives, so no new exposure; confirm `transcript.jsonl` keeps the
+  session dir's owner-only (`0o600`) mode.
+- Deterministic turn id is **namespaced by `SessionId`** (`derive(SessionId,
+  firstAssistantUuid)`) so two harnesses cannot collide on one `_te_id`.
+- Provider selection from the in-memory registry/spec (validated `FromJSON`
+  uuid), never a serialized "trusted" flag, so a hostile `session.json` cannot
+  coerce tailing of a foreign log.
+- **TOCTOU:** re-validate `SafeClaudeLogPath` on offset-reset/rotation, and the
+  steady-state read re-open uses `O_NOFOLLOW` (not just the initial validation),
+  closing the validate→reopen leaf-swap window.
 
 ## Out of scope
 
@@ -190,15 +261,24 @@ from tmux always. Harness exit → cancel tailer.
   multi-text turn, interleaved tool_use (ignored), thinking (ignored), turn
   boundary via new user event, terminal `stop_reason`, malformed/meta lines
   skipped.
+- Bounded combinator: `splitLinesBounded` over-cap path is purely unit-tested
+  (no-LF line exceeding the buffer cap → `OverCap`, not unbounded growth).
 - Core-wiring (over injected provider, like `Harness.ReconcileSpec`):
   (a) **structural single-writer** — a log-provider harness never calls the tmux
   `_hh_snapshotTurn` (recording fake counter stays 0) and `routeViaHandle`
   Request recording is unchanged;
-  (b) **idempotent replay** — re-feeding the same log lines yields one entry per
-  derived turn id;
-  (c) **fallback** — a non-uuid harness uses the tmux path unchanged;
-  (d) **lifecycle** — provider engages on spawned-claude activation, tailer
-  cancels on exit.
+  (b) **offset-resume idempotency** — restart from a persisted offset re-emits
+  nothing; and a within-run rotation re-read is deduped by the recorded-id set →
+  one entry per derived turn id;
+  (c) **merged DoD regression** — the existing `ReconcileSpec` tmux-provider
+  tests (#3 once-only, #4 distinct ids, unchanged-once) still pass verbatim,
+  proving the provider seam is additive;
+  (d) **fallback** — a non-uuid harness uses the tmux path unchanged;
+  (e) **no mid-turn fork** — log over-cap mid-turn finalizes once under the log
+  id, then falls back at the next boundary (no second id for the same turn);
+  (f) **lifecycle** — provider engages on spawned-claude activation; tailer
+  `Async` cancels on exit with `SomeAsyncException` re-raised, teardown
+  `timeout`-bounded.
 - TDD throughout; 100% coverage gate (factor real-FS path resolution into a pure
   function + thin IO shell to stay coverable, per the merged work's zero-waiver
   norm); `-Wall -Werror`; hlint clean.
