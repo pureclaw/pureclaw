@@ -163,6 +163,26 @@ window the gate identified):
 (mirrors `ClaudeCode.hs` `renameFile` pattern) carrying `{offset, lastRecordedId}`;
 a torn/garbage value parses to "fail closed → seek EOF," never offset 0.
 
+**Implementation invariants (from architect re-confirm):**
+- The recorded-id set is a **captured `IORef`** constructed alongside
+  `reconcileDeps` (`CLI/Commands.hs`), OUTSIDE the per-call bracket that opens a
+  fresh transcript handle — so it persists across record calls (the production
+  `_rd_recordResponse` opens/closes a handle each call). The reconcile loop is
+  single-threaded, so check-set → record → add-id is atomic w.r.t. itself.
+- Seed the set by reading **all** `_te_id`s via the untrimmed transcript query
+  (`_th_query emptyFilter` — which does NOT apply compaction trimming), NOT
+  `loadRecentMessages` (which trims to the last compaction boundary and could
+  miss a pre-boundary id, re-introducing a duplicate).
+- The on-disk `_te_id` column is a flat unscoped `Text`; `derive(SessionId,
+  firstAssistantUuid)` is what prevents cross-session/-harness id reuse from
+  colliding within one file.
+- **Invariant to keep dormant:** the legacy `harnessReceive`/`_hh_receive`
+  direct-record path (`ClaudeCode.hs`, random id; `Runtimes.hs`/`SlashCommands.hs`
+  drainers) must stay OFF the frontend reconcile flow — `routeViaHandle` does not
+  call `_hh_receive` (`API.hs`). Re-enabling a `_hh_receive`-driven Response
+  record for a log-provider harness would bypass the recorded-id set and
+  re-introduce duplicates. (Testing item (a) guards the frontend path.)
+
 ### Lifecycle, liveness, fallback
 
 - **Automatic lifecycle:** when a spawned claude-code harness with a uuid becomes
