@@ -1,4 +1,5 @@
--- | Turn-content provider seam (Harness log content source — Task 4).
+-- | Turn-content provider seam (Harness log content source — Task 4) plus the
+-- recorded-id dedup helpers + the tailer driving loop (Task 5).
 --
 -- A 'TurnProvider' is the source of a harness turn's text, a finalize signal,
 -- and an optional stable turn id, consumed by the reconcile loop's
@@ -6,9 +7,12 @@
 -- decouples /where/ a turn's text comes from (tmux screen capture today, the
 -- claude JSONL log later) from the loop that streams + finalizes it.
 --
--- This module is a LEAF below "PureClaw.Harness.Reconcile" — it must NOT import
--- Reconcile (Reconcile imports this for 'TurnProvider'). Keeping it a leaf
--- avoids an import cycle.
+-- This module is a LEAF below "PureClaw.Harness.Reconcile" for the provider
+-- seam — it must NOT import Reconcile for that purpose (Reconcile imports this
+-- for 'TurnProvider'). The Task-5 helpers ('recordOnce', 'seedRecordedIds',
+-- 'runLogTailer') live here too; 'recordOnce' wraps the record closure and only
+-- references 'mkTurnEntry'/'TranscriptEntry' types, not the loop, so no cycle is
+-- introduced.
 --
 -- == The two built-in providers
 --
@@ -20,19 +24,70 @@
 --   * 'nullProvider' — a handle-less entry: empty text, never finalizes, no
 --     derived id.
 --
--- The log provider (Task 5) supplies a non-trivial '_tp_snapshot' whose
--- @finalized@ flag is an AUTHORITATIVE finalize and a '_tp_turnId' that derives
--- a stable id from the JSONL event — wired in later; the seam lives here.
+-- == Idempotent replay (Task 5)
+--
+-- The durable transcript write path is append-only with no upsert, so dedup
+-- must happen in front of the record call. 'seedRecordedIds' loads the set of
+-- '_te_id's already on disk at tailer startup (via the UNTRIMMED
+-- @_th_query emptyFilter@ — not 'loadRecentMessages', which trims at compaction
+-- boundaries and could miss a pre-boundary id). 'recordOnce' refuses to record
+-- a turn whose derived id is already in that set and adds each newly-recorded id
+-- to it. Because the log provider's turn id is deterministic from durable JSONL
+-- bytes, a turn re-folded after a crash/restart derives the SAME id, which is
+-- already disk-seeded → skipped (no duplicate).
+--
+-- == The tailer driver (Task 5)
+--
+-- 'runLogTailer' is the driving loop around 'tailStep': poll, persist the offset
+-- (the caller wires the actual write), forward each 'ProseTurn' to a sink. It
+-- treats 'TailUnavailable' as TERMINAL — a loud WARN + STOP so the harness falls
+-- back to the tmux provider — because 'tailStep' returns the UNCHANGED offset on
+-- a cap trip, so re-looping would spin forever. It runs the loop under
+-- 'Async.withAsync' and re-raises 'SomeAsyncException' (not only
+-- 'AsyncCancelled') on teardown per the recurring darwin-CI-hang invariant.
 module PureClaw.Harness.LogProvider
-  ( TurnProvider (..)
+  ( -- * Turn-content provider seam
+    TurnProvider (..)
   , tmuxProvider
   , nullProvider
+
+    -- * Recorded-id dedup (idempotent replay)
+  , seedRecordedIds
+  , recordOnce
+
+    -- * Tailer driver
+  , runLogTailer
   ) where
 
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async qualified as Async
+import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
+import Data.IORef (IORef, atomicModifyIORef')
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (UTCTime)
 
+import PureClaw.Core.Types (SessionId)
 import PureClaw.Handles.Harness (HarnessHandle (..))
+import PureClaw.Handles.Log (LogHandle (..))
+import PureClaw.Handles.Transcript (TranscriptHandle (..))
+import PureClaw.Harness.ClaudeLogPath (SafeClaudeLogPath)
+import PureClaw.Harness.ClaudeLogProse (ProseTurn, emptyProseState)
+import PureClaw.Harness.ClaudeLogTail
+  ( JsonlTailDeps
+  , TailCaps
+  , TailEvent (..)
+  , seekStart
+  , tailStep
+  )
+import PureClaw.Harness.JsonlTail (emptyBuffer)
+import PureClaw.Transcript.Types (TranscriptEntry (..), emptyFilter)
+
+-- ---------------------------------------------------------------------------
+-- Turn-content provider seam
+-- ---------------------------------------------------------------------------
 
 -- | The source of a harness turn's content for the reconcile loop.
 --
@@ -65,3 +120,102 @@ nullProvider = TurnProvider
   { _tp_snapshot = pure ("", False)
   , _tp_turnId   = pure Nothing
   }
+
+-- ---------------------------------------------------------------------------
+-- Recorded-id dedup (idempotent replay)
+-- ---------------------------------------------------------------------------
+
+-- | Seed the recorded-id set from this session's on-disk transcript at tailer
+-- startup. Reads EVERY entry via the UNTRIMMED @_th_query emptyFilter@ (NOT
+-- 'loadRecentMessages', which trims to the last compaction boundary and could
+-- miss a pre-boundary id, re-introducing a duplicate on replay).
+seedRecordedIds :: TranscriptHandle -> IO (Set Text)
+seedRecordedIds th =
+  Set.fromList . map _te_id <$> _th_query th emptyFilter
+
+-- | Record a turn at most once. If the entry's '_te_id' is already in the
+-- (disk-seeded, mutable) set, skip the record entirely; otherwise record via
+-- the supplied append action and insert the id. The reconcile loop is
+-- single-threaded, so check-set → record → add-id is atomic w.r.t. itself.
+recordOnce
+  :: IORef (Set Text)
+  -> (SessionId -> TranscriptEntry -> IO ())
+  -> SessionId
+  -> TranscriptEntry
+  -> IO ()
+recordOnce ref record sid entry = do
+  let tid = _te_id entry
+  -- atomicModifyIORef' returns whether the id was newly inserted; only then do
+  -- we record. Insert-before-record so a re-entrant call for the same id during
+  -- the record (impossible in the single-threaded loop, but cheap to be safe)
+  -- still dedups.
+  isNew <- atomicModifyIORef' ref $ \s ->
+    if Set.member tid s
+      then (s, False)
+      else (Set.insert tid s, True)
+  if isNew
+    then record sid entry
+    else pure ()
+
+-- ---------------------------------------------------------------------------
+-- Tailer driver
+-- ---------------------------------------------------------------------------
+
+-- | Poll interval between tail steps (250 ms).
+tailerPollMicros :: Int
+tailerPollMicros = 250 * 1000
+
+-- | Drive 'tailStep' in a loop, forwarding each yielded 'ProseTurn' to @sink@.
+--
+-- Runs the loop body under 'Async.withAsync' so a teardown cancellation is
+-- delivered as an async exception; 'SomeAsyncException' is RE-RAISED (not only
+-- 'AsyncCancelled') per the darwin-CI-hang invariant, while a logged
+-- non-async exception terminates the loop cleanly.
+--
+-- 'TailUnavailable' is TERMINAL: a loud WARN + STOP (so the harness falls back
+-- to the tmux provider). 'tailStep' returns the UNCHANGED offset on a cap trip,
+-- so re-looping on the same bytes would spin forever — hence we never re-loop
+-- on it.
+runLogTailer
+  :: JsonlTailDeps
+  -> TailCaps
+  -> LogHandle
+  -> SafeClaudeLogPath
+  -> (ProseTurn -> IO ())
+  -> IO ()
+runLogTailer deps caps logH path sink =
+  Async.withAsync loop $ \a -> do
+    r <- try (Async.wait a)
+    case r of
+      Right () -> pure ()
+      Left e
+        -- Re-raise async exceptions (cancellation/shutdown) so teardown is not
+        -- swallowed (darwin-CI-hang invariant).
+        | Just ae <- fromException e -> throwIO (ae :: SomeAsyncException)
+        -- A non-async exception terminates the loop; log it and stop.
+        | otherwise -> _lh_logWarn logH
+            ("claude log tailer error: " <> textShow (e :: SomeException))
+  where
+    loop = do
+      off0 <- seekStart deps path Nothing
+      go (off0, emptyBuffer, emptyProseState)
+
+    go st = do
+      (st', evs) <- tailStep deps caps path st
+      if any isUnavailable evs
+        then _lh_logWarn logH
+               "claude log unavailable for harness — falling back to tmux"
+        else do
+          mapM_ emit evs
+          threadDelay tailerPollMicros
+          go st'
+
+    emit (TailProse pt) = sink pt
+    emit TailUnavailable = pure ()
+
+    isUnavailable TailUnavailable = True
+    isUnavailable (TailProse _)   = False
+
+-- Local helper to render an exception as 'Text'.
+textShow :: Show a => a -> Text
+textShow = T.pack . show
