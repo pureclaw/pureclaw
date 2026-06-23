@@ -352,6 +352,7 @@ test-suite pureclaw-test
     Integration.CLISpec
     Integration.ImportRoundTripSpec
     Integration.TabsSyncSpec
+    Integration.ClaudeLogContentSpec
     Transcript.TypesSpec
     Transcript.CombinatorSpec
     Transcript.ProviderSpec

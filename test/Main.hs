@@ -92,6 +92,7 @@ import qualified Integration.SignalFlowSpec
 import qualified Integration.CLISpec
 import qualified Integration.ImportRoundTripSpec
 import qualified Integration.TabsSyncSpec
+import qualified Integration.ClaudeLogContentSpec
 import qualified Transcript.TypesSpec
 import qualified Handles.TranscriptSpec
 import qualified Handles.HarnessSpec
@@ -271,6 +272,7 @@ main = withIsolatedHome $ hspec $ do
   describe "Integration.CLI" Integration.CLISpec.spec
   describe "Integration.ImportRoundTrip" Integration.ImportRoundTripSpec.spec
   describe "Integration.TabsSync" Integration.TabsSyncSpec.spec
+  describe "Integration.ClaudeLogContent" Integration.ClaudeLogContentSpec.spec
   describe "Transcript.Types" Transcript.TypesSpec.spec
   describe "Handles.Transcript" Handles.TranscriptSpec.spec
   describe "Handles.Harness" Handles.HarnessSpec.spec
