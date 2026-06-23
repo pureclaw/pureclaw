@@ -38,8 +38,11 @@
 --
 -- == The tailer driver (Task 5)
 --
--- 'runLogTailer' is the driving loop around 'tailStep': poll, persist the offset
--- (the caller wires the actual write), forward each 'ProseTurn' to a sink. It
+-- 'runLogTailer' is the driving loop around 'tailStep': poll and forward each
+-- 'ProseTurn' to a sink. No tail offset is persisted across (re)starts — on
+-- every (re)start it seeks to EOF ('seekStart' … 'Nothing'); replay correctness
+-- rests entirely on the disk-seeded recorded-id set ('seedRecordedIds' +
+-- 'recordOnce'), not on a saved byte offset. It
 -- treats 'TailUnavailable' as TERMINAL — a loud WARN + STOP so the harness falls
 -- back to the tmux provider — because 'tailStep' returns the UNCHANGED offset on
 -- a cap trip, so re-looping would spin forever. It runs the loop under
@@ -57,6 +60,11 @@ module PureClaw.Harness.LogProvider
   , applyProseTurn
   , mkLogTurnProvider
 
+    -- * Cached provider selection (no per-tick decode/WARN spam)
+  , LogProviderState (..)
+  , ResolveInputs (..)
+  , selectLogProvider
+
     -- * Recorded-id dedup (idempotent replay)
   , seedRecordedIds
   , recordOnce
@@ -69,7 +77,9 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
 import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
 import Control.Monad qualified as Monad
-import Data.IORef (IORef, atomicModifyIORef', readIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', readIORef)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -80,7 +90,10 @@ import PureClaw.Core.Types (SessionId)
 import PureClaw.Handles.Harness (HarnessHandle (..))
 import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Handles.Transcript (TranscriptHandle (..))
-import PureClaw.Harness.ClaudeLogPath (SafeClaudeLogPath)
+import PureClaw.Harness.ClaudeLogPath
+  ( ClaudeLogPathError (..)
+  , SafeClaudeLogPath
+  )
 import PureClaw.Harness.ClaudeLogProse
   ( ProseTurn (..)
   , deriveTurnId
@@ -176,6 +189,125 @@ mkLogTurnProvider ref = TurnProvider
   }
 
 -- ---------------------------------------------------------------------------
+-- Cached provider selection (no per-tick decode/WARN spam)
+-- ---------------------------------------------------------------------------
+
+-- | Per-harness cached selection state. The reconcile loop runs the selector
+-- every tick (~2s) for every bound entry; without a cache a freshly-spawned
+-- claude harness — which has NO JSONL file until its first output — would
+-- re-decode @session.json@, re-resolve the base, and re-attempt (and re-WARN)
+-- on every tick for the entire pre-first-output window. These three states make
+-- that cheap and quiet:
+--
+--   * 'LpResolved' — success: the log tailer has engaged; return the cached
+--     log 'TurnProvider' as-is.
+--   * 'LpPending' — a valid @claude-code@ harness whose log file is not present
+--     YET (a 'ClaudeLogNotFound', the NORMAL pre-output state). Caches a CHEAP
+--     re-attempt closure (only 'mkSafeClaudeLogPath' — the validated uuid\/base
+--     are already closed over), so subsequent ticks do NOT re-decode
+--     @session.json@ and do NOT WARN, yet the provider still ENGAGES the moment
+--     the JSONL appears (a later 'Right' transitions to 'LpResolved').
+--   * 'LpFallback' — permanently the tmux\/null fallback: not @claude-code@, no
+--     or invalid uuid, OR a genuine (non-not-found) resolution error. WARNed at
+--     most once; the input resolver is never re-run.
+data LogProviderState
+  = LpResolved !TurnProvider
+  | LpPending !(IO (Either ClaudeLogPathError SafeClaudeLogPath))
+  | LpFallback
+
+-- | Outcome of the one-time \"resolve inputs\" phase (decode @session.json@,
+-- resolve the claude base). Keeps the expensive\/fragile input resolution OUT
+-- of the per-tick path: it runs once, and its result is cached as either a
+-- permanent 'LpFallback' or a cheap re-attemptable 'LpPending'\/'LpResolved'.
+data ResolveInputs
+  = -- | Not a resolvable @claude-code@ log source (not @claude-code@, no uuid,
+    -- invalid uuid). Carries the one-shot WARN text. Cached as 'LpFallback'.
+    RiFallback !Text
+  | -- | The inputs are valid; carries a CHEAP re-attempt closure that only
+    -- re-runs 'mkSafeClaudeLogPath' (no @session.json@ decode, no base
+    -- re-resolution). Its first result is classified by 'selectLogProvider':
+    -- 'Right' → engage ('LpResolved'); 'Left' 'ClaudeLogNotFound' → 'LpPending'
+    -- (re-attempt next tick, no WARN); any other 'Left' → 'LpFallback' (WARN
+    -- once).
+    RiReady !(IO (Either ClaudeLogPathError SafeClaudeLogPath))
+
+-- | True for the one error that means \"the log just is not on disk yet\" — the
+-- expected, transient pre-first-output state. Every OTHER error
+-- (ambiguity, symlink escape, owner\/mode) is a genuine fault that must NOT be
+-- treated as Pending (it would re-attempt forever); those become 'LpFallback'.
+isNotFound :: ClaudeLogPathError -> Bool
+isNotFound (ClaudeLogNotFound _) = True
+isNotFound _                     = False
+
+-- | Choose the turn-content provider for one entry, caching the decision per
+-- key so the per-tick path neither re-decodes inputs nor WARN-spams.
+--
+-- On a cache HIT: 'LpResolved' returns the cached provider; 'LpFallback'
+-- returns @fallback@ (no work, no WARN); 'LpPending' cheaply RE-ATTEMPTS via the
+-- cached closure — on 'Right' it transitions to 'LpResolved' (engage), on a
+-- still-not-found 'Left' it stays Pending and returns @fallback@ WITHOUT
+-- WARNing, and on a genuine non-not-found 'Left' it transitions to 'LpFallback'
+-- (WARN once).
+--
+-- On a cache MISS: run the one-time @resolveInputs@. 'RiFallback' caches
+-- 'LpFallback' and WARNs once; 'RiReady' runs the cheap attempt once and
+-- classifies it exactly as the Pending re-attempt does.
+--
+-- @engage@ is the IO that seeds the recorded-id set, starts the tailer Async,
+-- and builds the log 'TurnProvider' (run at most once, on the first 'Right').
+selectLogProvider
+  :: Ord k
+  => IORef (Map k LogProviderState)
+  -> k
+  -> TurnProvider
+  -- ^ tmux\/null fallback provider for this entry
+  -> IO ResolveInputs
+  -- ^ one-time input resolution (decode @session.json@, resolve base)
+  -> (SafeClaudeLogPath -> IO TurnProvider)
+  -- ^ engage on the first 'Right': seed + start tailer + build provider
+  -> (Text -> IO ())
+  -- ^ WARN sink (fired at most once per key)
+  -> IO TurnProvider
+selectLogProvider cacheRef key fallback resolveInputs engage warn = do
+  cached <- Map.lookup key <$> readIORef cacheRef
+  case cached of
+    Just (LpResolved p) -> pure p
+    Just LpFallback     -> pure fallback
+    Just (LpPending reattempt) -> reattempt >>= classify reattempt
+    Nothing -> do
+      ri <- resolveInputs
+      case ri of
+        RiFallback warnTxt -> do
+          modifyIORef' cacheRef (Map.insert key LpFallback)
+          warn warnTxt
+          pure fallback
+        RiReady reattempt ->
+          reattempt >>= classify reattempt
+  where
+    -- Classify one attempt result, transitioning the cache + (at most once)
+    -- WARNing. A genuine fault transitions to 'LpFallback' exactly once per key
+    -- — whether reached on the first attempt (cache miss) or on a later Pending
+    -- re-attempt — so the WARN here fires at most once per key.
+    classify reattempt = \case
+      Right safePath -> do
+        prov <- engage safePath
+        modifyIORef' cacheRef (Map.insert key (LpResolved prov))
+        pure prov
+      Left err
+        | isNotFound err -> do
+            -- Expected pre-output state: stay Pending, re-attempt next tick,
+            -- NO WARN. (Idempotent re-insert keeps the closure cached.)
+            modifyIORef' cacheRef (Map.insert key (LpPending reattempt))
+            pure fallback
+        | otherwise -> do
+            modifyIORef' cacheRef (Map.insert key LpFallback)
+            warn (faultWarn err)
+            pure fallback
+
+    faultWarn err =
+      "harness log unavailable (" <> textShow err <> ") — falling back to tmux"
+
+-- ---------------------------------------------------------------------------
 -- Recorded-id dedup (idempotent replay)
 -- ---------------------------------------------------------------------------
 
@@ -249,6 +381,9 @@ runLogTailer deps caps logH path sink =
             ("claude log tailer error: " <> textShow (e :: SomeException))
   where
     loop = do
+      -- No persisted offset: 'Nothing' seeks to EOF on every (re)start. Replay
+      -- correctness rests on the disk-seeded recorded-id set, not a saved
+      -- offset (see this module's header).
       off0 <- seekStart deps path Nothing
       go (off0, emptyBuffer, emptyProseState)
 

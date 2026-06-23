@@ -35,10 +35,12 @@ import PureClaw.Handles.Harness (mkNoOpHarnessHandle, _hh_snapshotTurn)
 import PureClaw.Handles.Log (mkNoOpLogHandle, _lh_logWarn)
 import PureClaw.Handles.Transcript (TranscriptHandle (..), mkNoOpTranscriptHandle)
 import PureClaw.Harness.ClaudeLogPath
-  ( SafeClaudeLogPath
+  ( ClaudeLogPathError (..)
+  , SafeClaudeLogPath
   , mkClaudeBase
   , mkSafeClaudeLogPath
   )
+import Data.Map.Strict qualified as Map
 import PureClaw.Harness.ClaudeLogProse (ProseTurn (..), deriveTurnId)
 import PureClaw.Harness.ClaudeLogTail
   ( JsonlTailDeps (..)
@@ -139,6 +141,111 @@ spec = do
       txt2 `shouldBe` "Hello world"
       fin2 `shouldBe` True
       mid2 `shouldBe` Just (deriveTurnId "sess-x" "uuid-1", t0)
+
+  describe "selectLogProvider" $ do
+    -- A distinctive engaged provider so we can tell it apart from the fallback.
+    let fallbackProv = nullProvider                                  -- snapshot ("", False)
+        engagedProv  = tmuxProvider
+          (mkNoOpHarnessHandle { _hh_snapshotTurn = pure "ENGAGED" }) -- snapshot ("ENGAGED", False)
+        snapTextOf p = fst <$> _tp_snapshot p
+
+    it "(c) success: engages once, caches Resolved, no WARN, no re-engage" $
+      withRealPath $ \safePath -> do
+        cache <- newIORef (Map.empty :: Map.Map Int LogProviderState)
+        engageCalls  <- newIORef (0 :: Int)
+        resolveCalls <- newIORef (0 :: Int)
+        warns        <- newIORef ([] :: [Text])
+        let resolveInputs = do
+              modifyIORef' resolveCalls (+ 1)
+              pure (RiReady (pure (Right safePath)))
+            engage _ = modifyIORef' engageCalls (+ 1) >> pure engagedProv
+            warn t   = modifyIORef' warns (t :)
+            select   = selectLogProvider cache (0 :: Int) fallbackProv
+                         resolveInputs engage warn
+        p1 <- select
+        snapTextOf p1 `shouldReturn` "ENGAGED"
+        -- Second call is a Resolved cache hit: no resolve, no engage, no WARN.
+        p2 <- select
+        snapTextOf p2 `shouldReturn` "ENGAGED"
+        readIORef resolveCalls `shouldReturn` 1
+        readIORef engageCalls  `shouldReturn` 1
+        readIORef warns        `shouldReturn` []
+
+    it "(a) pending: not-found caches no WARN, re-attempts each tick, engages on later Right" $
+      withRealPath $ \safePath -> do
+        cache <- newIORef (Map.empty :: Map.Map Int LogProviderState)
+        -- The cheap re-attempt: not-found on the first two attempts, then Right.
+        attempt <- newIORef (0 :: Int)
+        engageCalls  <- newIORef (0 :: Int)
+        resolveCalls <- newIORef (0 :: Int)
+        warns        <- newIORef ([] :: [Text])
+        let reattempt = do
+              n <- atomicModifyIORef' attempt (\c -> (c + 1, c))
+              pure $ if n < 2 then Left (ClaudeLogNotFound "/no/such/root")
+                              else Right safePath
+            resolveInputs = modifyIORef' resolveCalls (+ 1) >> pure (RiReady reattempt)
+            engage _ = modifyIORef' engageCalls (+ 1) >> pure engagedProv
+            warn t   = modifyIORef' warns (t :)
+            select   = selectLogProvider cache (0 :: Int) fallbackProv
+                         resolveInputs engage warn
+        -- Tick 1: cache miss → resolve inputs, attempt #0 not-found → fallback,
+        -- NO WARN, Pending cached.
+        p1 <- select
+        snapTextOf p1 `shouldReturn` ""
+        -- Tick 2: Pending hit → re-attempt #1 still not-found → fallback, NO WARN.
+        -- Crucially NO second resolveInputs (no session.json re-decode).
+        p2 <- select
+        snapTextOf p2 `shouldReturn` ""
+        -- Tick 3: Pending hit → re-attempt #2 Right → engage, Resolved cached.
+        p3 <- select
+        snapTextOf p3 `shouldReturn` "ENGAGED"
+        -- Tick 4: Resolved hit → cached provider, no further attempt.
+        p4 <- select
+        snapTextOf p4 `shouldReturn` "ENGAGED"
+        readIORef resolveCalls `shouldReturn` 1     -- inputs resolved ONCE
+        readIORef attempt      `shouldReturn` 3     -- re-attempted each pending tick
+        readIORef engageCalls  `shouldReturn` 1     -- engaged exactly once
+        readIORef warns        `shouldReturn` []    -- never WARNed on not-found
+
+    it "(b) fallback: RiFallback caches permanently, WARNs once, never re-resolves" $ do
+      cache <- newIORef (Map.empty :: Map.Map Int LogProviderState)
+      resolveCalls <- newIORef (0 :: Int)
+      engageCalls  <- newIORef (0 :: Int)
+      warns        <- newIORef ([] :: [Text])
+      let resolveInputs = modifyIORef' resolveCalls (+ 1)
+                            >> pure (RiFallback "not claude — using tmux")
+          engage _ = modifyIORef' engageCalls (+ 1) >> pure engagedProv
+          warn t   = modifyIORef' warns (t :)
+          select   = selectLogProvider cache (0 :: Int) fallbackProv
+                       resolveInputs engage warn
+      p1 <- select
+      snapTextOf p1 `shouldReturn` ""
+      -- Second + third calls: Fallback cache hit — no resolve, no engage, no
+      -- further WARN.
+      _ <- select
+      _ <- select
+      readIORef resolveCalls `shouldReturn` 1
+      readIORef engageCalls  `shouldReturn` 0
+      readIORef warns        `shouldReturn` ["not claude — using tmux"]
+
+    it "(b') fault: a genuine (non-not-found) error caches Fallback + WARNs once" $ do
+      cache <- newIORef (Map.empty :: Map.Map Int LogProviderState)
+      resolveCalls <- newIORef (0 :: Int)
+      warns        <- newIORef ([] :: [Text])
+      let -- Inputs are valid, but the path attempt yields an owner/mode fault —
+          -- NOT a not-found, so it must NOT be treated as Pending.
+          reattempt = pure (Left (ClaudeLogInsecure "/x.jsonl" 0o066 0))
+          resolveInputs = modifyIORef' resolveCalls (+ 1) >> pure (RiReady reattempt)
+          engage _ = fail "engage must not run on a fault"
+          warn t   = modifyIORef' warns (t :)
+          select   = selectLogProvider cache (0 :: Int) fallbackProv
+                       resolveInputs engage warn
+      p1 <- select
+      snapTextOf p1 `shouldReturn` ""
+      _ <- select   -- Fallback hit: no re-resolve, no second WARN.
+      readIORef resolveCalls `shouldReturn` 1
+      ws <- readIORef warns
+      length ws `shouldBe` 1
 
   describe "recordOnce" $ do
     it "skips a _te_id already in the seeded set (crash/restart idempotency)" $ do
