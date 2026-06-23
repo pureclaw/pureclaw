@@ -58,6 +58,11 @@ module PureClaw.Harness.ClaudeLogConvert
     convertLine
     -- * Payload encoder (exported for golden tests)
   , encodeValuePayload
+    -- * Total JSONL helpers (re-used by ClaudeLogProse — do not re-implement)
+  , decodeObject
+  , lookupText
+  , lookupObject
+  , sanitizeBlock
   ) where
 
 import Data.Aeson (Value (..))
