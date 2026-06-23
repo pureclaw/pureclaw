@@ -32,6 +32,7 @@
 module PureClaw.Harness.ClaudeLogTail
   ( -- * Injectable IO seam
     JsonlTailDeps (..)
+  , defaultJsonlTailDeps
 
     -- * DoS caps
   , TailCaps (..)
@@ -47,11 +48,19 @@ module PureClaw.Harness.ClaudeLogTail
   , seekStart
   ) where
 
+import Control.Exception qualified as Exc
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Time.Clock (UTCTime)
+import Data.ByteString.Internal qualified as BSI
+import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Word (Word8)
+import Foreign.Ptr (Ptr, castPtr)
+import System.IO (SeekMode (AbsoluteSeek))
+import System.Posix.IO qualified as PIO
+import System.Posix.Files qualified as PF
+import System.Posix.Types (ByteCount, Fd, FileOffset)
 
-import PureClaw.Harness.ClaudeLogPath (SafeClaudeLogPath)
+import PureClaw.Harness.ClaudeLogPath (SafeClaudeLogPath, getSafeClaudeLogPath)
 import PureClaw.Harness.ClaudeLogProse
   ( ProseState
   , ProseTurn
@@ -88,6 +97,48 @@ data JsonlTailDeps = JsonlTailDeps
   , _jt_now      :: IO UTCTime
     -- ^ Current UTC time (used downstream; injected for testability).
   }
+
+-- | Production 'JsonlTailDeps' over the real filesystem.
+--
+-- Every operation re-opens the leaf with @O_NOFOLLOW@ (so a leaf-swap to a
+-- symlink between steps fails the open — the steady-state half of the TOCTOU
+-- guard described in the spec Security section; the validate-on-rotation half
+-- is the caller's via 'tailStep' shrink-reset). Reads are positional (@fdSeek@
+-- + @fdReadBuf@) and bounded to the requested byte count, so a rapidly-growing
+-- file never delivers an unbounded single chunk.
+defaultJsonlTailDeps :: JsonlTailDeps
+defaultJsonlTailDeps = JsonlTailDeps
+  { _jt_size = \path ->
+      withNoFollowFd path $ \fd -> do
+        status <- PF.getFdStatus fd
+        pure (fromIntegral (PF.fileSize status))
+  , _jt_readFrom = \path (Offset off) n ->
+      withNoFollowFd path $ \fd -> do
+        _ <- PIO.fdSeek fd AbsoluteSeek (fromIntegral off :: FileOffset)
+        bs <- readUpTo fd n
+        pure (bs, Offset (off + fromIntegral (BS.length bs)))
+  , _jt_now = getCurrentTime
+  }
+  where
+    -- Open the validated leaf with @O_NOFOLLOW@, run the action, always close.
+    withNoFollowFd :: SafeClaudeLogPath -> (Fd -> IO a) -> IO a
+    withNoFollowFd path action = do
+      let flags = PIO.defaultFileFlags { PIO.nofollow = True }
+      Exc.bracket
+        (PIO.openFd (getSafeClaudeLogPath path) PIO.ReadOnly flags)
+        PIO.closeFd
+        action
+
+    -- Read UP TO @n@ bytes from the current fd position into a fresh
+    -- 'ByteString'. @fdReadBuf@ returns the count actually read (0 at EOF).
+    readUpTo :: Fd -> Int -> IO ByteString
+    readUpTo fd n
+      | n <= 0 = pure BS.empty
+      | otherwise =
+          BSI.createAndTrim n $ \ptr -> do
+            got <- PIO.fdReadBuf fd (castPtr (ptr :: Ptr Word8))
+                     (fromIntegral n :: ByteCount)
+            pure (fromIntegral got)
 
 -- ---------------------------------------------------------------------------
 -- DoS caps
