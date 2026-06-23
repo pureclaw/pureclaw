@@ -8,6 +8,7 @@
 -- terminal 'TailUnavailable'.
 module Harness.LogProviderSpec (spec) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (modifyMVar_, newMVar, readMVar)
 import Control.Exception (bracket)
@@ -194,6 +195,38 @@ spec = do
         n <- readMVar warns
         n `shouldBe` 1
         readIORef sink `shouldReturn` []
+
+    it "forwards an emitted ProseTurn to the sink, then keeps polling" $
+      withRealPath $ \path -> do
+        -- The file is empty at seekStart (offset 0), then grows by one complete
+        -- assistant line. runLogTailer reads it, folds a ProseTurn, and forwards
+        -- it to the sink (covering the emit/go continuation). We then cancel.
+        let asstLine =
+              "{\"type\":\"assistant\",\"uuid\":\"u1\",\"message\":{\"role\":\"assistant\""
+                <> ",\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}\n"
+        sizeCalls <- newIORef (0 :: Int)
+        let deps = JsonlTailDeps
+              { _jt_size = \_ -> do
+                  n <- atomicModifyIORef' sizeCalls (\c -> (c + 1, c))
+                  pure $ if n == 0 then 0 else fromIntegral (BS.length asstLine)
+              , _jt_readFrom = \_ (Offset off) cap ->
+                  let start = fromIntegral off :: Int
+                      chunk = BS.take cap (BS.drop start asstLine)
+                  in pure (chunk, Offset (off + fromIntegral (BS.length chunk)))
+              , _jt_now = pure t0
+              }
+        got <- newMVar ([] :: [Text])
+        a <- Async.async $
+          runLogTailer deps defaultTailCaps mkNoOpLogHandle path
+            (\pt -> modifyMVar_ got (pure . (_pt_text pt :)))
+        -- Wait until the sink has received the prose, then cancel.
+        let waitForEmit = do
+              xs <- readMVar got
+              if null xs then threadDelay 20000 >> waitForEmit else pure xs
+        emitted <- timeout (2 * 1000 * 1000) waitForEmit
+        Async.cancel a
+        _ <- Async.waitCatch a
+        emitted `shouldBe` Just ["Hi"]
 
     it "re-raises an async cancellation on teardown (darwin-CI-hang invariant)" $
       withRealPath $ \path -> do
