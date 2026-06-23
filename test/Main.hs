@@ -97,6 +97,7 @@ import qualified Handles.TranscriptSpec
 import qualified Handles.HarnessSpec
 import qualified Harness.ClaudeCodeSpec
 import qualified Harness.ClaudeLogConvertSpec
+import qualified Harness.ClaudeLogProseSpec
 import qualified Harness.ClaudeLogPathSpec
 import qualified Harness.ClaudeSessionSpec
 import qualified Harness.DiscoverySpec
@@ -273,6 +274,7 @@ main = withIsolatedHome $ hspec $ do
   describe "Handles.Harness" Handles.HarnessSpec.spec
   describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
   describe "Harness.ClaudeLogConvert" Harness.ClaudeLogConvertSpec.spec
+  describe "Harness.ClaudeLogProse" Harness.ClaudeLogProseSpec.spec
   describe "Harness.ClaudeLogPath" Harness.ClaudeLogPathSpec.spec
   describe "Harness.ClaudeSession" Harness.ClaudeSessionSpec.spec
   describe "Harness.Discovery" Harness.DiscoverySpec.spec

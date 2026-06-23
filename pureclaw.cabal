@@ -102,6 +102,7 @@ library
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode
     PureClaw.Harness.ClaudeLogConvert
+    PureClaw.Harness.ClaudeLogProse
     PureClaw.Harness.ClaudeLogPath
     PureClaw.Harness.ClaudeSession
     PureClaw.Harness.Discovery
@@ -375,6 +376,7 @@ test-suite pureclaw-test
     Frontend.APISpec
     Harness.ClaudeCodeSpec
     Harness.ClaudeLogConvertSpec
+    Harness.ClaudeLogProseSpec
     Harness.ClaudeLogPathSpec
     Harness.ClaudeSessionSpec
     Harness.DiscoverySpec
