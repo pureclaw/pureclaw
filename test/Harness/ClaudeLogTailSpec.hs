@@ -218,3 +218,23 @@ spec = describe "ClaudeLogTail" $
       ((newOff, _, _), evs) <- tailStep deps caps path st0
       evs `shouldBe` [TailUnavailable]
       newOff `shouldBe` Offset 0
+
+    it "tailStep per-line cap: a complete line exceeding _tc_line yields [TailUnavailable] without advancing" $ \path -> do
+      -- 65 bytes of 'a' + '\n' = a complete line whose content (65 bytes, after
+      -- the '\n' is stripped by splitLines) exceeds _tc_line = 64.
+      -- _tc_buffer = 16384 >> line length so the buffer cap does NOT fire first.
+      -- _tc_chunk is large enough to read the whole line in one go.
+      let lineContent = BS.replicate 65 0x61  -- 65 × 'a'
+          content     = lineContent <> "\n"
+      ref <- newIORef content
+      let deps = fakeDeps ref
+          caps = defaultTailCaps
+                   { _tc_line    = 64
+                   , _tc_buffer  = 16384
+                   , _tc_chunk   = 16384
+                   , _tc_backfill = 16384
+                   }
+          st0 = (Offset 0, emptyBuffer, emptyProseState)
+      ((newOff, _, _), evs) <- tailStep deps caps path st0
+      evs     `shouldBe` [TailUnavailable]
+      newOff  `shouldBe` Offset 0
