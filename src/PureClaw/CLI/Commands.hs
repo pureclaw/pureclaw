@@ -93,6 +93,10 @@ import PureClaw.Frontend.StreamBroker
   , mkInProcessBroker
   )
 import PureClaw.Harness.ClaudeCode (adoptExternalWindow, defaultClaudeCodeDeps)
+import PureClaw.Harness.ClaudeLogPath qualified as ClaudeLogPath
+import PureClaw.Harness.ClaudeSession qualified as ClaudeSession
+import PureClaw.Harness.ClaudeLogTail (defaultJsonlTailDeps, defaultTailCaps)
+import PureClaw.Harness.LogProvider qualified as LogProvider
 import PureClaw.Harness.Reconcile qualified as Reconcile
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Transcript (TranscriptHandle (..), mkNoOpTranscriptHandle)
@@ -987,23 +991,116 @@ runChat consentChannel serverMode opts = do
         -- double-delete — idempotent, but contradicting the seam's contract).
         -- Neither path touches 'session.json', so the session reappears in
         -- Recent Sessions.
+        -- Harness claude-log content source (Task 5). The recorded-id set is a
+        -- captured IORef constructed OUTSIDE the per-call bracket below (which
+        -- opens a fresh transcript handle each record), so it persists across
+        -- record calls. Seeded from the on-disk transcript when a log tailer
+        -- starts; 'recordOnce' refuses a turn whose deterministic derived id is
+        -- already present, making crash/restart replay idempotent without
+        -- touching the append-only '_th_record'.
+        recordedIds <- newIORef Set.empty
+        -- Per-HarnessId caches: the resolved log 'TurnProvider' (resolved ONCE,
+        -- never re-decoded per tick) and its tailer 'Async' (cancelled on
+        -- reconcile-detected harness exit).
+        logProviderCache <- newIORef (Map.empty :: Map.Map Registry.HarnessId LogProvider.TurnProvider)
+        logTailers       <- newIORef (Map.empty :: Map.Map Registry.HarnessId (Async.Async ()))
+        -- Select the turn-content provider for an entry. Gate on
+        -- flavour==claude-code && a ClaudeSessionUuid resolves (uuid-
+        -- resolvability, NOT origin — only spawned-with-uuid harnesses persist
+        -- _h_claudeSessionUuid). Falls back to the tmux/null provider on any
+        -- failure. NOTE: stepTurns only runs for BOUND entries, so a post-
+        -- process-restart unbound harness is out of scope (it never reaches
+        -- this selector).
+        let selectProvider e = do
+              let hid       = Registry._he_id e
+                  fallback  = pure (maybe LogProvider.nullProvider LogProvider.tmuxProvider
+                                      (Registry._he_handle e))
+              cached <- Map.lookup hid <$> readIORef logProviderCache
+              case cached of
+                Just p  -> pure p
+                Nothing
+                  | Registry._he_flavour e /= SessionTypes.HClaudeCode -> fallback
+                  | otherwise -> case Registry._he_sessionId e of
+                      Nothing  -> fallback
+                      Just sid -> do
+                        prov <- startLogProviderFor hid (SessionId sid)
+                        maybe fallback pure prov
+            -- Resolve uuid + SafeClaudeLogPath, seed recordedIds, start the
+            -- tailer, cache + return the log provider. Any Left/no-uuid →
+            -- Nothing (caller falls back, WARN once).
+            startLogProviderFor hid sid = do
+              let sessDir = sessionsDir </> T.unpack (unSessionId sid)
+                  metaP   = sessDir </> "session.json"
+              eMeta <- Aeson.eitherDecodeFileStrict' metaP
+              case eMeta of
+                Left _ -> pure Nothing
+                Right meta -> case SessionTypes._sm_kind (meta :: SessionTypes.SessionMeta) of
+                  SessionTypes.SkHarness hs
+                    | Just uuidTxt <- SessionTypes._h_claudeSessionUuid hs
+                    , Right uuid <- ClaudeSession.mkClaudeSessionUuid uuidTxt -> do
+                        base <- ClaudeLogPath.resolveClaudeBase
+                        ePath <- ClaudeLogPath.mkSafeClaudeLogPath base uuid
+                                   (fmap T.unpack (SessionTypes._h_canonicalCwd hs))
+                        case ePath of
+                          Left err -> do
+                            _lh_logWarn logger
+                              ("harness log unavailable (" <> T.pack (show err)
+                                <> ") — falling back to tmux for " <> unSessionId sid)
+                            pure Nothing
+                          Right safePath -> do
+                            -- Seed the recorded-id set from this session's
+                            -- transcript (untrimmed) before the tailer runs.
+                            let transP = sessDir </> "transcript.jsonl"
+                            bracket
+                              (mkBroadcastingFileTranscriptHandle Nothing sid logger transP)
+                              (\rth -> _th_flush rth >> _th_close rth)
+                              (\rth -> do
+                                 seeded <- LogProvider.seedRecordedIds rth
+                                 modifyIORef' recordedIds (Set.union seeded))
+                            -- Shared state the tailer writes + the provider reads.
+                            stateRef <- newIORef LogProvider.emptyLogTurnState
+                            let sink pt = do
+                                  ts <- getCurrentTime
+                                  modifyIORef' stateRef
+                                    (LogProvider.applyProseTurn (unSessionId sid) ts pt)
+                            a <- Async.async $
+                              LogProvider.runLogTailer defaultJsonlTailDeps
+                                defaultTailCaps logger safePath sink
+                            modifyIORef' logTailers (Map.insert hid a)
+                            let prov = LogProvider.mkLogTurnProvider stateRef
+                            modifyIORef' logProviderCache (Map.insert hid prov)
+                            pure (Just prov)
+                  _ -> pure Nothing
         let reconcileDeps = Reconcile.defaultReconcileDeps
-              { Reconcile._rd_evict = \_hid label ->
+              { Reconcile._rd_evict = \hid label -> do
                   modifyIORef' harnessRef (Map.delete label)
+                  -- Cancel + drop this harness's log tailer (and its caches) on
+                  -- reconcile-detected exit.
+                  mTailer <- Map.lookup hid <$> readIORef logTailers
+                  mapM_ Async.cancel mTailer
+                  modifyIORef' logTailers (Map.delete hid)
+                  modifyIORef' logProviderCache (Map.delete hid)
                 -- Output watcher (Task 6): on settle the loop records ONE Response
                 -- transcript entry for the session (the finalized turn),
-                -- broadcasting it to subscribers via the shared broker.
-              , Reconcile._rd_recordResponse = \sid entry -> do
-                  let path = sessionsDir </> T.unpack (unSessionId sid) </> "transcript.jsonl"
-                  bracket
-                    (mkBroadcastingFileTranscriptHandle (Just broker) sid logger path)
-                    (\rth -> _th_flush rth >> _th_close rth)
-                    (`_th_record` entry)
+                -- broadcasting it to subscribers via the shared broker. Wrapped
+                -- in 'recordOnce' so a turn whose derived id is already on disk
+                -- (crash/restart replay, within-run re-read) is skipped.
+              , Reconcile._rd_recordResponse =
+                  LogProvider.recordOnce recordedIds $ \sid entry -> do
+                    let path = sessionsDir </> T.unpack (unSessionId sid) </> "transcript.jsonl"
+                    bracket
+                      (mkBroadcastingFileTranscriptHandle (Just broker) sid logger path)
+                      (\rth -> _th_flush rth >> _th_close rth)
+                      (`_th_record` entry)
                 -- Live in-place updates (Task 6): each time the in-progress turn
                 -- grows, publish an EPHEMERAL 'EntryUpdated' event (same stable
                 -- turn id) — never persisted.
               , Reconcile._rd_publishUpdate = \sid entry ->
                   _streamBroker_publish broker (EntryUpdated sid entry)
+                -- Harness claude-log content source (Task 5): select the log
+                -- provider for a spawned-claude-with-uuid harness, else the tmux
+                -- path verbatim.
+              , Reconcile._rd_providerFor = selectProvider
               }
         -- WU8 (#80): restore the persisted tab view BEFORE the frontend server
         -- (and the tabbed loop) start, so the very first sidebar lists snapshot

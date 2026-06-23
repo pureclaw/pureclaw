@@ -68,6 +68,7 @@ module PureClaw.Harness.LogProvider
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
 import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
+import Control.Monad qualified as Monad
 import Data.IORef (IORef, atomicModifyIORef', readIORef)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -206,9 +207,7 @@ recordOnce ref record sid entry = do
     if Set.member tid s
       then (s, False)
       else (Set.insert tid s, True)
-  if isNew
-    then record sid entry
-    else pure ()
+  Monad.when isNew (record sid entry)
 
 -- ---------------------------------------------------------------------------
 -- Tailer driver
