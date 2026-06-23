@@ -8,6 +8,7 @@
 -- terminal 'TailUnavailable'.
 module Harness.LogProviderSpec (spec) where
 
+import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (modifyMVar_, newMVar, readMVar)
 import Control.Exception (bracket)
 import Data.ByteString (ByteString)
@@ -193,3 +194,40 @@ spec = do
         n <- readMVar warns
         n `shouldBe` 1
         readIORef sink `shouldReturn` []
+
+    it "re-raises an async cancellation on teardown (darwin-CI-hang invariant)" $
+      withRealPath $ \path -> do
+        -- An empty, never-growing file: seek to EOF (0), then every tailStep
+        -- reads nothing and threadDelays. Cancelling the runLogTailer Async must
+        -- deliver AsyncCancelled, which runLogTailer RE-RAISES (not swallows).
+        let deps = JsonlTailDeps
+              { _jt_size = \_ -> pure 0
+              , _jt_readFrom = \_ off _ -> pure (BS.empty, off)
+              , _jt_now = pure t0
+              }
+        a <- Async.async $
+          runLogTailer deps defaultTailCaps mkNoOpLogHandle path (\_ -> pure ())
+        Async.cancel a
+        r <- Async.waitCatch a
+        -- The cancellation propagated as an async exception (re-raised), so
+        -- waitCatch sees a Left, not a clean Right ().
+        case r of
+          Left _  -> pure ()
+          Right _ -> expectationFailure "expected the cancellation to be re-raised"
+
+    it "WARNs and stops on a non-async loop exception (not swallowed silently)" $
+      withRealPath $ \path -> do
+        -- _jt_size throws a synchronous IOException on the first probe (during
+        -- seekStart). runLogTailer must catch it, WARN, and return cleanly.
+        let deps = JsonlTailDeps
+              { _jt_size = \_ -> ioError (userError "boom")
+              , _jt_readFrom = \_ off _ -> pure (BS.empty, off)
+              , _jt_now = pure t0
+              }
+        warns <- newMVar (0 :: Int)
+        let logH = mkNoOpLogHandle
+                     { _lh_logWarn = \_ -> modifyMVar_ warns (pure . (+ 1)) }
+        result <- timeout (2 * 1000 * 1000) $
+          runLogTailer deps defaultTailCaps logH path (\_ -> pure ())
+        result `shouldBe` Just ()
+        readMVar warns `shouldReturn` 1
