@@ -103,6 +103,7 @@ import qualified Harness.ClaudeLogPathSpec
 import qualified Harness.ClaudeSessionSpec
 import qualified Harness.DiscoverySpec
 import qualified Harness.JsonlTailSpec
+import qualified Harness.LogProviderSpec
 import qualified Harness.ReconcileSpec
 import qualified Harness.RegistrySpec
 import qualified Harness.TmuxSpec
@@ -281,6 +282,7 @@ main = withIsolatedHome $ hspec $ do
   describe "Harness.ClaudeSession" Harness.ClaudeSessionSpec.spec
   describe "Harness.Discovery" Harness.DiscoverySpec.spec
   describe "Harness.JsonlTail" Harness.JsonlTailSpec.spec
+  describe "LogProvider" Harness.LogProviderSpec.spec
   describe "Harness.Reconcile" Harness.ReconcileSpec.spec
   describe "Harness.Registry" Harness.RegistrySpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec

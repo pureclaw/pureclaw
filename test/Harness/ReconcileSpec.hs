@@ -46,6 +46,7 @@ import PureClaw.Frontend.StreamBroker
 import PureClaw.Handles.Harness (HarnessHandle (..), mkNoOpHarnessHandle)
 import PureClaw.Handles.Log (LogHandle (..), mkNoOpLogHandle)
 import PureClaw.Harness.Observer (claudeObserver)
+import PureClaw.Harness.LogProvider (TurnProvider (..), nullProvider, tmuxProvider)
 import PureClaw.Harness.Reconcile
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Harness.Tmux (TmuxWindowRow (..))
@@ -103,6 +104,13 @@ fixedTs = UTCTime (fromGregorian 2026 6 18) (secondsToDiffTime 0)
 decodeEntryText :: TranscriptEntry -> Text
 decodeEntryText e = maybe "" TE.decodeUtf8 (decodePayload (_te_payload e))
 
+-- | The default '_rd_providerFor' selector — the verbatim tmux provider for a
+-- handle-attached entry, the null provider for a handle-less one. Used to fill
+-- the field in every full-literal 'ReconcileDeps' below so the tmux path stays
+-- byte-identical.
+defaultProviderFor :: Reg.HarnessEntry -> IO TurnProvider
+defaultProviderFor e = pure (maybe nullProvider tmuxProvider (Reg._he_handle e))
+
 -- | A raw screen frame the claudeObserver classifies as working (HasWorking ⇒
 -- Thinking), and one it classifies as idle (HasIdle ⇒ Idle once stable). The
 -- fake '_rd_capture' returns these to drive the observer-based classifier.
@@ -155,6 +163,7 @@ fakeDeps f = ReconcileDeps
   , _rd_recordResponse = \_sid _entry -> pure ()
   , _rd_publishUpdate = \_sid _entry -> pure ()
   , _rd_mintTurn = pure ("turn-1", fixedTs)
+  , _rd_providerFor = defaultProviderFor
   }
 
 -- | A log handle that records every warn\/error message into an 'IORef' so a
@@ -390,6 +399,7 @@ spec = do
           , _rd_recordResponse  = record
           , _rd_publishUpdate   = \_ _ -> pure ()
           , _rd_mintTurn        = pure ("turn-1", fixedTs)
+          , _rd_providerFor     = defaultProviderFor
           }
 
     it "records exactly one Response on a working→idle settle, then dedups" $ do
@@ -590,6 +600,7 @@ spec = do
             , _rd_recordResponse  = record
             , _rd_publishUpdate   = \_ _ -> pure ()
             , _rd_mintTurn        = pure ("turn-1", fixedTs)
+            , _rd_providerFor     = defaultProviderFor
             }
 
       Async.withAsync
@@ -634,6 +645,7 @@ spec = do
           , _rd_recordResponse  = record
           , _rd_publishUpdate   = pub
           , _rd_mintTurn        = mint
+          , _rd_providerFor     = defaultProviderFor
           }
 
         -- A handle whose '_hh_snapshotTurn' replays a per-tick turn script (the
@@ -884,6 +896,7 @@ spec = do
             , _rd_recordResponse = \sid e -> modifyIORef' finals ((sid, e) :)
             , _rd_publishUpdate  = \sid e -> modifyIORef' updates ((sid, e) :)
             , _rd_mintTurn       = pure ("turn-1", fixedTs)
+            , _rd_providerFor    = defaultProviderFor
             }
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
@@ -923,6 +936,7 @@ spec = do
             , _rd_recordResponse = \sid e -> modifyIORef' finals ((sid, e) :)
             , _rd_publishUpdate  = \_ _ -> pure ()
             , _rd_mintTurn       = pure ("turn-1", fixedTs)
+            , _rd_providerFor    = defaultProviderFor
             }
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
@@ -957,6 +971,7 @@ spec = do
             , _rd_recordResponse = \sid e -> modifyIORef' finals ((sid, e) :)
             , _rd_publishUpdate  = \_ _ -> pure ()
             , _rd_mintTurn       = pure ("turn-1", fixedTs)
+            , _rd_providerFor    = defaultProviderFor
             }
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
@@ -1029,6 +1044,7 @@ spec = do
             , _rd_recordResponse = \sid e -> modifyIORef' finals ((sid, e) :)
             , _rd_publishUpdate  = \_ _ -> pure ()
             , _rd_mintTurn       = pure ("turn-1", fixedTs)
+            , _rd_providerFor    = defaultProviderFor
             }
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
@@ -1123,6 +1139,7 @@ spec = do
             , _rd_recordResponse  = record
             , _rd_publishUpdate   = pub
             , _rd_mintTurn        = pure ("turn-1", fixedTs)
+            , _rd_providerFor     = defaultProviderFor
             }
       Async.withAsync
         (runReconcileLoopWith tick deps reg broker capLog) $ \_a -> do
@@ -1138,6 +1155,114 @@ spec = do
       -- The loop logged a warning for the failing publish.
       logs <- readIORef logRef
       any (\m -> "reconcile: update for" `T.isInfixOf` m) logs `shouldBe` True
+
+  describe "output watcher — log provider seam (Task 4)" $ do
+    let logHid = "claude-code-0"
+
+        -- A provider whose '_tp_snapshot' replays a per-tick @(text, finalized)@
+        -- script (the last value repeats) and whose '_tp_turnId' returns a fixed
+        -- derived id+timestamp. Models the log provider: streaming prose growth
+        -- then an authoritative finalize, with a deterministic id.
+        scriptedProvider :: IORef [(Text, Bool)] -> Maybe (Text, UTCTime) -> TurnProvider
+        scriptedProvider script derivedId = TurnProvider
+          { _tp_snapshot = do
+              xs <- readIORef script
+              case xs of
+                []       -> pure ("", False)
+                [x]      -> pure x
+                (x : ys) -> do writeIORef script ys; pure x
+          , _tp_turnId   = pure derivedId
+          }
+
+        -- Deps wiring an injected provider selector + recorders. The capture
+        -- frames still drive liveness (so the test can pin liveness to Thinking
+        -- to prove the finalize is NOT idle-gated).
+        logDeps
+          :: Text
+          -> IORef [Text]
+          -> (Reg.HarnessEntry -> IO TurnProvider)
+          -> (SessionId -> TranscriptEntry -> IO ())
+          -> (SessionId -> TranscriptEntry -> IO ())
+          -> ReconcileDeps
+        logDeps pclId frames providerFor pub record = ReconcileDeps
+          { _rd_sessions = pure ["pureclaw"]
+          , _rd_sweep    = \_ -> pure [ mkRow 0 logHid pclId (Just 100) False ]
+          , _rd_capture  = \_ _ -> do
+              xs <- readIORef frames
+              case xs of
+                []       -> pure (Just idleFrame)
+                [x]      -> pure (Just x)
+                (x : ys) -> do writeIORef frames ys; pure (Just x)
+          , _rd_harnessAlive   = \_ -> pure True
+          , _rd_stampLegacy     = \_ _ -> pure Nothing
+          , _rd_evict           = \_ _ -> pure ()
+          , _rd_recordResponse  = record
+          , _rd_publishUpdate   = pub
+          , _rd_mintTurn        = pure ("MINTED-SHOULD-NOT-APPEAR", fixedTs)
+          , _rd_providerFor      = providerFor
+          }
+
+    it "log provider: streams prose growth then finalizes on the finalized flag (one record, derived id)" $ do
+      updates <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      finals  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg
+        ((mkEntry hid logHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just mkNoOpHarnessHandle
+          })
+      -- The provider streams "A" → "AB", then finalizes on the SAME "AB".
+      script <- newIORef [("A", False), ("AB", False), ("AB", True)]
+      let prov = scriptedProvider script (Just ("derived-1", fixedTs))
+      -- Liveness stays Thinking throughout so settle-on-idle never triggers; the
+      -- only finalize path exercised is the provider's authoritative flag.
+      frames <- newIORef [busyFrame]
+      let deps = logDeps (Reg.harnessIdToText hid) frames
+                   (\_ -> pure prov)
+                   (\sid e -> modifyIORef' updates ((sid, e) :))
+                   (\sid e -> modifyIORef' finals  ((sid, e) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      us <- reverse <$> readIORef updates
+      fs <- reverse <$> readIORef finals
+      -- ≥1 update, all under the DERIVED id (never the minted id).
+      length us `shouldSatisfy` (>= 1)
+      map (_te_id . snd) us `shouldBe` replicate (length us) "derived-1"
+      -- Exactly one recorded Response, derived id, final text "AB".
+      map (fmap (\e -> (_te_id e, decodeEntryText e))) fs
+        `shouldBe` [(SessionId "sess-1", ("derived-1", "AB"))]
+
+    it "log provider finalize is NOT gated on tmux idle liveness" $ do
+      finals  <- newIORef ([] :: [(SessionId, TranscriptEntry)])
+      reg <- Reg.newRegistry
+      hid <- Reg.newHarnessId
+      Reg.insertEntry reg
+        ((mkEntry hid logHid (Just 100) (Just 200) Reg.LivenessThinking)
+          { Reg._he_sessionId = Just "sess-1"
+          , Reg._he_handle    = Just mkNoOpHarnessHandle
+          })
+      -- A new turn that finalizes on its FIRST snapshot, while liveness is
+      -- Thinking the entire time (busyFrame forever).
+      script <- newIORef [("done", True)]
+      let prov = scriptedProvider script (Just ("derived-X", fixedTs))
+      frames <- newIORef [busyFrame]
+      let deps = logDeps (Reg.harnessIdToText hid) frames
+                   (\_ -> pure prov)
+                   (\_ _ -> pure ())
+                   (\sid e -> modifyIORef' finals ((sid, e) :))
+      broker <- mkInProcessBroker defaultBrokerConfig
+      let tick = 40_000
+      Async.withAsync
+        (runReconcileLoopWith tick deps reg broker mkNoOpLogHandle) $ \_a -> do
+          threadDelay (20 * tick)
+      fs <- readIORef finals
+      -- Despite liveness never reaching Idle, the finalized flag records once.
+      map (fmap (\e -> (_te_id e, decodeEntryText e))) fs
+        `shouldBe` [(SessionId "sess-1", ("derived-X", "done"))]
 
   describe "reconcileTick — D5.5 / D5.7 (non-ours rows are never captured)" $ do
     it "a PID-mismatched marker row is logged + treated as not-ours (never captured, entry → Orphaned)" $ do

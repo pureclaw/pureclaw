@@ -96,8 +96,12 @@ import PureClaw.Transcript.Types
   , TranscriptEntry (..)
   , encodePayload
   )
-import PureClaw.Handles.Harness (HarnessHandle (..))
 import PureClaw.Handles.Log (LogHandle (..))
+import PureClaw.Harness.LogProvider
+  ( TurnProvider (..)
+  , nullProvider
+  , tmuxProvider
+  )
 import PureClaw.Harness.Observer qualified as Obs
 import PureClaw.Harness.Registry qualified as Reg
 import PureClaw.Session.Kind qualified as Kind
@@ -166,6 +170,17 @@ data ReconcileDeps = ReconcileDeps
   , _rd_mintTurn :: IO (Text, UTCTime)
     -- ^ Mint a fresh turn id + start timestamp for a new turn (Task 6).
     --   Production: a random UUID + 'getCurrentTime'; tests inject fixed values.
+  , _rd_providerFor :: Reg.HarnessEntry -> IO TurnProvider
+    -- ^ Select the turn-content provider for an entry (Harness log content
+    --   source, Task 4). The content-driven turn watcher sources a turn's text,
+    --   finalize signal, and optional stable id from this provider instead of
+    --   always from tmux's '_hh_snapshotTurn'. Default:
+    --   @\\e -> pure (maybe nullProvider tmuxProvider (Reg._he_handle e))@ —
+    --   a handle-attached entry gets the verbatim tmux provider; a handle-less
+    --   entry gets the null provider. The production log provider (the
+    --   spawned-claude-with-uuid path) is injected here in @CLI.Commands@. The
+    --   selection is a deterministic function of the entry, so re-selecting it
+    --   each tick latches the same provider for the duration of a turn.
   }
 
 -- | Production dependency set. Sweeps the @\"pureclaw\"@ session plus any other
@@ -212,6 +227,9 @@ defaultReconcileDeps = ReconcileDeps
   , _rd_publishUpdate = \_sid _entry -> pure ()
     -- Default turn minting: a fresh random UUID + the current wall-clock time.
   , _rd_mintTurn = (,) . UUID.toText <$> UUID.nextRandom <*> getCurrentTime
+    -- Default provider selection: the verbatim tmux provider for a
+    -- handle-attached entry, the null provider for a handle-less one.
+  , _rd_providerFor = pure . maybe nullProvider tmuxProvider . Reg._he_handle
   }
   where
     dedup = go []
@@ -672,43 +690,59 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
       foldM stepTerminal tm1 (terminalIds obs tm1)
       where
         stepLive tm (idText, liveness) =
-          withBoundEntry tm idText $ \realSid hh -> do
-            r <- try @SomeException (stepLiveEntry tm idText realSid hh liveness)
+          withBoundEntry tm idText $ \e realSid _hh -> do
+            -- Latch: select the content provider for this entry. The selection
+            -- is a deterministic function of the entry, so it is the same
+            -- provider for every tick of the active turn (no mid-turn switch).
+            provider <- _rd_providerFor deps e
+            r <- try @SomeException (stepLiveEntry tm idText realSid provider liveness)
             resolveTry "update" idText tm r
 
         stepTerminal tm (idText, st) =
-          withBoundEntry tm idText $ \realSid _hh ->
+          withBoundEntry tm idText $ \_e realSid _hh ->
             stepTerminalEntry tm idText realSid st
 
-    -- The content step for one live, bound entry. Snapshot the whole turn, then:
+    -- The content step for one live, bound entry. Snapshot the whole turn from
+    -- the selected provider — @(turnText, finalized)@ — then:
     --   * empty\/whitespace → no-op (between turns);
-    --   * new content (no state) → mint id, publish, insert active, stable 0;
-    --   * changed + active → publish under the SAME id, stable 0;
-    --   * changed + inactive (previous turn done) → mint a NEW id, publish, active;
-    --   * unchanged → stable+1; if active && liveness ∈ {Idle,AwaitingInput} &&
-    --     stable ≥ 'defaultSettleStableTicks' → record final (same id+ts), retire.
-    stepLiveEntry tm idText realSid hh liveness = do
-      turn <- _hh_snapshotTurn hh
+    --   * new content (no state) → start turn (provider id or mint), publish, active;
+    --   * changed + active → publish under the SAME id, stable 0 (then, if the
+    --     provider authoritatively finalized this snapshot, record + retire);
+    --   * changed + inactive (previous turn done) → start a NEW turn;
+    --   * unchanged → stable+1; finalize the active turn when the provider says
+    --     @finalized@ (AUTHORITATIVE — bypasses the idle-stability guard) OR when
+    --     it is idle-stable (liveness ∈ {Idle,AwaitingInput} && stable ≥ N). The
+    --     tmux provider never finalizes, so its idle-stability behavior is
+    --     unchanged.
+    stepLiveEntry tm idText realSid provider liveness = do
+      (turn, finalized) <- _tp_snapshot provider
       if T.null (T.strip turn)
         then pure tm
         else case Map.lookup idText tm of
-          Nothing -> startTurn tm idText realSid turn
+          Nothing -> startTurn tm idText realSid provider turn finalized
           Just st
-            | turn /= _tsLastText st -> do
+            | turn /= _tsLastText st ->
                 if _tsActive st
                   then do
                     -- Changed mid-turn: stream under the same stable id.
                     _rd_publishUpdate deps (SessionId realSid)
                       (mkTurnEntry (_tsTurnId st) (_tsStarted st) turn)
-                    pure (Map.insert idText st { _tsLastText = turn, _tsStable = 0 } tm)
+                    let st' = st { _tsLastText = turn, _tsStable = 0 }
+                    if finalized
+                      then finalizeRecord realSid idText
+                             (Map.insert idText st' { _tsActive = False } tm)
+                             (mkTurnEntry (_tsTurnId st) (_tsStarted st) turn)
+                      else pure (Map.insert idText st' tm)
                   -- A previous turn finalized; different content is a NEW turn.
-                  else startTurn tm idText realSid turn
+                  else startTurn tm idText realSid provider turn finalized
             | _tsActive st
-            , liveness `elem` [Reg.LivenessIdle, Reg.LivenessAwaitingInput]
-            , _tsStable st + 1 >= defaultSettleStableTicks ->
-                -- Unchanged + idle-stable: finalize the active turn exactly once.
+            , finalized
+              || ( liveness `elem` [Reg.LivenessIdle, Reg.LivenessAwaitingInput]
+                   && _tsStable st + 1 >= defaultSettleStableTicks ) ->
+                -- Authoritative finalize (provider @finalized@, any liveness) OR
+                -- unchanged + idle-stable: finalize the active turn exactly once.
                 -- Always mark inactive (success OR record-failure) so we never
-                -- re-record / log-spam on the next idle tick.
+                -- re-record / log-spam on the next tick.
                 finalizeRecord realSid idText
                   (Map.insert idText st { _tsStable = _tsStable st + 1, _tsActive = False } tm)
                   (mkTurnEntry (_tsTurnId st) (_tsStarted st) turn)
@@ -735,12 +769,20 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
               pure retiredTm
         Right () -> pure retiredTm
 
-    -- Mint a fresh turn, publish the first update, and record the active state.
-    startTurn tm idText realSid turn = do
-      (turnId, ts) <- _rd_mintTurn deps
+    -- Start a turn: take the stable id+timestamp from the provider's
+    -- '_tp_turnId' if it supplies one (the log provider derives both from the
+    -- JSONL event), else mint via '_rd_mintTurn' (the tmux path, unchanged).
+    -- Publish the first update. If the provider already finalized this first
+    -- snapshot, record it once and retire; otherwise insert it active.
+    startTurn tm idText realSid provider turn finalized = do
+      mDerived <- _tp_turnId provider
+      (turnId, ts) <- maybe (_rd_mintTurn deps) pure mDerived
       _rd_publishUpdate deps (SessionId realSid) (mkTurnEntry turnId ts turn)
-      pure (Map.insert idText
-              (TurnState turnId ts turn 0 True) tm)
+      if finalized
+        then finalizeRecord realSid idText
+               (Map.insert idText (TurnState turnId ts turn 0 False) tm)
+               (mkTurnEntry turnId ts turn)
+        else pure (Map.insert idText (TurnState turnId ts turn 0 True) tm)
 
     -- Terminal finalize for one bound entry whose ACTIVE turn went terminal or
     -- vanished. 'terminalIds' only selects active turns, and a turn is only ever
@@ -764,7 +806,7 @@ runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do
           case mEntry of
             Just e
               | Just realSid <- Reg._he_sessionId e
-              , Just hh      <- Reg._he_handle e -> k realSid hh
+              , Just hh      <- Reg._he_handle e -> k e realSid hh
             _ -> pure tm
 
     -- Resolve a per-entry 'try': re-raise 'AsyncCancelled', log + fall back to

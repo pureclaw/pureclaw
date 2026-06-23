@@ -108,6 +108,7 @@ library
     PureClaw.Harness.ClaudeSession
     PureClaw.Harness.Discovery
     PureClaw.Harness.JsonlTail
+    PureClaw.Harness.LogProvider
     PureClaw.Harness.Reconcile
     PureClaw.Harness.Id
     PureClaw.Harness.Registry
@@ -383,6 +384,7 @@ test-suite pureclaw-test
     Harness.ClaudeSessionSpec
     Harness.DiscoverySpec
     Harness.JsonlTailSpec
+    Harness.LogProviderSpec
     Harness.ReconcileSpec
     Harness.RegistrySpec
     Harness.TmuxSpec
