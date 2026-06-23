@@ -208,9 +208,16 @@ extractTextBlock _ = ""
 -- | Process a @user@ event.
 --
 -- If the content is NOT solely @tool_result@ blocks, this is a real user
--- message and ends the current turn (resetting to no active turn).  If the
--- content is solely @tool_result@ blocks, we treat it as a tool-call return
--- and leave the current turn open.
+-- message and ends the current turn (resetting to no active turn).
+--
+-- Backstop finalize: if the active turn has non-empty content and was NOT
+-- already finalized (i.e. it never received a terminal @stop_reason@), emit
+-- it now as a finalized 'ProseTurn'.  If the turn was already finalized it
+-- was already emitted on the earlier tick — do NOT re-emit it (avoid a
+-- duplicate finalized emission of the same turn id).
+--
+-- If the content is solely @tool_result@ blocks, we treat it as a tool-call
+-- return and leave the current turn open.
 handleUser :: KeyMap Value -> ProseState -> (ProseState, Maybe ProseTurn)
 handleUser obj ps =
   case lookupObject "message" obj of
@@ -218,7 +225,19 @@ handleUser obj ps =
     Just msg ->
       if isSolelyToolResult msg
         then noChange ps          -- tool-call return — do not end the turn
-        else (ps { _ps_turn = Nothing }, Nothing)  -- real user msg — end turn
+        else                      -- real user msg — end turn, backstop finalize
+          let ps' = ps { _ps_turn = Nothing }
+              emit = case _ps_turn ps of
+                Nothing -> Nothing
+                Just at ->
+                  if T.null (_at_text at) || _at_finalized at
+                    then Nothing   -- empty, or already finalized on an earlier tick
+                    else Just ProseTurn
+                           { _pt_sourceUuid = _at_sourceUuid at
+                           , _pt_text       = _at_text at
+                           , _pt_finalized  = True
+                           }
+          in  (ps', emit)
 
 -- | True iff every block in @message.content@ has @type = "tool_result"@.
 -- An empty block array or non-array content is treated as NOT solely

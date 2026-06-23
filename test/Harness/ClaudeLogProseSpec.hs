@@ -42,6 +42,14 @@ usrToolResult =
   "{\"type\":\"user\",\"uuid\":\"u-tr\",\"message\":{\"role\":\"user\""
   <> ",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"x\",\"content\":\"ok\"}]}}"
 
+-- | A user event whose content is a MIXED array: first a tool_result block,
+-- then a text block — counts as a real user message (NOT solely tool_result).
+usrMixed :: Text
+usrMixed =
+  "{\"type\":\"user\",\"uuid\":\"u-mx\",\"message\":{\"role\":\"user\""
+  <> ",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"x\",\"content\":\"ok\"}"
+  <> ",{\"type\":\"text\",\"text\":\"also some text\"}]}}"
+
 -- ---------------------------------------------------------------------------
 -- Specs
 -- ---------------------------------------------------------------------------
@@ -135,6 +143,38 @@ spec = describe "ClaudeLogProse" $ do
       Just txt -> do
         T.unpack txt `shouldNotContain` "\ESC"
         T.unpack txt `shouldContain` "red"
+
+  -- -------------------------------------------------------------------------
+  -- Backstop finalize: next-user-message ends a turn that had no terminal
+  -- stop_reason yet (the turn is emitted finalized as a backstop).
+  -- -------------------------------------------------------------------------
+
+  it "backstop finalize: user line emits prior unfinalized turn as finalized" $ do
+    -- Feed an assistant line WITHOUT a stop_reason (not yet finalized), then
+    -- a real user line.  The user line must yield Just a finalized ProseTurn.
+    let (s1, _)  = foldProseLine (te (asst "some prose" Nothing)) emptyProseState
+        (s2, mb) = foldProseLine (te usr) s1
+    -- The user tick emits the prior turn finalized
+    fmap _pt_finalized  mb `shouldBe` Just True
+    fmap _pt_text       mb `shouldBe` Just "some prose"
+    -- After the user tick, the new state has no active turn
+    currentProseTurn s2 `shouldBe` Nothing
+
+  it "no double-finalize: user line after already-finalized turn yields Nothing" $ do
+    -- Feed an assistant line WITH stop_reason=end_turn (emits finalized once),
+    -- then a real user line.  The user tick must yield Nothing (not re-emitted).
+    let (s1, _)  = foldProseLine (te (asst "done." (Just "end_turn"))) emptyProseState
+        (_, mb)  = foldProseLine (te usr) s1
+    mb `shouldBe` Nothing
+
+  it "mixed-array user content counts as real-user and ends the prior turn" $ do
+    -- A user event with [tool_result, text] is NOT solely tool_result, so it
+    -- ends the prior turn (backstop finalize if unfinalized).
+    let (s1, _)  = foldProseLine (te (asst "prev answer" Nothing)) emptyProseState
+        (s2, mb) = foldProseLine (te usrMixed) s1
+    fmap _pt_finalized mb `shouldBe` Just True
+    fmap _pt_text      mb `shouldBe` Just "prev answer"
+    currentProseTurn s2 `shouldBe` Nothing
 
 -- | Convert 'Text' to 'ByteString' via UTF-8 for 'foldProseLine'.
 te :: Text -> ByteString
