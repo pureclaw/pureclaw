@@ -51,6 +51,12 @@ module PureClaw.Harness.LogProvider
   , tmuxProvider
   , nullProvider
 
+    -- * Log provider over a shared tail state
+  , LogTurnState (..)
+  , emptyLogTurnState
+  , applyProseTurn
+  , mkLogTurnProvider
+
     -- * Recorded-id dedup (idempotent replay)
   , seedRecordedIds
   , recordOnce
@@ -62,7 +68,7 @@ module PureClaw.Harness.LogProvider
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
 import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
-import Data.IORef (IORef, atomicModifyIORef')
+import Data.IORef (IORef, atomicModifyIORef', readIORef)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -74,7 +80,11 @@ import PureClaw.Handles.Harness (HarnessHandle (..))
 import PureClaw.Handles.Log (LogHandle (..))
 import PureClaw.Handles.Transcript (TranscriptHandle (..))
 import PureClaw.Harness.ClaudeLogPath (SafeClaudeLogPath)
-import PureClaw.Harness.ClaudeLogProse (ProseTurn, emptyProseState)
+import PureClaw.Harness.ClaudeLogProse
+  ( ProseTurn (..)
+  , deriveTurnId
+  , emptyProseState
+  )
 import PureClaw.Harness.ClaudeLogTail
   ( JsonlTailDeps
   , TailCaps
@@ -119,6 +129,49 @@ nullProvider :: TurnProvider
 nullProvider = TurnProvider
   { _tp_snapshot = pure ("", False)
   , _tp_turnId   = pure Nothing
+  }
+
+-- ---------------------------------------------------------------------------
+-- Log provider over a shared tail state
+-- ---------------------------------------------------------------------------
+
+-- | The mutable state shared between the tailer (writer) and the log
+-- 'TurnProvider' (reader): the current turn's text, its finalize flag, and its
+-- pinned @(derivedId, timestamp)@ (Nothing until the first assistant line of a
+-- turn arrives).
+data LogTurnState = LogTurnState
+  { _lts_text      :: !Text
+  , _lts_finalized :: !Bool
+  , _lts_turnId    :: !(Maybe (Text, UTCTime))
+  } deriving stock (Eq, Show)
+
+-- | The initial empty turn state.
+emptyLogTurnState :: LogTurnState
+emptyLogTurnState = LogTurnState
+  { _lts_text      = ""
+  , _lts_finalized = False
+  , _lts_turnId    = Nothing
+  }
+
+-- | Fold a freshly-yielded 'ProseTurn' into the shared state. The derived id is
+-- @deriveTurnId sessionId (_pt_sourceUuid)@ — deterministic from durable JSONL
+-- bytes (the first assistant line's uuid), pinned with the supplied event
+-- timestamp @ts@. The text + finalize flag track the latest 'ProseTurn'.
+applyProseTurn :: Text -> UTCTime -> ProseTurn -> LogTurnState -> LogTurnState
+applyProseTurn sessionId ts pt _prev = LogTurnState
+  { _lts_text      = _pt_text pt
+  , _lts_finalized = _pt_finalized pt
+  , _lts_turnId    = Just (deriveTurnId sessionId (_pt_sourceUuid pt), ts)
+  }
+
+-- | A log 'TurnProvider' that reads the shared 'LogTurnState' IORef. The tailer
+-- sink writes the IORef (via 'applyProseTurn'); the reconcile loop reads it.
+mkLogTurnProvider :: IORef LogTurnState -> TurnProvider
+mkLogTurnProvider ref = TurnProvider
+  { _tp_snapshot = do
+      s <- readIORef ref
+      pure (_lts_text s, _lts_finalized s)
+  , _tp_turnId = _lts_turnId <$> readIORef ref
   }
 
 -- ---------------------------------------------------------------------------

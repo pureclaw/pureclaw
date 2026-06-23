@@ -37,7 +37,7 @@ import PureClaw.Harness.ClaudeLogPath
   , mkClaudeBase
   , mkSafeClaudeLogPath
   )
-import PureClaw.Harness.ClaudeLogProse (ProseTurn)
+import PureClaw.Harness.ClaudeLogProse (ProseTurn (..), deriveTurnId)
 import PureClaw.Harness.ClaudeLogTail
   ( JsonlTailDeps (..)
   , defaultTailCaps
@@ -112,6 +112,31 @@ spec = do
       (txt, fin) <- _tp_snapshot nullProvider
       mid <- _tp_turnId nullProvider
       (txt, fin, mid) `shouldBe` ("", False, Nothing)
+
+  describe "mkLogTurnProvider / applyProseTurn" $ do
+    it "reads the shared tail state: text, finalize flag, and derived id" $ do
+      ref <- newIORef emptyLogTurnState
+      let p = mkLogTurnProvider ref
+      -- Empty state first.
+      (txt0, fin0) <- _tp_snapshot p
+      mid0 <- _tp_turnId p
+      (txt0, fin0, mid0) `shouldBe` ("", False, Nothing)
+      -- Tailer writes a growing, not-yet-final turn.
+      modifyIORef' ref
+        (applyProseTurn "sess-x" t0 (ProseTurn "uuid-1" "Hello" False))
+      (txt1, fin1) <- _tp_snapshot p
+      mid1 <- _tp_turnId p
+      txt1 `shouldBe` "Hello"
+      fin1 `shouldBe` False
+      mid1 `shouldBe` Just (deriveTurnId "sess-x" "uuid-1", t0)
+      -- Then a finalized turn under the SAME pinned source uuid → same id.
+      modifyIORef' ref
+        (applyProseTurn "sess-x" t0 (ProseTurn "uuid-1" "Hello world" True))
+      (txt2, fin2) <- _tp_snapshot p
+      mid2 <- _tp_turnId p
+      txt2 `shouldBe` "Hello world"
+      fin2 `shouldBe` True
+      mid2 `shouldBe` Just (deriveTurnId "sess-x" "uuid-1", t0)
 
   describe "recordOnce" $ do
     it "skips a _te_id already in the seeded set (crash/restart idempotency)" $ do
