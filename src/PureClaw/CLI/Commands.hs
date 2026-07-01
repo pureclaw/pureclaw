@@ -87,18 +87,20 @@ import PureClaw.Tabs.Types (TabRef (..))
 import PureClaw.Frontend.Server
 import PureClaw.Frontend.StreamBroker
   ( BrokerConfig (..)
+  , BrokerEvent (..)
+  , StreamBroker (..)
   , defaultBrokerConfig
   , mkInProcessBroker
   )
 import PureClaw.Harness.ClaudeCode (adoptExternalWindow, defaultClaudeCodeDeps)
+import PureClaw.Harness.ClaudeLogPath qualified as ClaudeLogPath
+import PureClaw.Harness.ClaudeSession qualified as ClaudeSession
+import PureClaw.Harness.ClaudeLogTail (defaultJsonlTailDeps, defaultTailCaps)
+import PureClaw.Harness.LogProvider qualified as LogProvider
 import PureClaw.Harness.Reconcile qualified as Reconcile
 import PureClaw.Harness.Registry qualified as Registry
 import PureClaw.Handles.Transcript (TranscriptHandle (..), mkNoOpTranscriptHandle)
 import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
-import PureClaw.Transcript.Types
-  (Direction (..), TranscriptEntry (..), encodePayload)
-import Data.UUID qualified as UUID
-import Data.UUID.V4 qualified as UUID
 import PureClaw.Channels.AllowList
 import PureClaw.Channels.CLI
 import PureClaw.Channels.Signal
@@ -989,18 +991,127 @@ runChat consentChannel serverMode opts = do
         -- double-delete — idempotent, but contradicting the seam's contract).
         -- Neither path touches 'session.json', so the session reappears in
         -- Recent Sessions.
+        -- Harness claude-log content source (Task 5). The recorded-id set is a
+        -- captured IORef constructed OUTSIDE the per-call bracket below (which
+        -- opens a fresh transcript handle each record), so it persists across
+        -- record calls. Seeded from the on-disk transcript when a log tailer
+        -- starts; 'recordOnce' refuses a turn whose deterministic derived id is
+        -- already present, making crash/restart replay idempotent without
+        -- touching the append-only '_th_record'.
+        recordedIds <- newIORef Set.empty
+        -- Per-HarnessId caches: the log-provider selection STATE (resolved /
+        -- pending / fallback — see 'LogProvider.selectLogProvider'; the
+        -- expensive session.json decode + base resolution run at most ONCE per
+        -- harness, never per tick) and its tailer 'Async' (cancelled on
+        -- reconcile-detected harness exit).
+        logProviderCache <- newIORef (Map.empty :: Map.Map Registry.HarnessId LogProvider.LogProviderState)
+        logTailers       <- newIORef (Map.empty :: Map.Map Registry.HarnessId (Async.Async ()))
+        -- Select the turn-content provider for an entry. Gate on
+        -- flavour==claude-code && a ClaudeSessionUuid resolves (uuid-
+        -- resolvability, NOT origin — only spawned-with-uuid harnesses persist
+        -- _h_claudeSessionUuid). Falls back to the tmux/null provider on any
+        -- failure. NOTE: stepTurns only runs for BOUND entries, so a post-
+        -- process-restart unbound harness is out of scope (it never reaches
+        -- this selector).
+        --
+        -- The three-state cache ('LogProvider.selectLogProvider') means a
+        -- freshly-spawned claude harness (no JSONL yet → ClaudeLogNotFound, the
+        -- NORMAL pre-output state) does NOT re-decode session.json / re-WARN on
+        -- every ~2s tick: the resolved INPUTS are cached as Pending and only the
+        -- cheap mkSafeClaudeLogPath re-attempt runs per tick, engaging the log
+        -- provider the moment the JSONL appears.
+        let selectProvider e = do
+              let hid      = Registry._he_id e
+                  fallback = maybe LogProvider.nullProvider LogProvider.tmuxProvider
+                               (Registry._he_handle e)
+              LogProvider.selectLogProvider logProviderCache hid fallback
+                (resolveLogInputs e)
+                (engageLogProvider hid e)
+                (_lh_logWarn logger)
+            -- One-time input resolution: decode session.json, validate uuid,
+            -- resolve the claude base. Returns 'RiFallback' (with a WARN text)
+            -- for any non-claude / no-uuid / bad-uuid case, else 'RiReady' with
+            -- a CHEAP re-attempt closure that only re-runs mkSafeClaudeLogPath.
+            resolveLogInputs e
+              | Registry._he_flavour e /= SessionTypes.HClaudeCode =
+                  pure (LogProvider.RiFallback "harness is not claude-code — using tmux")
+              | otherwise = case Registry._he_sessionId e of
+                  Nothing  -> pure (LogProvider.RiFallback "harness has no session — using tmux")
+                  Just sid -> do
+                    let sessDir = sessionsDir </> T.unpack sid
+                        metaP   = sessDir </> "session.json"
+                    eMeta <- Aeson.eitherDecodeFileStrict' metaP
+                    case eMeta of
+                      Left err -> pure (LogProvider.RiFallback
+                        ("harness session.json decode failed (" <> T.pack err <> ") — using tmux"))
+                      Right meta -> case SessionTypes._sm_kind (meta :: SessionTypes.SessionMeta) of
+                        SessionTypes.SkHarness hs
+                          | Just uuidTxt <- SessionTypes._h_claudeSessionUuid hs
+                          , Right uuid <- ClaudeSession.mkClaudeSessionUuid uuidTxt -> do
+                              base <- ClaudeLogPath.resolveClaudeBase
+                              let mCwd = fmap T.unpack (SessionTypes._h_canonicalCwd hs)
+                              -- The CHEAP per-tick re-attempt: only the path
+                              -- glob/validate, NOT a session.json decode.
+                              pure (LogProvider.RiReady
+                                (ClaudeLogPath.mkSafeClaudeLogPath base uuid mCwd))
+                        _ -> pure (LogProvider.RiFallback
+                          "harness has no resolvable claude uuid — using tmux")
+            -- Engage on the first Right SafeClaudeLogPath: seed recordedIds,
+            -- start the tailer Async, build + return the log provider. Run at
+            -- most once per harness (on the not-found → found transition).
+            engageLogProvider hid e safePath = do
+              let sid     = fromMaybe "" (Registry._he_sessionId e)
+                  sessDir = sessionsDir </> T.unpack sid
+                  transP  = sessDir </> "transcript.jsonl"
+              -- Seed the recorded-id set from this session's transcript
+              -- (untrimmed) before the tailer runs.
+              bracket
+                (mkBroadcastingFileTranscriptHandle Nothing (SessionId sid) logger transP)
+                (\rth -> _th_flush rth >> _th_close rth)
+                (\rth -> do
+                   seeded <- LogProvider.seedRecordedIds rth
+                   modifyIORef' recordedIds (Set.union seeded))
+              -- Shared state the tailer writes + the provider reads.
+              stateRef <- newIORef LogProvider.emptyLogTurnState
+              let sink pt = do
+                    ts <- getCurrentTime
+                    modifyIORef' stateRef
+                      (LogProvider.applyProseTurn sid ts pt)
+              a <- Async.async $
+                LogProvider.runLogTailer defaultJsonlTailDeps
+                  defaultTailCaps logger safePath sink
+              modifyIORef' logTailers (Map.insert hid a)
+              pure (LogProvider.mkLogTurnProvider stateRef)
         let reconcileDeps = Reconcile.defaultReconcileDeps
-              { Reconcile._rd_evict = \_hid label ->
+              { Reconcile._rd_evict = \hid label -> do
                   modifyIORef' harnessRef (Map.delete label)
-                -- Output watcher (Task 7): on a working→settle transition the
-                -- loop records ONE Response transcript entry for the session,
-                -- broadcasting it to subscribers via the shared broker.
-              , Reconcile._rd_recordResponse = \sid txt -> do
-                  let path = sessionsDir </> T.unpack (unSessionId sid) </> "transcript.jsonl"
-                  bracket
-                    (mkBroadcastingFileTranscriptHandle (Just broker) sid logger path)
-                    (\rth -> _th_flush rth >> _th_close rth)
-                    (`recordResponseEntry` txt)
+                  -- Cancel + drop this harness's log tailer (and its caches) on
+                  -- reconcile-detected exit.
+                  mTailer <- Map.lookup hid <$> readIORef logTailers
+                  mapM_ Async.cancel mTailer
+                  modifyIORef' logTailers (Map.delete hid)
+                  modifyIORef' logProviderCache (Map.delete hid)
+                -- Output watcher (Task 6): on settle the loop records ONE Response
+                -- transcript entry for the session (the finalized turn),
+                -- broadcasting it to subscribers via the shared broker. Wrapped
+                -- in 'recordOnce' so a turn whose derived id is already on disk
+                -- (crash/restart replay, within-run re-read) is skipped.
+              , Reconcile._rd_recordResponse =
+                  LogProvider.recordOnce recordedIds $ \sid entry -> do
+                    let path = sessionsDir </> T.unpack (unSessionId sid) </> "transcript.jsonl"
+                    bracket
+                      (mkBroadcastingFileTranscriptHandle (Just broker) sid logger path)
+                      (\rth -> _th_flush rth >> _th_close rth)
+                      (`_th_record` entry)
+                -- Live in-place updates (Task 6): each time the in-progress turn
+                -- grows, publish an EPHEMERAL 'EntryUpdated' event (same stable
+                -- turn id) — never persisted.
+              , Reconcile._rd_publishUpdate = \sid entry ->
+                  _streamBroker_publish broker (EntryUpdated sid entry)
+                -- Harness claude-log content source (Task 5): select the log
+                -- provider for a spawned-claude-with-uuid harness, else the tmux
+                -- path verbatim.
+              , Reconcile._rd_providerFor = selectProvider
               }
         -- WU8 (#80): restore the persisted tab view BEFORE the frontend server
         -- (and the tabbed loop) start, so the very first sidebar lists snapshot
@@ -1401,22 +1512,6 @@ ignoreExc act = act `catch` \(_ :: SomeException) -> pure ()
 -- shape of @recordHarnessEntry … Response@ in "PureClaw.Frontend.API" — the
 -- output watcher (Task 7) uses it to land one settle-captured response on the
 -- session transcript.
-recordResponseEntry :: TranscriptHandle -> T.Text -> IO ()
-recordResponseEntry th payload = do
-  entryId <- UUID.toText <$> UUID.nextRandom
-  now <- getCurrentTime
-  _th_record th TranscriptEntry
-    { _te_id            = entryId
-    , _te_timestamp     = now
-    , _te_harness       = Just "harness"
-    , _te_model         = Nothing
-    , _te_direction     = Response
-    , _te_payload       = encodePayload (TE.encodeUtf8 payload)
-    , _te_durationMs    = Nothing
-    , _te_correlationId = entryId
-    , _te_metadata      = Map.empty
-    }
-
 -- | Render a 'HarnessError' to a concise user-facing 'Text' for the
 -- @\/tab new harness@ dispatcher (WU-B). Mirrors the surface
 -- 'PureClaw.Frontend.API.harnessErrorResponse' uses, but as plain text for the

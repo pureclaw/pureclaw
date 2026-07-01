@@ -102,10 +102,13 @@ library
     PureClaw.Harness
     PureClaw.Harness.ClaudeCode
     PureClaw.Harness.ClaudeLogConvert
+    PureClaw.Harness.ClaudeLogProse
+    PureClaw.Harness.ClaudeLogTail
     PureClaw.Harness.ClaudeLogPath
     PureClaw.Harness.ClaudeSession
     PureClaw.Harness.Discovery
     PureClaw.Harness.JsonlTail
+    PureClaw.Harness.LogProvider
     PureClaw.Harness.Reconcile
     PureClaw.Harness.Id
     PureClaw.Harness.Registry
@@ -349,6 +352,7 @@ test-suite pureclaw-test
     Integration.CLISpec
     Integration.ImportRoundTripSpec
     Integration.TabsSyncSpec
+    Integration.ClaudeLogContentSpec
     Transcript.TypesSpec
     Transcript.CombinatorSpec
     Transcript.ProviderSpec
@@ -375,10 +379,13 @@ test-suite pureclaw-test
     Frontend.APISpec
     Harness.ClaudeCodeSpec
     Harness.ClaudeLogConvertSpec
+    Harness.ClaudeLogProseSpec
+    Harness.ClaudeLogTailSpec
     Harness.ClaudeLogPathSpec
     Harness.ClaudeSessionSpec
     Harness.DiscoverySpec
     Harness.JsonlTailSpec
+    Harness.LogProviderSpec
     Harness.ReconcileSpec
     Harness.RegistrySpec
     Harness.TmuxSpec

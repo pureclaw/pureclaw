@@ -199,11 +199,12 @@ mkFakeHarness scriptRef statusRef recvDone signalled = do
                 if fired then pure () else putMVar recvDone ()
               _  -> pure ()
             pure out
-        , _hh_snapshot = \_ -> pure ""
-        , _hh_name     = "fake"
-        , _hh_session  = "fake-sess"
-        , _hh_status   = readIORef statusRef
-        , _hh_stop     = modifyIORef' stops (+ 1)
+        , _hh_snapshot     = \_ -> pure ""
+        , _hh_snapshotTurn = pure ""
+        , _hh_name         = "fake"
+        , _hh_session      = "fake-sess"
+        , _hh_status       = readIORef statusRef
+        , _hh_stop         = modifyIORef' stops (+ 1)
         }
   pure (FakeHarness handle sent stops sendDone)
 
@@ -427,13 +428,14 @@ spec = do
       -- whose '_hh_receive' always returns "" (the drainer just polls). The
       -- bounded send queue then fills and '_rt_send' surfaces back-pressure.
       let handle = HarnessHandle
-            { _hh_send     = \_ -> takeMVar sendGate
-            , _hh_receive  = pure ""
-            , _hh_snapshot = \_ -> pure ""
-            , _hh_name     = "fake"
-            , _hh_session  = "fake-sess"
-            , _hh_status   = pure HarnessRunning
-            , _hh_stop     = modifyIORef' stops (+ 1)
+            { _hh_send         = \_ -> takeMVar sendGate
+            , _hh_receive      = pure ""
+            , _hh_snapshot     = \_ -> pure ""
+            , _hh_snapshotTurn = pure ""
+            , _hh_name         = "fake"
+            , _hh_session      = "fake-sess"
+            , _hh_status       = pure HarnessRunning
+            , _hh_stop         = modifyIORef' stops (+ 1)
             }
       emits <- newIORef []
       let deps = (mkHarnDeps handle (recordingEmit emits)) { _hrd_sendBound = 1 }
@@ -498,15 +500,16 @@ spec = do
       -- test waits for the drainer to actually observe the exit (and take the
       -- HarnessExited branch) before stopping — making the stop deterministic.
       let handle = HarnessHandle
-            { _hh_send     = \_ -> pure ()
-            , _hh_receive  = pure ""
-            , _hh_snapshot = \_ -> pure ""
-            , _hh_name     = "fake"
-            , _hh_session  = "fake-sess"
-            , _hh_status   = do
+            { _hh_send         = \_ -> pure ()
+            , _hh_receive      = pure ""
+            , _hh_snapshot     = \_ -> pure ""
+            , _hh_snapshotTurn = pure ""
+            , _hh_name         = "fake"
+            , _hh_session      = "fake-sess"
+            , _hh_status       = do
                 _ <- tryPutMVar statusSeen ()
                 pure (HarnessExited ExitSuccess)
-            , _hh_stop     = modifyIORef' stops (+ 1)
+            , _hh_stop         = modifyIORef' stops (+ 1)
             }
       emits <- newIORef []
       let deps = mkHarnDeps handle (recordingEmit emits)

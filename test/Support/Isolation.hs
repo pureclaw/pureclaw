@@ -16,6 +16,7 @@ module Support.Isolation
   ) where
 
 import Control.Exception (finally)
+import System.IO (BufferMode (LineBuffering), hSetBuffering, stderr, stdout)
 import System.Directory (createDirectoryIfMissing, removeDirectoryRecursive)
 import System.Environment (setEnv)
 import System.FilePath ((</>))
@@ -26,6 +27,11 @@ import System.IO.Temp (createTempDirectory)
 -- @ExitFailure@ on a failing test).
 withIsolatedHome :: IO a -> IO a
 withIsolatedHome action = do
+  -- Line-buffer the suite's stdout/stderr: if a spec hangs, the output already
+  -- emitted (the describe/test it reached) is flushed instead of being lost in
+  -- block buffering when piped — making a hang diagnosable in CI and locally.
+  hSetBuffering stdout LineBuffering
+  hSetBuffering stderr LineBuffering
   root <- setupIsolatedHome
   action `finally` removeDirectoryRecursive root
 

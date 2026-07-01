@@ -12,6 +12,7 @@ module PureClaw.Harness.Observer
   , observerFor
   , claudeObserver
   , genericObserver
+  , isClaudeUserLine
   ) where
 
 import           Data.ByteString (ByteString)
@@ -29,6 +30,7 @@ data HarnessObserver = HarnessObserver
   { _ho_classify        :: Text -> HarnessActivityState
   , _ho_extractResponse :: Int -> ByteString -> Text
   , _ho_relevantTail    :: Int -> ByteString -> Text
+  , _ho_extractTurn     :: Int -> ByteString -> Text
   }
 
 observerFor :: HarnessFlavour -> HarnessObserver
@@ -177,11 +179,55 @@ relevantTailClaude n capture =
   let ls = filter (not . isClaudeChrome) (T.lines (TE.decodeUtf8Lenient capture))
   in T.intercalate "\n" (lastN n ls)
 
+-- | A user-submitted message line: ❯/› with non-empty text, NOT a numbered
+-- menu (❯ 1.) and NOT the bare idle input box (❯ alone).
+isClaudeUserLine :: Text -> Bool
+isClaudeUserLine raw =
+  let l = T.stripStart raw
+  in (T.isPrefixOf "\x276F" l || T.isPrefixOf "\x203A" l)  -- ❯ ›
+     && not (isNumberedYesNo l)
+     && not (T.null (T.strip (T.drop 1 l)))
+
+-- | Tool/process activity lines the TUI shows inside a turn (not assistant prose).
+isClaudeToolLine :: Text -> Bool
+isClaudeToolLine raw =
+  let l = T.stripStart raw
+      toolPrefixes = [ "Update(", "Edit(", "Write(", "Create(", "MultiEdit("
+                     , "Read(", "Bash(", "Grep(", "Glob(", "LS(", "Task(", "TodoWrite(" ]
+  in T.isPrefixOf "\x239C" l   -- ⎜ (rare)
+     || T.isPrefixOf "\x23BD" l   -- ⎽ scan-line/box-drawing
+     || T.isPrefixOf "\x2514" l
+     || T.isPrefixOf "\x251C" l   -- └ ├ tree
+     || T.isPrefixOf "\x2387" l   -- ⎇
+     || T.isPrefixOf "\x23BF" l   -- ⎿ result line
+     || (not (isResponseMarkerLine l) && any (`T.isPrefixOf` l) toolPrefixes)
+
+-- | The whole assistant turn since the last user prompt: drop everything up to
+-- and including the last user line, then keep the response blocks (markers
+-- stripped) and drop chrome + tool/process lines.
+extractTurnClaude :: Int -> ByteString -> Text
+extractTurnClaude baseline capture =
+  let ls   = T.lines (TE.decodeUtf8Lenient (dropBaseline baseline capture))
+      turn = case reverse [ i | (i, l) <- zip [0 :: Int ..] ls, isClaudeUserLine l ] of
+               (i : _) -> drop (i + 1) ls
+               []      -> ls
+  in if any isClaudeApprovalLine turn
+       then T.strip (T.unlines (dropWhile (not . isClaudeApprovalLine) turn))
+       else
+         let kept =
+               [ if isResponseMarkerLine l then stripResponseMarker l else l
+               | l <- turn
+               , not (isClaudeChrome l)
+               , not (isClaudeToolLine l)
+               ]
+         in T.strip (T.intercalate "\n" (filter (not . T.null . T.strip) kept))
+
 claudeObserver :: HarnessObserver
 claudeObserver = HarnessObserver
   { _ho_classify        = classifyClaude
   , _ho_extractResponse = extractClaude
   , _ho_relevantTail    = relevantTailClaude
+  , _ho_extractTurn     = extractTurnClaude
   }
 
 -- ── Generic fallback (Codex/OpenCode/Hermes/PureClaw/Custom) ─────────────────
@@ -197,6 +243,11 @@ genericObserver = HarnessObserver
            then T.intercalate "\n" ls
            else T.intercalate "\n" (lastN n ls)
   , _ho_relevantTail    = \n cap -> T.intercalate "\n" (lastN n (cleanLines cap))
+  , _ho_extractTurn     = \n cap ->
+      let ls = cleanLines cap
+      in if n <= 0
+           then T.intercalate "\n" ls
+           else T.intercalate "\n" (lastN n ls)
   }
   where
     cleanLines cap = filter (not . T.null . T.strip) (T.lines (TE.decodeUtf8Lenient cap))

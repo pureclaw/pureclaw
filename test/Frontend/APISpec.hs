@@ -4068,13 +4068,14 @@ fakeStartHarnessWith harnessRef key hid mReg reqSpec _ = do
 -- surfaced — without spawning a real tmux process.
 mkFakeHarnessHandle :: IORef [ByteString] -> ByteString -> HarnessHandle
 mkFakeHarnessHandle sentRef canned = HarnessHandle
-  { _hh_send     = \bs -> modifyIORef' sentRef (++ [bs])
-  , _hh_receive  = pure canned
-  , _hh_snapshot = \_ -> pure ""
-  , _hh_name     = "fake-harness"
-  , _hh_session  = "pureclaw"
-  , _hh_status   = pure HarnessRunning
-  , _hh_stop     = pure ()
+  { _hh_send         = \bs -> modifyIORef' sentRef (++ [bs])
+  , _hh_receive      = pure canned
+  , _hh_snapshot     = \_ -> pure ""
+  , _hh_snapshotTurn = pure ""
+  , _hh_name         = "fake-harness"
+  , _hh_session      = "pureclaw"
+  , _hh_status       = pure HarnessRunning
+  , _hh_stop         = pure ()
   }
 
 -- | Read every event currently in a broker 'Subscription' queue, waiting up
@@ -4099,13 +4100,14 @@ drainBrokerQueue budgetMicros sub = do
 -- '_hh_receive', so the throw must come from '_hh_send'.
 mkSendThrowingHarnessHandle :: HarnessHandle
 mkSendThrowingHarnessHandle = HarnessHandle
-  { _hh_send     = \_ -> throwIO (userError "send boom")
-  , _hh_receive  = pure ""
-  , _hh_snapshot = \_ -> pure ""
-  , _hh_name     = "fake-send-throwing-harness"
-  , _hh_session  = "pureclaw"
-  , _hh_status   = pure HarnessRunning
-  , _hh_stop     = pure ()
+  { _hh_send         = \_ -> throwIO (userError "send boom")
+  , _hh_receive      = pure ""
+  , _hh_snapshot     = \_ -> pure ""
+  , _hh_snapshotTurn = pure ""
+  , _hh_name         = "fake-send-throwing-harness"
+  , _hh_session      = "pureclaw"
+  , _hh_status       = pure HarnessRunning
+  , _hh_stop         = pure ()
   }
 
 -- | A fake handle that, like a restart-discovered REAL handle, ALSO records
@@ -4115,17 +4117,18 @@ mkSendThrowingHarnessHandle = HarnessHandle
 -- entries in the *session* transcript when the handle records elsewhere.
 mkRecordingFakeHarnessHandle :: FilePath -> IORef [ByteString] -> ByteString -> HarnessHandle
 mkRecordingFakeHarnessHandle ownTranscript sentRef canned = HarnessHandle
-  { _hh_send     = \bs -> do
+  { _hh_send         = \bs -> do
       modifyIORef' sentRef (++ [bs])
       LBS.appendFile ownTranscript (LBS.fromStrict bs <> "\n")
-  , _hh_receive  = do
+  , _hh_receive      = do
       LBS.appendFile ownTranscript (LBS.fromStrict canned <> "\n")
       pure canned
-  , _hh_snapshot = \_ -> pure ""
-  , _hh_name     = "fake-recording-harness"
-  , _hh_session  = "pureclaw"
-  , _hh_status   = pure HarnessRunning
-  , _hh_stop     = pure ()
+  , _hh_snapshot     = \_ -> pure ""
+  , _hh_snapshotTurn = pure ""
+  , _hh_name         = "fake-recording-harness"
+  , _hh_session      = "pureclaw"
+  , _hh_status       = pure HarnessRunning
+  , _hh_stop         = pure ()
   }
 
 -- | Write a harness-backed session to disk: @session.json@ whose

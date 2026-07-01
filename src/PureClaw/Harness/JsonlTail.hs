@@ -25,6 +25,10 @@ module PureClaw.Harness.JsonlTail
 
     -- * Splitting
   , splitLines
+
+    -- * Bounded splitting
+  , SplitCap (..)
+  , splitLinesBounded
   ) where
 
 import Data.ByteString (ByteString)
@@ -121,3 +125,20 @@ splitLast [x] = ([], x)
 splitLast (x : xs) =
   let (initLines, lst) = splitLast xs
    in (x : initLines, lst)
+
+-- | The only cap-exceeded outcome from 'splitLinesBounded'.
+data SplitCap = OverCap
+  deriving stock (Eq, Show)
+
+-- | Like 'splitLines', but fails closed if the residual partial line would
+-- exceed @maxBuffer@ bytes (a no-LF flood). The cap is checked BEFORE the split
+-- so an over-cap chunk never transiently allocates the concatenation.
+splitLinesBounded :: Int -> ByteString -> Buffer -> Either SplitCap ([CompleteLine], Buffer)
+splitLinesBounded maxBuffer chunk buf@(Buffer pending)
+  -- If there is no LF anywhere in chunk and pending<>chunk already exceeds the
+  -- cap, reject without building the full residual.
+  | not (0x0A `BS.elem` chunk)
+  , BS.length pending + BS.length chunk > maxBuffer = Left OverCap
+  | otherwise =
+      let (ls, resid@(Buffer r)) = splitLines chunk buf
+       in if BS.length r > maxBuffer then Left OverCap else Right (ls, resid)

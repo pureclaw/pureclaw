@@ -70,6 +70,11 @@ import PureClaw.Transcript.Types (TranscriptEntry)
 -- sidebar.
 data BrokerEvent
   = EntryRecorded   !SessionId !TranscriptEntry
+    -- | An in-progress (ephemeral) harness message was updated in-place.
+    -- Subscribers that are currently replaying this session drop the event
+    -- (it will be re-sent on the next tick); all other focused subscribers
+    -- forward it immediately as a 'SeEntryUpdate' wire event.
+  | EntryUpdated    !SessionId !TranscriptEntry
   | ActivityChanged !SessionId !SessionActivity
     -- | Full sidebar list snapshot (tabs + recent + archived) pushed on
     -- every mutation and once on WS connect. Carries pre-serialized JSON

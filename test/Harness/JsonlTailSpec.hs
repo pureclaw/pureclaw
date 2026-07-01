@@ -90,6 +90,31 @@ spec = do
       let (ls, _) = splitLines "one\ntwo\n" emptyBuffer
       map unCompleteLine ls `shouldBe` ["one", "two"]
 
+  describe "splitLinesBounded" $ do
+    it "splitLinesBounded passes complete lines through under the cap" $ do
+      case splitLinesBounded 1024 "a\nb\n" emptyBuffer of
+        Left e -> expectationFailure ("unexpected OverCap: " <> show e)
+        Right (ls, buf) -> do
+          map unCompleteLine ls `shouldBe` ["a", "b"]
+          unBuffer buf `shouldBe` ""
+
+    it "splitLinesBounded buffers a partial trailing line under the cap" $ do
+      case splitLinesBounded 1024 "a\npart" emptyBuffer of
+        Left e -> expectationFailure ("unexpected OverCap: " <> show e)
+        Right (ls, buf) -> do
+          map unCompleteLine ls `shouldBe` ["a"]
+          unBuffer buf `shouldBe` "part"
+
+    it "splitLinesBounded rejects a no-LF line exceeding the cap (OverCap, no growth)" $ do
+      let big = BS.replicate 2048 0x61   -- 2048 'a', no newline
+      splitLinesBounded 1024 big emptyBuffer `shouldBe` Left OverCap
+
+    it "splitLinesBounded rejects when pending+chunk exceeds cap with no LF" $ do
+      case splitLinesBounded 4096 "head" emptyBuffer of
+        Left e -> expectationFailure ("unexpected OverCap seeding buffer: " <> show e)
+        Right (_, buf) ->
+          splitLinesBounded 8 "morebytes_overflow" buf `shouldBe` Left OverCap
+
   describe "splitLines: round-trip property (D4.2)" $ do
     it "feeding any input as a single chunk reconstructs it" $
       property $ \(ws :: [Word8Wrapper]) ->

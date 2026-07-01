@@ -92,15 +92,19 @@ import qualified Integration.SignalFlowSpec
 import qualified Integration.CLISpec
 import qualified Integration.ImportRoundTripSpec
 import qualified Integration.TabsSyncSpec
+import qualified Integration.ClaudeLogContentSpec
 import qualified Transcript.TypesSpec
 import qualified Handles.TranscriptSpec
 import qualified Handles.HarnessSpec
 import qualified Harness.ClaudeCodeSpec
 import qualified Harness.ClaudeLogConvertSpec
+import qualified Harness.ClaudeLogProseSpec
+import qualified Harness.ClaudeLogTailSpec
 import qualified Harness.ClaudeLogPathSpec
 import qualified Harness.ClaudeSessionSpec
 import qualified Harness.DiscoverySpec
 import qualified Harness.JsonlTailSpec
+import qualified Harness.LogProviderSpec
 import qualified Harness.ReconcileSpec
 import qualified Harness.RegistrySpec
 import qualified Harness.TmuxSpec
@@ -268,15 +272,19 @@ main = withIsolatedHome $ hspec $ do
   describe "Integration.CLI" Integration.CLISpec.spec
   describe "Integration.ImportRoundTrip" Integration.ImportRoundTripSpec.spec
   describe "Integration.TabsSync" Integration.TabsSyncSpec.spec
+  describe "Integration.ClaudeLogContent" Integration.ClaudeLogContentSpec.spec
   describe "Transcript.Types" Transcript.TypesSpec.spec
   describe "Handles.Transcript" Handles.TranscriptSpec.spec
   describe "Handles.Harness" Handles.HarnessSpec.spec
   describe "Harness.ClaudeCode" Harness.ClaudeCodeSpec.spec
   describe "Harness.ClaudeLogConvert" Harness.ClaudeLogConvertSpec.spec
+  describe "Harness.ClaudeLogProse" Harness.ClaudeLogProseSpec.spec
+  describe "Harness.ClaudeLogTail" Harness.ClaudeLogTailSpec.spec
   describe "Harness.ClaudeLogPath" Harness.ClaudeLogPathSpec.spec
   describe "Harness.ClaudeSession" Harness.ClaudeSessionSpec.spec
   describe "Harness.Discovery" Harness.DiscoverySpec.spec
   describe "Harness.JsonlTail" Harness.JsonlTailSpec.spec
+  describe "LogProvider" Harness.LogProviderSpec.spec
   describe "Harness.Reconcile" Harness.ReconcileSpec.spec
   describe "Harness.Registry" Harness.RegistrySpec.spec
   describe "Harness.Tmux" Harness.TmuxSpec.spec

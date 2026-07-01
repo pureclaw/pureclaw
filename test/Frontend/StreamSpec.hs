@@ -24,10 +24,14 @@
 module Frontend.StreamSpec (spec) where
 
 import Control.Concurrent.STM (atomically, readTVarIO)
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as AesonKey
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Test.Hspec
 
 import PureClaw.Core.Types (SessionId (..))
@@ -48,6 +52,28 @@ import PureClaw.Frontend.Stream
   , releaseClaim
   , tryClaim
   )
+import PureClaw.Transcript.Types (Direction (..), TranscriptEntry (..))
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
+lookupKey :: Aeson.Value -> T.Text -> Maybe Aeson.Value
+lookupKey (Aeson.Object o) k = KM.lookup (AesonKey.fromText k) o
+lookupKey _ _ = Nothing
+
+sampleEntry :: TranscriptEntry
+sampleEntry = TranscriptEntry
+  { _te_id            = "te-uuid-1"
+  , _te_timestamp     = UTCTime (fromGregorian 2026 5 23) (secondsToDiffTime (18 * 3600 + 1))
+  , _te_harness       = Nothing
+  , _te_model         = Nothing
+  , _te_direction     = Response
+  , _te_payload       = "hello world"
+  , _te_durationMs    = Nothing
+  , _te_correlationId = "corr-1"
+  , _te_metadata      = Map.empty
+  }
 
 -- ---------------------------------------------------------------------------
 -- Wire protocol encoder / decoder
@@ -259,3 +285,12 @@ spec = do
           bs = LBS.fromStrict (TE.encodeUtf8
             ("{\"op\":\"focus\",\"sessionId\":\"s\",\"since\":\"" <> s <> "\"}"))
       show (decodeClientOp bs) `shouldContain` "CoFocus"
+
+  describe "encodeServerEvent SeEntryUpdate (entry-update wire event)" $ do
+    it "encodes SeEntryUpdate as type=entry-update with the entry" $ do
+      let v = encodeServerEvent (SeEntryUpdate (SessionId "s1") sampleEntry)
+      lookupKey v "type" `shouldBe` Just (Aeson.String "entry-update")
+      lookupKey v "sessionId" `shouldBe` Just (Aeson.String "s1")
+      -- entry object present, same shape as SeEntry
+      (lookupKey v "entry" >>= \e -> lookupKey e "id")
+        `shouldBe` Just (Aeson.String (_te_id sampleEntry))
